@@ -1,4 +1,5 @@
-import { useQuery } from "convex/react";
+import { useState } from "react";
+import { useMutation, useQuery } from "convex/react";
 import { Link } from "react-router-dom";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
@@ -6,7 +7,7 @@ import { Countdown } from "../components/Countdown";
 import { Money } from "../components/Money";
 import { StatusPill } from "../components/StatusPill";
 import { Empty, Loading } from "../components/States";
-import { day, sectionClass } from "../lib/ui";
+import { day, errorText, sectionClass } from "../lib/ui";
 
 type BoardData = FunctionReturnType<typeof api.purchases.board>;
 type BoardRow = BoardData["purchases"][number];
@@ -106,6 +107,21 @@ function Row({ row }: { row: BoardRow }) {
 
 export default function Board() {
   const board = useQuery(api.purchases.board);
+  const loadExamples = useMutation(api.examples.load);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function onLoadExamples() {
+    setLoadError(null);
+    setLoading(true);
+    try {
+      await loadExamples({});
+    } catch (error) {
+      setLoadError(errorText(error));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   if (board === undefined) {
     return <Loading rows={4} />;
@@ -137,12 +153,25 @@ export default function Board() {
           title="No purchases yet"
           hint="Forward an order confirmation to your Recoup inbox, or paste the text in from Settings, and it will show up here as a case."
           action={
-            <Link
-              to="/settings"
-              className="rounded-md bg-harbor px-4 py-2 text-sm font-semibold text-paper transition hover:bg-harbor/90"
-            >
-              Add a purchase
-            </Link>
+            <div className="flex flex-col items-center gap-3">
+              <div className="flex flex-wrap justify-center gap-2">
+                <Link
+                  to="/settings"
+                  className="rounded-md bg-harbor px-4 py-2 text-sm font-semibold text-paper transition hover:bg-harbor/90"
+                >
+                  Add a purchase
+                </Link>
+                <button
+                  type="button"
+                  onClick={onLoadExamples}
+                  disabled={loading}
+                  className="rounded-md border border-line px-4 py-2 text-sm font-semibold text-ink transition hover:bg-ink/5 disabled:opacity-50"
+                >
+                  {loading ? "Loading…" : "Load an example purchase"}
+                </button>
+              </div>
+              {loadError && <p className="text-sm text-rust">{loadError}</p>}
+            </div>
           }
         />
       ) : (

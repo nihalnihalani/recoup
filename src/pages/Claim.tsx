@@ -324,6 +324,8 @@ export default function Claim() {
   const latestDraft = drafts[0];
   const pendingFollowUp = followUps.find((followUp) => followUp.status === "pending");
   const isEmailChannel = policy === null || policy.channel === "email";
+  // A settled or dismissed claim takes no new ask; the backend refuses dismiss on confirmed (D48).
+  const isClosed = claim.status === "confirmed" || claim.status === "dismissed";
 
   async function run(work: () => Promise<unknown>) {
     setActionError(null);
@@ -380,14 +382,16 @@ export default function Claim() {
       <section className={`${sectionClass} space-y-3`}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="font-serif text-lg text-ink">The ask</h2>
-          <button
-            type="button"
-            disabled={busy}
-            className={secondaryButtonClass}
-            onClick={() => void run(() => generate({ claimId: claim._id }))}
-          >
-            {latestDraft ? "Write a new draft" : "Write the message"}
-          </button>
+          {!isClosed && (
+            <button
+              type="button"
+              disabled={busy}
+              className={secondaryButtonClass}
+              onClick={() => void run(() => generate({ claimId: claim._id }))}
+            >
+              {latestDraft ? "Write a new draft" : "Write the message"}
+            </button>
+          )}
         </div>
 
         {latestDraft ? (
@@ -498,7 +502,7 @@ export default function Claim() {
           />
         </div>
         {actionError && <ErrorBox error={actionError} />}
-        {claim.status !== "dismissed" && (
+        {!isClosed && (
           <button
             type="button"
             disabled={busy}
