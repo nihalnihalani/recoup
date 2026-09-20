@@ -1,4 +1,27 @@
 @import "tailwindcss";
 
-:root { color-scheme: light; }
-body { @apply bg-stone-50 text-stone-900 antialiased; }
+/*
+  Recoup token system: a ledger, not a dashboard.
+  - paper/ink: the statement page.
+  - line: hairline rules, the printed grid.
+  - rust/harbor/moss/gold/teal: one tone per money state (owed, in-flight, settled,
+    promised, merchant-channel) so a claim's status is legible at a glance.
+*/
+@theme {
+  --color-paper: #f6f5f0;
+  --color-ink: #1b1f1d;
+  --color-line: #dad6c8;
+  --color-rust: #a6491d;
+  --color-harbor: #2e4f73;
+  --color-moss: #1e6f52;
+  --color-gold: #a97a1f;
+  --color-teal: #146b6b;
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-paper text-ink antialiased;
+}
