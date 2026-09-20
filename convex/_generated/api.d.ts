@@ -9,6 +9,7 @@
  */
 
 import type * as auth from "../auth.js";
+import type * as claims from "../claims.js";
 import type * as followUps from "../followUps.js";
 import type * as http from "../http.js";
 import type * as inbound from "../inbound.js";
@@ -31,6 +32,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
+  claims: typeof claims;
   followUps: typeof followUps;
   http: typeof http;
   inbound: typeof inbound;
