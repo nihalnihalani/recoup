@@ -140,17 +140,33 @@ export const load = mutation({
       productUrl,
       returned: false,
     });
-    await ctx.db.insert("priceChecks", {
-      itemId: jacket,
-      userId,
-      observedCents: 12000,
-      currency: "USD",
-      confidence: 1,
-      variantMatch: "exact",
-      observedAt: now - 4 * DAY,
-      sourceUrl: productUrl,
-      note: "Example observation",
-    });
+    // A short, plainly labelled history so the example chart has a shape to read:
+    // steady at the paid price, a brief sale that ended, then the drop the claim is about.
+    const history: Array<[number, number]> = [
+      [5 * DAY, 12000],
+      [4 * DAY + 12 * HOUR, 12000],
+      [4 * DAY, 12000],
+      [3 * DAY + 12 * HOUR, 11400],
+      [3 * DAY, 11400],
+      [2 * DAY + 12 * HOUR, 12000],
+      [2 * DAY, 12000],
+      [1 * DAY + 12 * HOUR, 11800],
+      [1 * DAY, 10900],
+      [12 * HOUR, 10200],
+    ];
+    for (const [ago, cents] of history) {
+      await ctx.db.insert("priceChecks", {
+        itemId: jacket,
+        userId,
+        observedCents: cents,
+        currency: "USD",
+        confidence: 1,
+        variantMatch: "exact",
+        observedAt: now - ago,
+        sourceUrl: productUrl,
+        note: "Example observation",
+      });
+    }
     const drop = await ctx.db.insert("priceChecks", {
       itemId: jacket,
       userId,
