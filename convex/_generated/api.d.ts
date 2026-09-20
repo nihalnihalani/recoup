@@ -11,6 +11,10 @@
 import type * as auth from "../auth.js";
 import type * as http from "../http.js";
 import type * as inbound from "../inbound.js";
+import type * as lib_ai from "../lib/ai.js";
+import type * as lib_ledger from "../lib/ledger.js";
+import type * as lib_money from "../lib/money.js";
+import type * as lib_schemas from "../lib/schemas.js";
 import type * as mail from "../mail.js";
 import type * as policies from "../policies.js";
 
@@ -24,6 +28,10 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   http: typeof http;
   inbound: typeof inbound;
+  "lib/ai": typeof lib_ai;
+  "lib/ledger": typeof lib_ledger;
+  "lib/money": typeof lib_money;
+  "lib/schemas": typeof lib_schemas;
   mail: typeof mail;
   policies: typeof policies;
 }>;
