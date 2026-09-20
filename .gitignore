@@ -23,3 +23,10 @@ dist-ssr
 *.sln
 *.sw?
 .reference/
+
+# Reference repos (cloned for architecture study, not part of this project)
+ClaimHero/
+bipolar/
+
+# Local agent state
+.omc/
