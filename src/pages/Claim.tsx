@@ -3,317 +3,71 @@ import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
-import type { Doc, Id } from "../../convex/_generated/dataModel";
-import { Countdown } from "../components/Countdown";
-import { Money } from "../components/Money";
-import { StatusPill } from "../components/StatusPill";
+import type { Id } from "../../convex/_generated/dataModel";
+import { LedgerBar } from "../components/charts/LedgerBar";
+import { PriceChart } from "../components/charts/PriceChart";
+import { StatusSteps } from "../components/charts/StatusSteps";
+import { WindowMeter } from "../components/charts/WindowMeter";
+import { Card, StatLabel } from "../components/claim/Card";
+import { Composer, PacketRow } from "../components/claim/Composer";
+import { MoneyForm } from "../components/claim/MoneyForm";
+import { LedgerTimeline, ReplyTimeline } from "../components/claim/Timelines";
+import { DeltaBadge } from "../components/DeltaBadge";
+import { fmt, Money } from "../components/Money";
 import { Empty, ErrorBox, Loading } from "../components/States";
-import {
-  dollarsToCents,
-  errorText,
-  inputClass,
-  labelClass,
-  primaryButtonClass,
-  secondaryButtonClass,
-  sectionClass,
-  when,
-} from "../lib/ui";
+import { day, errorText, secondaryButtonClass, when } from "../lib/ui";
 
 type ClaimData = FunctionReturnType<typeof api.claims.get>;
+type Overview = FunctionReturnType<typeof api.tracking.overview>;
+type TrackedItem = Overview["items"][number];
 
-const CLAIM_TYPE_LABEL = {
-  price_adjustment: "Price drop",
-  return_credit: "Return credit",
-} as const;
-
-const REPLY_LABEL = {
-  promise: "Promise",
-  credit_issued: "Credit issued",
-  refusal: "Refusal",
-  question: "Question",
-  other: "Other",
-} as const;
-
-function domainOf(email: string): string {
-  const at = email.lastIndexOf("@");
-  return at === -1 ? "" : email.slice(at + 1).toLowerCase();
+/** The headline figure changes meaning with the claim's state; the label says which. */
+function headline(
+  status: ClaimData["claim"]["status"],
+  balance: ClaimData["balance"],
+): { label: string; cents: number; tone: string } {
+  if (status === "confirmed") {
+    return { label: "Back on your card", cents: balance.confirmed - balance.debited, tone: "text-moss" };
+  }
+  if (status === "dismissed") {
+    return { label: "Dismissed", cents: balance.unresolved, tone: "text-ink/40 line-through" };
+  }
+  return { label: "Owed to you", cents: balance.unresolved, tone: "text-ink" };
 }
 
-// ---------------------------------------------------------------------------
-// Draft editor (D11 version binding, D18 recipient gate, D29 send status)
-// ---------------------------------------------------------------------------
-
-function DraftEditor({
-  draft,
-  claim,
-  merchantDomain,
-}: {
-  draft: Doc<"drafts">;
-  claim: Doc<"claims">;
-  merchantDomain: string;
-}) {
-  const update = useMutation(api.drafts.update);
-  const approveAndSend = useMutation(api.drafts.approveAndSend);
-  const sendStatus = useQuery(api.drafts.sendStatus, { draftId: draft._id });
-
-  const [to, setTo] = useState(draft.to);
-  const [subject, setSubject] = useState(draft.subject);
-  const [body, setBody] = useState(draft.body);
-  const [recipientConfirmed, setRecipientConfirmed] = useState(draft.recipientConfirmed === true);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const sent = draft.outboundId !== undefined;
-  const mismatch =
-    to.trim().length > 0 &&
-    merchantDomain.length > 0 &&
-    !domainOf(to).endsWith(merchantDomain.toLowerCase());
-
-  async function run(work: () => Promise<unknown>) {
-    setError(null);
-    setBusy(true);
-    try {
-      await work();
-    } catch (caught) {
-      setError(errorText(caught));
-    } finally {
-      setBusy(false);
-    }
-  }
-
+function Figure({ label, cents, currency }: { label: string; cents?: number; currency: string }) {
   return (
-    <div className="space-y-3">
-      <div>
-        <label className={labelClass} htmlFor="draft-to">
-          To
-        </label>
-        <input
-          id="draft-to"
-          className={inputClass}
-          value={to}
-          disabled={sent}
-          placeholder="Confirm the merchant's contact address"
-          onChange={(event) => setTo(event.target.value)}
-        />
-        {mismatch && !sent && (
-          <p className="mt-1 text-xs text-rust">
-            This address is not on {merchantDomain}. Make sure it really is the merchant.
-          </p>
-        )}
-      </div>
-
-      <div>
-        <label className={labelClass} htmlFor="draft-subject">
-          Subject
-        </label>
-        <input
-          id="draft-subject"
-          className={inputClass}
-          value={subject}
-          disabled={sent}
-          onChange={(event) => setSubject(event.target.value)}
-        />
-      </div>
-
-      <div>
-        <label className={labelClass} htmlFor="draft-body">
-          Message
-        </label>
-        <textarea
-          id="draft-body"
-          rows={12}
-          className={inputClass}
-          value={body}
-          disabled={sent}
-          onChange={(event) => setBody(event.target.value)}
-        />
-      </div>
-
-      {!sent && (
-        <label className="flex items-start gap-2 text-sm text-ink">
-          <input
-            type="checkbox"
-            checked={recipientConfirmed}
-            onChange={(event) => setRecipientConfirmed(event.target.checked)}
-            className="mt-0.5"
-          />
-          I confirm this recipient is the right place to send this claim.
-        </label>
-      )}
-
-      {error && <ErrorBox error={error} />}
-      {draft.sendError && <ErrorBox error={`Send failed: ${draft.sendError}`} />}
-
-      {sent ? (
-        <div className="rounded-md border border-line bg-ink/[0.02] px-3 py-2 text-sm text-ink/70">
-          {sendStatus === undefined ? (
-            "Checking delivery…"
-          ) : sendStatus === null ? (
-            "Queued — no delivery record yet."
-          ) : sendStatus.agentmailMessageId ? (
-            <>Sent {draft.approvedAt ? when(draft.approvedAt) : ""}.</>
-          ) : sendStatus.errorMessage ? (
-            <>Delivery problem: {sendStatus.errorMessage}</>
-          ) : claim.sendUnknown ? (
-            "Delivery unknown. Recoup stopped checking."
-          ) : (
-            `Sending… (${sendStatus.status})`
-          )}
-        </div>
-      ) : (
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            disabled={busy}
-            className={secondaryButtonClass}
-            onClick={() => void run(() => update({ draftId: draft._id, to, subject, body }))}
-          >
-            Save draft
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            className={primaryButtonClass}
-            onClick={() =>
-              void run(() =>
-                approveAndSend({
-                  draftId: draft._id,
-                  to,
-                  subject,
-                  body,
-                  claimVersion: claim.version,
-                  draftVersion: draft.version,
-                  recipientConfirmed,
-                }),
-              )
-            }
-          >
-            {busy ? "Sending…" : "Approve & send"}
-          </button>
-        </div>
-      )}
+    <div>
+      <dt className="text-xs font-semibold uppercase text-ink/40">{label}</dt>
+      <dd className="mt-0.5 text-sm font-semibold tabular-nums text-ink">
+        {cents === undefined ? <span className="text-ink/30">—</span> : fmt(cents, currency)}
+      </dd>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Money actions (D24: client-generated idempotency key per submission)
-// ---------------------------------------------------------------------------
-
-function AmountForm({
-  title,
-  submitLabel,
-  currency,
-  onSubmit,
-}: {
-  title: string;
-  submitLabel: string;
-  currency: string;
-  onSubmit: (cents: number, evidence: string, idempotencyKey: string) => Promise<unknown>;
-}) {
-  const [amount, setAmount] = useState("");
-  const [evidence, setEvidence] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  async function handleSubmit() {
-    setError(null);
-    const cents = dollarsToCents(amount);
-    if (cents === null || cents === 0) {
-      setError("Enter an amount greater than zero.");
-      return;
-    }
-    setBusy(true);
-    try {
-      await onSubmit(cents, evidence.trim(), crypto.randomUUID());
-      setAmount("");
-      setEvidence("");
-    } catch (caught) {
-      setError(errorText(caught));
-    } finally {
-      setBusy(false);
-    }
-  }
-
+function DateFigure({ label, at }: { label: string; at?: number }) {
   return (
-    <div className={`${sectionClass} space-y-2`}>
-      <h3 className="font-serif text-base text-ink">{title}</h3>
-      <div>
-        <label className={labelClass} htmlFor={`${title}-amount`}>
-          Amount ({currency})
-        </label>
-        <input
-          id={`${title}-amount`}
-          inputMode="decimal"
-          placeholder="0.00"
-          className={inputClass}
-          value={amount}
-          onChange={(event) => setAmount(event.target.value)}
-        />
-      </div>
-      <div>
-        <label className={labelClass} htmlFor={`${title}-evidence`}>
-          Note
-        </label>
-        <input
-          id={`${title}-evidence`}
-          className={inputClass}
-          placeholder="Where you saw it"
-          value={evidence}
-          onChange={(event) => setEvidence(event.target.value)}
-        />
-      </div>
-      {error && <ErrorBox error={error} />}
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => void handleSubmit()}
-        className={primaryButtonClass}
-      >
-        {busy ? "Saving…" : submitLabel}
-      </button>
+    <div>
+      <dt className="text-xs font-semibold uppercase text-ink/40">{label}</dt>
+      <dd className="mt-0.5 text-sm font-semibold text-ink">{day(at)}</dd>
     </div>
   );
 }
-
-function LedgerStrip({ balance, currency }: { balance: ClaimData["balance"]; currency: string }) {
-  const cells = [
-    { label: "Expected", cents: balance.expected, tone: "text-ink/60" },
-    { label: "Promised", cents: balance.promised, tone: "text-gold/80" },
-    { label: "Confirmed", cents: balance.confirmed, tone: "text-moss/80" },
-    { label: "Unresolved", cents: balance.unresolved, tone: "text-rust/80" },
-  ];
-  return (
-    <dl className="grid grid-cols-2 divide-line overflow-hidden rounded-lg border border-line sm:grid-cols-4 sm:divide-x">
-      {cells.map((cell) => (
-        <div key={cell.label} className="px-4 py-3">
-          <dt className={`text-xs font-semibold uppercase tracking-wide ${cell.tone}`}>
-            {cell.label}
-          </dt>
-          <dd className="mt-1 text-lg text-ink">
-            <Money cents={cell.cents} currency={currency} />
-          </dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-// ---------------------------------------------------------------------------
 
 export default function Claim() {
   const { id } = useParams();
   const claimId = id as Id<"claims"> | undefined;
   const data = useQuery(api.claims.get, claimId ? { claimId } : "skip");
+  const overview = useQuery(api.tracking.overview, claimId ? {} : "skip");
 
   const generate = useAction(api.drafts.generate);
-  const markPacketSent = useMutation(api.drafts.markPacketSent);
   const confirmCredit = useMutation(api.claims.confirmCredit);
   const recordLaterDebit = useMutation(api.claims.recordLaterDebit);
   const dismiss = useMutation(api.claims.dismiss);
 
-  const [packetNote, setPacketNote] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
+  const [dismissError, setDismissError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   if (!claimId) return <Empty title="No claim selected" />;
@@ -324,210 +78,243 @@ export default function Claim() {
   const latestDraft = drafts[0];
   const pendingFollowUp = followUps.find((followUp) => followUp.status === "pending");
   const isEmailChannel = policy === null || policy.channel === "email";
+  const packetChannel = !isEmailChannel && policy ? policy.channel : undefined;
   // A settled or dismissed claim takes no new ask; the backend refuses dismiss on confirmed (D48).
   const isClosed = claim.status === "confirmed" || claim.status === "dismissed";
 
-  async function run(work: () => Promise<unknown>) {
-    setActionError(null);
+  // Price history lives on the dashboard read; the claim page borrows this item's series.
+  const tracked: TrackedItem | undefined = overview?.items.find(
+    (entry) => entry.itemId === claim.itemId,
+  );
+  const paidCents = tracked?.paidCents ?? item?.unitCents;
+  const qty = tracked?.qty ?? item?.qty ?? 1;
+  const purchasedAt = tracked?.purchasedAt ?? purchase?.purchasedAt;
+  const hero = headline(claim.status, balance);
+
+  async function run(
+    work: () => Promise<unknown>,
+    setError: (message: string | null) => void = setActionError,
+  ) {
+    setError(null);
     setBusy(true);
     try {
       await work();
     } catch (caught) {
-      setActionError(errorText(caught));
+      setError(errorText(caught));
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="space-y-6">
-      <div>
-        <p className="text-xs font-semibold uppercase tracking-wide text-ink/40">Claim</p>
-        <div className="flex flex-wrap items-center gap-3">
-          <h1 className="font-serif text-2xl font-semibold tracking-tight text-ink">
-            {CLAIM_TYPE_LABEL[claim.type]} · {item?.name ?? "item"}
-          </h1>
-          <StatusPill status={claim.status} />
-        </div>
-        <p className="mt-1 text-sm text-ink/60">
-          {purchase ? (
-            <Link
-              to={`/purchases/${purchase._id}`}
-              className="underline-offset-2 hover:text-ink hover:underline"
-            >
-              {purchase.merchant || purchase.merchantDomain}
-            </Link>
-          ) : (
-            "Purchase missing"
-          )}
-          {claim.windowEndsAt !== undefined && (
-            <>
-              {" · window closes in "}
-              <Countdown endsAt={claim.windowEndsAt} className="inline" />
-            </>
-          )}
-        </p>
-        {claim.attentionAt !== undefined && (
-          <p className="mt-2 rounded-md border border-gold/40 bg-gold/5 px-3 py-2 text-sm text-gold">
-            Needs your attention since {when(claim.attentionAt)}.
+    <div className="space-y-8">
+      <div className="sm:flex sm:items-start sm:justify-between sm:gap-6">
+        <div className="mb-4 min-w-0 sm:mb-0">
+          <h1 className="text-2xl font-bold text-ink md:text-3xl">{item?.name ?? "Item"}</h1>
+          <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-ink/60">
+            {purchase ? (
+              <Link to={`/purchases/${purchase._id}`} className="font-medium text-harbor hover:underline">
+                {purchase.merchant || purchase.merchantDomain}
+              </Link>
+            ) : (
+              "Purchase missing"
+            )}
+            {qty > 1 && <span className="tabular-nums text-ink/40">×{qty}</span>}
+            {claim.attentionAt !== undefined && (
+              <span className="rounded-full bg-gold/20 px-1.5 font-medium text-gold">
+                Needs you since {when(claim.attentionAt)}
+              </span>
+            )}
+            {pendingFollowUp && (
+              <span className="rounded-full bg-ink/10 px-1.5 font-medium text-ink/60">
+                Reminder {when(pendingFollowUp.fireAt)}
+              </span>
+            )}
           </p>
-        )}
-        {pendingFollowUp && (
-          <p className="mt-1 text-xs text-ink/50">Next reminder {when(pendingFollowUp.fireAt)}.</p>
-        )}
+        </div>
+        <div className="w-full shrink-0 sm:w-96">
+          <StatusSteps status={claim.status} />
+        </div>
       </div>
 
-      <LedgerStrip balance={balance} currency={currency} />
+      <div className="grid grid-cols-12 gap-6">
+        {/* Row 1: the evidence. What is owed, how far the price fell, and the history. */}
+        <Card className="col-span-full xl:col-span-8" bodyClassName="">
+          <div className="flex flex-wrap items-end justify-between gap-x-8 gap-y-4 px-5 pt-5">
+            <div>
+              <StatLabel>{hero.label}</StatLabel>
+              <div className="mt-1 flex items-center gap-2">
+                <Money
+                  cents={hero.cents}
+                  currency={currency}
+                  className={`font-sans! text-3xl font-bold ${hero.tone}`}
+                />
+                {paidCents !== undefined && (
+                  <DeltaBadge
+                    paidCents={paidCents}
+                    latestCents={tracked?.latestCents}
+                    currency={currency}
+                  />
+                )}
+              </div>
+            </div>
+            <dl className="flex gap-6">
+              <Figure label="Paid" cents={paidCents} currency={currency} />
+              <Figure label="Now" cents={tracked?.latestCents} currency={currency} />
+              <Figure label="Lowest" cents={tracked?.lowestCents} currency={currency} />
+            </dl>
+          </div>
+          <div className="min-w-0 px-2 pb-3 pt-4">
+            {overview === undefined ? (
+              <div
+                className="mx-3 h-[300px] animate-pulse rounded-lg bg-ink/5"
+                role="status"
+                aria-label="Loading price history"
+              />
+            ) : tracked && paidCents !== undefined && tracked.points.length > 0 ? (
+              <PriceChart
+                points={tracked.points}
+                paidCents={paidCents}
+                currency={currency}
+                purchasedAt={purchasedAt}
+                windowEndsAt={claim.windowEndsAt}
+                height={300}
+              />
+            ) : (
+              <div className="mx-3 flex h-40 items-center justify-center rounded-lg border border-dashed border-line text-sm text-ink/40">
+                No price history yet
+              </div>
+            )}
+          </div>
+        </Card>
 
-      <section className={`${sectionClass} space-y-3`}>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="font-serif text-lg text-ink">The ask</h2>
-          {!isClosed && (
-            <button
-              type="button"
-              disabled={busy}
-              className={secondaryButtonClass}
-              onClick={() => void run(() => generate({ claimId: claim._id }))}
-            >
-              {latestDraft ? "Write a new draft" : "Write the message"}
-            </button>
-          )}
+        <div className="col-span-full grid grid-cols-1 gap-6 sm:grid-cols-2 xl:col-span-4 xl:grid-cols-1">
+          <Card title="Window">
+            <WindowMeter purchasedAt={purchasedAt} endsAt={claim.windowEndsAt} />
+            <dl className="mt-4 flex gap-6">
+              <DateFigure label="Bought" at={purchasedAt} />
+              <DateFigure label="Closes" at={claim.windowEndsAt} />
+            </dl>
+          </Card>
+          <Card title="Ledger">
+            <LedgerBar
+              expected={balance.expected}
+              promised={balance.promised}
+              confirmed={balance.confirmed}
+              currency={currency}
+            />
+            <dl className="mt-4 flex gap-6 border-t border-line/60 pt-4">
+              <Figure label="Unresolved" cents={balance.unresolved} currency={currency} />
+              <Figure label="Confirmed" cents={balance.confirmed} currency={currency} />
+              <Figure label="Charged again" cents={balance.debited} currency={currency} />
+            </dl>
+          </Card>
         </div>
 
-        {latestDraft ? (
-          <DraftEditor
-            key={latestDraft._id}
-            draft={latestDraft}
-            claim={claim}
-            merchantDomain={purchase?.merchantDomain ?? ""}
-          />
-        ) : (
-          <p className="text-sm text-ink/60">No draft yet. Recoup will write one from the facts.</p>
-        )}
+        {/* Row 2: the ask and what came back. */}
+        <Card
+          title="The ask"
+          className="col-span-full xl:col-span-7"
+          actions={
+            !isClosed && (
+              <button
+                type="button"
+                disabled={busy}
+                className={secondaryButtonClass}
+                onClick={() => void run(() => generate({ claimId: claim._id }))}
+              >
+                {busy ? "Writing…" : latestDraft ? "Write a new draft" : "Write the message"}
+              </button>
+            )
+          }
+        >
+          <div className="space-y-4">
+            {latestDraft ? (
+              <Composer
+                key={latestDraft._id}
+                draft={latestDraft}
+                claim={claim}
+                merchantDomain={purchase?.merchantDomain ?? ""}
+                packetChannel={packetChannel}
+                closed={isClosed}
+              />
+            ) : (
+              <>
+                <div className="rounded-lg border border-dashed border-line px-4 py-10 text-center text-sm text-ink/40">
+                  No draft yet
+                </div>
+                {packetChannel !== undefined && !isClosed && (
+                  <PacketRow claim={claim} channel={packetChannel} />
+                )}
+              </>
+            )}
+            {actionError && <ErrorBox error={actionError} />}
+          </div>
+        </Card>
 
-        {!isEmailChannel && (
-          <div className="space-y-2 border-t border-line pt-3">
-            <p className="text-sm text-ink/70">
-              This merchant handles claims by {policy?.channel}. Send it yourself, then record it
-              here.
-            </p>
-            <input
-              className={inputClass}
-              placeholder="What you sent and where"
-              value={packetNote}
-              onChange={(event) => setPacketNote(event.target.value)}
-            />
-            <button
-              type="button"
-              disabled={busy || packetNote.trim().length === 0}
-              className={primaryButtonClass}
-              onClick={() =>
-                void run(async () => {
-                  await markPacketSent({ claimId: claim._id, note: packetNote.trim() });
-                  setPacketNote("");
+        <Card title="Replies" ruled className="col-span-full xl:col-span-5">
+          {replies.length === 0 ? (
+            <p className="py-6 text-center text-sm text-ink/40">None yet</p>
+          ) : (
+            <ReplyTimeline replies={replies} currency={currency} />
+          )}
+        </Card>
+
+        {/* Row 3: money in and out. */}
+        <Card title="Record money" className="col-span-full xl:col-span-5">
+          <div className="space-y-3">
+            <MoneyForm
+              title="Credit landed"
+              submitLabel="Confirm credit"
+              tone="credit"
+              currency={currency}
+              onSubmit={(cents, evidence, idempotencyKey) =>
+                confirmCredit({
+                  claimId: claim._id,
+                  cents,
+                  evidence: evidence || "Confirmed by the customer",
+                  idempotencyKey,
                 })
               }
-            >
-              Record as sent
-            </button>
+            />
+            <MoneyForm
+              title="Charged again"
+              submitLabel="Record charge"
+              tone="debit"
+              currency={currency}
+              onSubmit={(cents, evidence, idempotencyKey) =>
+                recordLaterDebit({
+                  claimId: claim._id,
+                  cents,
+                  evidence: evidence || "Recorded by the customer",
+                  idempotencyKey,
+                })
+              }
+            />
+            {!isClosed && (
+              <div className="space-y-3 border-t border-line/60 pt-3">
+                {dismissError && <ErrorBox error={dismissError} />}
+                <button
+                  type="button"
+                  disabled={busy}
+                  className="text-sm font-medium text-rust hover:underline disabled:opacity-60"
+                  onClick={() => void run(() => dismiss({ claimId: claim._id }), setDismissError)}
+                >
+                  Dismiss this claim
+                </button>
+              </div>
+            )}
           </div>
-        )}
-      </section>
+        </Card>
 
-      <section className="space-y-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Replies</h2>
-        {replies.length === 0 ? (
-          <p className="text-sm text-ink/60">Nothing back from the merchant yet.</p>
-        ) : (
-          <ul className="space-y-2">
-            {[...replies]
-              .sort((a, b) => b.receivedAt - a.receivedAt)
-              .map((reply) => (
-                <li key={reply._id} className={sectionClass}>
-                  <div className="flex flex-wrap items-baseline justify-between gap-2">
-                    <span className="text-xs font-semibold uppercase tracking-wide text-harbor">
-                      {REPLY_LABEL[reply.classification]}
-                    </span>
-                    <span className="text-xs text-ink/50">{when(reply.receivedAt)}</span>
-                  </div>
-                  <p className="mt-1 text-sm text-ink">{reply.summary}</p>
-                  <p className="mt-1 text-xs text-ink/50">
-                    From {reply.from}
-                    {reply.promisedCents !== undefined && (
-                      <>
-                        {" · promised "}
-                        <Money cents={reply.promisedCents} currency={currency} />
-                      </>
-                    )}
-                  </p>
-                  {reply.senderMismatch && (
-                    <p className="mt-1 text-xs text-rust">
-                      This came from a different domain than the one you wrote to.
-                    </p>
-                  )}
-                </li>
-              ))}
-          </ul>
-        )}
-      </section>
-
-      <section className="space-y-3">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Record money</h2>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <AmountForm
-            title="Confirm credit"
-            submitLabel="Credit landed"
-            currency={currency}
-            onSubmit={(cents, evidence, idempotencyKey) =>
-              confirmCredit({
-                claimId: claim._id,
-                cents,
-                evidence: evidence || "Confirmed by the customer",
-                idempotencyKey,
-              })
-            }
-          />
-          <AmountForm
-            title="Record later charge"
-            submitLabel="Charged again"
-            currency={currency}
-            onSubmit={(cents, evidence, idempotencyKey) =>
-              recordLaterDebit({
-                claimId: claim._id,
-                cents,
-                evidence: evidence || "Recorded by the customer",
-                idempotencyKey,
-              })
-            }
-          />
-        </div>
-        {actionError && <ErrorBox error={actionError} />}
-        {!isClosed && (
-          <button
-            type="button"
-            disabled={busy}
-            className={secondaryButtonClass}
-            onClick={() => void run(() => dismiss({ claimId: claim._id }))}
-          >
-            Dismiss this claim
-          </button>
-        )}
-      </section>
-
-      {events.length > 0 && (
-        <section className="space-y-2">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Ledger</h2>
-          <ul className="divide-y divide-line rounded-lg border border-line bg-white/70">
-            {events.map((event) => (
-              <li key={event._id} className="flex flex-wrap items-center justify-between gap-2 px-4 py-2">
-                <span className="text-sm text-ink">{event.kind.replace(/_/g, " ")}</span>
-                <span className="text-xs text-ink/50">{event.evidence}</span>
-                <Money cents={event.cents} currency={currency} className="text-sm text-ink" />
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+        <Card title="Ledger events" ruled className="col-span-full xl:col-span-7">
+          {events.length === 0 ? (
+            <p className="py-6 text-center text-sm text-ink/40">No money recorded yet</p>
+          ) : (
+            <LedgerTimeline events={events} currency={currency} />
+          )}
+        </Card>
+      </div>
     </div>
   );
 }

@@ -1,21 +1,47 @@
 @import "tailwindcss";
 
 /*
-  Recoup token system: a ledger, not a dashboard.
-  - paper/ink: the statement page.
-  - line: hairline rules, the printed grid.
-  - rust/harbor/moss/gold/teal: one tone per money state (owed, in-flight, settled,
-    promised, merchant-channel) so a claim's status is legible at a glance.
+  Recoup token system, dashboard edition.
+  The token names are unchanged so every page keeps compiling; the values now follow
+  a light analytics-dashboard palette:
+  - paper/ink/line: gray page, dark gray headings, hairline gray borders.
+  - harbor: violet, the primary and in-flight tone.
+  - moss: green, good (lower price, settled). rust: red, bad (higher price, owed).
+  - gold: yellow, promised or warning. teal: sky, the secondary series.
 */
 @theme {
-  --color-paper: #f6f5f0;
-  --color-ink: #1b1f1d;
-  --color-line: #dad6c8;
-  --color-rust: #a6491d;
-  --color-harbor: #2e4f73;
-  --color-moss: #1e6f52;
-  --color-gold: #a97a1f;
-  --color-teal: #146b6b;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+
+  --color-paper: #f3f4f6;
+  --color-ink: #1f2937;
+  --color-line: #e5e7eb;
+  --color-rust: #e5484d;
+  --color-harbor: #8470ff;
+  --color-moss: #239f52;
+  --color-gold: #f0bb33;
+  --color-teal: #67bfff;
+
+  --color-violet-50: #f1eeff;
+  --color-violet-100: #e6e1ff;
+  --color-violet-200: #d2cbff;
+  --color-violet-300: #b7acff;
+  --color-violet-400: #9c8cff;
+  --color-violet-500: #8470ff;
+  --color-violet-600: #755ff8;
+  --color-violet-700: #5d47de;
+  --color-violet-800: #4634b1;
+  --color-violet-900: #2f227c;
+
+  --color-sky-500: #67bfff;
+  --color-sky-700: #0b7fd1;
+  --color-green-500: #3ec972;
+  --color-green-700: #239f52;
+  --color-red-500: #ff5656;
+  --color-red-700: #e41414;
+  --color-yellow-500: #f0bb33;
+  --color-yellow-700: #ca8a04;
+
+  --shadow-xs: 0 1px 1px 0 rgb(0 0 0 / 0.05), 0 1px 2px 0 rgb(0 0 0 / 0.02);
 }
 
 :root {
@@ -23,5 +49,5 @@
 }
 
 body {
-  @apply bg-paper text-ink antialiased;
+  @apply bg-gray-100 font-sans text-gray-600 antialiased;
 }

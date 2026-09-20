@@ -1,12 +1,14 @@
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
-import type { Doc, Id } from "../../convex/_generated/dataModel";
-import { Money } from "../components/Money";
-import { StatusPill } from "../components/StatusPill";
-import { Empty, ErrorBox, Loading } from "../components/States";
+import type { Id } from "../../convex/_generated/dataModel";
+import { WindowMeter } from "../components/charts/WindowMeter";
+import { ItemTracker } from "../components/purchase/ItemTracker";
+import { RuleCard } from "../components/purchase/RuleCard";
+import { UntrackedTable } from "../components/purchase/UntrackedTable";
+import { Empty, Loading } from "../components/States";
 import {
   centsToDollars,
   day,
@@ -16,29 +18,10 @@ import {
   inputClass,
   labelClass,
   primaryButtonClass,
-  secondaryButtonClass,
-  sectionClass,
   toDateInput,
-  when,
 } from "../lib/ui";
 
 type PurchaseData = FunctionReturnType<typeof api.purchases.get>;
-type ItemWithDetail = PurchaseData["items"][number];
-
-const POLICY_KIND_LABEL = {
-  price_adjustment: "Price adjustment policy",
-  returns: "Returns policy",
-} as const;
-
-const CLAIM_TYPE_LABEL = {
-  price_adjustment: "Price drop",
-  return_credit: "Return credit",
-} as const;
-
-type PolicyChannel = Doc<"policies">["channel"];
-
-const CHANNELS: readonly PolicyChannel[] = ["email", "form", "chat", "phone", "unknown"];
-
 // ---------------------------------------------------------------------------
 // Review form (D25: every extracted purchase starts needs_review)
 // ---------------------------------------------------------------------------
@@ -128,16 +111,16 @@ function ReviewForm({ data }: { data: PurchaseData }) {
     }
   }
 
-  return (
-    <section className={`${sectionClass} space-y-4`}>
-      <div>
-        <h2 className="font-serif text-lg text-ink">Check this before Recoup starts work</h2>
-        <p className="mt-1 text-sm text-ink/60">
-          Recoup read these details out of the email. Fix anything wrong, then confirm.
-        </p>
-      </div>
+  const cellInput = `${inputClass} min-w-0`;
 
-      <div className="grid gap-3 sm:grid-cols-2">
+  return (
+    <section aria-label="Review this purchase" className="col-span-full rounded-xl bg-white shadow-xs">
+      <header className="border-b border-gray-100 px-5 py-4">
+        <h2 className="font-semibold text-gray-800">Check the details</h2>
+        <p className="mt-0.5 text-sm text-gray-500">Read from the order email. Fix anything wrong, then confirm.</p>
+      </header>
+
+      <div className="grid gap-4 px-5 py-5 sm:grid-cols-2">
         <div>
           <label className={labelClass} htmlFor="merchant">
             Merchant
@@ -185,403 +168,123 @@ function ReviewForm({ data }: { data: PurchaseData }) {
         </div>
       </div>
 
-      <div className="space-y-3">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Items</h3>
-        {items.length === 0 && <p className="text-sm text-ink/60">No items were extracted.</p>}
-        {items.map((item, index) => (
-          <div key={item.itemId} className="grid gap-2 rounded-md border border-line p-3 sm:grid-cols-4">
-            <div className="sm:col-span-2">
-              <label className={labelClass} htmlFor={`name-${item.itemId}`}>
-                Item
-              </label>
-              <input
-                id={`name-${item.itemId}`}
-                className={inputClass}
-                value={item.name}
-                onChange={(event) => patchItem(index, { name: event.target.value })}
-              />
-            </div>
-            <div>
-              <label className={labelClass} htmlFor={`unit-${item.itemId}`}>
-                Unit price
-              </label>
-              <input
-                id={`unit-${item.itemId}`}
-                inputMode="decimal"
-                className={inputClass}
-                value={item.unitDollars}
-                onChange={(event) => patchItem(index, { unitDollars: event.target.value })}
-              />
-            </div>
-            <div>
-              <label className={labelClass} htmlFor={`qty-${item.itemId}`}>
-                Qty
-              </label>
-              <input
-                id={`qty-${item.itemId}`}
-                inputMode="numeric"
-                className={inputClass}
-                value={item.qty}
-                onChange={(event) => patchItem(index, { qty: event.target.value })}
-              />
-            </div>
-            <div className="sm:col-span-4">
-              <label className={labelClass} htmlFor={`url-${item.itemId}`}>
-                Product page URL
-              </label>
-              <input
-                id={`url-${item.itemId}`}
-                className={inputClass}
-                placeholder="https://…"
-                value={item.productUrl}
-                onChange={(event) => patchItem(index, { productUrl: event.target.value })}
-              />
-            </div>
+      <div className="border-t border-gray-100 px-5 py-4">
+        <h3 className="font-semibold text-gray-800">Items</h3>
+        {items.length === 0 ? (
+          <p className="mt-2 text-sm text-gray-500">No items were extracted.</p>
+        ) : (
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full min-w-[40rem] table-auto text-sm">
+              <thead className="bg-gray-50 text-xs font-semibold uppercase text-gray-400">
+                <tr>
+                  <th scope="col" className="p-2 text-left">
+                    Item
+                  </th>
+                  <th scope="col" className="w-28 p-2 text-left">
+                    Unit price
+                  </th>
+                  <th scope="col" className="w-20 p-2 text-left">
+                    Qty
+                  </th>
+                  <th scope="col" className="p-2 text-left">
+                    Product page
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {items.map((item, index) => (
+                  <tr key={item.itemId}>
+                    <td className="p-2">
+                      <input
+                        aria-label={`Item ${index + 1} name`}
+                        className={cellInput}
+                        value={item.name}
+                        onChange={(event) => patchItem(index, { name: event.target.value })}
+                      />
+                    </td>
+                    <td className="p-2">
+                      <input
+                        aria-label={`Item ${index + 1} unit price`}
+                        inputMode="decimal"
+                        className={cellInput}
+                        value={item.unitDollars}
+                        onChange={(event) => patchItem(index, { unitDollars: event.target.value })}
+                      />
+                    </td>
+                    <td className="p-2">
+                      <input
+                        aria-label={`Item ${index + 1} quantity`}
+                        inputMode="numeric"
+                        className={cellInput}
+                        value={item.qty}
+                        onChange={(event) => patchItem(index, { qty: event.target.value })}
+                      />
+                    </td>
+                    <td className="p-2">
+                      <input
+                        aria-label={`Item ${index + 1} product page URL`}
+                        className={cellInput}
+                        placeholder="https://…"
+                        value={item.productUrl}
+                        onChange={(event) => patchItem(index, { productUrl: event.target.value })}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        ))}
+        )}
       </div>
 
-      {error && <ErrorBox error={error} />}
-
-      <button
-        type="button"
-        onClick={() => void handleSubmit()}
-        disabled={busy}
-        className={primaryButtonClass}
-      >
-        {busy ? "Confirming…" : "Confirm purchase"}
-      </button>
+      <footer className="flex flex-wrap items-center justify-end gap-3 border-t border-gray-100 px-5 py-4">
+        {error && (
+          <p role="alert" className="mr-auto text-sm text-rust">
+            {error}
+          </p>
+        )}
+        <button type="button" onClick={() => void handleSubmit()} disabled={busy} className={primaryButtonClass}>
+          {busy ? "Confirming…" : "Confirm purchase"}
+        </button>
+      </footer>
     </section>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Active item card
-// ---------------------------------------------------------------------------
 
-function ItemCard({ item, currency }: { item: ItemWithDetail; currency: string }) {
-  const setReturned = useMutation(api.purchases.setReturned);
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Asks for a fresh check on every tracked item; failures (cooldowns) are summed up inline. */
+function CheckAllButton({ itemIds }: { itemIds: Id<"items">[] }) {
   const checkNow = useMutation(api.priceWatch.checkNow);
-  const openClaim = useMutation(api.claims.open);
-
-  const [returnedAt, setReturnedAt] = useState(() => toDateInput(item.returnedAt ?? Date.now()));
-  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const latest = item.priceChecks.find((check) => check.observedCents !== undefined);
-  const openReturnClaim = item.claims.find(
-    (claim) => claim.type === "return_credit" && claim.status !== "dismissed",
-  );
-
-  async function run(work: () => Promise<unknown>) {
+  async function handleClick() {
     setError(null);
     setBusy(true);
-    try {
-      await work();
-    } catch (caught) {
-      setError(errorText(caught));
-    } finally {
-      setBusy(false);
+    const results = await Promise.allSettled(itemIds.map((itemId) => checkNow({ itemId })));
+    const failures = results.filter((result) => result.status === "rejected");
+    if (failures.length > 0) {
+      setError(`${failures.length} of ${itemIds.length} not checked: ${errorText(failures[0].reason)}`);
     }
+    setBusy(false);
   }
 
   return (
-    <li className={`${sectionClass} space-y-3`}>
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <div>
-          <p className="font-serif text-lg text-ink">{item.name}</p>
-          <p className="mt-0.5 text-xs text-ink/50">
-            Paid <Money cents={item.unitCents} currency={currency} /> × {item.qty}
-          </p>
-        </div>
-        <div className="text-right">
-          <p className="text-xs uppercase tracking-wide text-ink/50">Latest seen</p>
-          <p className="text-sm text-ink">
-            {latest?.observedCents !== undefined ? (
-              <Money cents={latest.observedCents} currency={latest.currency ?? currency} />
-            ) : (
-              "not checked yet"
-            )}
-          </p>
-        </div>
-      </div>
-
-      {item.productUrl && (
-        <a
-          href={item.productUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="block truncate text-xs text-harbor underline-offset-2 hover:underline"
-        >
-          {item.productUrl}
-        </a>
-      )}
-
-      {item.priceChecks.length > 0 && (
-        <ul className="space-y-1 border-t border-line pt-2 text-xs text-ink/60">
-          {item.priceChecks.slice(0, 5).map((check) => (
-            <li key={check._id} className="flex justify-between gap-3">
-              <span>{when(check.observedAt)}</span>
-              <span>
-                {check.observedCents !== undefined ? (
-                  <Money cents={check.observedCents} currency={check.currency ?? currency} />
-                ) : (
-                  (check.note ?? "no usable price")
-                )}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <div className="flex flex-wrap items-end gap-3 border-t border-line pt-3">
-        <label className="flex items-center gap-2 text-sm text-ink">
-          <input
-            type="checkbox"
-            checked={item.returned}
-            disabled={busy}
-            onChange={(event) => {
-              const returned = event.target.checked;
-              void run(() =>
-                setReturned({
-                  itemId: item._id,
-                  returned,
-                  returnedAt: returned ? (fromDateInput(returnedAt) ?? Date.now()) : undefined,
-                }),
-              );
-            }}
-          />
-          Returned
-        </label>
-        <div>
-          <label className={labelClass} htmlFor={`returnedAt-${item._id}`}>
-            Return date
-          </label>
-          <input
-            id={`returnedAt-${item._id}`}
-            type="date"
-            className={inputClass}
-            value={returnedAt}
-            onChange={(event) => {
-              setReturnedAt(event.target.value);
-              if (item.returned) {
-                const at = fromDateInput(event.target.value);
-                if (at !== null) {
-                  void run(() => setReturned({ itemId: item._id, returned: true, returnedAt: at }));
-                }
-              }
-            }}
-          />
-        </div>
-        <button
-          type="button"
-          disabled={busy || !item.productUrl}
-          title={item.productUrl ? undefined : "This item has no product page to check"}
-          onClick={() => void run(() => checkNow({ itemId: item._id }))}
-          className={secondaryButtonClass}
-        >
-          Check price now
-        </button>
-        {item.returned && !openReturnClaim && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void run(() => openClaim({ itemId: item._id }))}
-            className={primaryButtonClass}
-          >
-            Open claim
-          </button>
-        )}
-      </div>
-
-      {item.claims.length > 0 && (
-        <ul className="space-y-1 border-t border-line pt-2">
-          {item.claims.map((claim) => (
-            <li key={claim._id} className="flex flex-wrap items-center justify-between gap-2">
-              <Link
-                to={`/claims/${claim._id}`}
-                className="text-sm text-ink underline-offset-4 hover:underline"
-              >
-                {CLAIM_TYPE_LABEL[claim.type]} ·{" "}
-                <Money cents={Math.max(0, claim.balance.unresolved)} currency={currency} />
-              </Link>
-              <StatusPill status={claim.status} />
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {error && <ErrorBox error={error} />}
-    </li>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Policy cards (D17: immutable snapshots, refresh inserts a new row)
-// ---------------------------------------------------------------------------
-
-function PolicyCard({
-  kind,
-  policy,
-  merchantDomain,
-}: {
-  kind: "price_adjustment" | "returns";
-  policy: Doc<"policies"> | undefined;
-  merchantDomain: string;
-}) {
-  const confirmPolicy = useMutation(api.policies.confirm);
-  const refresh = useAction(api.policies.refresh);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  // `confirm` doubles as an edit: the user can correct what the scrape got
-  // wrong before vouching for it, and `channel` is required.
-  const [channel, setChannel] = useState<PolicyChannel>(policy?.channel ?? "unknown");
-  const [contactEmail, setContactEmail] = useState(policy?.contactEmail ?? "");
-  const [windowDays, setWindowDays] = useState(
-    policy?.windowDays === undefined ? "" : String(policy.windowDays),
-  );
-
-  async function run(work: () => Promise<unknown>) {
-    setError(null);
-    setBusy(true);
-    try {
-      await work();
-    } catch (caught) {
-      setError(errorText(caught));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className={`${sectionClass} space-y-2`}>
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="font-serif text-base text-ink">{POLICY_KIND_LABEL[kind]}</h3>
-        {policy && (
-          <span className="text-xs text-ink/50">Current policy · retrieved {when(policy.retrievedAt)}</span>
-        )}
-      </div>
-
-      {!policy ? (
-        <p className="text-sm text-ink/60">
-          Not looked up yet. Refresh to have Recoup find this merchant&rsquo;s rule.
+    <div className="flex flex-col items-end gap-1">
+      <button type="button" disabled={busy} onClick={() => void handleClick()} className={primaryButtonClass}>
+        {busy ? "Checking…" : "Check all prices"}
+      </button>
+      {error && (
+        <p role="alert" className="max-w-xs text-right text-xs text-rust">
+          {error}
         </p>
-      ) : (
-        <>
-          {policy.passage ? (
-            <blockquote className="border-l-2 border-line pl-3 text-sm italic text-ink/80">
-              {policy.passage}
-            </blockquote>
-          ) : (
-            <p className="text-sm text-ink/60">
-              {policy.note ?? "No passage found. Treat this as unknown."}
-            </p>
-          )}
-          <div className="grid gap-2 sm:grid-cols-3">
-            <div>
-              <label className={labelClass} htmlFor={`channel-${policy._id}`}>
-                Channel
-              </label>
-              <select
-                id={`channel-${policy._id}`}
-                className={inputClass}
-                value={channel}
-                onChange={(event) => setChannel(event.target.value as PolicyChannel)}
-              >
-                {CHANNELS.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className={labelClass} htmlFor={`contact-${policy._id}`}>
-                Contact email
-              </label>
-              <input
-                id={`contact-${policy._id}`}
-                className={inputClass}
-                placeholder="unknown"
-                value={contactEmail}
-                onChange={(event) => setContactEmail(event.target.value)}
-              />
-            </div>
-            <div>
-              <label className={labelClass} htmlFor={`window-${policy._id}`}>
-                Window (days)
-              </label>
-              <input
-                id={`window-${policy._id}`}
-                inputMode="numeric"
-                className={inputClass}
-                placeholder="unknown"
-                value={windowDays}
-                onChange={(event) => setWindowDays(event.target.value)}
-              />
-            </div>
-          </div>
-          <p className="text-xs text-ink/50">Confidence {policy.confidence.toFixed(2)}</p>
-          {policy.sourceUrl && (
-            <a
-              href={policy.sourceUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="block truncate text-xs text-harbor underline-offset-2 hover:underline"
-            >
-              {policy.sourceUrl}
-            </a>
-          )}
-        </>
       )}
-
-      <div className="flex flex-wrap items-center gap-3 pt-1">
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void run(() => refresh({ merchantDomain, kind }))}
-          className={secondaryButtonClass}
-        >
-          {busy ? "Reading the site…" : policy ? "Refresh" : "Look this up"}
-        </button>
-        {policy && (
-          <>
-            {policy.confirmedByUser && (
-              <span className="text-xs font-semibold uppercase tracking-wide text-moss">
-                Confirmed by you
-              </span>
-            )}
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() =>
-                void run(() => {
-                  const days = windowDays.trim() === "" ? undefined : Number(windowDays.trim());
-                  if (days !== undefined && (!Number.isSafeInteger(days) || days < 0)) {
-                    throw new Error("Enter the window as a whole number of days.");
-                  }
-                  return confirmPolicy({
-                    policyId: policy._id,
-                    channel,
-                    contactEmail: contactEmail.trim() === "" ? undefined : contactEmail.trim(),
-                    windowDays: days,
-                  });
-                })
-              }
-              className={primaryButtonClass}
-            >
-              {policy.confirmedByUser ? "Save corrections" : "This looks right"}
-            </button>
-          </>
-        )}
-      </div>
-
-      {error && <ErrorBox error={error} />}
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
 
 export default function Purchase() {
   const { id } = useParams();
@@ -593,62 +296,79 @@ export default function Purchase() {
 
   const { purchase, items, policies } = data;
   const currency = purchase.currency;
+  const needsReview = purchase.status === "needs_review";
+
+  // `get` returns the latest snapshot per kind; this page is price-only.
+  const rule = policies.find((candidate) => candidate.kind === "price_adjustment");
+  const windowEndsAt =
+    purchase.purchasedAt !== undefined && rule?.windowDays !== undefined
+      ? purchase.purchasedAt + rule.windowDays * DAY_MS
+      : undefined;
+
+  const tracked = items.filter((item) => item.productUrl);
+  const untracked = items.filter((item) => !item.productUrl);
+
+  const ruleCard = (
+    <RuleCard
+      // A refresh inserts a NEW snapshot (D17), so remount to pick up its
+      // values rather than keeping the old row's edits.
+      key={rule?._id ?? "none"}
+      policy={rule}
+      merchantDomain={purchase.merchantDomain}
+    />
+  );
 
   return (
-    <div className="space-y-6">
-      <div>
-        <p className="text-xs font-semibold uppercase tracking-wide text-ink/40">Purchase</p>
-        <h1 className="font-serif text-2xl font-semibold tracking-tight text-ink">
-          {purchase.merchant || purchase.merchantDomain || "Purchase"}
-        </h1>
-        <p className="mt-1 text-sm text-ink/60">
-          {purchase.orderRef ? `Order ${purchase.orderRef} · ` : ""}
-          {day(purchase.purchasedAt)} · {purchase.status.replace("_", " ")}
-        </p>
-        <Link to="/" className="mt-2 inline-block text-sm text-ink/60 underline-offset-2 hover:text-ink hover:underline">
-          Back to the board
-        </Link>
+    <div>
+      <div className="mb-8 sm:flex sm:items-center sm:justify-between sm:gap-6">
+        <div className="mb-4 min-w-0 sm:mb-0">
+          <Link to="/" className="text-sm font-medium text-gray-500 hover:text-gray-800">
+            Back to the board
+          </Link>
+          <h1 className="mt-1 truncate text-2xl font-bold text-gray-800 md:text-3xl">
+            {purchase.merchant || purchase.merchantDomain || "Purchase"}
+          </h1>
+          <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-500">
+            {purchase.orderRef && <span>Order {purchase.orderRef}</span>}
+            <span>Bought {day(purchase.purchasedAt)}</span>
+            {needsReview && (
+              <span className="rounded-full bg-gold/15 px-2.5 py-1 text-xs font-medium text-gold">Needs your review</span>
+            )}
+          </p>
+        </div>
+        {!needsReview && (
+          <div className="flex flex-wrap items-center gap-4 sm:justify-end">
+            <div className="w-56">
+              <WindowMeter purchasedAt={purchase.purchasedAt} endsAt={windowEndsAt} />
+            </div>
+            {tracked.length > 1 && <CheckAllButton itemIds={tracked.map((item) => item._id)} />}
+          </div>
+        )}
       </div>
 
-      {purchase.status === "needs_review" ? (
-        <ReviewForm data={data} />
-      ) : (
-        <>
-          <section className="space-y-3">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Items</h2>
-            {items.length === 0 ? (
-              <Empty title="No items on this purchase" />
-            ) : (
-              <ul className="space-y-3">
-                {items.map((item) => (
-                  <ItemCard key={item._id} item={item} currency={currency} />
-                ))}
-              </ul>
-            )}
-          </section>
-
-          <section className="space-y-3">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">
-              {purchase.merchant || purchase.merchantDomain} policy
-            </h2>
-            <div className="grid gap-3 sm:grid-cols-2">
-              {(["price_adjustment", "returns"] as const).map((kind) => {
-                const policy = policies.find((candidate) => candidate.kind === kind);
-                return (
-                  <PolicyCard
-                    // A refresh inserts a NEW snapshot (D17), so remount to pick
-                    // up its values rather than keeping the old row's edits.
-                    key={policy?._id ?? kind}
-                    kind={kind}
-                    policy={policy}
-                    merchantDomain={purchase.merchantDomain}
-                  />
-                );
-              })}
-            </div>
-          </section>
-        </>
-      )}
+      <div className="grid grid-cols-12 gap-6">
+        {needsReview ? (
+          <ReviewForm data={data} />
+        ) : (
+          <>
+            {items.length === 0 && <Empty title="No items on this purchase" className="col-span-full" />}
+            {tracked.map((item, index) => (
+              <ItemTracker
+                key={item._id}
+                item={item}
+                currency={currency}
+                purchasedAt={purchase.purchasedAt}
+                windowEndsAt={windowEndsAt}
+                // The rule belongs to the store, not the item: show it once,
+                // beside the first chart.
+                aside={index === 0 ? ruleCard : undefined}
+              />
+            ))}
+            {untracked.length > 0 && <UntrackedTable items={untracked} currency={currency} />}
+            {tracked.length === 0 && <div className="col-span-full xl:col-span-6">{ruleCard}</div>}
+          </>
+        )}
+      </div>
     </div>
   );
 }

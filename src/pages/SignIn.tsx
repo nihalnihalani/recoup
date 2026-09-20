@@ -1,5 +1,6 @@
 import { useAuthActions } from "@convex-dev/auth/react";
 import { type FormEvent, useState } from "react";
+import { inputClass, primaryButtonClass } from "../lib/ui";
 
 type Flow = "signIn" | "signUp";
 
@@ -28,57 +29,52 @@ export default function SignIn() {
     }
   }
 
+  const fieldLabel = "mb-1 block text-sm font-medium text-ink";
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-paper px-4 py-12">
-      <div className="w-full max-w-sm">
-        <div className="mb-8 text-center">
-          <h1 className="font-serif text-3xl font-semibold tracking-tight text-ink">Recoup</h1>
-          <p className="mx-auto mt-3 max-w-xs text-sm leading-relaxed text-ink/60">
-            Refund didn&rsquo;t add up? Price dropped after you bought? Recoup gets the difference
-            back.
-          </p>
+      <div className="w-full max-w-sm rounded-xl bg-white p-8 shadow-xs">
+        <div className="mb-6 flex items-center gap-2">
+          <svg viewBox="0 0 32 32" className="size-8" aria-hidden="true">
+            <rect width="32" height="32" rx="8" className="fill-harbor" />
+            <path
+              d="M9 11l7 9 7-9M16 20v-9"
+              fill="none"
+              stroke="white"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          <span className="text-lg font-bold text-ink">Recoup</span>
         </div>
 
-        <form
-          onSubmit={(event) => void handleSubmit(event)}
-          className="space-y-4 rounded-lg border border-line bg-white/70 p-6 shadow-sm"
-        >
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">
-            {flow === "signIn" ? "Sign in" : "Create your account"}
-          </h2>
+        <h1 className="text-3xl font-bold text-ink">
+          {flow === "signIn" ? "Welcome back" : "Create your account"}
+        </h1>
+        <p className="mt-2 text-sm text-ink/60">
+          Price dropped after you bought? Recoup gets the difference back.
+        </p>
 
+        <form onSubmit={(event) => void handleSubmit(event)} className="mt-6 space-y-4">
           {flow === "signUp" && (
             <div>
-              <label htmlFor="name" className="mb-1 block text-sm font-medium text-ink">
+              <label htmlFor="name" className={fieldLabel}>
                 Name
               </label>
-              <input
-                id="name"
-                name="name"
-                type="text"
-                autoComplete="name"
-                required
-                className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-harbor focus:ring-2 focus:ring-harbor/20"
-              />
+              <input id="name" name="name" type="text" autoComplete="name" required className={inputClass} />
             </div>
           )}
 
           <div>
-            <label htmlFor="email" className="mb-1 block text-sm font-medium text-ink">
+            <label htmlFor="email" className={fieldLabel}>
               Email
             </label>
-            <input
-              id="email"
-              name="email"
-              type="email"
-              autoComplete="email"
-              required
-              className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-harbor focus:ring-2 focus:ring-harbor/20"
-            />
+            <input id="email" name="email" type="email" autoComplete="email" required className={inputClass} />
           </div>
 
           <div>
-            <label htmlFor="password" className="mb-1 block text-sm font-medium text-ink">
+            <label htmlFor="password" className={fieldLabel}>
               Password
             </label>
             <input
@@ -88,35 +84,34 @@ export default function SignIn() {
               autoComplete={flow === "signIn" ? "current-password" : "new-password"}
               required
               minLength={8}
-              className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-harbor focus:ring-2 focus:ring-harbor/20"
+              className={inputClass}
             />
           </div>
 
           {error && (
-            <p role="alert" className="text-sm text-rust">
+            <p role="alert" className="rounded-lg bg-rust/10 px-3 py-2 text-sm text-rust">
               {error}
             </p>
           )}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full rounded-md bg-harbor px-4 py-2 text-sm font-semibold text-paper transition hover:bg-harbor/90 disabled:opacity-60"
-          >
+          <button type="submit" disabled={submitting} className={`w-full ${primaryButtonClass}`}>
             {submitting ? "Please wait…" : flow === "signIn" ? "Sign in" : "Create account"}
           </button>
+        </form>
 
+        <div className="mt-6 border-t border-line/60 pt-5 text-sm text-ink/60">
+          {flow === "signIn" ? "New to Recoup? " : "Already have an account? "}
           <button
             type="button"
             onClick={() => {
               setError(null);
               setFlow(flow === "signIn" ? "signUp" : "signIn");
             }}
-            className="w-full text-center text-sm text-ink/60 underline-offset-2 hover:text-ink hover:underline"
+            className="font-medium text-harbor hover:underline"
           >
-            {flow === "signIn" ? "New to Recoup? Create an account" : "Already have an account? Sign in"}
+            {flow === "signIn" ? "Create an account" : "Sign in"}
           </button>
-        </form>
+        </div>
       </div>
     </div>
   );
