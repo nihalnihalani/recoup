@@ -23,7 +23,7 @@ type Seeded = {
 async function seed(
   t: ReturnType<typeof setup>,
   userId: Id<"users">,
-  opts: { status?: "detected" | "drafted" | "queued" | "sent" } = {},
+  opts: { status?: "detected" | "drafted" | "queued" | "sent" | "confirmed" | "dismissed" } = {},
 ): Promise<Seeded> {
   return await t.run(async (ctx) => {
     const purchaseId = await ctx.db.insert("purchases", {
@@ -285,6 +285,32 @@ describe("drafts.approveAndSend guards", () => {
     ).rejects.toThrow(/already sent/i);
   });
 
+  it("refuses a second ask while one is queued, and any ask on a closed claim (review H6)", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    await withInbox(t, userId);
+    await confirmedPolicy(t, userId);
+    for (const [status, message] of [
+      ["queued", /already being sent/i],
+      ["confirmed", /closed/i],
+      ["dismissed", /closed/i],
+    ] as const) {
+      const { claimId } = await seed(t, userId, { status });
+      const draftId = await newDraft(t, claimId, userId);
+      await expect(
+        as.mutation(api.drafts.approveAndSend, {
+          draftId,
+          to: CONTACT,
+          subject: "s",
+          body: "b",
+          claimVersion: 1,
+          draftVersion: 1,
+          recipientConfirmed: true,
+        }),
+      ).rejects.toThrow(message);
+    }
+  });
+
   it("refuses to send before the user has an inbox", async () => {
     const t = setup();
     const { userId, as } = await signedIn(t);
@@ -441,6 +467,24 @@ describe("drafts.reconcileSend transitions (D13)", () => {
         .collect(),
     );
     expect(followUps).toHaveLength(0);
+  });
+
+  it("treats a bounce that still carries a message id as a failure, never as sent (review H3)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { claimId, draftId } = await sentDraft(t, userId);
+
+    const outcome = await t.run((ctx) =>
+      applySendOutcome(ctx, draftId, 1, {
+        status: "bounced",
+        agentmailMessageId: "msg-bounced-1",
+        threadId: "thread-1",
+        errorMessage: "mailbox does not exist",
+      }),
+    );
+    expect(outcome).toBe("failed");
+    const claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).toBe("drafted");
   });
 
   it("retries while attempts remain and ends at sendUnknown, never at sent", async () => {

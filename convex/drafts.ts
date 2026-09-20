@@ -153,7 +153,8 @@ export const context = internalQuery({
         .withIndex("by_claim", (q) => q.eq("claimId", claimId))
         .take(20),
       balance: await claimBalance(ctx, claim),
-      userName: user?.name ?? null,
+      // Password sign-up stores no name; the mailbox name is a truthful sign-off (review H5).
+      userName: user?.name ?? user?.email?.split("@")[0] ?? null,
       confirmedContact: purchase
         ? await confirmedContactFor(ctx, claim.userId, purchase.merchantDomain)
         : null,
@@ -361,6 +362,12 @@ export const approveAndSend = mutation({
       throw new ConvexError("The claim changed since this draft was written. Generate a new draft.");
     }
 
+    // One ask in flight per claim, and never on a closed claim (review H6).
+    if (claim.status === "queued") throw new ConvexError("A message for this claim is already being sent");
+    if (claim.status === "confirmed" || claim.status === "dismissed") {
+      throw new ConvexError("This claim is closed");
+    }
+
     const to = args.to.trim().toLowerCase();
     if (to.length === 0) throw new ConvexError("Enter a recipient email address");
     if (!EMAIL_RE.test(to)) throw new ConvexError("Enter a valid recipient email address");
@@ -449,6 +456,21 @@ export async function applySendOutcome(
   const claim = await ctx.db.get(draft.claimId);
   if (!claim) return "gone";
 
+  // Failures first: a bounced message still carries its message id (review H3).
+  if (status && (TERMINAL_FAILURES as readonly string[]).includes(status.status)) {
+    // Clear the outbound binding so the user can fix the address and retry;
+    // `sendError` keeps the reason visible next to the draft.
+    await ctx.db.patch(draft._id, {
+      sendError: (status.errorMessage ?? `Delivery ${status.status}`).slice(0, MAX_ERROR_CHARS),
+      outboundId: undefined,
+      approvedAt: undefined,
+    });
+    if (claim.status === "queued") {
+      await ctx.db.patch(claim._id, { status: "drafted", sendUnknown: undefined });
+    }
+    return "failed";
+  }
+
   if (status && status.agentmailMessageId) {
     await ctx.db.patch(draft._id, {
       agentmailMessageId: status.agentmailMessageId,
@@ -466,20 +488,6 @@ export async function applySendOutcome(
       await ctx.db.patch(claim._id, { threadId: status.threadId });
     }
     return "sent";
-  }
-
-  if (status && (TERMINAL_FAILURES as readonly string[]).includes(status.status)) {
-    // Clear the outbound binding so the user can fix the address and retry;
-    // `sendError` keeps the reason visible next to the draft.
-    await ctx.db.patch(draft._id, {
-      sendError: (status.errorMessage ?? `Delivery ${status.status}`).slice(0, MAX_ERROR_CHARS),
-      outboundId: undefined,
-      approvedAt: undefined,
-    });
-    if (claim.status === "queued") {
-      await ctx.db.patch(claim._id, { status: "drafted", sendUnknown: undefined });
-    }
-    return "failed";
   }
 
   if (attempt < BACKOFF_MS.length) {
