@@ -24,3 +24,5 @@ Each entry: date · env · revision · command/scenario · result · counts · l
 | confirm credit while reminder fires → no stale action | followUps.test | pending |
 | reply "refund issued" → promised only | replies.test | pending |
 | form/chat/phone merchant → packet flow | drafts.test + Claim page | pending |
+- 2026-09-21 · local · 2084ac0 · `npx convex dev --once` · components agentmail/firecrawl/staticHosting installed, functions ready · – · no provider keys; deploy does not require them (D12c)
+- 2026-09-21 · local · 2084ac0 · `npm run typecheck`, `npm run lint`, `npx vite build` · all exit 0 (re-run by lead) · 0 tests · –
