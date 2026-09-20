@@ -9,6 +9,7 @@
  */
 
 import type * as auth from "../auth.js";
+import type * as followUps from "../followUps.js";
 import type * as http from "../http.js";
 import type * as inbound from "../inbound.js";
 import type * as lib_ai from "../lib/ai.js";
@@ -17,6 +18,7 @@ import type * as lib_money from "../lib/money.js";
 import type * as lib_schemas from "../lib/schemas.js";
 import type * as mail from "../mail.js";
 import type * as policies from "../policies.js";
+import type * as replies from "../replies.js";
 
 import type {
   ApiFromModules,
@@ -26,6 +28,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
+  followUps: typeof followUps;
   http: typeof http;
   inbound: typeof inbound;
   "lib/ai": typeof lib_ai;
@@ -34,6 +37,7 @@ declare const fullApi: ApiFromModules<{
   "lib/schemas": typeof lib_schemas;
   mail: typeof mail;
   policies: typeof policies;
+  replies: typeof replies;
 }>;
 
 /**
