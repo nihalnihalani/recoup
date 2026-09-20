@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p convex/tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p convex/tsconfig.json --noEmit",
+    "postinstall": "patch-package",
+    "deploy": "npx @convex-dev/static-hosting deploy"
   },
   "dependencies": {
     "@agentmail/convex": "^0.1.0",
@@ -36,6 +38,7 @@
     "@vitejs/plugin-react": "^6.1.1",
     "convex-test": "^0.0.59",
     "oxlint": "^1.81.0",
+    "patch-package": "^8.0.1",
     "typescript": "~6.0.2",
     "vite": "^8.3.0",
     "vitest": "^4.1.11"

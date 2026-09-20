@@ -5,10 +5,13 @@ import firecrawl from "@firecrawl/firecrawl-convex/convex.config";
 import staticHosting from "@convex-dev/static-hosting/convex.config";
 
 const app = defineApp({
-  env: { FIRECRAWL_API_KEY: v.string() },
+  env: { FIRECRAWL_API_KEY: v.string(), AGENTMAIL_API_KEY: v.string() },
 });
 
-app.use(agentmail);
+// @agentmail/convex 0.1.0 sends from inside the isolated component runtime, which
+// does not see deployment env vars, and the published component declares no env.
+// patches/@agentmail+convex+0.1.0.patch adds the declaration; bind the key here.
+app.use(agentmail, { env: { AGENTMAIL_API_KEY: app.env.AGENTMAIL_API_KEY } });
 app.use(firecrawl, { env: { FIRECRAWL_API_KEY: app.env.FIRECRAWL_API_KEY } });
 // No httpPrefix: auth routes and the AgentMail webhook stay at the root,
 // the static site is a catch-all registered last in convex/http.ts.
