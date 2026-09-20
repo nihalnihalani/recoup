@@ -3,6 +3,41 @@ import { internalMutation, type MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 
+const DAY_MS = 86_400_000;
+/** Floor on the reminder delay: never nag a merchant sooner than a week (D26). */
+export const MIN_REMINDER_DAYS = 7;
+
+/**
+ * When to remind the user about a claim (D26): the later of seven days and
+ * the merchant's own returns window, so the reminder lands while there is
+ * still a window to point at. Falls back to the floor when no returns policy
+ * snapshot has been captured for the merchant.
+ */
+export async function reminderFireAt(
+  ctx: MutationCtx,
+  claim: Doc<"claims">,
+  from: number = Date.now(),
+): Promise<number> {
+  const purchase = await ctx.db.get(claim.purchaseId);
+  let days = MIN_REMINDER_DAYS;
+  if (purchase) {
+    const policy = await ctx.db
+      .query("policies")
+      .withIndex("by_user_domain_kind", (q) =>
+        q
+          .eq("userId", claim.userId)
+          .eq("merchantDomain", purchase.merchantDomain)
+          .eq("kind", "returns"),
+      )
+      .order("desc")
+      .first();
+    if (policy?.windowDays && Number.isFinite(policy.windowDays)) {
+      days = Math.max(days, Math.min(policy.windowDays, 365));
+    }
+  }
+  return from + days * DAY_MS;
+}
+
 /** Cancels every pending follow-up for a claim (D28). */
 export async function cancelPending(ctx: MutationCtx, claimId: Id<"claims">) {
   const rows = await ctx.db
@@ -50,6 +85,7 @@ export async function scheduleReminder(
  */
 export const fire = internalMutation({
   args: { claimId: v.id("claims") },
+  returns: v.null(),
   handler: async (ctx, { claimId }) => {
     const claim = await ctx.db.get(claimId);
     const pending = (
@@ -60,9 +96,10 @@ export const fire = internalMutation({
     ).filter((f) => f.status === "pending");
     if (!claim || claim.status === "confirmed" || claim.status === "dismissed") {
       for (const f of pending) await ctx.db.patch(f._id, { status: "cancelled" });
-      return;
+      return null;
     }
     for (const f of pending) await ctx.db.patch(f._id, { status: "fired" });
     await ctx.db.patch(claimId, { attentionAt: Date.now() });
+    return null;
   },
 });
