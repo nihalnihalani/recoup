@@ -1,100 +1,93 @@
 import { ConvexError, v } from "convex/values";
-import {
-  internalMutation,
-  mutation,
-  query,
-  type MutationCtx,
-} from "./_generated/server";
+import { components } from "./_generated/api";
+import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import schema, { claimStatus, eventKind } from "./schema";
 import { ownedClaim, ownedItem, requireUserId } from "./lib/access";
+import { balance, deriveStatus, newToken, statusAfterEvent, type EventKind } from "./lib/ledger";
 import { assertCents, assertPositiveCents } from "./lib/money";
-import { newToken, statusAfterEvent, type EventKind } from "./lib/ledger";
-import { balanceValidator, claimBalance, claimEvents } from "./lib/balance";
-import { cancelPending, reminderFireAt, scheduleReminder } from "./followUps";
+import { eventKind } from "./schema";
+import { cancelPending } from "./followUps";
+import { claimBalance } from "./lib/balance";
 
-const claimWithBalance = v.object({
-  ...schema.doc("claims").fields,
-  balance: balanceValidator,
-});
-
-const applyResult = v.object({ deduped: v.boolean(), status: claimStatus });
-
-/** Statuses that still count as "open" when refusing a duplicate claim. */
-const CLOSED_STATUSES: ReadonlyArray<Doc<"claims">["status"]> = ["confirmed", "dismissed"];
-
-/** How many times `openClaim` retries a token collision before giving up (D23). */
-const TOKEN_ATTEMPTS = 20;
+const MAX_TOKEN_ATTEMPTS = 10;
 
 /**
- * A globally unique claim token (D23). Reply routing falls back to the token
- * in the subject line, so a collision would hand one user's reply to another
- * user's claim; loop until the token is unused rather than trusting entropy.
- */
-async function uniqueToken(ctx: MutationCtx): Promise<string> {
-  for (let i = 0; i < TOKEN_ATTEMPTS; i++) {
-    const token = newToken();
-    const clash = await ctx.db
-      .query("claims")
-      .withIndex("by_token", (q) => q.eq("token", token))
-      .first();
-    if (!clash) return token;
-  }
-  throw new ConvexError("Could not allocate a unique claim token");
-}
-
-/**
- * Opens a claim. Not a registered function: it takes a `userId` and is
- * unauthenticated on purpose. Callers are the public `open` mutation below
- * (which resolves identity from `ctx.auth`) and `priceWatch.recordCheck`,
- * which opens price claims on the owner's behalf.
- *
- * Every related id is re-checked against the owner and against the purchase
- * (D19): a policy must belong to the same user and merchant domain, and a
- * price check must be an observation of this very item.
+ * Shared claim-creation path used by the public `open` mutation (always
+ * return_credit, D20) and by price-watch / examples callers (T09, T12).
+ * Validates related-id ownership (D19) and generates a globally unique
+ * token (D23) before inserting.
  */
 export async function openClaim(
   ctx: MutationCtx,
   args: {
     userId: Id<"users">;
+    purchaseId: Id<"purchases">;
     itemId: Id<"items">;
     type: "price_adjustment" | "return_credit";
     expectedCents: number;
     windowEndsAt?: number;
     policyId?: Id<"policies">;
     openedFromPriceCheckId?: Id<"priceChecks">;
+    isExample?: boolean;
   },
 ): Promise<Id<"claims">> {
   assertPositiveCents(args.expectedCents, "expectedCents");
 
+  // D46: never trust that the caller's ids belong together.
   const item = await ctx.db.get(args.itemId);
   if (!item || item.userId !== args.userId) throw new ConvexError("Item not found");
-  const purchase = await ctx.db.get(item.purchaseId);
-  if (!purchase || purchase.userId !== args.userId) throw new ConvexError("Purchase not found");
-
-  if (args.policyId) {
-    const policy = await ctx.db.get(args.policyId);
-    if (!policy || policy.userId !== args.userId) throw new ConvexError("Policy not found");
-    if (policy.merchantDomain !== purchase.merchantDomain) {
-      throw new ConvexError("Policy is for a different merchant");
-    }
-  }
-  if (args.openedFromPriceCheckId) {
-    const check = await ctx.db.get(args.openedFromPriceCheckId);
-    if (!check || check.userId !== args.userId) throw new ConvexError("Price check not found");
-    if (check.itemId !== args.itemId) throw new ConvexError("Price check is for a different item");
+  if (item.purchaseId !== args.purchaseId) {
+    throw new ConvexError("Item does not belong to this purchase");
   }
 
   const existing = await ctx.db
     .query("claims")
     .withIndex("by_item", (q) => q.eq("itemId", args.itemId))
     .collect();
-  if (existing.some((c) => c.type === args.type && !CLOSED_STATUSES.includes(c.status))) {
-    throw new ConvexError("An open claim of this type already exists for this item");
+  // D44: an item is returned once, so one return_credit claim per item
+  // unless the earlier one was dismissed. Price adjustments may repeat once
+  // the previous one is confirmed or dismissed.
+  const closed = args.type === "return_credit" ? ["dismissed"] : ["confirmed", "dismissed"];
+  if (existing.some((c) => c.type === args.type && !closed.includes(c.status))) {
+    throw new ConvexError(
+      args.type === "return_credit"
+        ? "A return claim already exists for this item"
+        : "An open claim of this type already exists for this item",
+    );
   }
 
-  return await ctx.db.insert("claims", {
-    purchaseId: item.purchaseId,
+  if (args.policyId) {
+    const policy = await ctx.db.get(args.policyId);
+    if (!policy || policy.userId !== args.userId) throw new ConvexError("Policy not found");
+    const purchase = await ctx.db.get(args.purchaseId);
+    if (!purchase || policy.merchantDomain !== purchase.merchantDomain) {
+      throw new ConvexError("Policy does not match this purchase's merchant");
+    }
+  }
+
+  if (args.openedFromPriceCheckId) {
+    const priceCheck = await ctx.db.get(args.openedFromPriceCheckId);
+    if (!priceCheck || priceCheck.userId !== args.userId || priceCheck.itemId !== args.itemId) {
+      throw new ConvexError("Price check does not match this item");
+    }
+  }
+
+  let token: string | undefined;
+  for (let i = 0; i < MAX_TOKEN_ATTEMPTS; i++) {
+    const candidate = newToken();
+    const hit = await ctx.db
+      .query("claims")
+      .withIndex("by_token", (q) => q.eq("token", candidate))
+      .first();
+    if (!hit) {
+      token = candidate;
+      break;
+    }
+  }
+  if (!token) throw new ConvexError("Could not generate a unique claim token");
+
+  return ctx.db.insert("claims", {
+    purchaseId: args.purchaseId,
     itemId: args.itemId,
     userId: args.userId,
     type: args.type,
@@ -103,42 +96,73 @@ export async function openClaim(
     windowEndsAt: args.windowEndsAt,
     policyId: args.policyId,
     openedFromPriceCheckId: args.openedFromPriceCheckId,
-    token: await uniqueToken(ctx),
+    token,
     version: 1,
-    isExample: purchase.isExample,
+    isExample: args.isExample,
   });
 }
 
 /**
- * Opens a return-credit claim on one item (D20). The client never states the
- * amount: the expected credit is derived server-side from the stored unit
- * price and quantity, less an optional restocking or return-label fee, so a
- * caller cannot inflate what the merchant supposedly owes. Price-adjustment
- * claims are opened only by `priceWatch.recordCheck`, never from the client.
+ * The only public way to open a claim (D20): always `return_credit`,
+ * always on an item the user has already marked returned. Expected cents
+ * are derived server-side from the item's price and an optional fee,
+ * never taken from the client. Price-adjustment claims are opened only by
+ * `priceWatch.recordCheck` (T09) via the exported `openClaim` helper.
  */
 export const open = mutation({
   args: { itemId: v.id("items"), feeCents: v.optional(v.number()) },
-  returns: v.id("claims"),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const item = await ownedItem(ctx, args.itemId, userId);
-    const fee = args.feeCents === undefined ? 0 : assertCents(args.feeCents, "feeCents");
-    const expectedCents = item.unitCents * item.qty - fee;
-    if (expectedCents <= 0) throw new ConvexError("Fee is not smaller than the item total");
-    return await openClaim(ctx, {
+    if (!item.returned) throw new ConvexError("Mark the item returned first");
+
+    const fee = args.feeCents ?? 0;
+    assertCents(fee, "feeCents");
+    const fullCents = item.unitCents * item.qty;
+    const expectedCents = fullCents - fee;
+    assertPositiveCents(expectedCents, "expectedCents");
+
+    const purchase = await ctx.db.get(item.purchaseId);
+    if (!purchase) throw new ConvexError("Purchase not found");
+    const policy = await ctx.db
+      .query("policies")
+      .withIndex("by_user_domain_kind", (q) =>
+        q.eq("userId", userId).eq("merchantDomain", purchase.merchantDomain).eq("kind", "returns"),
+      )
+      .order("desc")
+      .first();
+
+    const claimId = await openClaim(ctx, {
       userId,
+      purchaseId: item.purchaseId,
       itemId: args.itemId,
       type: "return_credit",
       expectedCents,
+      policyId: policy?._id,
     });
+
+    if (fee > 0) {
+      await ctx.db.insert("claimNotes", {
+        claimId,
+        userId,
+        kind: "expected_change",
+        text: "Fee deducted per policy",
+        oldCents: fullCents,
+        newCents: expectedCents,
+      });
+    }
+
+    return claimId;
   },
 });
 
 /**
- * Appends one fact to the append-only ledger and moves the claim's status to
- * whatever that fact implies (`lib/ledger.statusAfterEvent`). Duplicate
- * delivery is a no-op: `idempotencyKey` is namespaced by claim so one
- * client-supplied key can never dedupe an event on somebody else's claim.
+ * Appends one ledger event and recomputes claim status from the full
+ * ledger (ARCHITECTURE_PATTERNS: derived sums are never stored). Refuses a
+ * dismissed claim, which is terminal. Idempotency keys are scoped to the
+ * claim (D38): the same key with the same kind and cents is a no-op, the
+ * same key with different facts is a conflict. A later debit can never
+ * exceed the net confirmed credit (D40).
  */
 export async function applyEvent(
   ctx: MutationCtx,
@@ -146,27 +170,34 @@ export async function applyEvent(
   kind: EventKind,
   cents: number,
   evidence: string,
-  idempotencyKey?: string,
-): Promise<{ deduped: boolean; status: Doc<"claims">["status"] }> {
-  assertCents(cents, `${kind} cents`);
-  const scopedKey = idempotencyKey ? `${claim._id}:${idempotencyKey}` : undefined;
-  if (scopedKey) {
-    const dup = await ctx.db
-      .query("ledgerEvents")
-      .withIndex("by_key", (q) => q.eq("idempotencyKey", scopedKey))
-      .first();
-    if (dup) return { deduped: true, status: claim.status };
+  idempotencyKey: string,
+) {
+  if (claim.status === "dismissed") throw new ConvexError("Claim is dismissed");
+  assertPositiveCents(cents, "cents");
+  if (idempotencyKey.trim().length === 0) throw new ConvexError("idempotencyKey must not be empty");
+
+  const dup = await ctx.db
+    .query("ledgerEvents")
+    .withIndex("by_claim_key", (q) => q.eq("claimId", claim._id).eq("idempotencyKey", idempotencyKey))
+    .first();
+  if (dup) {
+    if (dup.kind !== kind || dup.cents !== cents) throw new ConvexError("idempotency conflict");
+    return { deduped: true as const, status: claim.status };
   }
 
-  await ctx.db.insert("ledgerEvents", {
-    claimId: claim._id,
-    userId: claim.userId,
-    kind,
-    cents,
-    evidence,
-    idempotencyKey: scopedKey,
-  });
-  const b = await claimBalance(ctx, claim);
+  if (kind === "later_debit") {
+    const before = await claimBalance(ctx, claim);
+    if (cents > before.confirmed - before.debited) {
+      throw new ConvexError("A later debit cannot exceed the confirmed credit");
+    }
+  }
+
+  await ctx.db.insert("ledgerEvents", { claimId: claim._id, userId: claim.userId, kind, cents, evidence, idempotencyKey });
+  const events = await ctx.db
+    .query("ledgerEvents")
+    .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+    .collect();
+  const b = balance(claim.expectedCents, events);
   const status = statusAfterEvent(claim.status, kind, b);
   const patch: Partial<Doc<"claims">> = { status, version: claim.version + 1 };
   if (status === "confirmed") {
@@ -174,15 +205,9 @@ export async function applyEvent(
     patch.attentionAt = undefined;
   }
   await ctx.db.patch(claim._id, patch);
-  return { deduped: false, status };
+  return { deduped: false as const, status };
 }
 
-/**
- * Unauthenticated on purpose: callers are `replies.classify` (a merchant
- * promise extracted from inbound mail) and the intake pipeline, which have
- * already resolved the owning user from the inbox. `userId` is re-checked
- * against the claim here so a wrong pairing writes nothing.
- */
 export const applyEventInternal = internalMutation({
   args: {
     claimId: v.id("claims"),
@@ -190,95 +215,59 @@ export const applyEventInternal = internalMutation({
     kind: eventKind,
     cents: v.number(),
     evidence: v.string(),
-    idempotencyKey: v.optional(v.string()),
+    idempotencyKey: v.string(),
   },
-  returns: applyResult,
   handler: async (ctx, args) => {
     const claim = await ctx.db.get(args.claimId);
     if (!claim || claim.userId !== args.userId) throw new ConvexError("Claim not found");
-    return await applyEvent(ctx, claim, args.kind, args.cents, args.evidence, args.idempotencyKey);
+    return applyEvent(ctx, claim, args.kind, args.cents, args.evidence, args.idempotencyKey);
   },
 });
 
-/**
- * The only way money becomes `confirmed` (Inv 3): the user saw the credit on
- * a statement. `idempotencyKey` is required (D24) because a double-submitted
- * form would otherwise confirm the same credit twice and settle a claim that
- * is still half owed.
- */
 export const confirmCredit = mutation({
-  args: {
-    claimId: v.id("claims"),
-    cents: v.number(),
-    evidence: v.string(),
-    idempotencyKey: v.string(),
-  },
-  returns: applyResult,
+  args: { claimId: v.id("claims"), cents: v.number(), evidence: v.string(), idempotencyKey: v.string() },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, args.claimId, userId);
-    assertPositiveCents(args.cents, "cents");
-    return await applyEvent(
-      ctx,
-      claim,
-      "confirmed_credit",
-      args.cents,
-      args.evidence,
-      args.idempotencyKey,
-    );
+    return applyEvent(ctx, claim, "confirmed_credit", args.cents, args.evidence, args.idempotencyKey);
   },
 });
 
-/** A merchant clawback after the credit landed. Same idempotency rule (D24). */
 export const recordLaterDebit = mutation({
-  args: {
-    claimId: v.id("claims"),
-    cents: v.number(),
-    evidence: v.string(),
-    idempotencyKey: v.string(),
-  },
-  returns: applyResult,
+  args: { claimId: v.id("claims"), cents: v.number(), evidence: v.string(), idempotencyKey: v.string() },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, args.claimId, userId);
-    assertPositiveCents(args.cents, "cents");
-    return await applyEvent(
-      ctx,
-      claim,
-      "later_debit",
-      args.cents,
-      args.evidence,
-      args.idempotencyKey,
-    );
+    return applyEvent(ctx, claim, "later_debit", args.cents, args.evidence, args.idempotencyKey);
   },
 });
 
 /**
- * Corrects what we think the merchant owes. This is bookkeeping, not money
- * moving, so it writes a `claimNotes` row and never a ledger event (D24).
- * Bumping the version invalidates any draft the user already approved but
- * that has not left the outbox, and cancels reminders tied to the old amount.
+ * Corrects the expected amount without touching the ledger (D24): no
+ * ledger event, just a note. Unapproves any not-yet-sent draft (no
+ * outboundId) since its body may cite the old amount, and cancels any
+ * pending reminder since the claim's terms just changed.
  */
 export const adjustExpected = mutation({
   args: { claimId: v.id("claims"), expectedCents: v.number(), reason: v.string() },
-  returns: v.null(),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, args.claimId, userId);
+    if (claim.status === "dismissed") throw new ConvexError("Claim is dismissed");
     assertPositiveCents(args.expectedCents, "expectedCents");
+    const oldCents = claim.expectedCents;
 
-    await ctx.db.patch(claim._id, {
+    // D41: the new expected amount can settle or un-settle the claim.
+    const b = await claimBalance(ctx, { _id: claim._id, expectedCents: args.expectedCents });
+    const status = deriveStatus(claim.status, b);
+    const patch: Partial<Doc<"claims">> = {
       expectedCents: args.expectedCents,
+      status,
       version: claim.version + 1,
-    });
-    await ctx.db.insert("claimNotes", {
-      claimId: claim._id,
-      userId,
-      kind: "expected_change",
-      text: args.reason,
-      oldCents: claim.expectedCents,
-      newCents: args.expectedCents,
-    });
+    };
+    if (status === "confirmed") patch.attentionAt = undefined;
+    await ctx.db.patch(claim._id, patch);
+
     const drafts = await ctx.db
       .query("drafts")
       .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
@@ -286,114 +275,86 @@ export const adjustExpected = mutation({
     for (const d of drafts) {
       if (d.approvedAt && !d.outboundId) await ctx.db.patch(d._id, { approvedAt: undefined });
     }
+
     await cancelPending(ctx, claim._id);
-    return null;
+
+    await ctx.db.insert("claimNotes", {
+      claimId: claim._id,
+      userId,
+      kind: "expected_change",
+      text: args.reason,
+      oldCents,
+      newCents: args.expectedCents,
+    });
   },
 });
 
 export const dismiss = mutation({
-  args: { claimId: v.id("claims"), reason: v.optional(v.string()) },
-  returns: v.null(),
-  handler: async (ctx, args) => {
+  args: { claimId: v.id("claims") },
+  handler: async (ctx, { claimId }) => {
     const userId = await requireUserId(ctx);
-    const claim = await ownedClaim(ctx, args.claimId, userId);
+    const claim = await ownedClaim(ctx, claimId, userId);
+    // D48: a confirmed claim holds real recovered money; it cannot be dismissed.
+    if (claim.status === "confirmed") throw new ConvexError("A confirmed claim cannot be dismissed");
     await cancelPending(ctx, claim._id);
-    await ctx.db.patch(claim._id, {
-      status: "dismissed",
-      version: claim.version + 1,
-      attentionAt: undefined,
-    });
-    await ctx.db.insert("claimNotes", {
-      claimId: claim._id,
-      userId,
-      kind: "status",
-      text: args.reason ?? "Dismissed",
-    });
-    return null;
+    await ctx.db.patch(claim._id, { status: "dismissed", version: claim.version + 1, attentionAt: undefined });
+    await ctx.db.insert("claimNotes", { claimId: claim._id, userId, kind: "status", text: "Dismissed by user" });
   },
 });
 
-/** Clears the "needs attention" flag a fired follow-up set (D03, D28). */
 export const clearAttention = mutation({
   args: { claimId: v.id("claims") },
-  returns: v.null(),
   handler: async (ctx, { claimId }) => {
     const userId = await requireUserId(ctx);
     await ownedClaim(ctx, claimId, userId);
     await ctx.db.patch(claimId, { attentionAt: undefined });
-    return null;
   },
 });
-
-/**
- * Schedules the reminder for a claim the user has chased (D26, D28). Not a
- * registered function: `drafts.reconcileSend` calls it once a send is
- * confirmed, which is the only moment a reminder makes sense.
- */
-export async function scheduleClaimReminder(ctx: MutationCtx, claim: Doc<"claims">) {
-  await scheduleReminder(ctx, claim, await reminderFireAt(ctx, claim));
-}
 
 export const get = query({
   args: { claimId: v.id("claims") },
-  returns: v.object({
-    claim: schema.doc("claims"),
-    item: v.union(schema.doc("items"), v.null()),
-    purchase: v.union(schema.doc("purchases"), v.null()),
-    events: v.array(schema.doc("ledgerEvents")),
-    notes: v.array(schema.doc("claimNotes")),
-    drafts: v.array(schema.doc("drafts")),
-    replies: v.array(schema.doc("replies")),
-    followUps: v.array(schema.doc("followUps")),
-    policy: v.union(schema.doc("policies"), v.null()),
-    balance: balanceValidator,
-  }),
   handler: async (ctx, { claimId }) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, claimId, userId);
-    const events = await claimEvents(ctx, claimId);
+    const item = await ctx.db.get(claim.itemId);
+    const purchase = await ctx.db.get(claim.purchaseId);
+    const events = await ctx.db
+      .query("ledgerEvents")
+      .withIndex("by_claim", (q) => q.eq("claimId", claimId))
+      .collect();
+    const drafts = await ctx.db
+      .query("drafts")
+      .withIndex("by_claim", (q) => q.eq("claimId", claimId))
+      .order("desc")
+      .collect();
+    const replies = await ctx.db
+      .query("replies")
+      .withIndex("by_claim", (q) => q.eq("claimId", claimId))
+      .collect();
+    const followUps = await ctx.db
+      .query("followUps")
+      .withIndex("by_claim", (q) => q.eq("claimId", claimId))
+      .collect();
+    const notes = await ctx.db
+      .query("claimNotes")
+      .withIndex("by_claim", (q) => q.eq("claimId", claimId))
+      .collect();
+    const policy = claim.policyId ? await ctx.db.get(claim.policyId) : null;
+    const messages = claim.threadId
+      ? await ctx.runQuery(components.agentmail.lib.listInboundMessages, { threadId: claim.threadId })
+      : [];
     return {
       claim,
-      item: await ctx.db.get(claim.itemId),
-      purchase: await ctx.db.get(claim.purchaseId),
+      item,
+      purchase,
       events,
-      notes: await ctx.db
-        .query("claimNotes")
-        .withIndex("by_claim", (q) => q.eq("claimId", claimId))
-        .collect(),
-      drafts: await ctx.db
-        .query("drafts")
-        .withIndex("by_claim", (q) => q.eq("claimId", claimId))
-        .order("desc")
-        .collect(),
-      replies: await ctx.db
-        .query("replies")
-        .withIndex("by_claim", (q) => q.eq("claimId", claimId))
-        .collect(),
-      followUps: await ctx.db
-        .query("followUps")
-        .withIndex("by_claim", (q) => q.eq("claimId", claimId))
-        .collect(),
-      policy: claim.policyId ? await ctx.db.get(claim.policyId) : null,
-      balance: await claimBalance(ctx, claim),
+      drafts,
+      replies,
+      followUps,
+      notes,
+      policy,
+      messages,
+      balance: balance(claim.expectedCents, events),
     };
-  },
-});
-
-/** Lists the claims that a fired follow-up pushed onto the user's plate. */
-export const needsAttention = query({
-  args: {},
-  returns: v.array(claimWithBalance),
-  handler: async (ctx) => {
-    const userId = await requireUserId(ctx);
-    const claims = await ctx.db
-      .query("claims")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .order("desc")
-      .take(200);
-    const flagged = claims.filter((c) => c.attentionAt !== undefined && c.status !== "dismissed");
-    return await Promise.all(
-      flagged.map(async (claim) => ({ ...claim, balance: await claimBalance(ctx, claim) })),
-    );
   },
 });

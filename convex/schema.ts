@@ -45,7 +45,7 @@ export default defineSchema({
     userId: v.id("users"), merchantDomain: v.string(), kind: policyKind, windowDays: v.optional(v.number()), channel,
     contactEmail: v.optional(v.string()), passage: v.string(), passageStart: v.optional(v.number()), sourceUrl: v.string(),
     retrievedAt: v.number(), confidence: v.number(), confirmedByUser: v.boolean(), note: v.optional(v.string()),
-    isExample: v.optional(v.boolean()),
+    isExample: v.optional(v.boolean()), userEdited: v.optional(v.boolean()),
   }).index("by_user_domain_kind", ["userId", "merchantDomain", "kind"]),
 
   /** One observation of a product page. observedCents undefined = no usable price (D16). */
@@ -63,11 +63,11 @@ export default defineSchema({
     sendUnknown: v.optional(v.boolean()), isExample: v.optional(v.boolean()),
   }).index("by_user", ["userId"]).index("by_item", ["itemId"]).index("by_token", ["token"]).index("by_thread", ["threadId"]),
 
-  /** Append-only facts about money. Only user confirmation creates confirmed_credit (Inv 3). */
+  /** Append-only facts about money. Idempotency keys are scoped per claim (D38). Only user confirmation creates confirmed_credit (Inv 3). */
   ledgerEvents: defineTable({
     claimId: v.id("claims"), userId: v.id("users"), kind: eventKind, cents: v.number(), evidence: v.string(),
     idempotencyKey: v.optional(v.string()),
-  }).index("by_claim", ["claimId"]).index("by_key", ["idempotencyKey"]),
+  }).index("by_claim", ["claimId"]).index("by_claim_key", ["claimId", "idempotencyKey"]),
 
   /** Non-monetary audit trail for a claim (D24). */
   claimNotes: defineTable({

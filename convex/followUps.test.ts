@@ -46,7 +46,7 @@ describe("followUps.scheduleReminder + fire", () => {
     const claim = await seedClaim(t, userId, "sent");
     if (!claim) throw new Error("claim not created");
 
-    const fireAt = Date.now() + 1000;
+    const fireAt = Date.now() - 1000; // already due (D42)
     await as.run((ctx) => scheduleReminder(ctx, claim, fireAt));
 
     const rows = await as.run((ctx) =>
@@ -78,7 +78,7 @@ describe("followUps.scheduleReminder + fire", () => {
     const claim = await seedClaim(t, userId, "confirmed");
     if (!claim) throw new Error("claim not created");
 
-    await as.run((ctx) => scheduleReminder(ctx, claim, Date.now() + 1000));
+    await as.run((ctx) => scheduleReminder(ctx, claim, Date.now() - 1000));
     await t.mutation(internal.followUps.fire, { claimId: claim._id });
 
     const rows = await as.run((ctx) =>
@@ -90,6 +90,35 @@ describe("followUps.scheduleReminder + fire", () => {
     expect(rows[0].status).toBe("cancelled");
     const updatedClaim = await as.run((ctx) => ctx.db.get(claim._id));
     expect(updatedClaim?.attentionAt).toBeUndefined();
+  });
+
+  it("fire is a no-op when no pending row is due (D42)", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const claim = await seedClaim(t, userId, "sent");
+    if (!claim) throw new Error("claim not created");
+
+    // No row at all.
+    await t.mutation(internal.followUps.fire, { claimId: claim._id });
+    expect((await as.run((ctx) => ctx.db.get(claim._id)))?.attentionAt).toBeUndefined();
+
+    // A pending row that is not due yet.
+    await as.run((ctx) => scheduleReminder(ctx, claim, Date.now() + 86_400_000));
+    await t.mutation(internal.followUps.fire, { claimId: claim._id });
+    const rows = await as.run((ctx) =>
+      ctx.db
+        .query("followUps")
+        .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+        .collect(),
+    );
+    expect(rows[0].status).toBe("pending");
+    expect((await as.run((ctx) => ctx.db.get(claim._id)))?.attentionAt).toBeUndefined();
+
+    // A cancelled row that is past due.
+    await as.run((ctx) => cancelPending(ctx, claim._id));
+    await as.run((ctx) => ctx.db.patch(rows[0]._id, { fireAt: Date.now() - 1000 }));
+    await t.mutation(internal.followUps.fire, { claimId: claim._id });
+    expect((await as.run((ctx) => ctx.db.get(claim._id)))?.attentionAt).toBeUndefined();
   });
 
   it("scheduleReminder cancels a prior pending reminder before scheduling the new one", async () => {

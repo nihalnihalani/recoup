@@ -104,6 +104,23 @@ export function statusAfterEvent(
   return current === "confirmed" ? current : "promised";
 }
 
+/**
+ * Re-derives a claim's status from its balance when no ledger event was
+ * appended, e.g. after `adjustExpected` (D41): settled -> `confirmed`;
+ * `confirmed` but no longer settled -> `reopened`; otherwise unchanged.
+ * `dismissed` is terminal and callers refuse it before getting here.
+ */
+export function deriveStatus(current: ClaimStatus, b: Balance): ClaimStatus {
+  if (current === "dismissed") return current;
+  if (isSettled(b)) return "confirmed";
+  return current === "confirmed" ? "reopened" : current;
+}
+
+/** Net money actually recovered on a claim, for board totals (D39). */
+export function netRecovered(b: Balance): number {
+  return Math.min(Math.max(b.confirmed - b.debited, 0), b.expected);
+}
+
 const TOKEN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /** A short, human-readable, collision-resistant claim token for email subjects. */

@@ -10,7 +10,7 @@ Statuses: VERIFIED_LOCAL · VERIFIED_LIVE · FAILED · BLOCKED_EXTERNAL · NOT_I
 | C04 | Account → inbox provisioning → settings | `profiles.ensureInbox` | `pages/Settings.tsx` | profiles.by_user unique | yes | idempotent by existing row | – | NOT_IMPLEMENTED | – |
 | C05 | Inbound webhook → verify → dedupe → route | `http.ts:/agentmail/webhook` → component → `inbound.onMessageReceived` | intake/replies | eventId, inbox_id | inbox→profile→user | processedEvents status | – | NOT_IMPLEMENTED | – |
 | C06 | Content → extraction → review → persist | `intake.extractFromText`/`paste` | `intake.applyExtraction` | zod InboundEmail | userId arg | needs_review on low conf | – | NOT_IMPLEMENTED | – |
-| C07 | Domain → policy search/scrape → card | `policies.fetchOne` | `purchases.get` policies | zod Policy | userId | upsert by (user,domain,kind) | – | NOT_IMPLEMENTED | – |
+| C07 | Domain → policy search/scrape → card | `policies.researchPolicy`→`insertSnapshot` | `policies.latest` ← `purchases.get` | zod Policy; passage verified verbatim (lib/passage) | userId on row; `confirm` owner-checked | immutable snapshots; errors → confidence 0 note | policies.test 8, passage.test 4 (injected deps) | VERIFIED_LOCAL; live BLOCKED_EXTERNAL (OPENAI_API_KEY) | lead spot-check |
 | C08 | URL → price check → claim | `priceWatch.checkItem`/`recordCheck` | `claims` | priceDropCents | item.userId | one open claim per item/type | – | NOT_IMPLEMENTED | – |
 | C09 | Returned item → gap → return claim | `purchases.setReturned`, `claims.open` | ledger | expected = unit×qty (− accepted fee) | yes | open-claim guard | – | NOT_IMPLEMENTED | – |
 | C10 | ID referential ownership | `lib/access.ts` | all | purchase.userId = item.userId = claim.userId | yes | n/a | – | NOT_IMPLEMENTED | – |

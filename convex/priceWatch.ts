@@ -266,6 +266,7 @@ export const recordCheck = internalMutation({
 
     const claimId = await openClaim(ctx, {
       userId: item.userId,
+      purchaseId: item.purchaseId,
       itemId: item._id,
       type: "price_adjustment",
       expectedCents: drop,

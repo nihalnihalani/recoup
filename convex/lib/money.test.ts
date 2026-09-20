@@ -5,8 +5,7 @@ import {
   assertCurrency,
   assertPositiveCents,
   assertQty,
-  toCents,
-} from "./money";
+  toCents, assertTimestamp, assertWindowDays, assertNonEmpty } from "./money";
 
 describe("toCents", () => {
   test("toCents(79.99)=7999", () => {
@@ -87,5 +86,28 @@ describe("assertCurrency", () => {
 
   test('assertCurrency("XXX") ok (valid ISO code)', () => {
     expect(assertCurrency("XXX")).toBe("XXX");
+  });
+});
+
+describe("non-money boundaries (D43)", () => {
+  const now = Date.UTC(2026, 8, 1);
+  test("assertTimestamp accepts past and up to a day ahead", () => {
+    expect(assertTimestamp(0, "t", now)).toBe(0);
+    expect(assertTimestamp(now + 86_400_000, "t", now)).toBe(now + 86_400_000);
+  });
+  test("assertTimestamp rejects negative, non-finite and far-future", () => {
+    expect(() => assertTimestamp(-1, "t", now)).toThrow(ConvexError);
+    expect(() => assertTimestamp(NaN, "t", now)).toThrow(ConvexError);
+    expect(() => assertTimestamp(Infinity, "t", now)).toThrow(ConvexError);
+    expect(() => assertTimestamp(now + 86_400_001, "t", now)).toThrow(ConvexError);
+  });
+  test("assertWindowDays accepts 0..3650 whole days only", () => {
+    expect(assertWindowDays(0)).toBe(0);
+    expect(assertWindowDays(3650)).toBe(3650);
+    for (const bad of [-1, 3651, 1.5, NaN]) expect(() => assertWindowDays(bad)).toThrow(ConvexError);
+  });
+  test("assertNonEmpty rejects blank strings", () => {
+    expect(assertNonEmpty("a.example", "d")).toBe("a.example");
+    expect(() => assertNonEmpty("  ", "d")).toThrow(ConvexError);
   });
 });

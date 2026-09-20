@@ -38,6 +38,8 @@ async function openClaimFor(
   as: Awaited<ReturnType<typeof signedIn>>["as"],
   itemId: Id<"items">,
 ) {
+  // claims.open only accepts an item already marked returned (D20).
+  await as.mutation(api.purchases.setReturned, { itemId, returned: true });
   const claimId = await as.mutation(api.claims.open, { itemId });
   const claim = await t.run(async (ctx) => await ctx.db.get(claimId));
   return claim!;

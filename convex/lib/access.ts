@@ -5,34 +5,38 @@ import type { MutationCtx, QueryCtx } from "../_generated/server";
 
 type Ctx = QueryCtx | MutationCtx;
 
-/**
- * The only way a Convex function in this app learns who is calling
- * (ARCHITECTURE_PATTERNS §Auth). No public function ever takes a `userId`
- * argument; identity always comes from `ctx.auth` via this helper.
- */
 export async function requireUserId(ctx: Ctx): Promise<Id<"users">> {
   const userId = await getAuthUserId(ctx);
   if (!userId) throw new ConvexError("Not signed in");
   return userId;
 }
 
-/** Loads a purchase, throwing the same "not found" for missing and not-owned. */
 export async function ownedPurchase(ctx: Ctx, purchaseId: Id<"purchases">, userId: Id<"users">) {
-  const purchase = await ctx.db.get(purchaseId);
-  if (!purchase || purchase.userId !== userId) throw new ConvexError("Purchase not found");
-  return purchase;
+  const p = await ctx.db.get(purchaseId);
+  if (!p || p.userId !== userId) throw new ConvexError("Purchase not found");
+  return p;
 }
 
-/** Loads an item, throwing the same "not found" for missing and not-owned. */
 export async function ownedItem(ctx: Ctx, itemId: Id<"items">, userId: Id<"users">) {
-  const item = await ctx.db.get(itemId);
-  if (!item || item.userId !== userId) throw new ConvexError("Item not found");
-  return item;
+  const i = await ctx.db.get(itemId);
+  if (!i || i.userId !== userId) throw new ConvexError("Item not found");
+  return i;
 }
 
-/** Loads a claim, throwing the same "not found" for missing and not-owned. */
 export async function ownedClaim(ctx: Ctx, claimId: Id<"claims">, userId: Id<"users">) {
-  const claim = await ctx.db.get(claimId);
-  if (!claim || claim.userId !== userId) throw new ConvexError("Claim not found");
-  return claim;
+  const c = await ctx.db.get(claimId);
+  if (!c || c.userId !== userId) throw new ConvexError("Claim not found");
+  return c;
+}
+
+export async function ownedPolicy(ctx: Ctx, policyId: Id<"policies">, userId: Id<"users">) {
+  const p = await ctx.db.get(policyId);
+  if (!p || p.userId !== userId) throw new ConvexError("Policy not found");
+  return p;
+}
+
+export async function ownedDraft(ctx: Ctx, draftId: Id<"drafts">, userId: Id<"users">) {
+  const d = await ctx.db.get(draftId);
+  if (!d || d.userId !== userId) throw new ConvexError("Draft not found");
+  return d;
 }

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { errorText } from "../lib/ui";
 
 /** A ledger-page skeleton: blank ruled lines standing in for rows not loaded yet. */
 export function Loading({ rows = 3, className = "" }: { rows?: number; className?: string }) {
@@ -48,7 +49,7 @@ export function ErrorBox({
   retry?: () => void;
   className?: string;
 }) {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorText(error);
   return (
     <div
       role="alert"

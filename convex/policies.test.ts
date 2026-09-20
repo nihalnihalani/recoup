@@ -1,296 +1,201 @@
+import { ConvexError } from "convex/values";
 import { describe, expect, it } from "vitest";
 import { api, internal } from "./_generated/api";
-import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
+import { researchPolicy } from "./policies";
+import { verifyPassage } from "./lib/passage";
 
-/**
- * Policy snapshots (D17). These tests exercise the mutations and the query
- * only: `fetchBoth`/`fetchOne` call Firecrawl and OpenAI and are verified
- * live against the dev deployment instead.
- */
-
-const DOMAIN = "acme.example";
-
-type SnapshotOverrides = {
-  kind?: "price_adjustment" | "returns";
-  windowDays?: number;
-  passage?: string;
-  passageStart?: number;
-  sourceUrl?: string;
-  confidence?: number;
-  note?: string;
-  merchantDomain?: string;
+const baseSnapshot = {
+  merchantDomain: "n.example",
+  kind: "returns" as const,
+  channel: "email" as const,
+  contactEmail: "help@n.example",
+  passage: "You may return items within 30 days.",
+  sourceUrl: "https://n.example/returns",
+  confidence: 0.9,
 };
 
-async function insert(
-  t: ReturnType<typeof setup>,
-  userId: Id<"users">,
-  o: SnapshotOverrides = {},
-): Promise<Id<"policies">> {
-  return await t.mutation(internal.policies.insertSnapshot, {
-    userId,
-    merchantDomain: o.merchantDomain ?? DOMAIN,
-    kind: o.kind ?? "returns",
-    windowDays: o.windowDays,
-    channel: "email",
-    contactEmail: "support@acme.example",
-    passage: o.passage ?? "Return most items within 30 days.",
-    passageStart: o.passageStart ?? 120,
-    sourceUrl: o.sourceUrl ?? `https://${DOMAIN}/returns`,
-    confidence: o.confidence ?? 0.9,
-    note: o.note,
-  });
-}
-
-/** Snapshots are ordered by _creationTime; make sure two inserts differ. */
-async function tick() {
-  await new Promise((resolve) => setTimeout(resolve, 3));
-}
-
-describe("policies.insertSnapshot", () => {
-  it("inserts a new row per refresh and never mutates the previous snapshot", async () => {
+describe("insertSnapshot / latest", () => {
+  it("always inserts a new row; latest returns the newest by retrievedAt", async () => {
     const t = setup();
     const { userId } = await signedIn(t);
 
-    const firstId = await insert(t, userId, { windowDays: 30, passage: "within 30 days" });
-    const before = await t.run((ctx) => ctx.db.get(firstId));
-    await tick();
-    const secondId = await insert(t, userId, { windowDays: 14, passage: "within 14 days" });
+    const firstId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, passage: "First passage" });
+    const secondId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, passage: "Second passage" });
 
-    expect(secondId).not.toBe(firstId);
-    const after = await t.run((ctx) => ctx.db.get(firstId));
-    expect(after).toEqual(before);
+    expect(firstId).not.toBe(secondId);
 
-    const all = await t.run((ctx) => ctx.db.query("policies").collect());
-    expect(all).toHaveLength(2);
+    const rows = await t.run(async (ctx) =>
+      ctx.db.query("policies").withIndex("by_user_domain_kind", (q) => q.eq("userId", userId).eq("merchantDomain", "n.example").eq("kind", "returns")).collect(),
+    );
+    expect(rows).toHaveLength(2);
+
+    const found = await t.run(async (ctx) => {
+      const { latest } = await import("./policies");
+      return latest(ctx, userId, "n.example", "returns");
+    });
+    expect(found?._id).toBe(secondId);
+    expect(found?.passage).toBe("Second passage");
+    expect(found?.confirmedByUser).toBe(false);
+  });
+});
+
+describe("confirm", () => {
+  it("patches only the owner's snapshot and sets confirmedByUser", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t, "Owner");
+    const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+
+    await as.mutation(api.policies.confirm, { policyId, channel: "email", contactEmail: "confirmed@n.example", windowDays: 30 });
+
+    const patched = await t.run(async (ctx) => ctx.db.get(policyId));
+    expect(patched?.confirmedByUser).toBe(true);
+    expect(patched?.contactEmail).toBe("confirmed@n.example");
+    expect(patched?.windowDays).toBe(30);
   });
 
-  it("defaults confirmedByUser to false and stamps retrievedAt", async () => {
+  it("rejects an out-of-range windowDays (D43)", async () => {
     const t = setup();
-    const { userId } = await signedIn(t);
-    const id = await insert(t, userId);
-    const row = await t.run((ctx) => ctx.db.get(id));
-    expect(row?.confirmedByUser).toBe(false);
-    expect(row?.retrievedAt).toBeGreaterThan(0);
+    const { userId, as } = await signedIn(t, "Owner");
+    const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+    for (const windowDays of [-1, 1.5, 3651]) {
+      await expect(
+        as.mutation(api.policies.confirm, { policyId, channel: "email", windowDays }),
+      ).rejects.toThrow(/windowDays/);
+    }
   });
 
-  it("stores a failed research pass as a zero-confidence snapshot, not an error", async () => {
+  it("an edited passage or sourceUrl clears the evidence markers (D45)", async () => {
     const t = setup();
-    const { userId } = await signedIn(t);
-    const id = await t.mutation(internal.policies.insertSnapshot, {
+    const { userId, as } = await signedIn(t, "Owner");
+    const policyId = await t.mutation(internal.policies.insertSnapshot, {
       userId,
-      merchantDomain: DOMAIN,
-      kind: "returns",
-      channel: "unknown",
-      passage: "",
-      sourceUrl: `https://${DOMAIN}`,
-      confidence: 0,
-      note: "passage not found verbatim",
+      ...baseSnapshot,
+      passageStart: 12,
     });
-    const row = await t.run((ctx) => ctx.db.get(id));
+
+    // Re-submitting the same passage keeps the evidence.
+    await as.mutation(api.policies.confirm, { policyId, channel: "email", passage: baseSnapshot.passage });
+    let row = await t.run(async (ctx) => ctx.db.get(policyId));
+    expect(row?.passageStart).toBe(12);
+    expect(row?.confidence).toBe(0.9);
+    expect(row?.userEdited).toBeUndefined();
+
+    await as.mutation(api.policies.confirm, { policyId, channel: "email", passage: "Returns within 45 days." });
+    row = await t.run(async (ctx) => ctx.db.get(policyId));
+    expect(row?.passageStart).toBeUndefined();
     expect(row?.confidence).toBe(0);
-    expect(row?.passage).toBe("");
-    expect(row?.passageStart).toBeUndefined();
-    expect(row?.note).toBe("passage not found verbatim");
-  });
-});
-
-describe("policies.latestForDomain", () => {
-  it("returns the newest snapshot per kind", async () => {
-    const t = setup();
-    const { userId, as } = await signedIn(t);
-
-    await insert(t, userId, { kind: "returns", windowDays: 30 });
-    await insert(t, userId, { kind: "price_adjustment", windowDays: 7 });
-    await tick();
-    await insert(t, userId, { kind: "returns", windowDays: 14 });
-
-    const latest = await as.query(api.policies.latestForDomain, { merchantDomain: DOMAIN });
-    expect(latest.returns?.windowDays).toBe(14);
-    expect(latest.price_adjustment?.windowDays).toBe(7);
-  });
-
-  it("returns nulls for a kind never researched", async () => {
-    const t = setup();
-    const { userId, as } = await signedIn(t);
-    await insert(t, userId, { kind: "returns" });
-    const latest = await as.query(api.policies.latestForDomain, { merchantDomain: DOMAIN });
-    expect(latest.price_adjustment).toBeNull();
-    expect(latest.returns).not.toBeNull();
-  });
-
-  it("accepts a messy domain the UI might pass", async () => {
-    const t = setup();
-    const { userId, as } = await signedIn(t);
-    await insert(t, userId, { kind: "returns" });
-    const latest = await as.query(api.policies.latestForDomain, {
-      merchantDomain: `https://WWW.${DOMAIN}/returns`,
-    });
-    expect(latest.returns).not.toBeNull();
-  });
-
-  it("returns nulls for a signed-out caller instead of throwing", async () => {
-    const t = setup();
-    const { userId } = await signedIn(t);
-    await insert(t, userId);
-    const latest = await t.query(api.policies.latestForDomain, { merchantDomain: DOMAIN });
-    expect(latest).toEqual({ price_adjustment: null, returns: null });
-  });
-
-  it("never returns another user's snapshot", async () => {
-    const t = setup();
-    const owner = await signedIn(t, "Owner");
-    const other = await signedIn(t, "Other");
-    await insert(t, owner.userId, { kind: "returns", windowDays: 30 });
-
-    const mine = await other.as.query(api.policies.latestForDomain, { merchantDomain: DOMAIN });
-    expect(mine).toEqual({ price_adjustment: null, returns: null });
-  });
-});
-
-describe("policies.confirm", () => {
-  it("confirms only the snapshot named, leaving older ones untouched", async () => {
-    const t = setup();
-    const { userId, as } = await signedIn(t);
-    const oldId = await insert(t, userId);
-    await tick();
-    const newId = await insert(t, userId);
-
-    await as.mutation(api.policies.confirm, { policyId: newId });
-
-    expect((await t.run((ctx) => ctx.db.get(newId)))?.confirmedByUser).toBe(true);
-    expect((await t.run((ctx) => ctx.db.get(oldId)))?.confirmedByUser).toBe(false);
-  });
-
-  it("rejects a caller who does not own the snapshot", async () => {
-    const t = setup();
-    const owner = await signedIn(t, "Owner");
-    const other = await signedIn(t, "Other");
-    const policyId = await insert(t, owner.userId);
-
-    await expect(other.as.mutation(api.policies.confirm, { policyId })).rejects.toThrow(
-      /Policy not found/,
-    );
-    expect((await t.run((ctx) => ctx.db.get(policyId)))?.confirmedByUser).toBe(false);
-  });
-
-  it("rejects a signed-out caller", async () => {
-    const t = setup();
-    const { userId } = await signedIn(t);
-    const policyId = await insert(t, userId);
-    await expect(t.mutation(api.policies.confirm, { policyId })).rejects.toThrow(/Not signed in/);
-  });
-});
-
-describe("policies.setManual", () => {
-  it("creates a user-confirmed snapshot that wins as the latest", async () => {
-    const t = setup();
-    const { userId, as } = await signedIn(t);
-    await insert(t, userId, { kind: "returns", windowDays: 30, confidence: 0.4 });
-    await tick();
-
-    const id = await as.mutation(api.policies.setManual, {
-      merchantDomain: `https://www.${DOMAIN}/help`,
-      kind: "returns",
-      windowDays: 60,
-      channel: "email",
-      contactEmail: "returns@acme.example",
-      passage: "Ninety day returns for members.",
-      sourceUrl: `https://${DOMAIN}/help/returns`,
-    });
-
-    const row = await t.run((ctx) => ctx.db.get(id));
+    expect(row?.userEdited).toBe(true);
     expect(row?.confirmedByUser).toBe(true);
-    expect(row?.confidence).toBe(1);
-    expect(row?.merchantDomain).toBe(DOMAIN);
-    expect(row?.windowDays).toBe(60);
-    // Nothing was located in a scrape, so there is no offset to store (D17).
-    expect(row?.passageStart).toBeUndefined();
-
-    const latest = await as.query(api.policies.latestForDomain, { merchantDomain: DOMAIN });
-    expect(latest.returns?._id).toBe(id);
   });
 
-  it("accepts a URL on its own", async () => {
+  it("throws when a different user tries to confirm someone else's snapshot", async () => {
     const t = setup();
-    const { as } = await signedIn(t);
-    const id = await as.mutation(api.policies.setManual, {
-      merchantDomain: DOMAIN,
-      kind: "price_adjustment",
-      sourceUrl: `https://${DOMAIN}/price-match`,
-    });
-    const row = await t.run((ctx) => ctx.db.get(id));
-    expect(row?.sourceUrl).toBe(`https://${DOMAIN}/price-match`);
-    expect(row?.channel).toBe("unknown");
-    expect(row?.passage).toBe("");
-  });
+    const { userId } = await signedIn(t, "Owner");
+    const { as: asOther } = await signedIn(t, "Other");
+    const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
 
-  it("rejects empty input, a bad URL, a bad window and a bad email", async () => {
-    const t = setup();
-    const { as } = await signedIn(t);
-    const base = { merchantDomain: DOMAIN, kind: "returns" } as const;
-    await expect(as.mutation(api.policies.setManual, base)).rejects.toThrow(/Enter a policy/);
-    await expect(
-      as.mutation(api.policies.setManual, { ...base, sourceUrl: "javascript:alert(1)" }),
-    ).rejects.toThrow(/valid policy URL/);
-    await expect(
-      as.mutation(api.policies.setManual, { ...base, windowDays: -1 }),
-    ).rejects.toThrow(/Window must be/);
-    await expect(
-      as.mutation(api.policies.setManual, { ...base, contactEmail: "nope" }),
-    ).rejects.toThrow(/valid contact email/);
-  });
-
-  it("rejects a signed-out caller and an unusable domain", async () => {
-    const t = setup();
-    const { as } = await signedIn(t);
-    await expect(
-      t.mutation(api.policies.setManual, {
-        merchantDomain: DOMAIN,
-        kind: "returns",
-        sourceUrl: `https://${DOMAIN}/x`,
-      }),
-    ).rejects.toThrow(/Not signed in/);
-    await expect(
-      as.mutation(api.policies.setManual, {
-        merchantDomain: "not a domain",
-        kind: "returns",
-        sourceUrl: `https://${DOMAIN}/x`,
-      }),
-    ).rejects.toThrow(/valid merchant domain/);
+    await expect(asOther.mutation(api.policies.confirm, { policyId, channel: "email" })).rejects.toThrow();
   });
 });
 
-describe("policies.refresh", () => {
-  it("schedules fetchBoth for the signed-in user with a normalized domain", async () => {
-    const t = setup();
-    const { userId, as } = await signedIn(t);
-    await as.mutation(api.policies.refresh, { merchantDomain: `https://WWW.${DOMAIN}/returns` });
+describe("refresh", () => {
+  it("requires auth", async () => {
+    await expect(setup().action(api.policies.refresh, { merchantDomain: "n.example", kind: "returns" })).rejects.toThrow();
+  });
+});
 
-    const scheduled = await t.run((ctx) =>
-      ctx.db.system.query("_scheduled_functions").collect(),
+describe("researchPolicy", () => {
+  it("inserts an unknown snapshot with a note when there are no hits", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+
+    const id = await researchPolicy(
+      { runMutation: (ref: any, args: any) => t.mutation(ref, args) },
+      { userId, merchantDomain: "n.example", kind: "returns" },
+      { search: async () => ({ web: [] }), extract: async () => { throw new Error("should not be called"); } },
     );
-    expect(scheduled).toHaveLength(1);
-    expect(scheduled[0].name).toContain("policies");
-    expect(scheduled[0].args[0]).toEqual({ userId, merchantDomain: DOMAIN });
+
+    const doc = await t.run(async (ctx) => ctx.db.get(id));
+    expect(doc?.channel).toBe("unknown");
+    expect(doc?.passage).toBe("");
+    expect(doc?.confidence).toBe(0);
+    expect(doc?.sourceUrl).toBe("https://n.example");
+    expect(doc?.note).toBe("No policy page found on the merchant's domain");
   });
 
-  it("rejects a signed-out caller and schedules nothing", async () => {
+  it("stores the passage with passageStart when it is verbatim in the markdown", async () => {
     const t = setup();
-    await expect(
-      t.mutation(api.policies.refresh, { merchantDomain: DOMAIN }),
-    ).rejects.toThrow(/Not signed in/);
-    const scheduled = await t.run((ctx) =>
-      ctx.db.system.query("_scheduled_functions").collect(),
+    const { userId } = await signedIn(t);
+    const markdown = "# Returns Policy\n\nWe accept returns within 45 days of delivery for a full refund.\nContact us at help@n.example.";
+    const passage = "We accept returns within 45 days of delivery for a full refund.";
+
+    const id = await researchPolicy(
+      { runMutation: (ref: any, args: any) => t.mutation(ref, args) },
+      { userId, merchantDomain: "n.example", kind: "returns" },
+      {
+        search: async () => ({ web: [{ url: "https://n.example/returns", markdown: markdown + " ".repeat(150) }] }),
+        extract: async () => ({ found: true, windowDays: 45, channel: "email", contactEmail: "help@n.example", passage, confidence: 0.92 }),
+      },
     );
-    expect(scheduled).toHaveLength(0);
+
+    const doc = await t.run(async (ctx) => ctx.db.get(id));
+    expect(doc?.passage).toBe(passage);
+    expect(doc?.confidence).toBe(0.92);
+    expect(doc?.passageStart).toBe(verifyPassage(markdown + " ".repeat(150), passage));
+    expect(doc?.note).toBeUndefined();
+    expect(doc?.windowDays).toBe(45);
   });
 
-  it("rejects an unusable domain", async () => {
+  it("zeroes confidence and notes when the extracted passage is not verbatim in the markdown", async () => {
     const t = setup();
-    const { as } = await signedIn(t);
-    await expect(
-      as.mutation(api.policies.refresh, { merchantDomain: "not a domain" }),
-    ).rejects.toThrow(/valid merchant domain/);
+    const { userId } = await signedIn(t);
+    const markdown = "# Returns Policy\n\n" + "Some unrelated boilerplate content padding this page out. ".repeat(6);
+
+    const id = await researchPolicy(
+      { runMutation: (ref: any, args: any) => t.mutation(ref, args) },
+      { userId, merchantDomain: "n.example", kind: "returns" },
+      {
+        search: async () => ({ web: [{ url: "https://n.example/returns", markdown }] }),
+        extract: async () => ({
+          found: true,
+          windowDays: 45,
+          channel: "email",
+          contactEmail: "help@n.example",
+          passage: "This exact sentence is not present on the page.",
+          confidence: 0.92,
+        }),
+      },
+    );
+
+    const doc = await t.run(async (ctx) => ctx.db.get(id));
+    expect(doc?.passage).toBe("");
+    expect(doc?.confidence).toBe(0);
+    expect(doc?.note).toBe("passage not found verbatim in source");
+    // Untrusted fields are still kept from the extraction (confidence 0 marks them unconfirmed).
+    expect(doc?.channel).toBe("email");
+    expect(doc?.contactEmail).toBe("help@n.example");
+    expect(doc?.windowDays).toBe(45);
+  });
+
+  it("records a Firecrawl error without throwing", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+
+    const id = await researchPolicy(
+      { runMutation: (ref: any, args: any) => t.mutation(ref, args) },
+      { userId, merchantDomain: "n.example", kind: "returns" },
+      {
+        search: async () => {
+          throw new ConvexError({ status: 402, message: "Insufficient credits" });
+        },
+        extract: async () => { throw new Error("should not be called"); },
+      },
+    );
+
+    const doc = await t.run(async (ctx) => ctx.db.get(id));
+    expect(doc?.confidence).toBe(0);
+    expect(doc?.channel).toBe("unknown");
+    expect(doc?.note).toMatch(/^Firecrawl/);
   });
 });

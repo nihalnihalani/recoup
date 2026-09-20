@@ -18,7 +18,7 @@ import { balanceValidator, claimBalance } from "./lib/balance";
 import { extract } from "./lib/ai";
 import { DraftOut } from "./lib/schemas";
 import { agentmail } from "./mail";
-import { scheduleClaimReminder } from "./claims";
+import { scheduleClaimReminder } from "./followUps";
 
 // ---------------------------------------------------------------------------
 // Constants

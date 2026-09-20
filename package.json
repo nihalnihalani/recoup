@@ -28,7 +28,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@convex-dev/workpool": "^0.4.12",
+    "@convex-dev/workpool": "^0.3.2",
     "@edge-runtime/vm": "^5.0.0",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",

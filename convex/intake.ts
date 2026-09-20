@@ -424,6 +424,7 @@ async function applyRefund(
     if (!claim) {
       const claimId = await openClaim(ctx, {
         userId,
+        purchaseId: item.purchaseId,
         itemId: item._id,
         type: "return_credit",
         expectedCents: item.unitCents * item.qty,

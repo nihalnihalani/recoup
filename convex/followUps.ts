@@ -75,11 +75,17 @@ export async function scheduleReminder(
   });
 }
 
+/** Schedules the default reminder for a claim: `reminderFireAt` from now (D26, D28). */
+export async function scheduleClaimReminder(ctx: MutationCtx, claim: Doc<"claims">) {
+  await scheduleReminder(ctx, claim, await reminderFireAt(ctx, claim));
+}
+
 /**
  * Fires a scheduled reminder. Acts on the claim's current status only
  * (D28): `confirmed` and `dismissed` claims cancel their pending reminders
  * without touching `attentionAt`; every other status gets `attentionAt` set
- * so the board surfaces it. Does not gate on claimVersion — a partial
+ * so the board surfaces it. Acts only on pending rows that are due (D42);
+ * with none, it is a no-op. Does not gate on claimVersion — a partial
  * credit bumps version on every event and would otherwise silently kill
  * reminders.
  */
@@ -87,19 +93,23 @@ export const fire = internalMutation({
   args: { claimId: v.id("claims") },
   returns: v.null(),
   handler: async (ctx, { claimId }) => {
-    const claim = await ctx.db.get(claimId);
+    const now = Date.now();
+    // D42: only a pending reminder that is actually due may act. A stale or
+    // duplicate scheduler run finds no such row and leaves the claim alone.
     const pending = (
       await ctx.db
         .query("followUps")
         .withIndex("by_claim", (q) => q.eq("claimId", claimId))
         .collect()
-    ).filter((f) => f.status === "pending");
+    ).filter((f) => f.status === "pending" && f.fireAt <= now);
+    if (pending.length === 0) return null;
+    const claim = await ctx.db.get(claimId);
     if (!claim || claim.status === "confirmed" || claim.status === "dismissed") {
       for (const f of pending) await ctx.db.patch(f._id, { status: "cancelled" });
       return null;
     }
     for (const f of pending) await ctx.db.patch(f._id, { status: "fired" });
-    await ctx.db.patch(claimId, { attentionAt: Date.now() });
+    await ctx.db.patch(claimId, { attentionAt: now });
     return null;
   },
 });

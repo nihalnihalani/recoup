@@ -12,7 +12,8 @@ import { ownedClaim, requireUserId } from "./lib/access";
 import { extract } from "./lib/ai";
 import { ReplyClass } from "./lib/schemas";
 import { toCents } from "./lib/money";
-import { applyEvent, scheduleClaimReminder } from "./claims";
+import { applyEvent } from "./claims";
+import { scheduleClaimReminder } from "./followUps";
 import { emailDomain } from "./drafts";
 
 const MAX_SUMMARY_CHARS = 240;
@@ -191,7 +192,7 @@ export const apply = internalMutation({
           "promised_credit",
           promisedCents,
           evidence,
-          `msg:${args.messageId}`,
+          `${claim._id}:msg:${args.messageId}`,
         );
       } else if (claim.status !== "confirmed" && claim.status !== "dismissed") {
         await ctx.db.patch(claim._id, { status: "promised" });

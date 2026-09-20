@@ -8,6 +8,8 @@ import {
   statusAfterEvent,
   newToken,
   tokenFromSubject,
+  deriveStatus,
+  netRecovered,
 } from "./ledger";
 
 describe("balance", () => {
@@ -182,5 +184,21 @@ describe("tokenFromSubject", () => {
   it("returns null when absent", () => {
     expect(tokenFromSubject("Re: Order 123")).toBeNull();
     expect(tokenFromSubject(undefined)).toBeNull();
+  });
+});
+
+describe("deriveStatus / netRecovered (D39, D41)", () => {
+  it("settled becomes confirmed; confirmed but unsettled reopens; else unchanged", () => {
+    expect(deriveStatus("sent", balance(3000, [{ kind: "confirmed_credit", cents: 3000 }]))).toBe("confirmed");
+    expect(deriveStatus("confirmed", balance(4000, [{ kind: "confirmed_credit", cents: 3000 }]))).toBe("reopened");
+    expect(deriveStatus("sent", balance(4000, [{ kind: "confirmed_credit", cents: 3000 }]))).toBe("sent");
+    expect(deriveStatus("dismissed", balance(3000, [{ kind: "confirmed_credit", cents: 3000 }]))).toBe("dismissed");
+  });
+
+  it("netRecovered clamps confirmed minus debited into 0..expected", () => {
+    const ev = (kind: "confirmed_credit" | "later_debit", cents: number) => ({ kind, cents });
+    expect(netRecovered(balance(4000, [ev("confirmed_credit", 4000), ev("later_debit", 1500)]))).toBe(2500);
+    expect(netRecovered(balance(4000, [ev("confirmed_credit", 6000)]))).toBe(4000);
+    expect(netRecovered(balance(4000, [ev("confirmed_credit", 1000), ev("later_debit", 2000)]))).toBe(0);
   });
 });

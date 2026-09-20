@@ -18,6 +18,25 @@ export function assertQty(n: number): number {
   return n;
 }
 
+/** A user-supplied timestamp: finite, not negative, at most a day in the future (D43). */
+export function assertTimestamp(n: number, label = "timestamp", now: number = Date.now()): number {
+  if (!Number.isFinite(n) || n < 0 || n > now + 86_400_000)
+    throw new ConvexError(`${label} must be a valid time, not in the future`);
+  return n;
+}
+
+/** A policy window in whole days, 0..3650 (D43). */
+export function assertWindowDays(n: number): number {
+  if (!Number.isSafeInteger(n) || n < 0 || n > 3650)
+    throw new ConvexError("windowDays must be a whole number between 0 and 3650");
+  return n;
+}
+
+export function assertNonEmpty(s: string, label: string): string {
+  if (s.trim().length === 0) throw new ConvexError(`${label} must not be empty`);
+  return s;
+}
+
 export function assertCurrency(s: string): string {
   if (!/^[A-Z]{3}$/.test(s))
     throw new ConvexError("currency must be a 3-letter ISO 4217 code");
