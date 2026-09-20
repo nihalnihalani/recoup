@@ -12,12 +12,15 @@ import type * as auth from "../auth.js";
 import type * as followUps from "../followUps.js";
 import type * as http from "../http.js";
 import type * as inbound from "../inbound.js";
+import type * as lib_access from "../lib/access.js";
 import type * as lib_ai from "../lib/ai.js";
 import type * as lib_ledger from "../lib/ledger.js";
 import type * as lib_money from "../lib/money.js";
+import type * as lib_passage from "../lib/passage.js";
 import type * as lib_schemas from "../lib/schemas.js";
 import type * as mail from "../mail.js";
 import type * as policies from "../policies.js";
+import type * as purchases from "../purchases.js";
 import type * as replies from "../replies.js";
 
 import type {
@@ -31,12 +34,15 @@ declare const fullApi: ApiFromModules<{
   followUps: typeof followUps;
   http: typeof http;
   inbound: typeof inbound;
+  "lib/access": typeof lib_access;
   "lib/ai": typeof lib_ai;
   "lib/ledger": typeof lib_ledger;
   "lib/money": typeof lib_money;
+  "lib/passage": typeof lib_passage;
   "lib/schemas": typeof lib_schemas;
   mail: typeof mail;
   policies: typeof policies;
+  purchases: typeof purchases;
   replies: typeof replies;
 }>;
 
