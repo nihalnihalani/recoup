@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { Component, type ReactNode } from "react";
 
 /** A ledger-page skeleton: blank ruled lines standing in for rows not loaded yet. */
 export function Loading({ rows = 3, className = "" }: { rows?: number; className?: string }) {
@@ -67,4 +67,29 @@ export function ErrorBox({
       )}
     </div>
   );
+}
+
+/**
+ * Catches errors thrown while rendering a subtree — in particular a Convex
+ * `useQuery` re-throwing a server-side `ConvexError` during render, which
+ * has no other way to reach the page. "Try again" resets local state and
+ * remounts the children, which re-subscribes the query.
+ */
+export class QueryBoundary extends Component<{ children: ReactNode }, { error: unknown; key: number }> {
+  state: { error: unknown; key: number } = { error: null, key: 0 };
+
+  static getDerivedStateFromError(error: unknown) {
+    return { error };
+  }
+
+  retry = () => {
+    this.setState((s) => ({ error: null, key: s.key + 1 }));
+  };
+
+  render() {
+    if (this.state.error) {
+      return <ErrorBox error={this.state.error} retry={this.retry} />;
+    }
+    return <div key={this.state.key}>{this.props.children}</div>;
+  }
 }
