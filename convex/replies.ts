@@ -3,6 +3,7 @@ import {
   internalAction,
   internalMutation,
   query,
+  type ActionCtx,
   type MutationCtx,
 } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -70,14 +71,61 @@ async function expectedDomain(
  */
 export const classify = internalAction({
   args: {
+    processedEventId: v.optional(v.id("processedEvents")),
     claimId: v.id("claims"),
     messageId: v.string(),
     from: v.string(),
     subject: v.string(),
     text: v.string(),
+    attempt: v.optional(v.number()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    // Scheduled actions are not retried by Convex, so a model hiccup would lose the
+    // merchant's reply for good (review H2): retry with backoff, then park the
+    // event as `failed` where the user can see it and re-run it.
+    const attempt = args.attempt ?? 0;
+    try {
+      await classifyOnce(ctx, args);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (attempt < CLASSIFY_BACKOFF_MS.length) {
+        await ctx.scheduler.runAfter(CLASSIFY_BACKOFF_MS[attempt], internal.replies.classify, {
+          ...args,
+          attempt: attempt + 1,
+        });
+      } else if (args.processedEventId) {
+        await ctx.runMutation(internal.intake.failEvent, {
+          processedEventId: args.processedEventId,
+          lastError: `Could not read the reply: ${message}`,
+        });
+      }
+      return null;
+    }
+    if (args.processedEventId) {
+      await ctx.runMutation(internal.replies.finishEvent, { processedEventId: args.processedEventId });
+    }
+    return null;
+  },
+});
+
+const CLASSIFY_BACKOFF_MS = [20_000, 120_000];
+
+export const finishEvent = internalMutation({
+  args: { processedEventId: v.id("processedEvents") },
+  returns: v.null(),
+  handler: async (ctx, { processedEventId }) => {
+    const row = await ctx.db.get(processedEventId);
+    if (row) await ctx.db.patch(processedEventId, { status: "succeeded", lastError: undefined, summary: "Reply read and recorded on the claim." });
+    return null;
+  },
+});
+
+async function classifyOnce(
+  ctx: ActionCtx,
+  args: { claimId: Id<"claims">; messageId: string; from: string; subject: string; text: string },
+): Promise<null> {
+  {
     const c = await ctx.runQuery(internal.drafts.context, { claimId: args.claimId });
     if (!c) return null;
 
@@ -104,8 +152,8 @@ export const classify = internalAction({
       promisedAmount: parsed.promisedAmount ?? undefined,
     });
     return null;
-  },
-});
+  }
+}
 
 /**
  * Records a classified reply against its claim (D21).

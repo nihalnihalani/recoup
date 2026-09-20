@@ -62,9 +62,11 @@ function day(ms: number | undefined): string | null {
 
 /** The domain half of an email address, lowercased. */
 export function emailDomain(address: string): string | null {
-  const at = address.lastIndexOf("@");
+  // Real From headers look like `Acme Support <help@acme.com>` (review H4).
+  const bare = /<([^<>]+)>/.exec(address)?.[1] ?? address;
+  const at = bare.lastIndexOf("@");
   if (at < 0) return null;
-  const domain = address.slice(at + 1).trim().toLowerCase();
+  const domain = bare.slice(at + 1).trim().toLowerCase().replace(/[^a-z0-9.-]+$/, "");
   return domain.length > 0 ? domain : null;
 }
 

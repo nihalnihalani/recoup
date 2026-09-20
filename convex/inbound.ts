@@ -149,10 +149,12 @@ export const onMessageReceived = internalMutation({
           userId: profile.userId,
           claimId: claim._id,
           route: "reply",
-          status: "succeeded",
-          summary: `Reply on claim ${claim.token} sent for classification.`,
+          // Stays `processing` until the reply is classified and applied (review H2).
+          status: "processing",
+          summary: `Reply on claim ${claim.token} is being read.`,
         });
         await ctx.scheduler.runAfter(0, internal.replies.classify, {
+          processedEventId: eventId,
           claimId: claim._id,
           messageId,
           from,

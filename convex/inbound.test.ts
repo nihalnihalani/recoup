@@ -131,7 +131,8 @@ describe("inbound.onMessageReceived", () => {
 
     const [row] = await events(t);
     expect(row.route).toBe("reply");
-    expect(row.status).toBe("succeeded");
+    // Not `succeeded` until the reply is classified and applied (review H2).
+    expect(row.status).toBe("processing");
     expect(row.claimId).toBe(claim._id);
     const after = await t.run(async (ctx) => await ctx.db.get(claim._id));
     expect(after?.threadId).toBe("thread-9");

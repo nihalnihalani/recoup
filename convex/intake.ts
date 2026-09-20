@@ -570,6 +570,25 @@ export const retryEvent = mutation({
     if (row.status !== "failed" && row.status !== "needs_review") {
       throw new ConvexError("This event is not waiting on anything");
     }
+    if (row.route === "reply") {
+      // Re-read a merchant reply whose classification failed (review H2).
+      const payload = row.payload as
+        | { messageId?: unknown; from?: unknown; subject?: unknown; text?: unknown }
+        | undefined;
+      if (!row.claimId || typeof payload?.messageId !== "string") {
+        throw new ConvexError("This event cannot be re-run");
+      }
+      await ctx.db.patch(processedEventId, { status: "processing", lastError: undefined });
+      await ctx.scheduler.runAfter(0, internal.replies.classify, {
+        processedEventId,
+        claimId: row.claimId,
+        messageId: payload.messageId,
+        from: typeof payload.from === "string" ? payload.from : "",
+        subject: typeof payload.subject === "string" ? payload.subject : "",
+        text: typeof payload.text === "string" ? payload.text : "",
+      });
+      return null;
+    }
     if (row.route !== "intake") throw new ConvexError("This event cannot be re-run");
 
     await ctx.db.patch(processedEventId, {

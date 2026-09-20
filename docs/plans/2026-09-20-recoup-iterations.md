@@ -36,6 +36,25 @@ Total boxed time: about 19 hours of the roughly 43 available. The slack is for t
 
 After I5 the app already delivers the first half of the pitch ("refund didn't add up"). After I6 it delivers the whole pitch. Everything below is improvement, not rescue.
 
+## Direction change, 2026-09-20 evening (Charlie)
+
+Product focus moves to **price**: never overpay, before or after you buy. The under-credited-return story is dropped from the pitch, the video and the UI. Its backend (`return_credit` claims, refund-email attribution) stays in place untouched because removing it is surgery with no demo value; the UI simply stops offering it.
+
+Status when this was written: I0 and I1 passed live (local and on `https://earnest-setter-354.convex.site`), H7 fixed, I2 interrupted mid-run.
+
+Revised order after I2 and I3 (both still needed: a purchase and its price-adjustment policy):
+
+| # | Slice | Exit check (live) | Box |
+|---|---|---|---|
+| **I6** (moved up) | Price drop after purchase | "Check price now" on a real product URL stores an observation; a qualifying drop opens a `price_adjustment` claim with a countdown | 2h |
+| **I4 / I5** | Ask and reply, on the price claim | Draft, approve, send to a controlled inbox, reply moves it to `promised`, confirm closes it | 5h |
+| **W1** | Watchlist: track something I have not bought | Add an item by product URL with an optional target price. It is checked on the same cron and "check now" as owned items. Price history shows on the item. Reuses `priceChecks` and the extractor; new `watches` table | 3h |
+| **W2** | Tell me when it drops | When a watched item falls below target, or by the threshold, one email goes to the account address through AgentMail, deduped per item per price. In-app "drops" list on the Board | 2h |
+| **W3** | Same item, other stores | For a watch, Firecrawl search finds candidate listings on other merchants; each is price-extracted with the variant-match check; the item page ranks offers cheapest first with store, price, last checked, link. User confirms which listings are truly the same product | 4h |
+| **I7** | Submission | unchanged | 4h |
+
+Honest limits to state in `hackathon.md`: price history starts the day we start watching (we have no archive of past prices); stores that block automated access or require login (Facebook Marketplace, parts of Amazon and eBay) are covered only when a page can be read publicly, and marketplace listings are individual sellers, not a stable product price; matching "the same item" across stores is a model judgement the user confirms.
+
 ## Known defects, assigned to the iteration that would hit them
 
 From the independent backend review on 2026-09-20 (read-only, nothing was run; it reviewed the tree just before the teammate merge, so re-check line numbers in `purchases.ts`, `claims.ts`, `policies.ts`). Auth and ownership, ledger invariants, webhook dedupe and routing, external API call shapes, and the cron sweep came back clean. Fix each item inside its iteration, not before.
@@ -80,11 +99,11 @@ Pulled only after I6 passes, one item at a time, each with its own small exit ch
 
 | Iteration | Status | Commit | Notes |
 |---|---|---|---|
-| I0 | not started | | blocked on: merge reconciliation green, Charlie signs up |
-| I1 | not started | | |
-| I2 | not started | | |
-| I3 | not started | | |
-| I4 | not started | | |
-| I5 | not started | | |
-| I6 | not started | | |
+| I0 | **passed** 2026-09-20 | `3152758` | Sign-up, sign-in, empty Board, inbox created live. Note: after sign-up the page needed a reload to leave the sign-in screen; recheck. |
+| I1 | **passed** locally 2026-09-20; public URL serves the app, signed-in recheck pending | `d49c3cb` | Example loaded, scarf claim confirmed for $40, status `confirmed`. Added the missing Board button; hid ask/dismiss on closed claims. Static site uploaded to `earnest-setter-354.convex.site` (SPA fallback verified by curl). Board totals exclude example money by decision D27, so the totals check moved to I6. |
+| I2 | **passed** 2026-09-20 | `b93d19f` | Real OpenAI extraction from pasted Best Buy and Target orders: merchant, domain, order ref, date, items, cents, product URL all correct. Fixed H7 (domain normalisation). |
+| I3 | **passed** 2026-09-20 | `b93d19f` | Target: verbatim passages at 0.99 / 0.93 confidence, 14-day window, channel chat. Best Buy serves Firecrawl a region splash, so it correctly lands as unknown; the note now says so. Passage match made tolerant of markdown and curly quotes. |
+| I4 | **half passed**: drafting live; send not yet run | `9ff60d7` | Draft quotes the policy, amount and token correctly; recipient empty when the policy has no contact (D18). Fixed H3, H5, H6 with tests. Real send needs a recipient inbox and Charlie's go-ahead. |
+| I5 | not run; known bugs pre-fixed | (this commit) | H2 (lost replies: retry with backoff, park as failed, user can re-run) and H4 (display-name From header) fixed with tests. |
+| I6 | **passed** 2026-09-20 | `b93d19f` | Real Target product page: observed $499.99 against $549.99 paid, claim opened for $50.00, countdown 9d 12h, Board OWED $50.00. A wrong product URL correctly reports 'page does not price this product'. |
 | I7 | not started | | |

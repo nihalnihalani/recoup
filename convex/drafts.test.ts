@@ -672,3 +672,12 @@ describe("drafts.sendStatus + listForClaim (D29)", () => {
     );
   });
 });
+
+describe("emailDomain (review H4)", () => {
+  it("reads the domain out of a display-name From header", async () => {
+    const { emailDomain } = await import("./drafts");
+    expect(emailDomain("Acme Support <Help@Acme.com>")).toBe("acme.com");
+    expect(emailDomain("help@acme.com")).toBe("acme.com");
+    expect(emailDomain("no address here")).toBeNull();
+  });
+});
