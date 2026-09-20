@@ -7,6 +7,7 @@ import { netRecovered } from "./lib/ledger";
 import { claimsWithBalance } from "./lib/balance";
 import { assertCents, assertCurrency, assertNonEmpty, assertQty, assertTimestamp } from "./lib/money";
 import { cancelPending } from "./followUps";
+import { normalizeDomain } from "./lib/policyText";
 
 const itemInput = v.object({
   name: v.string(),
@@ -36,6 +37,9 @@ export const create = mutation({
     }
     assertCurrency(args.currency);
     assertNonEmpty(args.merchantDomain, "merchantDomain");
+    // Policies are keyed by the bare registrable host; store the same form here (review H7).
+    const merchantDomain = normalizeDomain(args.merchantDomain);
+    if (!merchantDomain) throw new ConvexError("merchantDomain must be a domain like example.com");
     if (items.length === 0) throw new ConvexError("A purchase needs at least one item");
     if (purchasedAt !== undefined) assertTimestamp(purchasedAt, "purchasedAt");
     for (const it of items) {
@@ -45,6 +49,7 @@ export const create = mutation({
 
     const purchaseId = await ctx.db.insert("purchases", {
       ...rest,
+      merchantDomain,
       purchasedAt,
       userId,
       status: resolvedStatus,
@@ -55,7 +60,7 @@ export const create = mutation({
     if (resolvedStatus === "active") {
       await ctx.scheduler.runAfter(0, internal.policies.fetchBoth, {
         userId,
-        merchantDomain: args.merchantDomain,
+        merchantDomain,
       });
     }
     return purchaseId;
@@ -84,6 +89,9 @@ export const confirm = mutation({
     const purchase = await ownedPurchase(ctx, args.purchaseId, userId);
     if (purchase.status === "archived") throw new ConvexError("Purchase not found");
     assertNonEmpty(args.merchantDomain, "merchantDomain");
+    // Policies are keyed by the bare registrable host; store the same form here (review H7).
+    const merchantDomain = normalizeDomain(args.merchantDomain);
+    if (!merchantDomain) throw new ConvexError("merchantDomain must be a domain like example.com");
     if (args.items.length === 0) throw new ConvexError("A purchase needs at least one item");
     assertTimestamp(args.purchasedAt, "purchasedAt");
     for (const it of args.items) {
@@ -96,7 +104,7 @@ export const confirm = mutation({
     }
     await ctx.db.patch(args.purchaseId, {
       merchant: args.merchant,
-      merchantDomain: args.merchantDomain,
+      merchantDomain,
       orderRef: args.orderRef,
       purchasedAt: args.purchasedAt,
       status: "active",
@@ -111,7 +119,7 @@ export const confirm = mutation({
     }
     await ctx.scheduler.runAfter(0, internal.policies.fetchBoth, {
       userId,
-      merchantDomain: args.merchantDomain,
+      merchantDomain,
     });
   },
 });

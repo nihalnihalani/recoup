@@ -114,6 +114,19 @@ export async function researchPolicy(
     sourceUrl: url,
   };
 
+  if (!p.found) {
+    // The page loaded but says nothing about this rule (bot wall, region splash, unrelated article).
+    return ctx.runMutation(internal.policies.insertSnapshot, {
+      ...shared,
+      windowDays: undefined,
+      channel: "unknown",
+      contactEmail: undefined,
+      passage: "",
+      confidence: 0,
+      note: "The pages found do not state this policy. Paste the rule or its link below.",
+    });
+  }
+
   const passageStart = verifyPassage(markdown, p.passage);
   if (passageStart === null) {
     return ctx.runMutation(internal.policies.insertSnapshot, {

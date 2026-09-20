@@ -285,3 +285,19 @@ describe("purchases", () => {
     expect(board.totals.owed).toBe(0);
   });
 });
+
+describe("merchant domain normalisation (review H7)", () => {
+  it("stores the bare host so policies and purchases agree", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const id = await as.mutation(api.purchases.create, {
+      merchant: "Best Buy",
+      merchantDomain: "https://WWW.BestBuy.com/orders",
+      purchasedAt: Date.now() - 86_400_000,
+      currency: "USD",
+      items: [{ name: "Headphones", unitCents: 12000, qty: 1 }],
+    });
+    const got = await as.query(api.purchases.get, { purchaseId: id });
+    expect(got!.purchase.merchantDomain).toBe("bestbuy.com");
+  });
+});
