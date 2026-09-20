@@ -13,7 +13,7 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | T05 | Claims + ledger events + notes | sonnet-backend | T04 | in_progress | promise≠confirmed; dedupe; later-debit; version bump tests |
 | T06 | zod schemas + OpenAI helper | sonnet-integrations | – (own files) | verified | schema tests; no network |
 | T07 | Inbox provisioning, inbound routing, intake | sonnet-integrations | T05,T06 | pending | routing tests; dedupe with status |
-| T08 | Policy research (Firecrawl) | sonnet-integrations | T06 | in_progress | upsert test; live BLOCKED_EXTERNAL until keys |
+| T08 | Policy research (Firecrawl) | sonnet-integrations | T06 | verified (live BLOCKED_EXTERNAL) | upsert test; live BLOCKED_EXTERNAL until keys |
 | T09 | Price watch cron + checkNow | sonnet-integrations | T05,T08 | pending | threshold/window/dedupe tests |
 | T10 | Drafts, approved send, replies, reminders | sonnet-integrations | T07 | pending | stale-version + empty-recipient tests |
 | T11 | Frontend screens (T11a scaffold now; T11b flows after T05/T10) | sonnet-frontend | T11a: T02 · T11b: T05,T07,T10 | T11a verified · T11b pending | browser rehearsal against dev deployment |
