@@ -45,3 +45,19 @@ Format: D## · date · decision · rationale · affects
 - D35 · **Webhook secret stays unset** in dev until the user creates the AgentMail webhook; the route returns an error and no event is applied (fail closed). Planner's placeholder suggestion declined to avoid a fake secret in the deployment.
 - D36 · **Workpool version alignment.** `@agentmail/convex@0.1.0` bundles nested `@convex-dev/workpool@0.3.2` (range `^0.3.0`); the harness had registered top-level 0.4.12, a latent schema mismatch for any test that exercises a send. Pin the dev dependency to `@convex-dev/workpool@0.3.2` so npm hoists one copy and the component and harness share it. Verify with `ls node_modules/@agentmail/convex/node_modules/@convex-dev` (should not exist afterwards). · affects T04 (backend owns package.json/test.setup.ts), T10 tests.
 - D37 · **T03 harness deviation accepted.** `registerComponent("agentmail", …)` needs an inert `"./component/_generated/root.js"` entry in the module map because the shipped package has no `.ts` under `_generated`; convex-test infers the module root from that path. Documented in `convex/test.setup.ts`.
+
+## Phase 1 checkpoint decisions (adversarial recheck of T04/T05 code, findings R1–R12)
+
+- D38 · R1 · **Idempotency keys are scoped per claim.** Index `ledgerEvents.by_claim_key ["claimId","idempotencyKey"]` replaces `by_key`. Empty key rejected. If the stored event with that key has different `kind` or `cents` → `ConvexError("idempotency conflict")`, never a silent no-op. Asserts run before the dedupe lookup.
+- D39 · R2 · **Board `confirmed` is net recovered:** Σ `clamp(confirmed − debited, 0, expected)` per non-dismissed real claim.
+- D40 · R3 · **A later debit cannot exceed net confirmed credit** (`cents ≤ confirmed − debited`).
+- D41 · R4 · **`adjustExpected` re-derives status** through a shared `deriveStatus(current, balance)` (settled → `confirmed`; `confirmed` but not settled → `reopened`; else unchanged) and refuses `dismissed`.
+- D42 · R5 · **`followUps.fire` acts only on pending rows with `fireAt ≤ now`;** no matching row → no-op, claim untouched.
+- D43 · R6 · **Non-money boundaries:** `assertTimestamp` (finite, ≥ 0, ≤ now + 1 day), `assertWindowDays` (safe int 0..3650), non-empty `merchantDomain` and non-empty `items` on create/confirm; `policies.confirm` validates `windowDays`.
+- D44 · R7 · **One `return_credit` claim per item** unless the previous one is `dismissed`.
+- D45 · R8 · **Passage edits clear evidence:** `policies.confirm` with a changed `passage` or `sourceUrl` sets `passageStart` undefined, `confidence: 0`, `userEdited: true` (new optional schema field). `verifyPassage` requires ≥ 40 normalized characters.
+- D46 · R9 · **`openClaim` re-checks relationships:** `item.purchaseId === purchaseId`, `item.userId === userId`, `priceCheck.userId === userId`.
+- D47 · R10 · **`purchases.remove` archives** (`status: "archived"`) instead of deleting; board and get skip archived; ledger history is preserved. Example `remove` also archives.
+- D48 · R11/R12 · Ledger events use `assertPositiveCents`; board skips claims with `isExample` even on real purchases; `dismiss` refuses `confirmed`.
+- D49 · **T10 guard:** `reconcileSend` must not overwrite `confirmed`/`dismissed` (a claim can be confirmed while `queued`); it only transitions from `queued`.
+- Drift noted, accepted: `processedEvents.kind` stays `v.string()` (tests use free-form kinds).
