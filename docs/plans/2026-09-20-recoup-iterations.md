@@ -63,11 +63,11 @@ From the independent backend review on 2026-09-20 (read-only, nothing was run; i
 |---|---|---|
 | I2 / I3 | H7: `merchantDomain` stored raw on purchases but normalised on policies; `www.bestbuy.com` yields no policy card and `openClaim` throws "different merchant" | `normalizeDomain` in `purchases.create` and `confirm` |
 | I3 | M1: every confirm or refresh inserts a snapshot that shadows a user-confirmed policy; price watch then stops silently | skip refetch when a snapshot is under 24h old, or prefer the newest `confirmedByUser` row |
-| I4 | H3: `applySendOutcome` checks message id before failure statuses, so a bounce becomes `sent` | check terminal failures first |
+| I4 | **passed** 2026-09-20 | `59a9df4` | Real email sent through AgentMail from the user's Recoup inbox to a controlled inbox; claim went `queued` then `sent`, reminder scheduled. Found live: the AgentMail component could not see `AGENTMAIL_API_KEY` (isolated runtime, no env declared in 0.1.0); fixed with the same patch-package patch ClaimHero ships. The component's own retry delivered the queued message after the fix. Also fixed H3, H5, H6 with tests. |
 | I4 | H6: `approveAndSend` has no claim-status guard; two drafts can both send; a send reopens a closed claim | refuse when `queued`, `dismissed`, `confirmed` |
 | I4 | H5: password sign-up never sets a name, drafts are signed "the customer" | fall back to email local part |
 | I4 | M4: after five status checks a claim is stuck `queued` | manual "check again" |
-| I5 | H2: inbound event marked `succeeded` before classification; an OpenAI 429 loses the merchant reply for good | keep `processing`, fail in a catch, allow retry for replies |
+| I5 | **passed** 2026-09-20 | `59a9df4` | Reply sent from the controlled inbox arrived by webhook, routed to the right claim, classified `promise` with $50.00; status `promised`, unresolved stayed $50.00. Confirming the credit moved it to `confirmed`, unresolved $0.00, reminder cancelled. H2 and H4 fixed beforehand with tests. |
 | I5 | H4: `emailDomain("Acme <help@acme.com>")` returns `acme.com>`, so every real reply is flagged sender mismatch | extract the address before the domain |
 | Backlog 1 | H1: inbound prefers `extracted_text`, which strips forwarded content; a forwarded order can reach the model as "FYI" | store both; intake reads `text` first, replies read `extractedText` first |
 | Backlog | M2, M3 (stuck or duplicate intake events), M5 (`adjustExpected` drops the reminder), M6 (no rate limits), M7 (60 KB payloads in a reactive query), and the LOW items | see `docs/reviews/2026-09-20-backend-review.md` |
