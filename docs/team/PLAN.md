@@ -11,7 +11,7 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | T03 | Schema (final) + ledger + money + test harness + stubs | sonnet-backend | T02 | in_progress | ledger tests pass; schema deploys |
 | T04 | Access helpers, purchases/items | sonnet-backend | T03 | pending | cross-user rejection test passes |
 | T05 | Claims + ledger events + followUps | sonnet-backend | T04 | pending | promise≠confirmed; dedupe; later-debit; version bump tests |
-| T06 | zod schemas + OpenAI helper | sonnet-integrations | – (own files) | in_progress | schema tests; no network |
+| T06 | zod schemas + OpenAI helper | sonnet-integrations | – (own files) | verified | schema tests; no network |
 | T07 | Inbox provisioning, inbound routing, intake | sonnet-integrations | T05,T06 | pending | routing tests; dedupe with status |
 | T08 | Policy research (Firecrawl) | sonnet-integrations | T06 | pending | upsert test; live BLOCKED_EXTERNAL until keys |
 | T09 | Price watch cron + checkNow | sonnet-integrations | T05,T08 | pending | threshold/window/dedupe tests |

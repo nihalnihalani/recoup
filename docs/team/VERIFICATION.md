@@ -26,3 +26,4 @@ Each entry: date · env · revision · command/scenario · result · counts · l
 | form/chat/phone merchant → packet flow | drafts.test + Claim page | pending |
 - 2026-09-21 · local · 2084ac0 · `npx convex dev --once` · components agentmail/firecrawl/staticHosting installed, functions ready · – · no provider keys; deploy does not require them (D12c)
 - 2026-09-21 · local · 2084ac0 · `npm run typecheck`, `npm run lint`, `npx vite build` · all exit 0 (re-run by lead) · 0 tests · –
+- 2026-09-21 · local · dfcd3a1 · `npx vitest run convex/lib` · 3 files, 40 passed · strict-mode guard covers all 5 schemas; `extract` fails closed without key (lead re-ran) · OpenAI never called live yet (D07)
