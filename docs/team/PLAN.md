@@ -1,0 +1,26 @@
+# Team plan (lead-owned)
+
+Source plan: `docs/plans/2026-09-20-recoup.md` (T01–T16 map 1:1 to its Tasks 1–16). Patterns: `docs/ARCHITECTURE_PATTERNS.md`. Decisions: `DECISIONS.md`.
+
+Statuses: pending · ready · in_progress · review · changes_requested · verified · blocked
+
+| ID | Purpose | Owner (model) | Blocks on | Status | Evidence required |
+|---|---|---|---|---|---|
+| T01 | Scaffold + Convex project | done (sonnet) | – | verified | review-task1 APPROVE; build/test exit 0 |
+| T02 | Components, auth, http, main.tsx | sonnet-backend (sonnet) | T01 | in_progress | `convex dev --once` ready; typecheck+build exit 0; env names set |
+| T03 | Schema + pure ledger (TDD) | sonnet-backend | T02 | pending | ledger tests pass; schema deploys |
+| T04 | Access helpers, purchases/items | sonnet-backend | T03 | pending | cross-user rejection test passes |
+| T05 | Claims + ledger events + followUps | sonnet-backend | T04 | pending | promise≠confirmed; dedupe; later-debit; version bump tests |
+| T06 | OpenAI helper + zod schemas | sonnet-integrations | T03 | pending | schema tests; no network |
+| T07 | Inbox provisioning, inbound routing, intake | sonnet-integrations | T05,T06 | pending | routing tests; dedupe with status |
+| T08 | Policy research (Firecrawl) | sonnet-integrations | T06 | pending | upsert test; live BLOCKED_EXTERNAL until keys |
+| T09 | Price watch cron + checkNow | sonnet-integrations | T05,T08 | pending | threshold/window/dedupe tests |
+| T10 | Drafts, approved send, replies, reminders | sonnet-integrations | T07 | pending | stale-version + empty-recipient tests |
+| T11 | Frontend screens | sonnet-frontend | T04 (API stable) | pending | browser rehearsal against dev deployment |
+| T12 | Example loader | sonnet-backend | T05 | pending | owned+labelled; no real recipients |
+| T13 | Hardening pass | sonnet-tester + opus-devils-advocate | T10,T11 | pending | invariant checklist; adversarial fixtures |
+| T14 | Deploy to convex.site | sonnet-verifier | T13 | blocked | needs OPENAI/AGENTMAIL keys for live path |
+| T15 | hackathon.md, README, video | lead + sonnet-frontend | T14 | pending | honest limits section |
+| T16 | Submit + social | user | T15 | blocked | user authorization required |
+
+Waves: W1 = T02 (backend) + planner + devils-advocate. W2 = T03–T05 (backend) ‖ T06 (integrations). W3 = T07–T10 (integrations) ‖ T11 (frontend). W4 = T12, T13, verifier. W5 = auditor, T14, T15.
