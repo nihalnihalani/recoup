@@ -11,10 +11,37 @@
  * verification code and a reset code are bound to the issuing provider
  * (`verifyCodeAndSignIn.ts`), so a shared id would let one kind of code
  * authorize the other.
+ *
+ * **F1 (checkpoint 4, D94, BLOCKER):** this used to be a hand-built object
+ * literal with no `authorize`. `verifyCodeAndSignIn.ts`'s `verifyCodeOnly`
+ * only runs the issuing provider's `authorize(params, account)` binding
+ * check `if (methodProvider.type === "email" && methodProvider.authorize !==
+ * undefined)` (:180-194) — with no `authorize` at all, that check was
+ * skipped unconditionally, so *any* valid, unexpired code, redeemed with
+ * *any* `params.email`, authenticated as the code's own account (looked up
+ * solely via `verificationCode.accountId`, never compared against
+ * `params.email`). A code issued to victim V, redeemed while claiming
+ * attacker A's address, signed the caller in as V. Fixed by building this
+ * config with the library's own `Email({...})` (`providers/Email.ts:44-56`),
+ * which supplies exactly that binding check —
+ * `account.providerAccountId !== params.email` throws — as its default
+ * `authorize`. We must not pass our own `authorize` in the config below:
+ * `Email()`'s `providerDefaults` merge (`provider_utils.ts`'s `merge`)
+ * overwrites the default with whatever key is present in our config object,
+ * even `authorize: undefined` (that's the library's own documented escape
+ * hatch for "magic link" mode) — so simply omitting the key is what keeps
+ * the real check. `Email()` itself hardcodes `id`/`maxAge`/`name` and defers
+ * our overrides to a `.options` merge that only happens lazily at
+ * materialization (`materializeProvider`, called deep inside
+ * `signInViaProvider`) — invisible to code (and tests) that reads the
+ * returned object's fields directly — so those three are re-applied
+ * immediately below; that later lazy merge then re-applies the identical
+ * values (a no-op) and never touches `authorize` (not one of our keys).
  */
 import { ConvexError } from "convex/values";
 import { generateRandomString } from "@oslojs/crypto/random";
 import type { RandomReader } from "@oslojs/crypto/random";
+import { Email } from "@convex-dev/auth/providers/Email";
 import type { EmailConfig, GenericActionCtxWithAuthConfig } from "@convex-dev/auth/server";
 import type { DataModel } from "../_generated/dataModel";
 import { rateLimiter } from "./rateLimits";
@@ -81,15 +108,27 @@ export const authMailTransport = {
 /**
  * `Email({...})` config for the verify/reset flows. `kind` picks the
  * provider id (`recoup-verify` | `recoup-reset`) and the outgoing copy;
- * everything else about the two configs is identical.
+ * everything else about the two configs is identical. Deliberately does
+ * *not* pass `authorize` — see the module doc comment (F1) for why that
+ * omission is what keeps the library's default account-binding check.
  */
 export function authMail(kind: AuthMailKind): EmailConfig {
-  return {
-    id: `recoup-${kind}`,
-    type: "email",
-    name: kind === "verify" ? "Recoup email verification" : "Recoup password reset",
+  const id = `recoup-${kind}`;
+  const name = kind === "verify" ? "Recoup email verification" : "Recoup password reset";
+  const generateVerificationToken = async () => generateRandomString(random, CODE_ALPHABET, CODE_LENGTH);
+
+  // No explicit `<DataModel>` generic: `Email()`'s `authorize` field is a
+  // contravariant function-typed property, so instantiating it with our
+  // concrete `DataModel` would make `built` (and this function's declared
+  // `EmailConfig` return type, which itself defaults to `GenericDataModel`)
+  // mutually unassignable under `strictFunctionTypes`. Nothing here reads
+  // `built.authorize`'s `account` parameter, so the default generic loses
+  // nothing.
+  const built = Email({
+    id,
+    name,
     maxAge: VERIFICATION_CODE_TTL_S,
-    generateVerificationToken: async () => generateRandomString(random, CODE_ALPHABET, CODE_LENGTH),
+    generateVerificationToken,
     sendVerificationRequest: (async (
       { identifier, token, expires }: { identifier: string; token: string; expires: Date },
       ctx?: GenericActionCtxWithAuthConfig<DataModel>,
@@ -107,5 +146,13 @@ export function authMail(kind: AuthMailKind): EmailConfig {
 
       await authMailTransport.send({ to: identifier, kind, code: token, expiresInMinutes });
     }) as EmailConfig["sendVerificationRequest"],
-  };
+  });
+
+  // `Email()` hardcodes id/maxAge/name in its own returned literal and only
+  // applies our overrides via a `.options` merge the library performs lazily
+  // at materialization time (see doc comment). Re-apply them here so this
+  // object is already correct for anything that reads it directly (our own
+  // tests included) — `built.authorize` (the real binding check) and
+  // `built.sendVerificationRequest`/`built.type` are left untouched.
+  return { ...built, id, name, maxAge: VERIFICATION_CODE_TTL_S, generateVerificationToken };
 }
