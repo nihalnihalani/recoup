@@ -1,13 +1,158 @@
+import { useAction, useMutation, useQuery } from "convex/react";
+import { ConvexError } from "convex/values";
 import { useState } from "react";
-import { Empty } from "../components/States";
+import { api } from "../../convex/_generated/api";
+import { Loading, QueryBoundary } from "../components/States";
 
-// T11b: wire api.profiles.me for the signed-in inbox address; api.profiles.ensureInbox
-// provisions one on first load if it doesn't exist yet.
-// T11b: the paste box below submits to api.intake.paste; a failed/needs_review intake
-// event's "Try again" calls api.intake.retryEvent.
-export default function Settings() {
-  const [pasted, setPasted] = useState("");
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof ConvexError && typeof err.data === "string" ? err.data : fallback;
+}
 
+// ---------------------------------------------------------------------------
+// Inbox: profiles.me for the address, profiles.ensureInbox to provision one.
+// ---------------------------------------------------------------------------
+
+function InboxSection() {
+  const me = useQuery(api.profiles.me);
+  const ensureInbox = useAction(api.profiles.ensureInbox);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [createdEmail, setCreatedEmail] = useState<string | null>(null);
+
+  async function handleCreate() {
+    setError(null);
+    setCreating(true);
+    try {
+      const email = await ensureInbox({});
+      setCreatedEmail(email);
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't create your inbox."));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  if (me === undefined) {
+    return (
+      <section className="space-y-2">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Your inbox</h2>
+        <Loading rows={1} />
+      </section>
+    );
+  }
+
+  const inboxEmail = me.profile?.inboxEmail ?? createdEmail;
+
+  return (
+    <section className="space-y-2">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Your inbox</h2>
+      {inboxEmail ? (
+        <div className="rounded-lg border border-line bg-white/70 p-4">
+          <p className="font-mono text-sm text-ink">{inboxEmail}</p>
+          <p className="mt-2 text-sm text-ink/60">
+            Forward order confirmations and refund emails here.
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-lg border border-dashed border-line bg-ink/[0.02] p-4">
+          <p className="text-sm text-ink/60">
+            Forward order confirmations and refund emails here. Create an inbox to get started.
+          </p>
+          <button
+            type="button"
+            onClick={() => void handleCreate()}
+            disabled={creating}
+            className="mt-3 rounded-md bg-harbor px-4 py-2 text-sm font-semibold text-paper disabled:opacity-60"
+          >
+            {creating ? "Creating…" : "Create my inbox"}
+          </button>
+        </div>
+      )}
+      {error && (
+        <p role="alert" className="text-sm text-rust">
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function SignedInAsSection() {
+  const me = useQuery(api.profiles.me);
+
+  if (me === undefined) {
+    return (
+      <section className="space-y-2">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Signed in as</h2>
+        <Loading rows={1} />
+      </section>
+    );
+  }
+
+  return (
+    <section className="space-y-2">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Signed in as</h2>
+      <p className="text-sm text-ink">{me.user?.email ?? "Unknown"}</p>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Examples
+// ---------------------------------------------------------------------------
+
+function ExamplesSection() {
+  const remove = useMutation(api.examples.remove);
+  const [removing, setRemoving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<string | null>(null);
+
+  async function handleRemove() {
+    if (!window.confirm("Remove your example purchases? This can't be undone.")) return;
+    setError(null);
+    setResult(null);
+    setRemoving(true);
+    try {
+      const { removed } = await remove({});
+      setResult(
+        removed > 0
+          ? `Removed ${removed} example purchase${removed === 1 ? "" : "s"}.`
+          : "No example purchases to remove.",
+      );
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't remove example purchases."));
+    } finally {
+      setRemoving(false);
+    }
+  }
+
+  return (
+    <section className="space-y-2">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Examples</h2>
+      <div className="rounded-lg border border-line bg-white/50 p-4">
+        <p className="text-sm text-ink/60">
+          Clear the example purchases loaded from the Board, if any.
+        </p>
+        <button
+          type="button"
+          onClick={() => void handleRemove()}
+          disabled={removing}
+          className="mt-3 rounded-md border border-line px-4 py-2 text-sm font-semibold text-ink/70 transition hover:border-rust/40 hover:text-rust disabled:opacity-60"
+        >
+          {removing ? "Removing…" : "Remove example purchases"}
+        </button>
+        {result && <p className="mt-2 text-sm text-ink/60">{result}</p>}
+        {error && (
+          <p role="alert" className="mt-2 text-sm text-rust">
+            {error}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function SettingsContent() {
   return (
     <div className="space-y-8">
       <div>
@@ -15,34 +160,17 @@ export default function Settings() {
         <p className="mt-1 text-sm text-ink/60">Your Recoup inbox and how to feed it purchases.</p>
       </div>
 
-      <section className="space-y-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Your inbox</h2>
-        <Empty
-          title="Inbox address not loaded yet"
-          hint="Forward order confirmations here and Recoup will turn them into cases automatically."
-        />
-      </section>
-
-      <section className="space-y-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">
-          Paste an order confirmation
-        </h2>
-        <textarea
-          value={pasted}
-          onChange={(event) => setPasted(event.target.value)}
-          rows={6}
-          placeholder="Paste the order confirmation email text here…"
-          className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-harbor focus:ring-2 focus:ring-harbor/20"
-        />
-        <button
-          type="button"
-          disabled
-          title="Wiring up next: T11b"
-          className="rounded-md bg-harbor px-4 py-2 text-sm font-semibold text-paper opacity-60"
-        >
-          Add purchase
-        </button>
-      </section>
+      <InboxSection />
+      <SignedInAsSection />
+      <ExamplesSection />
     </div>
+  );
+}
+
+export default function Settings() {
+  return (
+    <QueryBoundary>
+      <SettingsContent />
+    </QueryBoundary>
   );
 }
