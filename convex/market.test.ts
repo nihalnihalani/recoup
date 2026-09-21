@@ -3,6 +3,8 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { FIND_MARKER } from "./lib/offerMatch";
+import { OUT_OF_STOCK_NOTE } from "./market";
+import { OUT_OF_STOCK_NOTE as OUT_OF_STOCK_NOTE_UI } from "../src/lib/offerNotes";
 import {
   DAILY_BUDGETS,
   GLOBAL_DAILY_BUDGETS,
@@ -254,6 +256,15 @@ describe("empty result", () => {
     const auto = await t.mutation(internal.market.requestLookup, { watchId, trigger: "auto" });
     expect(auto).toEqual({ scheduled: false, state: "empty_result", reason: "empty_result" });
     expect(await scheduled(t)).toHaveLength(0);
+  });
+});
+
+describe("OUT_OF_STOCK_NOTE (D102)", () => {
+  it("is exported, and stays literally equal to src/lib/offerNotes.ts's UI copy", () => {
+    // D102: exported so this string can be VERIFIED against the frontend's copy by a test, instead of
+    // the two silently drifting (src/ cannot import convex/*.ts directly -- server-only packages don't
+    // bundle for the browser -- so offerNotes.ts keeps its own copy; this is that verification).
+    expect(OUT_OF_STOCK_NOTE).toBe(OUT_OF_STOCK_NOTE_UI);
   });
 });
 
