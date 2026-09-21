@@ -147,6 +147,72 @@ describe("normalizeLegacyAccounts (T05.1 F4, D94)", () => {
     expect(untouched?.providerAccountId).toBe("Dup@Example.com");
   });
 
+  it("N8 (D99): restart: true rescans from the start after an operator resolves a recorded collision by hand", async () => {
+    const t = setup();
+    const send = vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
+    // The already-normalized account that will block the other one below.
+    await signIn(t, { flow: "signUp", email: "n8-dup@example.com", password: PASSWORD });
+    // A distinct account, later rewritten legacy-style to collide with it.
+    await signIn(t, { flow: "signUp", email: "n8-dup-temp@example.com", password: PASSWORD });
+    send.mockRestore();
+
+    const { blockerAccountId, blockerUserId, collidingAccountId } = await t.run(async (ctx) => {
+      const blocker = await ctx.db
+        .query("authAccounts")
+        .withIndex("providerAndAccountId", (q) => q.eq("provider", "password").eq("providerAccountId", "n8-dup@example.com"))
+        .unique();
+      const colliding = await ctx.db
+        .query("authAccounts")
+        .withIndex("providerAndAccountId", (q) =>
+          q.eq("provider", "password").eq("providerAccountId", "n8-dup-temp@example.com"),
+        )
+        .unique();
+      if (!blocker || !colliding) throw new Error("missing seeded accounts");
+      await ctx.db.patch(colliding._id, { providerAccountId: "N8-Dup@Example.com" });
+      await ctx.db.patch(colliding.userId, { email: "N8-Dup@Example.com" });
+      return { blockerAccountId: blocker._id, blockerUserId: blocker.userId, collidingAccountId: colliding._id };
+    });
+
+    // First pass: the collision is detected (both at the authAccounts level
+    // and, separately, at the users level) and the row is left untouched.
+    const first = await t.mutation(internal.lib.authMigrate.normalizeLegacyAccounts, {});
+    expect(first.done).toBe(true);
+    expect(first.collisions).toBeGreaterThanOrEqual(1);
+    const stillColliding = await t.run(async (ctx) => ctx.db.get(collidingAccountId));
+    expect(stillColliding?.providerAccountId).toBe("N8-Dup@Example.com");
+
+    // A bare re-run resumes from the persisted end-of-table cursor and finds
+    // nothing: a normal resume can never revisit a row from an earlier page,
+    // even once the collision below gets fixed.
+    const bareResumeBeforeFix = await t.mutation(internal.lib.authMigrate.normalizeLegacyAccounts, {});
+    expect(bareResumeBeforeFix.scanned).toBe(0);
+    expect(bareResumeBeforeFix.accountsNormalized).toBe(0);
+
+    // Operator resolves the collision out of band (e.g. renames the stale
+    // blocking account away) — the blocking row no longer normalizes to the
+    // same address as the row that was refused.
+    await t.run(async (ctx) => {
+      await ctx.db.patch(blockerAccountId, { providerAccountId: "n8-dup-old@example.com" });
+      await ctx.db.patch(blockerUserId, { email: "n8-dup-old@example.com" });
+    });
+
+    // Still nothing without restart: the cursor is still parked at the end.
+    const bareResumeAfterFix = await t.mutation(internal.lib.authMigrate.normalizeLegacyAccounts, {});
+    expect(bareResumeAfterFix.scanned).toBe(0);
+    expect(bareResumeAfterFix.accountsNormalized).toBe(0);
+
+    // restart: true resets the cursor to the beginning and picks the
+    // now-fixable row up.
+    const restarted = await t.mutation(internal.lib.authMigrate.normalizeLegacyAccounts, { restart: true });
+    expect(restarted.scanned).toBeGreaterThan(0);
+    expect(restarted.accountsNormalized).toBeGreaterThanOrEqual(1);
+    expect(restarted.usersNormalized).toBeGreaterThanOrEqual(1);
+    expect(restarted.collisions).toBe(0);
+
+    const fixed = await t.run(async (ctx) => ctx.db.get(collidingAccountId));
+    expect(fixed?.providerAccountId).toBe("n8-dup@example.com");
+  });
+
   it("is resumable via opsState: the run persists a cursor, and re-passing it explicitly is consistent with the default resume", async () => {
     const t = setup();
     await seedLegacyAccount(t, "resumable@example.com", "Resumable@Example.com");

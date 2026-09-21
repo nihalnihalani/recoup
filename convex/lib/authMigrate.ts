@@ -31,6 +31,17 @@
  * collision is refused and recorded (counted in the return value and logged
  * with both document ids) so an operator can resolve it by hand; the row is
  * left exactly as it was.
+ *
+ * N8 (D99): once a full pass completes, the persisted `opsState` cursor
+ * sits at the end of the table, so a bare re-run (or an explicit re-run
+ * with the *stored* cursor) legitimately finds nothing (`scanned: 0`) —
+ * that is the intended idempotent-no-op behavior. But it also means that
+ * once an operator resolves a recorded collision by hand (renames or
+ * removes the blocking row), a normal resume can never revisit the row
+ * that was refused: it lives on an earlier page, before the cursor. The
+ * `restart` arg resets the scan to the beginning of the table regardless of
+ * any stored or supplied cursor, so the now-fixable row gets a fresh look.
+ * A full rescan is still idempotent — it only costs the extra reads.
  */
 import { v } from "convex/values";
 import { internalMutation } from "../_generated/server";
@@ -56,7 +67,15 @@ function tryNormalizeEmail(raw: string): string | null {
 }
 
 export const normalizeLegacyAccounts = internalMutation({
-  args: { cursor: v.optional(v.string()) },
+  args: {
+    cursor: v.optional(v.string()),
+    /**
+     * N8 (D99): ignore both the stored `opsState` cursor and any explicit
+     * `cursor` and rescan `authAccounts` from the very start. Use after
+     * resolving a recorded collision by hand — see the module docstring.
+     */
+    restart: v.optional(v.boolean()),
+  },
   returns: v.object({
     done: v.boolean(),
     scanned: v.number(),
@@ -70,7 +89,7 @@ export const normalizeLegacyAccounts = internalMutation({
       .query("opsState")
       .withIndex("by_key", (q) => q.eq("key", AUTH_MIGRATE_OPS_KEY))
       .unique();
-    const cursor = args.cursor ?? opsRow?.cursor ?? null;
+    const cursor = args.restart ? null : (args.cursor ?? opsRow?.cursor ?? null);
 
     const page = await ctx.db.query("authAccounts").paginate({ cursor, numItems: PAGE_SIZE });
 
