@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConvexError } from "convex/values";
 import { setup } from "../test.setup";
+import { internal } from "../_generated/api";
 import { authMail, authMailTransport } from "./authMail";
 
 /** `sendVerificationRequest` is typed with one declared parameter (the
@@ -51,12 +52,18 @@ describe("authMail().sendVerificationRequest wiring (contract T05 f2)", () => {
     );
 
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith({
-      to: "person@example.com",
-      kind: "verify",
-      code: "12345678",
-      expiresInMinutes: 15,
-    });
+    // D102: `send` now also receives `ctx` as a second (undeclared) argument
+    // — asserted loosely here (`expect.anything()`), since its exact shape
+    // is convex-test's plumbing, not this wiring contract's concern.
+    expect(spy).toHaveBeenCalledWith(
+      {
+        to: "person@example.com",
+        kind: "verify",
+        code: "12345678",
+        expiresInMinutes: 15,
+      },
+      expect.anything(),
+    );
   });
 
   it("the reset kind reaches the transport as kind: reset", async () => {
@@ -66,7 +73,7 @@ describe("authMail().sendVerificationRequest wiring (contract T05 f2)", () => {
 
     await t.run(async (ctx) => await send("reset")({ identifier: "person@example.com", token: "87654321", expires }, ctx));
 
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ kind: "reset", code: "87654321" }));
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ kind: "reset", code: "87654321" }), expect.anything());
   });
 
   it("throws (before the transport is reached) when ctx is missing", async () => {
@@ -192,5 +199,99 @@ describe("authMailTransport.send default implementation (AgentMail REST)", () =>
     expect(body.text).toContain("12345678");
     expect(body.text).toContain("15 minutes");
     expect(body.text).not.toMatch(/https?:\/\//); // no links (invariant)
+  });
+});
+
+describe("authMailTransport.send — D102: E2E code capture (E2E_SEED_ENABLED)", () => {
+  const ENV_KEYS = ["E2E_SEED_ENABLED", "CONVEX_SITE_URL", "AGENTMAIL_API_KEY", "ALERTS_INBOX_ID"] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  function stashEnv() {
+    for (const key of ENV_KEYS) saved[key] = process.env[key];
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const key of ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  async function readCapturedCode(t: ReturnType<typeof setup>, email: string) {
+    return await t.run(async (ctx) =>
+      ctx.db
+        .query("opsState")
+        .withIndex("by_key", (q) => q.eq("key", `e2e:code:${email}`))
+        .unique(),
+    );
+  }
+
+  it("with E2E_SEED_ENABLED=true, a signUp's code send records the code and succeeds even when the provider throws (no credentials)", async () => {
+    stashEnv();
+    process.env.E2E_SEED_ENABLED = "true";
+    process.env.CONVEX_SITE_URL = "https://recoup-test.convex.site";
+    // A keyless disposable deployment: the real AgentMail call would throw.
+    delete process.env.AGENTMAIL_API_KEY;
+    delete process.env.ALERTS_INBOX_ID;
+
+    const t = setup();
+    const email = "e2e-capture@example.com";
+    const expires = new Date(Date.now() + 900_000);
+
+    // Does not throw, even though sendViaProvider necessarily would.
+    await t.run(async (ctx) => {
+      await send("verify")({ identifier: email, token: "12345678", expires }, ctx);
+    });
+
+    const row = await readCapturedCode(t, email);
+    expect(row?.cursor).toBe("12345678");
+  });
+
+  it("with E2E_SEED_ENABLED unset, nothing is recorded and a provider failure still throws (behavior unchanged)", async () => {
+    stashEnv();
+    delete process.env.E2E_SEED_ENABLED;
+    delete process.env.AGENTMAIL_API_KEY;
+    delete process.env.ALERTS_INBOX_ID;
+
+    const t = setup();
+    const email = "no-e2e@example.com";
+    const expires = new Date(Date.now() + 900_000);
+
+    await expect(
+      t.run(async (ctx) => await send("verify")({ identifier: email, token: "87654321", expires }, ctx)),
+    ).rejects.toThrow("Could not send the email right now");
+
+    expect(await readCapturedCode(t, email)).toBeNull();
+  });
+
+  it("recordE2ECode refuses on the documented production host even when E2E_SEED_ENABLED is set", async () => {
+    stashEnv();
+    process.env.E2E_SEED_ENABLED = "true";
+    process.env.CONVEX_SITE_URL = "https://cool-oyster-399.convex.site";
+
+    const t = setup();
+    const email = "prod-guard@example.com";
+
+    await expect(
+      t.mutation(internal.lib.authMail.recordE2ECode, { email, code: "12345678", kind: "verify" }),
+    ).rejects.toThrow();
+
+    expect(await readCapturedCode(t, email)).toBeNull();
+  });
+
+  it("recordE2ECode refuses when E2E_SEED_ENABLED is not set to the exact string \"true\"", async () => {
+    stashEnv();
+    delete process.env.E2E_SEED_ENABLED;
+    process.env.CONVEX_SITE_URL = "https://recoup-test.convex.site";
+
+    const t = setup();
+    const email = "gate-off@example.com";
+
+    await expect(
+      t.mutation(internal.lib.authMail.recordE2ECode, { email, code: "12345678", kind: "reset" }),
+    ).rejects.toThrow();
+
+    expect(await readCapturedCode(t, email)).toBeNull();
   });
 });

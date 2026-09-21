@@ -69,8 +69,10 @@ describe("guarded Password provider — flow table and failure modes (T05, D65-D
     expect(users[0]!.emailVerificationTime).toBeUndefined();
 
     expect(send).toHaveBeenCalledTimes(1);
+    // D102: `send` also receives `ctx` as a second (undeclared) argument.
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ to: "foo@example.com", kind: "verify", expiresInMinutes: 15 }),
+      expect.anything(),
     );
     expect(lastCode(send)).toMatch(/^\d{8}$/);
   });
@@ -195,7 +197,7 @@ describe("guarded Password provider — flow table and failure modes (T05, D65-D
     expect(knownResult.tokens).toBeNull();
 
     expect(send).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith(expect.objectContaining({ to: known, kind: "reset" }));
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ to: known, kind: "reset" }), expect.anything());
   });
 
   it("reset-verification with the reset code changes the password, verifies the email, and signs in", async () => {
