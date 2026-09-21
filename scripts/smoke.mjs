@@ -39,6 +39,17 @@ const FETCH_TIMEOUT_MS = 15_000;
 const HTML_PATHS = ["/", "/watching", "/settings", "/claims/x"];
 const CONVEX_CLOUD_HOST_RE = /https?:\/\/([a-z0-9-]+\.convex\.cloud)/gi;
 const ASSET_TAG_RES = [/<script[^>]+src="([^"]+)"/gi, /<link[^>]+href="([^"]+\.(?:js|css))"/gi];
+// F-T25-1: `convex`'s own ConvexReactClient constructor throws this literal
+// example URL in its "no address provided" / "wrong address type" error
+// messages (node_modules/convex/src/react/client.ts:358 as of convex@1.46.0:
+// `` `ConvexReactClient requires a URL like 'https://happy-otter-123.convex.cloud', ...` ``).
+// That whole client library ships inside the app bundle, so this literal
+// string always matches CONVEX_CLOUD_HOST_RE too -- an inert, never-real
+// host baked into a third-party dependency's error text, not a second
+// Convex deployment this build actually talks to. Excluded by name so the
+// check still fails on any OTHER second host (a real regression: the build
+// pointing at more than one live deployment).
+const DOCUMENTED_EXAMPLE_HOST = "happy-otter-123.convex.cloud";
 
 const siteUrl = (process.argv[2] ?? process.env.SITE_URL ?? DEFAULT_SITE_URL).trim().replace(/\/+$/, "");
 
@@ -139,6 +150,10 @@ async function checkBundleReferencesOneConvexCloudHost(rootHtml) {
       unreadable.push(`${assetUrl} (${errorMessage(err)})`);
     }
   }
+
+  // F-T25-1: drop the inert documented example host before judging
+  // uniqueness -- see DOCUMENTED_EXAMPLE_HOST's own comment.
+  hosts.delete(DOCUMENTED_EXAMPLE_HOST);
 
   if (hosts.size === 0 && unreadable.length > 0) {
     record(check, false, `could not read any referenced asset: ${unreadable.join(", ")}`);
