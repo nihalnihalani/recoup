@@ -722,3 +722,110 @@ describe("purchases.board bounded reads (F-AUD-1)", () => {
     expect(board.truncated).toBe(false);
   });
 });
+
+/**
+ * B-6 (D129, checkpoint 6d): F-AUD-1 bounded the PURCHASE-list and ITEM
+ * reads, but left the per-purchase claims list (`by_purchase_type`) and, far
+ * more expensively, `claimBalance`'s own `ledgerEvents` range read -- called
+ * once per claim actually returned -- completely unbounded. At 60 active
+ * purchases x 50 items x 2 claims each (6,000 claims, every number still
+ * inside `MAX_BOARD_PURCHASES`/`MAX_ITEMS_PER_PURCHASE`/
+ * `MAX_PURCHASES_PER_USER`), that is 6,000 EXTRA index ranges from
+ * `claimBalance` alone, over Convex's 4,096-per-transaction limit -- the
+ * Board page threw the platform error for any real account with two open
+ * claim types (price adjustment + return credit) on every returned item.
+ *
+ * Fixed the same shape items already use: a shared `MAX_BOARD_CLAIMS_TOTAL`
+ * budget, spent as claims are actually read (not allotted per purchase up
+ * front), with a `take(cap + 1)` probe read per purchase so `truncated`
+ * reflects a REAL cut rather than a merely tight budget.
+ */
+describe("purchases.board claims budget (B-6, D129)", () => {
+  const modules = import.meta.glob("./**/*.*s");
+  const agentmailModules = import.meta.glob("../node_modules/@agentmail/convex/src/component/**/*.ts", { exhaustive: true });
+  const workpoolModules = import.meta.glob("../node_modules/@convex-dev/workpool/src/component/**/*.ts", { exhaustive: true });
+  const rlModules = import.meta.glob("../node_modules/@convex-dev/rate-limiter/src/component/**/*.ts", { exhaustive: true });
+  const bwModules = import.meta.glob("../node_modules/@convex-dev/batch-worker/src/component/**/*.ts", { exhaustive: true });
+
+  function harness() {
+    process.env.FIRECRAWL_API_KEY = "fc-test";
+    process.env.AGENTMAIL_API_KEY = "am-test";
+    process.env.AGENTMAIL_WEBHOOK_SECRET = "whsec_test";
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    t.registerComponent("agentmail", agentmail.schema, agentmailModules);
+    t.registerComponent("agentmail/sendPool", workpool.schema, workpoolModules);
+    t.registerComponent("agentmail/callbackPool", workpool.schema, workpoolModules);
+    firecrawl.register(t);
+    t.registerComponent("rateLimiter", rl.schema, rlModules);
+    t.registerComponent("rateLimiter/batchWorker", bw.schema, bwModules);
+    return t;
+  }
+  type T = ReturnType<typeof harness>;
+
+  async function heavySignedIn(t: T, name: string) {
+    const userId: Id<"users"> = await t.run((ctx) => ctx.db.insert("users", { name }));
+    return { userId, as: t.withIdentity({ subject: `${userId}|session` }) };
+  }
+
+  /** `purchaseCount` active purchases x `itemCount` returned items each, `claimsPerItem` claims (alternating type) on every item. */
+  async function heavyAccountWithClaims(t: T, userId: Id<"users">, purchaseCount: number, itemCount: number, claimsPerItem: number) {
+    for (let p = 0; p < purchaseCount; p++) {
+      await t.run(async (ctx) => {
+        const purchaseId = await ctx.db.insert("purchases", {
+          userId, merchant: `M${p}`, merchantDomain: `m${p}.example`, purchasedAt: Date.now() - 1000, currency: "USD", status: "active",
+        });
+        for (let i = 0; i < itemCount; i++) {
+          const itemId = await ctx.db.insert("items", { purchaseId, userId, name: `i${i}`, unitCents: 1000, qty: 1, returned: true });
+          for (let c = 0; c < claimsPerItem; c++) {
+            await ctx.db.insert("claims", {
+              purchaseId, itemId, userId, type: c % 2 === 0 ? "price_adjustment" : "return_credit",
+              expectedCents: 100, status: c % 2 === 0 ? "sent" : "confirmed", token: `p${p}-i${i}-c${c}`, version: 1,
+            });
+          }
+        }
+      });
+    }
+  }
+
+  async function measureBoard(t: T, as: ReturnType<T["withIdentity"]>) {
+    const { result, metrics } = await as.run(async (ctx) => {
+      const result = await ctx.runQuery(api.purchases.board, {});
+      const metrics = await ctx.meta.getTransactionMetrics();
+      return { result, metrics };
+    });
+    return { result, documentsRead: metrics.documentsRead.used, databaseQueries: metrics.databaseQueries.used };
+  }
+
+  it("60 purchases x 50 items x 2 claims each (6,000 claims) -- board does not throw, stays under 4,096 ranges, and truncates", async () => {
+    const t = harness();
+    const { userId, as } = await heavySignedIn(t, "Heavy claims");
+    await heavyAccountWithClaims(t, userId, 60, 50, 2);
+    const { result, documentsRead, databaseQueries } = await measureBoard(t, as);
+    // eslint-disable-next-line no-console
+    console.log("[B-6] 60x50x2 claims:", JSON.stringify({ documentsRead, databaseQueries, purchasesReturned: result.purchases.length, truncated: result.truncated }));
+    expect(databaseQueries).toBeLessThan(4096);
+    expect(result.truncated).toBe(true);
+  }, 120_000);
+
+  it("60 purchases x 50 items x 1 claim each (3,000 claims) -- stays under the budget without truncating", async () => {
+    const t = harness();
+    const { userId, as } = await heavySignedIn(t, "Heavy one-claim");
+    await heavyAccountWithClaims(t, userId, 60, 50, 1);
+    const { result, documentsRead, databaseQueries } = await measureBoard(t, as);
+    // eslint-disable-next-line no-console
+    console.log("[B-6 control] 60x50x1 claims:", JSON.stringify({ documentsRead, databaseQueries, purchasesReturned: result.purchases.length, truncated: result.truncated }));
+    expect(databaseQueries).toBeLessThan(4096);
+    expect(result.purchases).toHaveLength(60);
+    expect(result.truncated).toBe(false);
+  }, 120_000);
+
+  it("light account (2 purchases x 3 items x 2 claims) renders every claim, untruncated, with correct totals", async () => {
+    const t = harness();
+    const { userId, as } = await heavySignedIn(t, "Light claims");
+    await heavyAccountWithClaims(t, userId, 2, 3, 2);
+    const board = await as.query(api.purchases.board, {});
+    expect(board.truncated).toBe(false);
+    const totalClaims = board.purchases.reduce((n, r) => n + r.claims.length, 0);
+    expect(totalClaims).toBe(2 * 3 * 2);
+  });
+});

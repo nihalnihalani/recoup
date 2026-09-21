@@ -391,6 +391,32 @@ const MAX_BOARD_ITEMS_TOTAL = MAX_BOARD_PURCHASES * MAX_ITEMS_PER_PURCHASE;
 /** F-AUD-1: `processedEvents` rows read per status (`failed`/`needs_review`) for the "needs attention" list; the merge below still renders at most 20 (D14). */
 const ATTENTION_SCAN_PER_STATUS = 20;
 
+/**
+ * B-6 (D129, checkpoint 6d): F-AUD-1 bounded the purchase list and the item
+ * reads, but left this loop's claims read completely unbounded in the way
+ * that actually matters for the range budget -- not the per-purchase
+ * `by_purchase_type` claims list itself (one range per purchase, same O(1)
+ * shape the item probe already has), but `claimBalance`'s own `ledgerEvents`
+ * range read (`lib/balance.ts`), issued once per claim ACTUALLY RETURNED. At
+ * 60 active purchases x 50 items x 2 claims each (6,000 claims, every number
+ * still inside `MAX_BOARD_PURCHASES`/`MAX_ITEMS_PER_PURCHASE`/
+ * `MAX_PURCHASES_PER_USER`), that alone is 6,000 index ranges, over Convex's
+ * 4,096-per-transaction limit -- the Board page threw the platform error for
+ * any real account with two open claim types (price adjustment + return
+ * credit) on every returned item.
+ *
+ * Same shape as `MAX_BOARD_ITEMS_TOTAL`: a shared claims-read budget spent
+ * as claims are actually read across every purchase this call processes,
+ * not allotted per purchase up front (an early purchase with few claims must
+ * not starve a later one of budget it never used). Sized the same way --
+ * `MAX_BOARD_PURCHASES * MAX_ITEMS_PER_PURCHASE` -- so a realistic account
+ * within every existing cap is never truncated on claims alone.
+ */
+const MAX_BOARD_CLAIMS_TOTAL = MAX_BOARD_PURCHASES * MAX_ITEMS_PER_PURCHASE;
+
+/** B-6: per-purchase claims cap mirroring `MAX_ITEMS_PER_PURCHASE`'s role for items -- a realistic item carries at most one claim per type (price_adjustment, return_credit), so twice the item cap is generous headroom before the shared budget above ever needs to cut a single heavy purchase's claims list. */
+const MAX_BOARD_CLAIMS_PER_PURCHASE = MAX_ITEMS_PER_PURCHASE * 2;
+
 export const board = query({
   args: {},
   returns: v.object({
@@ -429,15 +455,20 @@ export const board = query({
     // F-AUD-1: shared budget, spent as rows are actually read -- see
     // MAX_BOARD_ITEMS_TOTAL's doc comment.
     let itemsRoom = MAX_BOARD_ITEMS_TOTAL;
+    // B-6: shared claims budget, same spend-as-read shape -- see
+    // MAX_BOARD_CLAIMS_TOTAL's doc comment.
+    let claimsRoom = MAX_BOARD_CLAIMS_TOTAL;
     const rows: Array<{
       purchase: Doc<"purchases">;
       items: Doc<"items">[];
       claims: Array<Doc<"claims"> & { balance: Awaited<ReturnType<typeof claimBalance>>; item: Doc<"items"> | undefined }>;
     }> = [];
     for (const p of purchases) {
-      if (itemsRoom <= 0) {
-        // F-AUD-1: the shared budget is spent; every purchase from here on
-        // is cut ENTIRELY (a real truncation) rather than read-and-discarded.
+      if (itemsRoom <= 0 || claimsRoom <= 0) {
+        // F-AUD-1/B-6: either shared budget is spent; every purchase from
+        // here on is cut ENTIRELY (a real truncation) rather than
+        // read-and-discarded -- a purchase never renders with a partial
+        // money picture (some claims read, others silently missing).
         truncated = true;
         break;
       }
@@ -460,10 +491,22 @@ export const board = query({
       // `type`), instead of a `by_item` range read PER ITEM. This is what
       // turns the range count from O(items) into O(purchases) -- the
       // dominant fix for the "too many index ranges read" crash.
-      const purchaseClaims = await ctx.db
+      //
+      // B-6: bounded the same way the items probe above is -- `take(cap+1)`
+      // against the shared `claimsRoom` budget, one range past the cap so
+      // `truncated` reflects a REAL cut. This caps how many claims are
+      // actually returned, which in turn caps how many `claimBalance` calls
+      // (each its own `ledgerEvents` range read, the real cost driver) this
+      // purchase spends.
+      const claimsCap = Math.min(MAX_BOARD_CLAIMS_PER_PURCHASE, claimsRoom);
+      const claimsProbe = await ctx.db
         .query("claims")
         .withIndex("by_purchase_type", (q) => q.eq("purchaseId", p._id))
-        .collect();
+        .take(claimsCap + 1);
+      const claimsOverflow = claimsProbe.length > claimsCap;
+      if (claimsOverflow) truncated = true;
+      const purchaseClaims = claimsOverflow ? claimsProbe.slice(0, claimsCap) : claimsProbe;
+      claimsRoom -= purchaseClaims.length;
       const claims = await Promise.all(
         purchaseClaims.map(async (c) => ({ ...c, balance: await claimBalance(ctx, c) })),
       );
