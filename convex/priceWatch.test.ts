@@ -323,6 +323,28 @@ describe("priceWatch.recordCheck acceptance (D16)", () => {
     expect(await claimsFor(t, itemId)).toHaveLength(2);
   });
 
+  it("never claims a settled drop twice, and claims only the new remainder if the price falls further", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { itemId } = await world(t, userId);
+
+    const first = await t.mutation(internal.priceWatch.recordCheck, good(itemId, 9_500));
+    await t.run((ctx) => ctx.db.patch(first.claimId!, { status: "confirmed" }));
+
+    // Same price again after the money came back: nothing new to ask for.
+    const same = await t.mutation(internal.priceWatch.recordCheck, good(itemId, 9_500));
+    expect(same.claimId).toBeNull();
+    expect(same.note).toBe("Drop already claimed");
+
+    // A further fall is a fresh ask for the difference only.
+    const further = await t.mutation(internal.priceWatch.recordCheck, good(itemId, 9_000));
+    expect(further.claimId).not.toBeNull();
+    const second = await t.run((ctx) => ctx.db.get(further.claimId!));
+    // Paid 120.00: 25.00 was settled at 95.00, so 90.00 leaves 5.00 new.
+    expect(second!.expectedCents).toBe(500);
+    expect(await claimsFor(t, itemId)).toHaveLength(2);
+  });
+
   it("opens nothing for a purchase with no confirmed date (D25)", async () => {
     const t = setup();
     const { userId } = await signedIn(t);

@@ -1,5 +1,6 @@
 import type { FunctionReturnType } from "convex/server";
 import type { api } from "../../../convex/_generated/api";
+import { boughtVerdict, type BoughtVerdict } from "../../lib/priceStats";
 import { storeInfo } from "../../lib/stores";
 import { shortDay } from "../../lib/ui";
 
@@ -83,6 +84,26 @@ export function boughtProduct(item: Item): Product {
     isExample: item.isExample,
     item,
   };
+}
+
+/** What a bought product's price means right now; undefined for a product that is only watched. */
+export function productVerdict(product: Product, now: number): BoughtVerdict | undefined {
+  const { item } = product;
+  if (!item) return undefined;
+  return boughtVerdict({
+    paidCents: item.paidCents,
+    latestCents: item.latestCents,
+    windowEndsAt: item.windowEndsAt,
+    claimStatus: item.claim?.status,
+    now,
+    currency: item.currency,
+  });
+}
+
+/** Products with money to claim right now lead; everything else keeps the order it came in. */
+export function claimNowFirst(products: Product[], now: number): Product[] {
+  const claimable = (product: Product) => productVerdict(product, now)?.kind === "claim_now";
+  return [...products.filter(claimable), ...products.filter((product) => !claimable(product))];
 }
 
 /** A drop that can still be claimed: price is below paid, the window has not shut, the money is not back yet. */

@@ -18,7 +18,8 @@ function tintFor(domain: string): string {
 /**
  * A store's tile. The icon is requested from the store's own domain only, never a
  * third-party favicon service, which would learn the user's store list. When it
- * fails to load, a letter on a tint picked from the domain stands in.
+ * fails to load, a letter on a tint picked from the domain stands in. A loaded icon
+ * sits on `tile`, which stays light in the dark theme because most store marks are dark.
  */
 export function StoreAvatar({ domain, size = 36 }: { domain: string; size?: number }) {
   const host = normalizeDomain(domain);
@@ -34,7 +35,7 @@ export function StoreAvatar({ domain, size = 36 }: { domain: string; size?: numb
     <span
       aria-hidden="true"
       className={`relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-lg font-semibold ${
-        state === "loaded" ? "bg-gray-100" : tintFor(host)
+        state === "loaded" ? "bg-tile" : tintFor(host)
       }`}
       style={{ width: size, height: size, fontSize: Math.max(11, Math.round(size * 0.42)) }}
     >

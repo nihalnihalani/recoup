@@ -226,7 +226,7 @@ export function AreaChart({
         <g role="img" aria-label={`${ariaLabel}. Latest ${format(data[last].value)}, ${shortDay(data[last].at)}.`}>
           {ticks.map((t) => (
             <g key={t}>
-              <line x1={M.left} x2={right} y1={y(t)} y2={y(t)} className="stroke-gray-100" strokeWidth={1} />
+              <line x1={M.left} x2={right} y1={y(t)} y2={y(t)} className="stroke-chart-grid" strokeWidth={1} />
               <text x={M.left - 8} y={y(t)} dy="0.32em" textAnchor="end" className="fill-gray-400 text-xs tabular-nums">
                 {format(t)}
               </text>
@@ -270,7 +270,7 @@ export function AreaChart({
                 dy={refY - M.top < 14 ? "1.15em" : "-0.45em"}
                 textAnchor="end"
                 className="fill-gray-400 text-[11px] font-medium"
-                style={{ paintOrder: "stroke", stroke: "white", strokeWidth: 3, strokeLinejoin: "round" }}
+                style={{ paintOrder: "stroke", stroke: "var(--color-surface)", strokeWidth: 3, strokeLinejoin: "round" }}
               >
                 {reference.label}
               </text>
@@ -322,7 +322,7 @@ export function AreaChart({
                 r={i === active ? 5 : 4}
                 strokeWidth={2}
                 opacity={shown ? 1 : 0}
-                className={`${palette.fill} pointer-events-none stroke-white outline-none focus-visible:stroke-gray-900 ${
+                className={`${palette.fill} pointer-events-none stroke-surface outline-none focus-visible:stroke-gray-900 ${
                   i === last ? "chart-fade" : ""
                 }`}
                 tabIndex={(active ?? last) === i ? 0 : -1}

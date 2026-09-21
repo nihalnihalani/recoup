@@ -3,7 +3,8 @@ import { Link } from "react-router-dom";
 import { fmt } from "../Money";
 import { StatusPill } from "../StatusPill";
 import { cardHeaderClass, cardTitleClass, percent, pillBadClass, pillGoodClass, pillMutedClass } from "../../lib/ui";
-import type { Product, Watch } from "./model";
+import type { VerdictTone } from "../../lib/priceStats";
+import { productVerdict, type Product, type Watch } from "./model";
 
 export function ExampleChip() {
   return <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Example</span>;
@@ -76,8 +77,23 @@ const VERDICTS: Record<Watch["verdict"]["label"], { label: string; className: st
   unknown: { label: "No price", className: "bg-gray-100 text-gray-500" },
 };
 
-/** A watch's verdict (or its paused / checking state); a bought item's claim status, or "Tracking". */
-export function ProductStatus({ product, linked = false }: { product: Product; linked?: boolean }) {
+const TONES: Record<VerdictTone, string> = {
+  green: "bg-green-500/20 text-green-700",
+  violet: "bg-violet-500/15 text-violet-700",
+  yellow: "bg-yellow-500/20 text-yellow-700",
+  gray: "bg-gray-100 text-gray-600",
+  red: "bg-red-500/20 text-red-700",
+};
+
+/** The claim statuses the claim's own pill already says best: the store has been asked, or money moved. */
+const CLAIM_SPEAKS = new Set(["queued", "sent", "packet", "promised", "confirmed", "reopened"]);
+
+/**
+ * A watch's verdict (or its paused / checking state). A bought item shows its claim's
+ * status once the store has been asked, and otherwise what its price means: claim now,
+ * holding, went up, window closed.
+ */
+export function ProductStatus({ product, now, linked = false }: { product: Product; now: number; linked?: boolean }) {
   const { watch, item } = product;
   if (watch) {
     if (watch.checking) {
@@ -96,7 +112,8 @@ export function ProductStatus({ product, linked = false }: { product: Product; l
       </span>
     );
   }
-  if (item?.claim) {
+  const verdict = productVerdict(product, now);
+  if (item?.claim && (CLAIM_SPEAKS.has(item.claim.status) || verdict === undefined)) {
     const pill = <StatusPill status={item.claim.status} />;
     return linked ? (
       <Link
@@ -111,10 +128,36 @@ export function ProductStatus({ product, linked = false }: { product: Product; l
       pill
     );
   }
-  return (
-    <span className={`${chipBase} bg-gray-100 text-gray-600`}>
-      <span aria-hidden="true" className={`size-1.5 rounded-full ${item?.productUrl ? "bg-violet-500" : "bg-gray-300"}`} />
-      {item?.productUrl ? "Tracking" : "No product link"}
+  if (verdict === undefined || (verdict.kind === "no_price" && !item?.productUrl)) {
+    return (
+      <span className={`${chipBase} bg-gray-100 text-gray-600`}>
+        <span aria-hidden="true" className="size-1.5 rounded-full bg-gray-300" />
+        No product link
+      </span>
+    );
+  }
+  const chip = (
+    <span className={`${chipBase} ${TONES[verdict.tone]}`} title={verdict.reason}>
+      {verdict.kind === "claim_now" && (
+        <span className="relative flex size-1.5" aria-hidden="true">
+          <span className="absolute inline-flex size-full animate-ping rounded-full bg-violet-500 opacity-60 motion-reduce:animate-none" />
+          <span className="relative inline-flex size-1.5 rounded-full bg-violet-500" />
+        </span>
+      )}
+      {verdict.shortLabel}
     </span>
+  );
+  // A drop the backend already opened a claim for: the chip leads straight to it.
+  return linked && item?.claim ? (
+    <Link
+      to={`/claims/${item.claim.claimId}`}
+      onClick={(event) => event.stopPropagation()}
+      aria-label={`${verdict.label}: claim for ${product.name}`}
+      className="inline-flex rounded-full outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+    >
+      {chip}
+    </Link>
+  ) : (
+    chip
   );
 }

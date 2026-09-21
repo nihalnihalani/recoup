@@ -41,11 +41,74 @@
   --color-yellow-500: #f0bb33;
   --color-yellow-700: #ca8a04;
 
+  /* Semantic aliases for the few places where "white" means two different things. */
+  --color-surface: #ffffff;
+  --color-on-accent: #ffffff;
+  --color-chart-grid: #f3f4f6;
+  --color-tile: #f3f4f6;
+
   --shadow-xs: 0 1px 1px 0 rgb(0 0 0 / 0.05), 0 1px 2px 0 rgb(0 0 0 / 0.02);
 }
 
 :root {
   color-scheme: light;
+}
+
+/*
+  Dark theme. Every colour utility reads a CSS variable, so the theme is a remap of
+  those variables under `.dark` on <html> (set by src/lib/theme.ts and, before first
+  paint, by the inline script in index.html). The gray scale inverts: `white` is the
+  card surface, gray-100 the page, gray-800 the heading ink. The -700 tints used as
+  pill text lighten so they read on a dark surface.
+*/
+.dark {
+  color-scheme: dark;
+
+  --color-white: #1f2937;
+  --color-gray-50: #1b2431;
+  --color-gray-100: #111827;
+  --color-gray-200: #374151;
+  --color-gray-300: #4b5563;
+  --color-gray-400: #9ca3af;
+  --color-gray-500: #9ca3af;
+  --color-gray-600: #d1d5db;
+  --color-gray-700: #e5e7eb;
+  --color-gray-800: #f3f4f6;
+  --color-gray-900: #f9fafb;
+
+  --color-paper: #111827;
+  --color-ink: #f3f4f6;
+  --color-line: #374151;
+  --color-rust: #f0666a;
+  --color-harbor: #9c8cff;
+  --color-moss: #34b868;
+  --color-gold: #f5c84f;
+  --color-teal: #7cc8ff;
+
+  --color-violet-600: #a596ff;
+  --color-violet-700: #b7acff;
+  --color-sky-700: #7cc8ff;
+  --color-green-700: #5fdc8f;
+  --color-red-700: #ff8a8a;
+  --color-yellow-700: #f5c84f;
+
+  --color-surface: #1f2937;
+  --color-chart-grid: #2b3646;
+  --color-tile: #e5e7eb;
+
+  --shadow-xs: 0 1px 1px 0 rgb(0 0 0 / 0.25), 0 1px 2px 0 rgb(0 0 0 / 0.2);
+}
+
+/*
+  Where `white` is text on a saturated fill (avatar initial, solid status pills,
+  timeline bullets) it must stay white, and the one solid green fill keeps its
+  deep value so that white text still reads on it.
+*/
+.dark .text-white {
+  color: var(--color-on-accent);
+}
+.dark .bg-green-700 {
+  background-color: #239f52;
 }
 
 body {

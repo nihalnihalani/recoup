@@ -2,14 +2,16 @@ import { Link, useNavigate } from "react-router-dom";
 import { AreaChart } from "../charts/AreaChart";
 import { fmt } from "../Money";
 import { StoreAvatar } from "../StoreAvatar";
-import { bigNumberClass, cardClass, mutedLabelClass, pillGoodClass } from "../../lib/ui";
-import type { Product } from "./model";
+import { bigNumberClass, cardClass, mutedLabelClass, pillGoodClass, useNow } from "../../lib/ui";
+import { claimNowFirst, productVerdict, type Product } from "./model";
 import { ChangePill, ExampleChip, ProductStatus } from "./parts";
 
 const MAX_CARDS = 6;
 
-function ProductCard({ product }: { product: Product }) {
+function ProductCard({ product, now }: { product: Product; now: number }) {
   const navigate = useNavigate();
+  const verdict = productVerdict(product, now);
+  const claimNow = verdict?.kind === "claim_now";
   const { currency } = product;
   const known = product.nowCents !== undefined;
   // A bought item nobody has priced yet still has one honest number: what was paid.
@@ -17,7 +19,7 @@ function ProductCard({ product }: { product: Product }) {
 
   return (
     <article
-      className={`group col-span-full flex cursor-pointer flex-col sm:col-span-6 xl:col-span-4 ${cardClass}`}
+      className={`group col-span-full flex cursor-pointer flex-col sm:col-span-6 xl:col-span-4 ${cardClass} ${claimNow ? "ring-1 ring-violet-500/40" : ""}`}
       onClick={() => void navigate(product.to)}
     >
       <header className="flex items-start gap-3 px-5 pt-5">
@@ -38,7 +40,7 @@ function ProductCard({ product }: { product: Product }) {
           </p>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1">
-          <ProductStatus product={product} />
+          <ProductStatus product={product} now={now} />
           {product.isExample && <ExampleChip />}
         </div>
       </header>
@@ -53,6 +55,11 @@ function ProductCard({ product }: { product: Product }) {
             <ChangePill nowCents={product.nowCents} basisCents={product.basisCents} currency={currency} versus={product.basisLabel} />
           )}
         </div>
+        {verdict && product.nowCents !== undefined && (
+          <p className="mt-1 truncate text-xs text-gray-400" title={verdict.reason}>
+            {verdict.reason}
+          </p>
+        )}
       </div>
 
       {/* The chart answers hover and arrow keys itself, so a click on it does not leave the page. */}
@@ -70,14 +77,15 @@ function ProductCard({ product }: { product: Product }) {
   );
 }
 
-/** The first six products, watched ones first, each with its own price line. */
+/** The first six products, each with its own price line: money to claim now leads, then watched, then bought. */
 export function ProductCards({ products }: { products: Product[] }) {
-  const shown = products.slice(0, MAX_CARDS);
+  const now = useNow();
+  const shown = claimNowFirst(products, now).slice(0, MAX_CARDS);
   return (
     <section aria-label="Products">
       <div className="grid grid-cols-12 gap-6">
         {shown.map((product) => (
-          <ProductCard key={product.key} product={product} />
+          <ProductCard key={product.key} product={product} now={now} />
         ))}
       </div>
       {products.length > MAX_CARDS && (

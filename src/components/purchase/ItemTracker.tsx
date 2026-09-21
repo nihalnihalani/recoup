@@ -8,7 +8,20 @@ import { PriceChart } from "../charts/PriceChart";
 import { StatusSteps } from "../charts/StatusSteps";
 import { DeltaBadge } from "../DeltaBadge";
 import { fmt } from "../Money";
-import { day, errorText, secondaryButtonClass } from "../../lib/ui";
+import { boughtVerdict, priceStats, type VerdictTone } from "../../lib/priceStats";
+import {
+  day,
+  errorText,
+  mutedLabelClass,
+  percent,
+  pillBadClass,
+  pillGoodClass,
+  pillMutedClass,
+  pillWarnClass,
+  primaryButtonClass,
+  secondaryButtonClass,
+  useNow,
+} from "../../lib/ui";
 
 type PurchaseData = FunctionReturnType<typeof api.purchases.get>;
 export type TrackedItem = PurchaseData["items"][number];
@@ -23,6 +36,28 @@ function ExternalIcon() {
 
 const cardClass = "rounded-xl bg-white shadow-xs";
 const eyebrowClass = "text-xs font-semibold uppercase text-gray-400";
+
+/** `purchases.get` returns at most this many price checks per item. */
+const CHECK_CAP = 30;
+
+const TONE_PILL: Record<VerdictTone, string> = {
+  green: pillGoodClass,
+  red: pillBadClass,
+  yellow: pillWarnClass,
+  gray: pillMutedClass,
+  violet: "inline-flex items-center gap-1 rounded-full bg-violet-500/20 px-1.5 text-sm font-medium text-violet-700",
+};
+
+/** One figure of the compact strip under the chart; the same strip a watched product shows. */
+function StripStat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="min-w-0">
+      <dt className={mutedLabelClass}>{label}</dt>
+      <dd className="mt-0.5 truncate text-sm font-semibold tabular-nums text-gray-800">{value}</dd>
+      {hint && <dd className="truncate text-xs text-gray-400">{hint}</dd>}
+    </div>
+  );
+}
 
 function Stat({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -58,6 +93,7 @@ export function ItemTracker({
   // checkNow only schedules the check. Remember the newest check we had when
   // asking, and read as "checking" until a newer one arrives.
   const [askedAfter, setAskedAfter] = useState<Id<"priceChecks"> | "none" | null>(null);
+  const now = useNow();
 
   const newestId = item.priceChecks[0]?._id ?? "none";
   const checking = busy || (askedAfter !== null && askedAfter === newestId);
@@ -76,6 +112,24 @@ export function ItemTracker({
   const lastUnplotted = unplotted[0];
 
   const claims = item.claims.filter((claim) => claim.type === "price_adjustment");
+
+  // Every figure below describes only the plotted reads, which the server caps.
+  const stats = priceStats(points, now);
+  const capped = item.priceChecks.length >= CHECK_CAP;
+  const money = (cents: number | null) => (cents === null ? "—" : fmt(cents, currency));
+  // The newest claim still in play decides the verdict, as it does on the dashboard.
+  const liveClaim = [...claims]
+    .filter((claim) => claim.status !== "dismissed")
+    .sort((a, b) => b._creationTime - a._creationTime)[0];
+  const verdict = boughtVerdict({
+    paidCents: item.unitCents,
+    latestCents: latest?.cents,
+    windowEndsAt,
+    claimStatus: liveClaim?.status,
+    now,
+    currency,
+  });
+  const held = stats.daysAtCurrentPrice;
 
   async function handleCheck() {
     setError(null);
@@ -135,6 +189,28 @@ export function ItemTracker({
             </p>
             <DeltaBadge paidCents={item.unitCents} latestCents={latest?.cents} currency={currency} />
           </div>
+          {held !== null && stats.count >= 2 && (
+            <p className="mt-0.5 text-xs text-gray-400">
+              {held === 0 ? "At this price for less than a day" : `At this price for ${held} ${held === 1 ? "day" : "days"}`}
+            </p>
+          )}
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+            <span className={`${TONE_PILL[verdict.tone]} whitespace-nowrap`}>{verdict.label}</span>
+            <span className="min-w-0 text-sm text-gray-600">{verdict.reason}</span>
+            {verdict.kind === "claim_now" &&
+              (liveClaim ? (
+                <Link to={`/claims/${liveClaim._id}`} className={primaryButtonClass}>
+                  Open the claim
+                </Link>
+              ) : (
+                claims.length === 0 && (
+                  // Claims are opened by a price check that confirms the drop, never from the browser.
+                  <button type="button" disabled={checking} onClick={() => void handleCheck()} className={primaryButtonClass}>
+                    {checking ? "Checking…" : "Confirm the drop to open a claim"}
+                  </button>
+                )
+              ))}
+          </div>
         </div>
 
         <div className="min-w-0 grow px-5 pb-5 pt-4">
@@ -152,6 +228,22 @@ export function ItemTracker({
               {checking ? "Reading the product page…" : "No price seen yet"}
             </div>
           )}
+          <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-gray-100 pt-3 sm:grid-cols-3">
+            <StripStat label="Lowest" value={money(stats.lowest)} />
+            <StripStat label="Highest" value={money(stats.highest)} />
+            <StripStat label="Average" value={money(stats.average)} />
+            <StripStat
+              label="Swing"
+              value={stats.count >= 2 ? percent(stats.swingPct / 100) : "—"}
+              hint="high to low, of average"
+            />
+            <StripStat
+              label="Price reads"
+              value={capped ? `${stats.count}+` : String(stats.count)}
+              hint={capped ? `stats use the latest ${CHECK_CAP} checks` : undefined}
+            />
+            <StripStat label="Tracking since" value={day(stats.trackingSince ?? undefined)} hint="no history before this" />
+          </dl>
           {unplotted.length > 0 && lastUnplotted && (
             <p className="mt-3 text-xs text-gray-400">
               {unplotted.length} {unplotted.length === 1 ? "check" : "checks"} not plotted. Last on{" "}

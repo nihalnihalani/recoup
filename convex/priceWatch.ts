@@ -125,6 +125,17 @@ async function hasOpenPriceClaim(ctx: QueryCtx, itemId: Id<"items">): Promise<bo
   return claims.some((c) => c.type === "price_adjustment" && !CLOSED_STATUSES.includes(c.status));
 }
 
+/** Cents already asked for and settled on this item's price drops; dismissed claims do not count. */
+async function settledPriceClaimCents(ctx: QueryCtx, itemId: Id<"items">): Promise<number> {
+  const claims = await ctx.db
+    .query("claims")
+    .withIndex("by_item", (q) => q.eq("itemId", itemId))
+    .collect();
+  return claims
+    .filter((c) => c.type === "price_adjustment" && c.status === "confirmed")
+    .reduce((sum, c) => sum + c.expectedCents, 0);
+}
+
 /**
  * The window a claim would be opened against, or null when this item is not
  * watchable right now. Shared by `eligibleItems` (which decides what to
@@ -259,13 +270,21 @@ export const recordCheck = internalMutation({
     if (await hasOpenPriceClaim(ctx, item._id)) {
       return { priceCheckId, claimId: null, accepted: true, note: "Claim already open" };
     }
+    // A settled claim already covered part (usually all) of this drop. Ask only
+    // for what is new: the same $50 must never be claimed twice, but a price
+    // that falls further after a payout is a fresh, smaller ask (found live).
+    const settled = await settledPriceClaimCents(ctx, item._id);
+    const remaining = drop - settled;
+    if (settled > 0 && remaining < Math.max(100, Math.round(item.unitCents * item.qty * 0.02))) {
+      return { priceCheckId, claimId: null, accepted: true, note: "Drop already claimed" };
+    }
 
     const claimId = await openClaim(ctx, {
       userId: item.userId,
       purchaseId: item.purchaseId,
       itemId: item._id,
       type: "price_adjustment",
-      expectedCents: drop,
+      expectedCents: remaining,
       windowEndsAt: window.endsAt,
       policyId: window.policy._id,
       openedFromPriceCheckId: priceCheckId,

@@ -7,7 +7,7 @@ const STEPS = [
 ] as const;
 
 const TERMINAL: Record<string, { label: string; className: string }> = {
-  reopened: { label: "Charged again", className: "bg-red-500 text-white" },
+  reopened: { label: "Charged again", className: "bg-red-500 text-on-accent" },
   dismissed: { label: "Dismissed", className: "bg-gray-100 text-gray-400 line-through" },
 };
 

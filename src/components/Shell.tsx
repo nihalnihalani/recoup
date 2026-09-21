@@ -4,6 +4,8 @@ import { useAuthActions } from "@convex-dev/auth/react";
 import { useQuery } from "convex/react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { api } from "../../convex/_generated/api";
+import { NotificationBell } from "./NotificationBell";
+import { ThemeToggle } from "./ThemeToggle";
 
 function Icon({ children }: { children: ReactNode }) {
   return (
@@ -69,12 +71,12 @@ function Logo() {
         <path
           d="M8 11h5l3 5 3 5h5"
           fill="none"
-          className="stroke-white"
+          className="stroke-on-accent"
           strokeWidth={2.5}
           strokeLinecap="round"
           strokeLinejoin="round"
         />
-        <circle cx="24" cy="21" r="2.5" className="fill-white" />
+        <circle cx="24" cy="21" r="2.5" className="fill-on-accent" />
       </svg>
       <span className="text-lg font-bold text-gray-800">Recoup</span>
     </span>
@@ -85,7 +87,7 @@ function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
   return (
     <>
       <div
-        className={`fixed inset-0 z-40 bg-gray-900/30 transition-opacity lg:hidden ${
+        className={`fixed inset-0 z-40 bg-black/40 transition-opacity lg:hidden ${
           open ? "opacity-100" : "pointer-events-none opacity-0"
         }`}
         aria-hidden="true"
@@ -175,7 +177,7 @@ function UserMenu() {
         aria-expanded={open}
         className="flex items-center gap-2 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
       >
-        <span className="flex size-8 items-center justify-center rounded-full bg-violet-500 text-sm font-semibold text-white">
+        <span className="flex size-8 items-center justify-center rounded-full bg-violet-500 text-sm font-semibold text-on-accent">
           {initial ?? (
             <svg className="size-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
               <circle cx="12" cy="8" r="4" />
@@ -245,7 +247,10 @@ export function Shell() {
                 <path d="M4 6h16M4 12h16M4 18h16" />
               </Icon>
             </button>
-            <div className="ml-auto">
+            <div className="ml-auto flex items-center gap-2 sm:gap-3">
+              <ThemeToggle />
+              <NotificationBell />
+              <span className="h-6 w-px bg-gray-200" aria-hidden="true" />
               <UserMenu />
             </div>
           </div>

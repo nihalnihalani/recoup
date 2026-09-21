@@ -2,8 +2,8 @@ import { Link, useNavigate } from "react-router-dom";
 import { WindowMeter } from "../charts/WindowMeter";
 import { fmt } from "../Money";
 import { StoreAvatar } from "../StoreAvatar";
-import { cardClass, tableHeadClass } from "../../lib/ui";
-import type { Product } from "./model";
+import { cardClass, tableHeadClass, useNow } from "../../lib/ui";
+import { claimNowFirst, type Product } from "./model";
 import { CardHeader, ExampleChip, ProductStatus } from "./parts";
 
 function subLabel(product: Product): string {
@@ -51,6 +51,8 @@ function RangeBar({ product }: { product: Product }) {
 
 export function ProductsTable({ products }: { products: Product[] }) {
   const navigate = useNavigate();
+  const now = useNow();
+  const ordered = claimNowFirst(products, now);
   return (
     <section className={`col-span-full xl:col-span-8 ${cardClass}`} aria-labelledby="products-title">
       <CardHeader id="products-title" title="Products" count={products.length} />
@@ -65,7 +67,7 @@ export function ProductsTable({ products }: { products: Product[] }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {products.map((product) => {
+            {ordered.map((product) => {
               const basis = product.kind === "bought" ? product.basisCents : (product.watch?.targetCents ?? undefined);
               return (
                 <tr key={product.key} className="cursor-pointer transition hover:bg-gray-50" onClick={() => void navigate(product.to)}>
@@ -103,7 +105,7 @@ export function ProductsTable({ products }: { products: Product[] }) {
                     <div className="mt-1 text-xs text-gray-400">{subLabel(product)}</div>
                   </td>
                   <td className="p-2">
-                    <ProductStatus product={product} linked />
+                    <ProductStatus product={product} now={now} linked />
                   </td>
                   <td className="w-44 p-2">
                     {product.item ? (

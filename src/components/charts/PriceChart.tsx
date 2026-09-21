@@ -193,7 +193,7 @@ export function PriceChart({
         <g role="img" aria-label={summary}>
           {ticks.map((t) => (
             <g key={t}>
-              <line x1={M.left} x2={right} y1={y(t)} y2={y(t)} className="stroke-gray-100" strokeWidth={1} />
+              <line x1={M.left} x2={right} y1={y(t)} y2={y(t)} className="stroke-chart-grid" strokeWidth={1} />
               <text x={M.left - 8} y={y(t)} dy="0.32em" textAnchor="end" className="fill-gray-400 text-xs tabular-nums">
                 {axisMoney(t, currency, whole)}
               </text>
@@ -304,7 +304,7 @@ export function PriceChart({
         <g role="group" aria-label="Price observations. Use the arrow keys to move between them.">
           {marks.map((m, i) => {
             const isLast = i === marks.length - 1;
-            const tone = m.bought ? "fill-white stroke-violet-500" : "fill-violet-500 stroke-white";
+            const tone = m.bought ? "fill-surface stroke-violet-500" : "fill-violet-500 stroke-surface";
             return (
               <circle
                 key={`${m.at}-${i}`}

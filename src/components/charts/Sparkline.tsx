@@ -73,7 +73,7 @@ export function Sparkline({
           <path d={line} fill="none" className={stroke} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
         )}
         {last && (
-          <circle cx={x(last.at)} cy={y(last.cents)} r={4} className={`${fill} stroke-white`} strokeWidth={2} />
+          <circle cx={x(last.at)} cy={y(last.cents)} r={4} className={`${fill} stroke-surface`} strokeWidth={2} />
         )}
       </svg>
     </div>

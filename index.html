@@ -14,6 +14,20 @@
       name="description"
       content="Price dropped after you bought? Recoup gets the difference back. Haven't bought yet? It watches the price everywhere and tells you when to."
     />
+    <script>
+      // Apply the stored (or system) theme before first paint so there is no flash.
+      (function () {
+        var theme = "system";
+        try {
+          var stored = localStorage.getItem("recoup-theme");
+          if (stored === "light" || stored === "dark" || stored === "system") theme = stored;
+        } catch (e) {}
+        var dark =
+          theme === "dark" ||
+          (theme === "system" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.toggle("dark", dark);
+      })();
+    </script>
     <title>Recoup: never overpay, before or after you buy</title>
   </head>
   <body>
