@@ -472,13 +472,64 @@ describe("read budgets: heavy-account measurements (T07)", () => {
   it(
     "watches.sweep",
     async () => {
-      const fixture = "60 due watches (plus 1 not-yet-due offer-stress watch)";
+      const fixture = "60 due watches (plus 1 not-yet-due offer-stress watch), all owned by ONE user";
       const m = await measure(t, (ctx) => ctx.runMutation(internal.watches.sweep, {}));
       expect(m.error).toBeNull();
       report("watches.sweep", fixture, m);
-      // WATCH_SWEEP_PAGE=50: bounded regardless of the 60 due rows behind it.
-      expect(m.result).toBe(50);
+      // T12 (D74 fairness fix): the page is still read at WATCH_SWEEP_PAGE=50
+      // (earliest-due-first, globally), but a single user is now capped at
+      // WATCH_SWEEP_PER_USER=10 scheduled per tick -- the other 40 due rows
+      // in this one-user fixture are bumped (not scheduled) this tick and
+      // picked up on a later one. See the multi-user fixture below for the
+      // case where several users share one page and the fix lets the full
+      // page clear in a single tick.
+      expect(m.result).toBe(10);
       expect(m.documentsRead).toBeLessThanOrEqual(200);
+    },
+    30_000,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// watches.sweep: per-user fairness across several accounts sharing one page
+// (D74/T12). Independent of the single-user "heavy account" fixture above --
+// this is the scenario the per-user cap exists for: several accounts with
+// due watches in the same tick, none of which may be starved by another.
+// ---------------------------------------------------------------------------
+
+describe("watches.sweep: multi-user fairness (D74/T12)", () => {
+  it(
+    "6 users sharing one page, none over the per-user cap, all clear in one tick",
+    async () => {
+      const t = harness();
+      // 4 users at exactly WATCH_SWEEP_PER_USER=10 due watches + 2 users at 5:
+      // 4*10 + 2*5 = 50 == WATCH_SWEEP_PAGE, so the whole page is these 6
+      // users' rows (no truncation surprises from unrelated due watches) and
+      // no single user exceeds the per-user cap, so nothing is rotated --
+      // the fix lets a full, fairly-shared page clear in one tick.
+      const counts = [10, 10, 10, 10, 5, 5];
+      for (let u = 0; u < counts.length; u++) {
+        const { userId } = await signedIn(t, `Fair${u}`);
+        await t.run(async (ctx) => {
+          for (let i = 0; i < counts[u]; i++) {
+            await ctx.db.insert("watches", {
+              userId,
+              name: `Fair${u} watch ${i}`,
+              productUrl: `https://fair${u}.example/p/${i}`,
+              merchantDomain: `fair${u}.example`,
+              currency: "USD",
+              status: "active",
+              nextCheckAt: NOW - HOUR,
+            });
+          }
+        });
+      }
+
+      const m = await measure(t, (ctx) => ctx.runMutation(internal.watches.sweep, {}));
+      expect(m.error).toBeNull();
+      report("watches.sweep (6 users, none over cap)", "6 users: 10,10,10,10,5,5 due watches", m);
+      expect(m.result).toBe(50);
+      expect(m.documentsRead).toBeLessThanOrEqual(300);
     },
     30_000,
   );
@@ -650,13 +701,14 @@ describe("priceWatch.eligibleItems: transaction-limit overflow (D80)", () => {
   // collect, plus item-level `nextCheckAt` rotation and a per-user cap
   // checked before any per-item read) -- measured at 2,000 documentsRead for
   // this exact fixture, well under the 32,000 ceiling. Flipped from
-  // `it.fails` to `it` now that it passes for real. NOTE for whoever owns
-  // this file next: the two tests below ("reproduces the exact throw..." and
-  // "61 claims/item ... sits exactly at the ceiling") assert the OLD, now-fixed
-  // overflow's exact numbers and no longer hold now that eligibleItems does
-  // not overflow at this fixture size; T12 was not permitted to edit them
-  // (scope: flip `it.fails` wrappers only), so they are left failing as a
-  // known, expected consequence of the fix -- see T12's final report.
+  // `it.fails` to `it` now that it passes for real. D101 (T09): the two
+  // tests below, which used to assert the OLD overflow's exact numbers
+  // (32,001-document throw; an exact 32,000-document "ceiling"), are
+  // rewritten below to assert the NEW, measured bound instead -- an indexed
+  // per-item existence check no longer scales with claimsPerItem the way the
+  // old unbounded `.collect()` did (confirmed empirically: 61 and 65
+  // claims/item now both measure the identical 2,000 documentsRead, so the
+  // old 61-vs-62 "ceiling" bisection no longer describes this code path).
   it(
     "does not overflow the 32,000-document budget at 500 items x 65 claims/item",
     async () => {
@@ -673,46 +725,48 @@ describe("priceWatch.eligibleItems: transaction-limit overflow (D80)", () => {
   );
 
   it(
-    "reproduces the exact throw and its metrics at the moment of failure",
+    "at 500 items x 65 claims/item, eligibleItems reads well under the ceiling and does not throw (D101, after T12)",
     async () => {
       const t = harness();
       const { userId } = await signedIn(t, "Overflowed2");
       await overflowFixture(t, userId, NOW, { items: 500, claimsPerItem: 65 });
 
       const m = await measure(t, (ctx) => ctx.runQuery(internal.priceWatch.eligibleItems, {}));
-      report("priceWatch.eligibleItems (500x65, current main)", "500 items x65 claims/item", m);
-      expect(m.error).not.toBeNull();
-      expect(m.error!.message).toMatch(/Scanned too many documents.*limit: 32000/);
-      // The tracker throws on the read that pushes documentsRead past the
-      // limit; that read still commits (real Convex charges for it too), so
-      // `used` reads the limit + 1 deterministically, regardless of which
-      // item/claim tipped it over.
-      expect(m.documentsRead).toBe(32_001);
+      report("priceWatch.eligibleItems (500x65, after T12)", "500 items x65 claims/item", m);
+      // Was: throws with documentsRead === 32_001 (the old unbounded
+      // per-item claims `.collect()`). T12's `claims.by_item_type_status`
+      // index turns that into a bounded per-item existence check: measured
+      // at 2,000 documentsRead for this exact fixture (docs/reviews/
+      // read-budgets.md's "after T12" column) -- asserting a headroom bound
+      // rather than the exact number, matching this file's style elsewhere.
+      expect(m.error).toBeNull();
+      expect(Array.isArray(m.result)).toBe(true);
+      expect(m.documentsRead).toBeLessThanOrEqual(2_500);
     },
     60_000,
   );
 
-  // Bisection (task deliverable 3: "bisect fixture size to the failure
-  // threshold"). documentsRead for this code path is, per item scanned,
-  // 1 (purchase get) + 1 (policy lookup, one row per user+domain+kind here)
-  // + claimsPerItem (the unbounded collect), plus the initial 500-document
-  // `items` scan itself: total = items * (claimsPerItem + 3). At items=500
-  // that crosses the 32,000 ceiling between claimsPerItem=61 (500*64=32,000,
-  // exactly AT the limit: the tracker only throws when a read pushes STRICTLY
-  // past it) and claimsPerItem=62 (500*65=32,500). Confirmed empirically
-  // below at the lower bound; the dissent's own 65-claim repro above
-  // confirms the upper bound.
+  // Was a bisection to the OLD linear-scan failure threshold (per item:
+  // 1 purchase get + 1 policy lookup + claimsPerItem, uncapped -- crossing
+  // 32,000 between claimsPerItem=61 and 62 at items=500). T12's indexed
+  // existence check no longer scales with claimsPerItem at all: 61 and 65
+  // claims/item both measure the identical 2,000 documentsRead (confirmed
+  // empirically), so there is no longer a claimsPerItem-driven ceiling here
+  // to bisect. Fixture size kept exactly as it was (61 claims/item, 500
+  // items) rather than reduced, so this stays a real regression guard against
+  // the per-item read ever becoming unbounded again -- only the assertion
+  // (D101, after T12) changed.
   it(
-    "61 claims/item at 500 items sits exactly at the ceiling and does not throw",
+    "61 claims/item at 500 items reads well under the ceiling and does not throw (D101, after T12)",
     async () => {
       const t = harness();
       const { userId } = await signedIn(t, "AtCeiling");
       await overflowFixture(t, userId, NOW, { items: 500, claimsPerItem: 61 });
 
       const m = await measure(t, (ctx) => ctx.runQuery(internal.priceWatch.eligibleItems, {}));
-      report("priceWatch.eligibleItems (500x61, ceiling)", "500 items x61 claims/item", m);
+      report("priceWatch.eligibleItems (500x61, after T12)", "500 items x61 claims/item", m);
       expect(m.error).toBeNull();
-      expect(m.documentsRead).toBe(32_000);
+      expect(m.documentsRead).toBeLessThanOrEqual(2_500);
     },
     60_000,
   );
