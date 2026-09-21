@@ -64,13 +64,15 @@ export const overview = query({
       foundCents: v.number(),
       recoveredCents: v.number(),
       checks: v.number(),
+      /** Unresolved money on labelled example purchases; excluded from foundCents (D27). */
+      exampleFoundCents: v.number(),
     }),
     capped: v.boolean(),
   }),
   handler: async (ctx) => {
     const empty = {
       items: [],
-      totals: { tracked: 0, watching: 0, foundCents: 0, recoveredCents: 0, checks: 0 },
+      totals: { tracked: 0, watching: 0, foundCents: 0, recoveredCents: 0, checks: 0, exampleFoundCents: 0 },
       capped: false,
     };
     const userId = await getAuthUserId(ctx);
@@ -87,6 +89,7 @@ export const overview = query({
     const items = [];
     let watching = 0;
     let foundCents = 0;
+    let exampleFoundCents = 0;
     let recoveredCents = 0;
     let checks = 0;
 
@@ -131,6 +134,9 @@ export const overview = query({
         if (priceClaim && balance && !isExample) {
           foundCents += Math.max(balance.unresolved, 0);
           recoveredCents += Math.max(balance.confirmed - balance.debited, 0);
+        } else if (priceClaim && balance && isExample) {
+          // Never mixed into real totals (D27); reported apart so the UI can explain a $0 headline over example rows.
+          exampleFoundCents += Math.max(balance.unresolved, 0);
         }
 
         items.push({
@@ -171,7 +177,7 @@ export const overview = query({
 
     return {
       items,
-      totals: { tracked: items.length, watching, foundCents, recoveredCents, checks },
+      totals: { tracked: items.length, watching, foundCents, recoveredCents, checks, exampleFoundCents },
       capped,
     };
   },

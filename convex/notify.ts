@@ -162,12 +162,16 @@ export const dropContext = internalQuery({
       .withIndex("by_user", (q) => q.eq("userId", row.userId))
       .unique();
     const to = user?.email?.trim() || null;
+    // Alerts go out from one shared app inbox (ALERTS_INBOX_ID, not a secret), so watching works the moment
+    // someone signs up and does not spend one of the org's limited AgentMail inboxes per account. A user's
+    // own Recoup inbox is only needed for mail to a store, where replies must come back to them.
+    const inboxId = process.env.ALERTS_INBOX_ID?.trim() || profile?.inboxId || null;
 
     let problem: string | null = null;
     if (!watch || row.cents === undefined) problem = "The watched item no longer exists";
     else if (watch.status !== "active") problem = "This item is no longer being watched";
     else if (!to) problem = "Your account has no email address to send alerts to";
-    else if (!profile) problem = "Your Recoup inbox is not set up yet, so the alert could not be sent";
+    else if (!inboxId) problem = "Price alerts are not configured on this deployment";
 
     let text = "";
     if (watch && row.cents !== undefined) {
@@ -192,7 +196,7 @@ export const dropContext = internalQuery({
       );
       text = lines.join("\n");
     }
-    return { problem, inboxId: profile?.inboxId ?? null, to, subject: row.subject, text, watchId: row.watchId ?? null };
+    return { problem, inboxId, to, subject: row.subject, text, watchId: row.watchId ?? null };
   },
 });
 

@@ -259,7 +259,25 @@ describe("a drop that cannot be mailed is still recorded", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("no Recoup inbox: failed row with the reason", async () => {
+  it("no Recoup inbox but a shared alerts inbox: the alert goes out from the shared inbox", async () => {
+    process.env.ALERTS_INBOX_ID = "alerts@agentmail.test";
+    try {
+      const t = setup();
+      const { userId } = await account(t, { inbox: false });
+      const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+      await observe(t, watchId, 4_000);
+      await flush(t);
+
+      const [row] = await mailRows(t);
+      expect(row.status).toBe("sent");
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0][1]).toBe("alerts@agentmail.test");
+    } finally {
+      delete process.env.ALERTS_INBOX_ID;
+    }
+  });
+
+  it("no inbox of any kind: failed row with the reason", async () => {
     const t = setup();
     const { userId } = await account(t, { inbox: false });
     const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
@@ -268,7 +286,7 @@ describe("a drop that cannot be mailed is still recorded", () => {
 
     const [row] = await mailRows(t);
     expect(row.status).toBe("failed");
-    expect(row.error).toMatch(/inbox is not set up/);
+    expect(row.error).toMatch(/alerts are not configured/i);
     expect(send).not.toHaveBeenCalled();
   });
 

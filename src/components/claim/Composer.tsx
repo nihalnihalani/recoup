@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import { useId, useState } from "react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../../convex/_generated/api";
@@ -196,6 +196,9 @@ export function Composer({
 }) {
   const update = useMutation(api.drafts.update);
   const approveAndSend = useMutation(api.drafts.approveAndSend);
+  // The store's reply has to come back to this user, so a claim email goes out from their own Recoup
+  // inbox. It is created on the first send rather than at sign-up (idempotent: returns the existing one).
+  const ensureInbox = useAction(api.profiles.ensureInbox);
   const sendStatus = useQuery(api.drafts.sendStatus, { draftId: draft._id });
 
   const toId = useId();
@@ -314,8 +317,9 @@ export function Composer({
                 disabled={busy}
                 className={primaryButtonClass}
                 onClick={() =>
-                  void run(() =>
-                    approveAndSend({
+                  void run(async () => {
+                    await ensureInbox({});
+                    return approveAndSend({
                       draftId: draft._id,
                       to,
                       subject,
@@ -323,8 +327,8 @@ export function Composer({
                       claimVersion: claim.version,
                       draftVersion: draft.version,
                       recipientConfirmed,
-                    }),
-                  )
+                    });
+                  })
                 }
               >
                 {busy ? "Sending…" : "Approve & send"}
