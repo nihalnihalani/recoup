@@ -263,6 +263,11 @@ describe("retryable failures and backoff", () => {
     expect(line.kind).toBe("market_failed");
     expect(line.watchId).toBe(String(watchId));
     expect(typeof line.error).toBe("string");
+    // correlationId/at are excluded before the leak check below: correlationId is a random UUID
+    // (crypto.randomUUID()) whose hex/hyphen characters can incidentally match the sk-/fc- shape
+    // (~1% per run) -- not a leak, just a coincidental substring of a random id.
+    delete line.correlationId;
+    delete line.at;
     const raw = JSON.stringify(line);
     // sanitizeError collapses the raw provider body down to one of a small set of fixed,
     // user-safe categories (convex/lib/errors.ts) -- the injected secret/email never survives.

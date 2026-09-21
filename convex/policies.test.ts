@@ -369,6 +369,11 @@ describe("T24c (D109): fetchBothImpl's failure line is structured and redacted",
       expect(line.kind).toBe("extraction_failed");
       expect(line.merchantDomain).toBe(merchantDomain);
       expect(typeof line.error).toBe("string");
+      // correlationId/at are excluded before the leak check below: correlationId is a random UUID
+      // (crypto.randomUUID()) whose hex/hyphen characters can incidentally match the sk-/fc- shape
+      // (~1% per run) -- not a leak, just a coincidental substring of a random id.
+      delete line.correlationId;
+      delete line.at;
     }
     // `policyKind` (not `kind`, which `logEvent`'s envelope reserves for its own tag) survives.
     expect(lines.map((l) => l.policyKind)).toEqual(["price_adjustment", "returns"]);

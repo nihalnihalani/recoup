@@ -230,6 +230,11 @@ describe("searchOffers", () => {
     expect(line.watchId).toBe(String(watchId));
     expect(line.storeDomain).toBe("dead.example");
     expect(typeof line.error).toBe("string");
+    // correlationId/at are excluded before the leak check below: correlationId is a random UUID
+    // (crypto.randomUUID()) whose hex/hyphen characters can incidentally match the sk-/fc- shape
+    // (~1% per run) -- not a leak, just a coincidental substring of a random id.
+    delete line.correlationId;
+    delete line.at;
     const raw = JSON.stringify(line);
     expect(raw).not.toMatch(/sk-[A-Za-z0-9_-]{10,}/);
     expect(raw).not.toMatch(/fc-[A-Za-z0-9_-]{10,}/);
