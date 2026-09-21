@@ -233,17 +233,16 @@ Two ways, different blast radius:
   app is touched.
 - **This deployment's side:** `npx convex env remove AGENTMAIL_WEBHOOK_SECRET
   --deployment <name>` (or set it to a value that no longer matches the
-  provider's). Every inbound POST to `/agentmail/webhook` then fails —
-  **verified live**: with the secret entirely unset, the component's
-  `assertConfigured("webhook")` throws before it ever reaches signature
-  verification, which Convex turns into a bare **500**, not the clean 401 a
-  present-but-wrong secret produces (`convex/http.test.ts` covers the latter
-  case; `scripts/smoke.mjs`'s webhook check expects 401 and will correctly
-  report this as a distinct failure, not a false pass). Either way, no event
-  is ever applied — this path fails closed, it just does not fail with the
-  tidiest possible status code. Prefer the provider-side disable when you
-  have a choice; use the env-var removal only when you cannot reach the
-  provider dashboard.
+  provider's). Every inbound POST to `/agentmail/webhook` then fails with a
+  clean **401 and an empty body** (F-T22-1, T24b): `convex/http.ts` checks
+  `process.env.AGENTMAIL_WEBHOOK_SECRET` by name before ever calling into the
+  AgentMail component, so an unset secret can no longer reach the component's
+  own `assertConfigured("webhook")` throw (which, uncaught, used to surface
+  as a bare 500 — that was the previously-documented behaviour here; fixed by
+  F-T22-1 and covered by `convex/http.test.ts`). No event is ever applied
+  either way — this path always fails closed. Prefer the provider-side
+  disable when you have a choice; use the env-var removal only when you
+  cannot reach the provider dashboard.
 
 ## 7. `AUTH_LOG_LEVEL` / `AUTH_LOG_SECRETS` — never set these
 
@@ -315,3 +314,8 @@ in this repo's `package.json` (`convex@^1.46.0`) offers. Neither command was
 run for real as part of writing this file; do that only when you actually
 need a backup/restore, and only against a deployment you are sure is not
 production.
+
+## 11. Retention: never-verified accounts, and a stalled cursor
+
+- **Never-verified accounts are purged after 7 days and cannot be recovered.** `convex/retention.ts`'s daily sweep deletes any `users` row with no `emailVerificationTime` once it is more than `RETENTION_UNVERIFIED_DAYS` (7) days old and owns no purchases/watches/claims/profiles rows (D107 hygiene addendum — sign-in itself is gated on verification, so an unverified account can never legitimately own any of those). There is no undo; the person must sign up again.
+- **Read a stalled retention cursor:** `npx convex run ops:backlog '{}' --deployment adorable-lion-138` — its `retention` field names which table the resumable sweep (`convex/retention.ts`'s `sweep`) is currently on (`rule`), how long the cursor has sat there untouched (`cursorAgeMs`), and whether that exceeds the 48h stall threshold (`stalled: true`, almost always one row on that table the sweep keeps failing to process — a poison page). **Reset it** by inspecting and patching the single `opsState` row keyed `"retention"` by hand (`npx convex run --inline-query 'await ctx.db.query("opsState").withIndex("by_key", q => q.eq("key", "retention")).unique()'`, then `--inline-mutation` with `ctx.db.patch` to set its `cursor` field to `'{"step":0,"page":null}'` to restart the whole cycle from the top, or to `'{"step":<next step index>,"page":null}'` to skip only the stuck step for this cycle), then resume progress with `npx convex run retention:sweep '{}' --deployment adorable-lion-138`.
