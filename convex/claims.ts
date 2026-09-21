@@ -5,10 +5,26 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { ownedClaim, ownedItem, requireUserId } from "./lib/access";
 import { balance, deriveStatus, newToken, statusAfterEvent, type EventKind } from "./lib/ledger";
 import { assertCents, assertPositiveCents } from "./lib/money";
-import { eventKind } from "./schema";
+import { assertMaxChars } from "./lib/text";
+import schema, { claimStatus, eventKind } from "./schema";
 import { cancelPending } from "./followUps";
-import { claimBalance } from "./lib/balance";
+import { claimBalance, balanceValidator } from "./lib/balance";
 import { agentmail } from "./mail";
+
+/**
+ * P08 (T16, docs/reviews/2026-09-21-phase0-reproduction.md's boundary.test.ts
+ * finding): no free-text field here had an application-level length cap --
+ * unlike every other free-text field in the app (draft subject/body, purchase
+ * / item names), which all go through `boundedLine`/`.slice(...)`. A single
+ * call could write a multi-megabyte string into a `ledgerEvents`/
+ * `claimNotes` row. These bound length only (no control-character cleanup):
+ * callers already control the shape of these strings (auto-generated
+ * evidence text, or a user-typed reason/evidence the client is free to
+ * display verbatim).
+ */
+const MAX_EVIDENCE_CHARS = 2_000;
+const MAX_REASON_CHARS = 500;
+const MAX_IDEMPOTENCY_KEY_CHARS = 128;
 
 /**
  * Same accepted deviation as `drafts.sendCtx` (D12a): the AgentMail
@@ -120,6 +136,7 @@ export async function openClaim(
  */
 export const open = mutation({
   args: { itemId: v.id("items"), feeCents: v.optional(v.number()) },
+  returns: v.id("claims"),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const item = await ownedItem(ctx, args.itemId, userId);
@@ -183,7 +200,9 @@ export async function applyEvent(
 ) {
   if (claim.status === "dismissed") throw new ConvexError("Claim is dismissed");
   assertPositiveCents(cents, "cents");
+  assertMaxChars(evidence, "evidence", MAX_EVIDENCE_CHARS);
   if (idempotencyKey.trim().length === 0) throw new ConvexError("idempotencyKey must not be empty");
+  assertMaxChars(idempotencyKey, "idempotencyKey", MAX_IDEMPOTENCY_KEY_CHARS);
 
   const dup = await ctx.db
     .query("ledgerEvents")
@@ -233,8 +252,11 @@ export const applyEventInternal = internalMutation({
   },
 });
 
+const applyEventResult = v.object({ deduped: v.boolean(), status: claimStatus });
+
 export const confirmCredit = mutation({
   args: { claimId: v.id("claims"), cents: v.number(), evidence: v.string(), idempotencyKey: v.string() },
+  returns: applyEventResult,
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, args.claimId, userId);
@@ -244,6 +266,7 @@ export const confirmCredit = mutation({
 
 export const recordLaterDebit = mutation({
   args: { claimId: v.id("claims"), cents: v.number(), evidence: v.string(), idempotencyKey: v.string() },
+  returns: applyEventResult,
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, args.claimId, userId);
@@ -259,11 +282,13 @@ export const recordLaterDebit = mutation({
  */
 export const adjustExpected = mutation({
   args: { claimId: v.id("claims"), expectedCents: v.number(), reason: v.string() },
+  returns: v.null(),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, args.claimId, userId);
     if (claim.status === "dismissed") throw new ConvexError("Claim is dismissed");
     assertPositiveCents(args.expectedCents, "expectedCents");
+    assertMaxChars(args.reason, "reason", MAX_REASON_CHARS);
     const oldCents = claim.expectedCents;
 
     // D41: the new expected amount can settle or un-settle the claim.
@@ -295,11 +320,13 @@ export const adjustExpected = mutation({
       oldCents,
       newCents: args.expectedCents,
     });
+    return null;
   },
 });
 
 export const dismiss = mutation({
   args: { claimId: v.id("claims") },
+  returns: v.null(),
   handler: async (ctx, { claimId }) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, claimId, userId);
@@ -334,24 +361,43 @@ export const dismiss = mutation({
           kind: "status",
           text: cancelled ? "Dismissed; pending send cancelled" : "Dismissed; send could not be cancelled",
         });
-        return;
+        return null;
       }
     }
     await ctx.db.insert("claimNotes", { claimId: claim._id, userId, kind: "status", text: "Dismissed by user" });
+    return null;
   },
 });
 
 export const clearAttention = mutation({
   args: { claimId: v.id("claims") },
+  returns: v.null(),
   handler: async (ctx, { claimId }) => {
     const userId = await requireUserId(ctx);
     await ownedClaim(ctx, claimId, userId);
     await ctx.db.patch(claimId, { attentionAt: undefined });
+    return null;
   },
 });
 
 export const get = query({
   args: { claimId: v.id("claims") },
+  returns: v.object({
+    claim: schema.doc("claims"),
+    item: v.union(schema.doc("items"), v.null()),
+    purchase: v.union(schema.doc("purchases"), v.null()),
+    events: v.array(schema.doc("ledgerEvents")),
+    drafts: v.array(schema.doc("drafts")),
+    replies: v.array(schema.doc("replies")),
+    followUps: v.array(schema.doc("followUps")),
+    notes: v.array(schema.doc("claimNotes")),
+    policy: v.union(schema.doc("policies"), v.null()),
+    // Opaque component data (`@agentmail/convex`'s own `listInboundMessages`
+    // query declares no `returns` validator of its own); nothing in this app
+    // has a schema for it.
+    messages: v.any(),
+    balance: balanceValidator,
+  }),
   handler: async (ctx, { claimId }) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, claimId, userId);

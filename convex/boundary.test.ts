@@ -855,76 +855,75 @@ describe("malformed input matrix: string length on claims.ts ledger fields", () 
     });
   }
 
-  // Matches PLAN.md T02's contract literally: "records current behaviour;
-  // T16 tightens and updates the expectation" -- these are passing tests
-  // that document the ABSENCE of a length bound today, not failures.
-  it("confirmCredit currently accepts a 10,000-char evidence string (no app-level bound; PLAN.md T02, current behaviour)", async () => {
+  // T16 tightened these: PLAN.md's T02 contract recorded the (former)
+  // absence of a length bound as "current behaviour ... T16 tightens and
+  // updates the expectation." claims.ts now bounds evidence/reason/
+  // idempotencyKey at 2,000/500/128 chars (convex/lib/text.ts's
+  // `assertMaxChars`) with a ConvexError, so a 10,000-char value (still well
+  // under the ~1MB platform limit these tests originally probed) is refused.
+  it("confirmCredit rejects a 10,000-char evidence string (T16: bounded at 2,000 chars)", async () => {
     const t = setup();
     const { as, userId } = await signedIn(t);
     const { claimId } = await returnClaim2(t, userId);
     const evidence = "e".repeat(10_000);
-    const result = await as.mutation(api.claims.confirmCredit, { claimId, cents: 100, evidence, idempotencyKey: "k" });
-    expect(result.status).toBe("detected"); // partial credit against a 1,000-cent expectation: not yet settled
-    const event = (await t.run((ctx) => ctx.db.query("ledgerEvents").collect()))[0];
-    expect(event.evidence.length).toBe(10_000);
+    await expect(
+      as.mutation(api.claims.confirmCredit, { claimId, cents: 100, evidence, idempotencyKey: "k" }),
+    ).rejects.toThrow(/evidence must be at most 2000 characters/);
+    expect(await t.run((ctx) => ctx.db.query("ledgerEvents").collect())).toHaveLength(0);
   });
 
-  it("recordLaterDebit currently accepts a 10,000-char evidence string (no app-level bound; PLAN.md T02, current behaviour)", async () => {
+  it("recordLaterDebit rejects a 10,000-char evidence string (T16: bounded at 2,000 chars)", async () => {
     const t = setup();
     const { as, userId } = await signedIn(t);
     const { claimId } = await returnClaim2(t, userId);
     await as.mutation(api.claims.confirmCredit, { claimId, cents: 1_000, evidence: "e", idempotencyKey: "k0" });
     const evidence = "d".repeat(10_000);
-    const result = await as.mutation(api.claims.recordLaterDebit, { claimId, cents: 100, evidence, idempotencyKey: "k1" });
-    expect(result.status).toBe("reopened"); // the prior confirmCredit fully settled the claim; this debit reopens it
+    await expect(
+      as.mutation(api.claims.recordLaterDebit, { claimId, cents: 100, evidence, idempotencyKey: "k1" }),
+    ).rejects.toThrow(/evidence must be at most 2000 characters/);
   });
 
-  it("adjustExpected currently accepts a 10,000-char reason string (no app-level bound; PLAN.md T02, current behaviour)", async () => {
+  it("adjustExpected rejects a 10,000-char reason string (T16: bounded at 500 chars)", async () => {
     const t = setup();
     const { as, userId } = await signedIn(t);
     const { claimId } = await returnClaim2(t, userId);
     const reason = "r".repeat(10_000);
-    await as.mutation(api.claims.adjustExpected, { claimId, expectedCents: 500, reason });
-    const note = (await t.run((ctx) => ctx.db.query("claimNotes").collect()))[0];
-    expect(note.text.length).toBe(10_000);
+    await expect(
+      as.mutation(api.claims.adjustExpected, { claimId, expectedCents: 500, reason }),
+    ).rejects.toThrow(/reason must be at most 500 characters/);
+    expect(await t.run((ctx) => ctx.db.query("claimNotes").collect())).toHaveLength(0);
   });
 
-  it("confirmCredit currently accepts a 10,000-char idempotencyKey (no app-level bound; PLAN.md T02, current behaviour)", async () => {
+  it("confirmCredit rejects a 10,000-char idempotencyKey (T16: bounded at 128 chars)", async () => {
     const t = setup();
     const { as, userId } = await signedIn(t);
     const { claimId } = await returnClaim2(t, userId);
     const idempotencyKey = "k".repeat(10_000);
-    const result = await as.mutation(api.claims.confirmCredit, { claimId, cents: 100, evidence: "e", idempotencyKey });
-    expect(result.status).toBe("detected"); // partial credit against a 1,000-cent expectation: not yet settled
+    await expect(
+      as.mutation(api.claims.confirmCredit, { claimId, cents: 100, evidence: "e", idempotencyKey }),
+    ).rejects.toThrow(/idempotencyKey must be at most 128 characters/);
   });
 
   /**
-   * FINDING (convex/claims.ts: `confirmCredit`/`recordLaterDebit`/
-   * `adjustExpected`, and convex/lib/money.ts `assertPositiveCents`): none
-   * of `evidence`, `reason` or `idempotencyKey` has an application-level
-   * length cap (unlike every other free-text field in the app -- draft
-   * subject/body, claim notes elsewhere, purchase/item names -- which all
-   * go through `boundedLine`/`.slice(...)`). A single call can therefore
-   * write a multi-megabyte string into a `ledgerEvents`/`claimNotes` row.
-   * Confirmed empirically: a ~1.5 MB `evidence` string is accepted with no
-   * error under this harness (the mock backend does not itself enforce
-   * Convex's ~1 MB per-string/per-document platform limit, so this proves
-   * the APPLICATION has no bound of its own, not merely that the platform
-   * limit wasn't hit). This is the same gap PLAN.md's T02 contract already
-   * flags for the 10,000-char case ("records current behaviour; T16
-   * tightens and updates the expectation"); this test quantifies it at
-   * roughly 150x that size to make the missing bound concrete for T16.
+   * FINDING, now fixed (T16; was convex/claims.ts: `confirmCredit`/
+   * `recordLaterDebit`/`adjustExpected`, and convex/lib/money.ts
+   * `assertPositiveCents`): none of `evidence`, `reason` or `idempotencyKey`
+   * had an application-level length cap (unlike every other free-text field
+   * in the app -- draft subject/body, claim notes elsewhere, purchase/item
+   * names -- which all go through `boundedLine`/`.slice(...)`), so a single
+   * call could write a multi-megabyte string into a `ledgerEvents`/
+   * `claimNotes` row. This test previously confirmed a ~1.5 MB `evidence`
+   * string was accepted with no error; `claims.ts`'s new 2,000-char bound
+   * (convex/lib/text.ts's `assertMaxChars`) now rejects it 750x under that
+   * size, so this is a passing regression test, not an `it.fails` finding.
    */
-  it.fails(
-    "FINDING: confirmCredit should reject an unbounded (~1.5MB) evidence string, but currently accepts it",
-    async () => {
-      const t = setup();
-      const { as, userId } = await signedIn(t);
-      const { claimId } = await returnClaim2(t, userId);
-      const evidence = "x".repeat(1_500_000);
-      await expect(
-        as.mutation(api.claims.confirmCredit, { claimId, cents: 100, evidence, idempotencyKey: "big" }),
-      ).rejects.toThrow();
-    },
-  );
+  it("confirmCredit rejects an unbounded (~1.5MB) evidence string (T16, was a FINDING)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { claimId } = await returnClaim2(t, userId);
+    const evidence = "x".repeat(1_500_000);
+    await expect(
+      as.mutation(api.claims.confirmCredit, { claimId, cents: 100, evidence, idempotencyKey: "big" }),
+    ).rejects.toThrow(/evidence must be at most 2000 characters/);
+  });
 });

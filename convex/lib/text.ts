@@ -21,3 +21,15 @@ export function boundedLine(s: string, label: string, max: number): string {
   if (line.length > max) throw new ConvexError(`${label} must be at most ${max} characters`);
   return line;
 }
+
+/**
+ * A length-only ceiling, refusing (not truncating or cleaning) a value
+ * longer than `max`. Unlike `boundedLine`, this does not strip control
+ * characters or trim -- for callers that already control the string's shape
+ * (ledger evidence, claim notes, idempotency keys) and just need a cap
+ * (P08, T16).
+ */
+export function assertMaxChars(s: string, label: string, max: number): string {
+  if (s.length > max) throw new ConvexError(`${label} must be at most ${max} characters`);
+  return s;
+}
