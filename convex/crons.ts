@@ -44,4 +44,11 @@ crons.interval("mail sweep", { hours: 1 }, internal.notify.sweepStalled, {});
  */
 crons.interval("retention sweep", { hours: 24 }, internal.retention.sweep, {});
 
+/**
+ * Confirmed other-store offers (W3), once a day at 13:00 UTC, which is early morning on the US west
+ * coast where the demo account lives. Convex crons are UTC and do not follow daylight saving, so this
+ * drifts by an hour in winter; a re-check is not time-critical, it just has to be recent.
+ */
+crons.cron("offer prices", "0 13 * * *", internal.offers.sweepRechecks, {});
+
 export default crons;
