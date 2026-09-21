@@ -23,11 +23,43 @@ export function ExampleChip() {
  * Marks a section as a sampled window rather than the account's full history
  * (D72: a truncated page is labelled, never presented as a total). `windowNote`
  * is the server's description of exactly what was sampled, shown as a tooltip.
+ *
+ * F-T19-1: was `text-gray-500` on `bg-gray-100`, 4.39:1 (fails the 4.5:1 AA
+ * minimum for normal text). `text-gray-600` on the same `bg-gray-100`
+ * measures 6.87:1 (ratios from the Tailwind v4 oklch theme tokens: gray-100
+ * oklch(96.7% 0.003 264.542) -> #f3f4f6, gray-600 oklch(44.6% 0.03 256.802)
+ * -> #4a5565, converted to linear sRGB then WCAG relative luminance, same
+ * method as T24a's D114 fixes).
  */
 export function RecentNote({ windowNote }: { windowNote: string }) {
   return (
-    <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500" title={windowNote}>
+    <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600" title={windowNote}>
       Recent
+    </span>
+  );
+}
+
+/**
+ * A muted, text-based flag for a price that may not be current (F-T24b-2):
+ * `insights.trackedTable`'s `priceStale` is true when the row's primary-store
+ * price is missing or older than `STALE_PRICE_MS`, in which case it is
+ * excluded from `lowestCents`/`lowestDomain` -- this badge is what lets a
+ * viewer know a fresher number was preferred (or none was available) instead
+ * of silently disagreeing with what the store itself currently shows. The
+ * word "Stale" carries the meaning without colour; `aria-label` gives screen
+ * readers the fuller sentence in place of the terse visible text.
+ * bg-gray-100/text-gray-600 reuses `RecentNote`'s pill (6.87:1, see above)
+ * rather than the app's `yellow-500/20` + `yellow-700` chip tone, which
+ * measures only 4.32:1 against its own tinted background and would fail AA.
+ */
+export function StaleBadge() {
+  return (
+    <span
+      className="inline-flex shrink-0 items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600"
+      aria-label="Primary store price may be missing or out of date"
+      title="Primary store price may be missing or out of date"
+    >
+      Stale
     </span>
   );
 }

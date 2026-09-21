@@ -7,7 +7,7 @@ import { cardClass, cardTitleClass } from "../../lib/ui";
 import { normalizeDomain, storeInfo } from "../../lib/stores";
 import { Icon } from "./icons";
 import type { TrackedRow } from "./model";
-import { Bone, PctChange, controlClass, focusRing } from "./parts";
+import { Bone, PctChange, StaleBadge, controlClass, focusRing } from "./parts";
 
 type StatusFilter = "all" | "active" | "paused" | "bought";
 type SortKey = "name" | "lowest";
@@ -226,14 +226,25 @@ export function TrackedTable({ rows }: { rows: TrackedRow[] }) {
   const onSort = (key: SortKey) =>
     setSort((current) => (current?.key !== key ? { key, dir: "asc" } : current.dir === "asc" ? { key, dir: "desc" } : null));
 
+  // F-T24b-2: `priceStale` (true when the primary store's own price is missing or
+  // older than STALE_PRICE_MS) excludes that price from `lowestCents`/`lowestDomain`
+  // server-side; the em-dash below already covered "nothing priced at all", but gave
+  // no signal when staleness was the reason, or that a fresher price was preferred
+  // over the primary store's. `StaleBadge` makes that visible as text, not colour.
   const lowest = (row: TrackedRow) =>
     row.lowestCents === null ? (
-      <span className="text-gray-400" aria-label="No price read yet">
-        —
+      <span className="inline-flex items-center gap-1.5">
+        <span className="text-gray-400" aria-label={row.priceStale ? "No current price: the primary store's price is missing or out of date" : "No price read yet"}>
+          —
+        </span>
+        {row.priceStale && <StaleBadge />}
       </span>
     ) : (
       <>
-        <span className="font-semibold tabular-nums text-gray-900">{fmt(row.lowestCents, row.currency ?? "USD")}</span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="font-semibold tabular-nums text-gray-900">{fmt(row.lowestCents, row.currency ?? "USD")}</span>
+          {row.priceStale && <StaleBadge />}
+        </span>
         {row.lowestDomain && <span className="block text-xs text-gray-400">{storeInfo(row.lowestDomain).name}</span>}
       </>
     );

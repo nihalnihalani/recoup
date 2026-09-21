@@ -182,22 +182,18 @@ test.describe("resilience", () => {
     //     `text-gray-500` on `bg-gray-100`, #6a7282 on #f3f4f6, 4.39:1 vs
     //     4.5:1 required -- reproduces on both desktop-chromium and mobile.
     //     Not ActivityTimeline.tsx/Watching.tsx (T19's own contrast-line
-    //     scope) and not parts.tsx (outside T19's file ownership), so left
-    //     for the next frontend owner rather than fixed here.
-    const BOARD_CONTRAST_FIXME =
-      "NEW finding once ActivityTimeline.tsx's own timestamp was fixed (F-T24-1/D114/T19) unmasked a THIRD " +
-      "violation on the same page (axe only reports what it can see): src/components/dashboard/parts.tsx:29's " +
-      "RecentNote pill, #6a7282 (text-gray-500) on #f3f4f6 (bg-gray-100), 4.39:1 vs required 4.5:1 (axe " +
-      "color-contrast/serious, reproduces on desktop-chromium and mobile); not T19's files to fix " +
-      "(ActivityTimeline.tsx/Watching.tsx contrast lines only), flagged for the next frontend owner";
-
-    test.fixme(
-      `Board has no serious/critical accessibility violations -- ${BOARD_CONTRAST_FIXME}`,
-      async ({ leadPage: page }) => {
-        const serious = await gotoAndScan(page, "/");
-        expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
-      },
-    );
+    //     scope) and not parts.tsx (outside T19's file ownership), was left
+    //     for the next frontend owner rather than fixed there.
+    //
+    // F-T19-1 (fixed by T24c): `RecentNote` moved from `text-gray-500` to
+    // `text-gray-600` (#4a5565 on #f3f4f6, 6.87:1 -- same conversion method
+    // as F-T20-1 above). Re-verified against the live adorable-lion-138
+    // deployment on both desktop-chromium and mobile: Board now has no
+    // serious/critical violations, so this is a real test again.
+    test("Board has no serious/critical accessibility violations", async ({ leadPage: page }) => {
+      const serious = await gotoAndScan(page, "/");
+      expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
+    });
 
     test("Watching has no serious/critical accessibility violations", async ({ leadPage: page }) => {
       const serious = await gotoAndScan(page, "/watching");
