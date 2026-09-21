@@ -342,7 +342,11 @@ describe("tombstoned account: scheduled/webhook readers skip it (D87)", () => {
 // ---------------------------------------------------------------------------
 
 describe("F-T21-1 (MEDIUM): inbound webhook mid-deletion is not gated on isTombstoned", () => {
-  it.fails(
+  // T18.2/D115 6b-3: `inbound.onMessageReceived` now checks `isTombstoned`
+  // right after resolving the profile, so this flips from `it.fails` to a
+  // normal passing assertion (was failing against the pre-fix code: the
+  // event used to route to "intake"/"reply", never "ignored").
+  it(
     "routes an inbound webhook for a tombstoned-but-not-yet-purged inbox to ignored",
     async () => {
       const t = setup();

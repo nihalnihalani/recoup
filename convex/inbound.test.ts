@@ -284,3 +284,66 @@ describe("inbound.onMessageReceived — D112 6a-2 per-inbox rate limit", () => {
     expect((await events(t)).find((e) => e.externalId === "evt-reset-after")!.route).toBe("intake");
   });
 });
+
+// ---------------------------------------------------------------------------
+// D115 6b-3 / D116: checkpoint 6b's devil's-advocate repros F4a and F5
+// (reviewer's scratchpad da6b.test.ts, ported here as regression tests).
+// Both fail against the pre-T18.2 code (no tombstone gate in
+// `onMessageReceived`, and `userId` was only ever patched on the reply/
+// intake branches) and pass once the fix lands.
+// ---------------------------------------------------------------------------
+
+describe("inbound.onMessageReceived — D115 6b-3 tombstone gate (checkpoint 6b F4a)", () => {
+  it("a webhook for a tombstoned-but-not-yet-purged account's inbox is routed to ignored, never reply/intake", async () => {
+    const t = setup();
+    const { userId } = await fixture(t);
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }),
+    );
+
+    // Deliberately no scheduled purge is run: this is exactly the window
+    // between `requestDeletion` and the moment a real purge reaches
+    // `profiles`, which a real purge run also passes through.
+    await t.mutation(internal.inbound.onMessageReceived, {
+      eventId: "evt-mid-purge",
+      thread: {},
+      message: message({ message_id: "m-mid-purge" }),
+    });
+
+    const row = (await events(t)).find((e) => e.externalId === "evt-mid-purge")!;
+    // Before the fix this routed to "intake" (findReplyClaim finds nothing
+    // for an unrecognised message, same as the "routes an unrecognised
+    // message to intake" case above) and scheduled `intake.processEvent`.
+    expect(row.route).toBe("ignored");
+    expect(row.status).toBe("succeeded");
+    expect(row.summary).toBe("Ignored: account deleted");
+    expect(row.userId).toBe(userId); // 6b-7: still owned, even on the ignored branch.
+  });
+});
+
+describe("inbound.onMessageReceived — D115 6b-7 owned rows (checkpoint 6b F5)", () => {
+  it("a rate-limited inbound row still carries userId, so an account-deletion purge can find it", async () => {
+    const t = setup();
+    const { userId } = await fixture(t);
+    for (let i = 0; i < 60; i++) {
+      await t.mutation(internal.inbound.onMessageReceived, {
+        eventId: `evt-owned-${i}`,
+        thread: {},
+        message: message({ message_id: `m-owned-${i}` }),
+      });
+    }
+    await t.mutation(internal.inbound.onMessageReceived, {
+      eventId: "evt-owned-61",
+      thread: {},
+      message: message({ message_id: "m-owned-61" }),
+    });
+
+    const ignored = (await events(t)).find((e) => e.externalId === "evt-owned-61")!;
+    expect(ignored.route).toBe("ignored");
+    expect(ignored.summary).toMatch(/rate limited/i);
+    // Before the fix this row's `userId` was never set: a rate-limited row
+    // for a REAL, resolved inbox kept the mail text forever with no owner
+    // for the account-deletion purge to ever find.
+    expect(ignored.userId).toBe(userId);
+  });
+});

@@ -5,6 +5,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { tokenFromSubject } from "./lib/ledger";
 import { sanitizeError } from "./lib/errors";
 import { rateLimiter } from "./lib/rateLimits";
+import { isTombstoned } from "./lib/accountState";
 
 /** How much of a message body we keep for the retry payload (D14). */
 const MAX_TEXT_CHARS = 60_000;
@@ -141,6 +142,31 @@ export const onMessageReceived = internalMutation({
           status: "succeeded",
           route: "ignored",
           summary: "Message arrived for an inbox this app does not know.",
+        });
+        return null;
+      }
+
+      // D115 6b-7: as soon as the inbox resolves to an owner, the row is
+      // patched with that `userId` -- before any further branching (rate
+      // limit, tombstone, reply vs. intake) -- so every downstream outcome,
+      // including one that stops here (rate-limited/ignored), leaves an
+      // OWNED row the account-deletion purge can find. Before this, only the
+      // reply/intake branches below ever set `userId`, so a rate-limited or
+      // early-refused row for a real inbox kept the mail text forever with
+      // no owner to purge it (checkpoint 6b, F5).
+      await ctx.db.patch(eventId, { userId: profile.userId });
+
+      // D115 6b-3: a tombstoned (deleting/deleted) owner's inbox is routed
+      // to ignored and nothing is scheduled -- the live webhook path used to
+      // have no gate at all, unlike every scheduled sweep (D87), so mail for
+      // an account mid-purge (or already gone) could still open a claim or
+      // write a ledger event that the purge pass already behind it would
+      // never see again.
+      if (await isTombstoned(ctx, profile.userId)) {
+        await ctx.db.patch(eventId, {
+          status: "succeeded",
+          route: "ignored",
+          summary: "Ignored: account deleted",
         });
         return null;
       }
