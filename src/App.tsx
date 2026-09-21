@@ -6,6 +6,7 @@ import Claim from "./pages/Claim";
 import Purchase from "./pages/Purchase";
 import Settings from "./pages/Settings";
 import SignIn from "./pages/SignIn";
+import Watching from "./pages/Watching";
 
 export default function App() {
   return (
@@ -26,6 +27,7 @@ export default function App() {
             <Route path="/" element={<Board />} />
             <Route path="/purchases/:id" element={<Purchase />} />
             <Route path="/claims/:id" element={<Claim />} />
+            <Route path="/watching" element={<Watching />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>

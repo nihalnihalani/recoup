@@ -107,3 +107,4 @@ Pulled only after I6 passes, one item at a time, each with its own small exit ch
 | I5 | not run; known bugs pre-fixed | (this commit) | H2 (lost replies: retry with backoff, park as failed, user can re-run) and H4 (display-name From header) fixed with tests. |
 | I6 | **passed** 2026-09-20 | `b93d19f` | Real Target product page: observed $499.99 against $549.99 paid, claim opened for $50.00, countdown 9d 12h, Board OWED $50.00. A wrong product URL correctly reports 'page does not price this product'. |
 | I7 | not started | | |
+| W1 + W1b | **passed** 2026-09-20 | (this commit) | Pasted a real Target product link on the new Watching page: name and $499.99 read from the page, target $449.99 stored, verdict 'Not enough history yet' with a plain reason. Backend: `watches`/`watchChecks`, bounded hourly sweep, per-watch cooldown and per-user caps, pure `lib/verdict.ts`; 336 tests. Next: W2 drop email, W4 'I bought it', W3 other stores, T1 copy. |
