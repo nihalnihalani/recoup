@@ -1,12 +1,22 @@
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useAuthActions } from "@convex-dev/auth/react";
+import { useAction, useConvex, useMutation, useQuery } from "convex/react";
 import { type ReactNode, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import {
+  EXPORT_CLOSE,
+  EXPORT_TABLES,
+  exportFilename,
+  exportPreamble,
+  exportTableChunk,
+  fetchAllRows,
+} from "../lib/accountExport";
 import { ErrorBox, Loading } from "../components/States";
 import {
   errorText,
   inputClass,
+  labelClass,
   pageTitleClass,
   primaryButtonClass,
   secondaryButtonClass,
@@ -21,7 +31,28 @@ const SUPPRESSION_COPY: Record<string, string> = {
   user_unsubscribed: "Alerts paused: you unsubscribed from price alerts. Turn alerts back on to resume.",
 };
 
+/** Exact phrase `api.account.requestDeletion` requires (T18 contract, verbatim). */
+const DELETE_CONFIRMATION_PHRASE = "delete my account";
+
+const destructiveButtonClass =
+  "inline-flex items-center justify-center gap-2 rounded-xl bg-red-700 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-50";
+
 export default function Settings() {
+  const deletionStatus = useQuery(api.account.deletionStatus);
+
+  // A still-signed-in tab while deletion is underway (requested here, or in
+  // another tab/device) gets a read-only status page instead of the normal
+  // Settings screen — every mutation below would fail anyway once
+  // `requireUserId` sees the tombstone (`lib/access.ts`), so this avoids
+  // showing controls that cannot work.
+  if (deletionStatus && (deletionStatus.status === "deleting" || deletionStatus.status === "deleted")) {
+    return <DeletionInProgress status={deletionStatus} />;
+  }
+
+  return <SettingsContent />;
+}
+
+function SettingsContent() {
   const profile = useQuery(api.profiles.me);
   const attention = useQuery(api.intake.needsAttention);
   const alerts = useQuery(api.alerts.settings);
@@ -29,6 +60,10 @@ export default function Settings() {
   const ensureInbox = useAction(api.profiles.ensureInbox);
   const paste = useAction(api.intake.paste);
   const retryEvent = useMutation(api.intake.retryEvent);
+  const requestDeletion = useMutation(api.account.requestDeletion);
+  const convex = useConvex();
+  const { signOut } = useAuthActions();
+  const navigate = useNavigate();
 
   const [pasted, setPasted] = useState("");
   const [busy, setBusy] = useState(false);
@@ -39,6 +74,15 @@ export default function Settings() {
   const [alertsError, setAlertsError] = useState<string | null>(null);
   const [alertsBusy, setAlertsBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportProgress, setExportProgress] = useState<{ table: string; rows: number } | null>(null);
+  const [exportDone, setExportDone] = useState(false);
+
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   async function handleToggleAlerts(enabled: boolean) {
     setAlertsError(null);
@@ -99,6 +143,75 @@ export default function Settings() {
     }
   }
 
+  /**
+   * Walks every table `api.account.exportPage` serves, one table and one
+   * page at a time (`useConvex().query(...)` called imperatively in this
+   * click handler — not a hook in a loop, which React disallows), and
+   * streams the result straight into `Blob` parts (`exportPreamble` /
+   * `exportTableChunk` / `EXPORT_CLOSE` from `src/lib/accountExport.ts`) so
+   * the browser never holds a second, fully-serialized copy of the export
+   * in memory. The server pages at 200 rows; nothing here reads a whole
+   * table at once either.
+   */
+  async function handleExport() {
+    setExportError(null);
+    setExportDone(false);
+    setExportProgress(null);
+    setExportBusy(true);
+    try {
+      const exportedAt = Date.now();
+      const parts: string[] = [exportPreamble(exportedAt)];
+      for (let i = 0; i < EXPORT_TABLES.length; i++) {
+        const table = EXPORT_TABLES[i];
+        setExportProgress({ table, rows: 0 });
+        const rows = await fetchAllRows(
+          (cursor) => convex.query(api.account.exportPage, { table, cursor }),
+          (rowsSoFar) => setExportProgress({ table, rows: rowsSoFar }),
+        );
+        parts.push(exportTableChunk(table, rows, i === 0));
+      }
+      parts.push(EXPORT_CLOSE);
+
+      const blob = new Blob(parts, { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = exportFilename(new Date(exportedAt));
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+
+      setExportDone(true);
+      setExportProgress(null);
+    } catch (error) {
+      setExportError(errorText(error));
+      setExportProgress(null);
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  /**
+   * `api.account.requestDeletion` tombstones the account and revokes every
+   * session in one transaction (T18); this client then signs its own tab out
+   * (the still-connected socket would otherwise keep working until the token
+   * naturally expires) and lands on `/signin` with a static, server-free
+   * confirmation carried as route state — never a second server call.
+   */
+  async function handleDeleteAccount() {
+    setDeleteError(null);
+    setDeleteBusy(true);
+    try {
+      await requestDeletion({ confirmation: deleteConfirmation });
+      await signOut();
+      navigate("/signin", { replace: true, state: { accountDeleted: true } });
+    } catch (error) {
+      setDeleteError(errorText(error));
+      setDeleteBusy(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -106,9 +219,14 @@ export default function Settings() {
           <h1 className={pageTitleClass}>Settings</h1>
           <p className="mt-1 text-sm text-gray-500">Forward an order confirmation, or paste one here.</p>
         </div>
-        <Link to="/" className={secondaryButtonClass}>
-          Back to the board
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link to="/privacy" className="rounded text-sm font-semibold text-gray-500 underline decoration-gray-300 underline-offset-4 outline-none transition hover:text-gray-900 hover:decoration-gray-900 focus-visible:ring-2 focus-visible:ring-violet-500">
+            Privacy
+          </Link>
+          <Link to="/" className={secondaryButtonClass}>
+            Back to the board
+          </Link>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -275,7 +393,8 @@ export default function Settings() {
                         </span>
                       </td>
                       <td className="min-w-64 px-3 py-3 text-gray-900">
-                        {event.summary ?? event.lastError ?? "No detail recorded."}
+                        {/* F-T16-3: `lastError` is always undefined on the wire now (T16); `errorSummary` is the real sanitized projection. */}
+                        {event.summary ?? event.errorSummary ?? "No detail recorded."}
                       </td>
                       <td className="whitespace-nowrap px-3 py-3 text-gray-500">
                         {event.kind}
@@ -302,6 +421,114 @@ export default function Settings() {
           )}
           {retryError && <ErrorBox error={retryError} className="mt-3" />}
         </SettingsCard>
+
+        <SettingsCard title="Export your data" icon={<DownloadIcon />}>
+          <div className="space-y-3">
+            <p className="text-sm text-gray-500">
+              Downloads everything Recoup has about your account — purchases, items, claims, the ledger, drafts,
+              replies, watches, price history and the mail log — as one JSON file on your own device.
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void handleExport()}
+                disabled={exportBusy}
+                className={secondaryButtonClass}
+              >
+                {exportBusy ? "Exporting…" : "Export my data"}
+              </button>
+              {exportBusy && exportProgress && (
+                <p role="status" aria-live="polite" className="text-sm text-gray-500 tabular-nums">
+                  {exportProgress.table}: {exportProgress.rows} row{exportProgress.rows === 1 ? "" : "s"}…
+                </p>
+              )}
+              {!exportBusy && exportDone && (
+                <p role="status" className="flex items-center gap-2 text-sm font-medium text-green-700">
+                  <span aria-hidden="true" className="size-2 rounded-full bg-green-500" />
+                  Downloaded.
+                </p>
+              )}
+            </div>
+            {exportError && <ErrorBox error={exportError} className="mt-1" />}
+          </div>
+        </SettingsCard>
+
+        <SettingsCard title="Delete account" icon={<TrashIcon />} className="lg:col-span-2">
+          <div className="space-y-4">
+            <div className="space-y-2 text-sm text-gray-500">
+              <p>
+                Deletes your account now, not just hides it: every purchase, item, claim, ledger entry, draft,
+                reply, watch and mail log row is removed, including your money history.
+              </p>
+              <p>
+                What stays: an anonymous tombstone recording that an account existed and was deleted — no purchases,
+                claims or messages are attached to it. Deleting your Recoup inbox with the mail provider can take a
+                little time; Recoup keeps retrying until it succeeds. Emails already sent to stores cannot be
+                recalled or unsent.
+              </p>
+            </div>
+
+            <div>
+              <label htmlFor="delete-confirmation" className={labelClass}>
+                Type <span className="font-mono font-semibold text-gray-900">{DELETE_CONFIRMATION_PHRASE}</span> to
+                confirm
+              </label>
+              <input
+                id="delete-confirmation"
+                type="text"
+                value={deleteConfirmation}
+                onChange={(event) => setDeleteConfirmation(event.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+                className={`${inputClass} max-w-sm`}
+              />
+            </div>
+
+            <button
+              type="button"
+              onClick={() => void handleDeleteAccount()}
+              disabled={deleteBusy || deleteConfirmation !== DELETE_CONFIRMATION_PHRASE}
+              className={destructiveButtonClass}
+            >
+              {deleteBusy ? "Deleting…" : "Delete my account permanently"}
+            </button>
+
+            {deleteError && <ErrorBox error={deleteError} />}
+          </div>
+        </SettingsCard>
+      </div>
+    </div>
+  );
+}
+
+/** Read-only status page shown to a still-signed-in tab while `api.account.deletionStatus` reports `deleting`/`deleted` — every mutation would fail once `requireUserId` sees the tombstone, so no controls are offered, only the current status and a way to sign out. */
+function DeletionInProgress({
+  status,
+}: {
+  status: { status: "deleting" | "deleted"; inboxDeleted?: boolean; attempts: number };
+}) {
+  const { signOut } = useAuthActions();
+  return (
+    <div className="flex min-h-[60vh] items-center justify-center">
+      <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-6 text-center">
+        <h1 className="text-xl font-semibold tracking-tight text-gray-900">
+          {status.status === "deleted" ? "Account deleted" : "Deletion in progress"}
+        </h1>
+        <p className="mt-2 text-sm leading-relaxed text-gray-500">
+          {status.status === "deleted"
+            ? "This account and its data have been removed."
+            : "Your data is being removed. This can take a little while and does not need this page open."}
+        </p>
+        {status.status === "deleting" && (
+          <p className="mt-2 text-xs text-gray-500">
+            {status.inboxDeleted === false
+              ? "Removing your data is finished; deleting your Recoup inbox with the mail provider is still retrying."
+              : "This page will not update further — reload to check status."}
+          </p>
+        )}
+        <button type="button" onClick={() => void signOut()} className={`mt-5 ${primaryButtonClass}`}>
+          Sign out
+        </button>
       </div>
     </div>
   );
@@ -439,6 +666,27 @@ function CheckIcon() {
   return (
     <Line className="size-4">
       <path d="M5 12.500l4.500 4.500L19 7.500" />
+    </Line>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <Line>
+      <path d="M12 4v11" />
+      <path d="M7.500 11 12 15.500 16.500 11" />
+      <path d="M4.500 17.500v1.750a1.250 1.250 0 0 0 1.250 1.250h12.500a1.250 1.250 0 0 0 1.250-1.250V17.500" />
+    </Line>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <Line>
+      <path d="M5 7h14" />
+      <path d="M9 7V5.500a1.500 1.500 0 0 1 1.500-1.500h3a1.500 1.500 0 0 1 1.500 1.500V7" />
+      <path d="M7 7l1 12.500A1.500 1.500 0 0 0 9.500 21h5a1.500 1.500 0 0 0 1.500-1.500L17 7" />
+      <path d="M10 11v6M14 11v6" />
     </Line>
   );
 }
