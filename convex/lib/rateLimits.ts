@@ -18,15 +18,24 @@ export const rateLimiter = new RateLimiter(components.rateLimiter, {
   authMailGlobal: { kind: "fixed window", rate: 200, period: HOUR },
   /**
    * `signUp` attempts (T05.1 F5), consumed *before* any `users`/`authAccounts`
-   * row is created. Same named config used two ways: an unkeyed call scopes
-   * one deployment-wide bucket (20/hour of new-account attempts total); a
-   * call keyed by the normalized email adds a coarse per-address floor on
-   * top (the tight per-address throttle is `authMailPerEmail`, already
-   * consumed once verification mail actually sends — this just stops a
-   * targeted burst of signUps against one address from creating rows before
-   * that limit is ever reached).
+   * row is created. Per-address only (keyed by the normalized email): a
+   * coarse floor stopping a targeted burst of signUps against one address
+   * from creating rows before the tighter `authMailPerEmail` cap is ever
+   * reached (that one only fires once verification mail actually sends).
+   * The deployment-wide counterpart is the separate `authSignUpGlobal`
+   * config below (N4, D99) — they used to share this one name and rate,
+   * which meant a 20/hour *global* cap on signUps across every address,
+   * i.e. a self-inflicted registration lockout, not an abuse control.
    */
   authSignUp: { kind: "fixed window", rate: 20, period: HOUR },
+  /**
+   * N4 (D99): deployment-wide `signUp` ceiling, independent of the
+   * per-address `authSignUp` bucket above. Token bucket (not fixed window)
+   * so a legitimate burst right after a marketing push isn't punished by
+   * landing on a hard window edge; 200/hour, default capacity 200 (== rate,
+   * per the component's `configWithDefaults`) so it also starts full.
+   */
+  authSignUpGlobal: { kind: "token bucket", rate: 200, period: HOUR },
   /** AgentMail inbox provisioning per user (T18 reprovision / signUp race guard). */
   inboxProvision: { kind: "fixed window", rate: 1, period: 5 * MINUTE },
   /** Manual "recheck now" on one stalled mailLog row (T06). */
