@@ -3,7 +3,7 @@ import { mutation, query } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
 import { ownedItem, ownedPurchase, requireUserId } from "./lib/access";
 import { netRecovered } from "./lib/ledger";
-import { claimsWithBalance } from "./lib/balance";
+import { claimsWithBalance, balanceValidator } from "./lib/balance";
 import { assertCents, assertCurrency, assertNonEmpty, assertQty, assertTimestamp } from "./lib/money";
 import { cancelPending } from "./followUps";
 import { normalizeDomain } from "./lib/policyText";
@@ -13,6 +13,7 @@ import { parseProductUrl } from "./lib/watchUrl";
 import { boundedLine } from "./lib/text";
 import { schedulePolicyFetch } from "./policies";
 import { assertCoarseNow } from "./watches";
+import schema, { processedStatus, verdictValidator } from "./schema";
 import {
   MAX_ITEMS_PER_PURCHASE,
   MAX_ITEM_NAME_CHARS,
@@ -44,6 +45,33 @@ function cleanOrderRef(orderRef: string | undefined): string | undefined {
   if (orderRef === undefined) return undefined;
   return boundedLine(orderRef, "orderRef", MAX_ORDER_REF_CHARS) || undefined;
 }
+
+/** A claim doc extended with its derived (never stored) balance -- shared by `get` and `board`'s returns validators. */
+const claimWithBalance = schema.doc("claims").extend({ balance: balanceValidator });
+
+/** `get`'s per-item row: the item document plus its price history and derived read-only fields. */
+const itemWithHistory = schema.doc("items").extend({
+  claims: v.array(claimWithBalance),
+  priceChecks: v.array(schema.doc("priceChecks")),
+  verdict: verdictValidator,
+});
+
+/** `board`'s per-purchase row. */
+const boardRow = v.object({
+  purchase: schema.doc("purchases"),
+  items: v.array(schema.doc("items")),
+  claims: v.array(claimWithBalance.extend({ item: v.optional(schema.doc("items")) })),
+});
+
+/** `board`'s "needs attention" list: D58's explicit field allowlist (never the raw `lastError`). */
+const boardAttentionRow = v.object({
+  _id: v.id("processedEvents"),
+  status: processedStatus,
+  kind: v.string(),
+  summary: v.optional(v.string()),
+  attempts: v.number(),
+  errorSummary: v.optional(v.string()),
+});
 
 const itemInput = v.object({
   name: v.string(),
@@ -196,6 +224,7 @@ export const confirm = mutation({
 
 export const setReturned = mutation({
   args: { itemId: v.id("items"), returned: v.boolean(), returnedAt: v.optional(v.number()) },
+  returns: v.null(),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     await ownedItem(ctx, args.itemId, userId);
@@ -204,6 +233,7 @@ export const setReturned = mutation({
       returned: args.returned,
       returnedAt: args.returned ? (args.returnedAt ?? Date.now()) : undefined,
     });
+    return null;
   },
 });
 
@@ -234,6 +264,11 @@ const POLICY_KINDS = ["price_adjustment", "returns"] as const;
 
 export const get = query({
   args: { purchaseId: v.id("purchases"), now: v.optional(v.number()) },
+  returns: v.object({
+    purchase: schema.doc("purchases"),
+    items: v.array(itemWithHistory),
+    policies: v.array(schema.doc("policies")),
+  }),
   handler: async (ctx, { purchaseId, now: argsNow }) => {
     const userId = await requireUserId(ctx);
     const purchase = await ownedPurchase(ctx, purchaseId, userId);
@@ -291,6 +326,11 @@ export const get = query({
 
 export const board = query({
   args: {},
+  returns: v.object({
+    purchases: v.array(boardRow),
+    totals: v.object({ owed: v.number(), asked: v.number(), confirmed: v.number() }),
+    attention: v.array(boardAttentionRow),
+  }),
   handler: async (ctx) => {
     const userId = await requireUserId(ctx);
     // Archived purchases are hidden everywhere (D47).
