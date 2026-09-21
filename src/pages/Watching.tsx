@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
 import { Money } from "../components/Money";
 import { ErrorBox } from "../components/States";
 import { WatchCard } from "../components/watching/WatchCard";
 import { BellIcon, Chip, IconTile, LinkIcon, TagDownIcon } from "../components/watching/parts";
+import { dropChip } from "../lib/drops";
 import {
   cardClass,
   cardTitleClass,
@@ -103,7 +105,24 @@ function AddWatch() {
 /** W2 backstop: every price-drop alert, whether or not the email went out. */
 function Drops() {
   const drops = useQuery(api.notify.drops);
+  const recheckDrop = useMutation(api.notify.recheckDrop);
+  const [recheckingId, setRecheckingId] = useState<Id<"mailLog"> | null>(null);
+  const [recheckError, setRecheckError] = useState<string | null>(null);
+
   if (drops === undefined || drops.length === 0) return null;
+
+  async function handleRecheck(mailLogId: Id<"mailLog">) {
+    setRecheckError(null);
+    setRecheckingId(mailLogId);
+    try {
+      await recheckDrop({ mailLogId });
+    } catch (error) {
+      setRecheckError(errorText(error));
+    } finally {
+      setRecheckingId(null);
+    }
+  }
+
   return (
     <section className={sectionClass} aria-labelledby="drops-title">
       <div className="flex items-center gap-3">
@@ -115,34 +134,50 @@ function Drops() {
         </h2>
       </div>
       <ul className="mt-4 divide-y divide-gray-100 border-t border-dashed border-gray-200">
-        {drops.map((drop) => (
-          <li key={drop._id} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3 text-sm">
-            <span className="min-w-0 text-gray-500">
-              <span className="font-semibold text-gray-900">{drop.watchName ?? "Item"}</span>
-              {drop.cents !== null && (
-                <>
-                  {" is now "}
-                  <span className="font-semibold tabular-nums text-green-700">
-                    <Money cents={drop.cents} currency="USD" />
+        {drops.map((drop) => {
+          const chip = dropChip(drop);
+          return (
+            <li key={drop._id} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3 text-sm">
+              <span className="min-w-0 text-gray-500">
+                <span className="font-semibold text-gray-900">{drop.watchName ?? "Item"}</span>
+                {drop.cents !== null && (
+                  <>
+                    {" is now "}
+                    <span className="font-semibold tabular-nums text-green-700">
+                      <Money cents={drop.cents} currency="USD" />
+                    </span>
+                  </>
+                )}
+                {drop.previousCents !== null && (
+                  <span className="tabular-nums text-gray-400">
+                    {" (was "}
+                    <Money cents={drop.previousCents} currency="USD" />)
                   </span>
-                </>
-              )}
-              {drop.previousCents !== null && (
-                <span className="tabular-nums text-gray-400">
-                  {" (was "}
-                  <Money cents={drop.previousCents} currency="USD" />)
-                </span>
-              )}
-            </span>
-            <span className="flex flex-wrap items-center gap-2 text-xs text-gray-400">
-              {when(drop._creationTime)}
-              <Chip tone={drop.status === "sent" ? "good" : drop.status === "failed" ? "wait" : "muted"}>
-                {drop.status === "sent" ? "Emailed" : drop.status === "failed" ? (drop.error ?? "Not emailed") : "Sending"}
-              </Chip>
-            </span>
-          </li>
-        ))}
+                )}
+              </span>
+              <span className="flex flex-wrap items-center gap-2 text-xs text-gray-400">
+                {when(drop._creationTime)}
+                <Chip tone={chip.tone}>{chip.label}</Chip>
+                {drop.status === "unknown" && drop.canRecheck && (
+                  <button
+                    type="button"
+                    disabled={recheckingId === drop._id}
+                    onClick={() => void handleRecheck(drop._id)}
+                    className={`${secondaryButtonClass} px-2.5 py-1 text-xs`}
+                  >
+                    {recheckingId === drop._id ? "Checking…" : "Check again"}
+                  </button>
+                )}
+              </span>
+            </li>
+          );
+        })}
       </ul>
+      {recheckError && (
+        <p role="alert" className="mt-3 rounded-xl border border-red-500/30 bg-red-500/5 px-3.5 py-2.5 text-sm text-red-700">
+          {recheckError}
+        </p>
+      )}
     </section>
   );
 }
