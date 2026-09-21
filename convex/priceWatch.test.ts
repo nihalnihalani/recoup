@@ -3,7 +3,7 @@ import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
-import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS } from "./limits";
+import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS, PRICE_CHECK_PER_USER_PER_TICK, WATCH_CHECK_INTERVAL_MS, WATCH_SWEEP_BUMP_MS } from "./limits";
 
 /**
  * Price watch (T09). These tests exercise `eligibleItems`, `recordCheck` and
@@ -454,6 +454,71 @@ describe("priceWatch.eligibleItems", () => {
 
     const ids = await t.query(internal.priceWatch.eligibleItems, {});
     expect(new Set(ids)).toEqual(new Set([one.itemId, two.itemId]));
+  });
+
+  it("D74: caps one user's eligible items at PRICE_CHECK_PER_USER_PER_TICK, but still lists another user's item", async () => {
+    const t = setup();
+    const heavy = await signedIn(t, "Heavy");
+    const light = await signedIn(t, "Light");
+    const heavyItems: Id<"items">[] = [];
+    for (let i = 0; i < PRICE_CHECK_PER_USER_PER_TICK + 5; i++) {
+      const { itemId } = await world(t, heavy.userId, { productUrl: `${URL}?v=${i}` });
+      heavyItems.push(itemId);
+    }
+    const { itemId: lightItemId } = await world(t, light.userId);
+
+    const ids = await t.query(internal.priceWatch.eligibleItems, {});
+    const heavyCount = ids.filter((id) => heavyItems.includes(id)).length;
+    expect(heavyCount).toBe(PRICE_CHECK_PER_USER_PER_TICK);
+    expect(ids).toContain(lightItemId);
+  });
+
+  it("items.by_nextCheck ascending: never-stamped items (undefined) sort before a stamped future one", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { itemId: stamped } = await world(t, userId, { productUrl: `${URL}?stamped` });
+    await t.run((ctx) => ctx.db.patch(stamped, { nextCheckAt: Date.now() + 999_999 }));
+    const { itemId: fresh } = await world(t, userId, { productUrl: `${URL}?fresh` });
+
+    const ids = await t.query(internal.priceWatch.eligibleItems, {});
+    expect(ids.indexOf(fresh)).toBeLessThan(ids.indexOf(stamped));
+  });
+
+  it("D87: skips a tombstoned owner's item", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { itemId } = await world(t, userId);
+    await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }));
+
+    expect(await t.query(internal.priceWatch.eligibleItems, {})).toEqual([]);
+    expect(await t.query(internal.priceWatch.itemForCheck, { itemId })).toBeNull();
+  });
+});
+
+describe("priceWatch.runAll rotation (D74)", () => {
+  const T0 = Date.UTC(2026, 8, 20, 12);
+  afterEach(() => vi.useRealTimers());
+
+  it("bumps nextCheckAt WATCH_CHECK_INTERVAL_MS for scheduled items and WATCH_SWEEP_BUMP_MS for budget-skipped ones", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { itemId: a } = await world(t, userId, { productUrl: `${URL}?a` });
+    const { itemId: b } = await world(t, userId, { productUrl: `${URL}?b` });
+    await t.run((ctx) =>
+      ctx.db.insert("usage", { day: "2026-09-20", kind: "price_check", count: GLOBAL_DAILY_BUDGETS.price_check.max - 1 }),
+    );
+
+    expect(await t.action(internal.priceWatch.runAll, {})).toBe(1);
+    const rowA = await t.run((ctx) => ctx.db.get(a));
+    const rowB = await t.run((ctx) => ctx.db.get(b));
+    // One of the two got the single remaining budget unit and a full-interval bump; the other was
+    // only rotated a short way forward so it is near the front of the next tick's scan.
+    const scheduledRow = rowA!.nextCheckAt === T0 + WATCH_CHECK_INTERVAL_MS ? rowA! : rowB!;
+    const skippedRow = scheduledRow === rowA ? rowB! : rowA!;
+    expect(scheduledRow.nextCheckAt).toBe(T0 + WATCH_CHECK_INTERVAL_MS);
+    expect(skippedRow.nextCheckAt).toBe(T0 + WATCH_SWEEP_BUMP_MS);
   });
 });
 

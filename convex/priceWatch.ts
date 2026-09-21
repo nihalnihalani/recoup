@@ -1,7 +1,7 @@
 /**
  * Price watch (T09).
  *
- * Every six hours `crons.ts` runs `runAll`, which reads a bounded page of
+ * Every two hours `crons.ts` runs `runAll`, which reads a bounded page of
  * eligible items and fans out one scheduled `checkItem` per item. `checkItem`
  * scrapes the product page through the Firecrawl component, extracts a price
  * with OpenAI, and hands the raw extraction to `recordCheck`.
@@ -28,6 +28,7 @@ import { components, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { variantMatch } from "./schema";
 import { ownedItem, requireUserId } from "./lib/access";
+import { isTombstoned } from "./lib/accountState";
 import { toCents } from "./lib/money";
 import { priceDropCents, windowEndsAt } from "./lib/ledger";
 import { openClaim } from "./claims";
@@ -36,6 +37,7 @@ import { extract } from "./lib/ai";
 import { imageUrlChange, pageImageUrl } from "./lib/imageUrl";
 import { charge } from "./lib/budget";
 import { parseProductUrl } from "./lib/watchUrl";
+import { PRICE_CHECK_PER_USER_PER_TICK, WATCH_CHECK_INTERVAL_MS, WATCH_SWEEP_BUMP_MS } from "./limits";
 
 const firecrawl = new FirecrawlClient(components.firecrawl);
 
@@ -119,13 +121,23 @@ async function latestPricePolicy(
   return latestPolicy(ctx, userId, merchantDomain, "price_adjustment");
 }
 
-/** True when an unsettled price-adjustment claim already exists for this item. */
+/**
+ * True when an unsettled price-adjustment claim already exists for this item.
+ *
+ * D93/D74: narrowed to `claims.by_item_type_status`'s `itemId`+`type` range
+ * instead of `.collect()`ing every claim on the item -- the read-budget
+ * overflow this was fixing (D80) came entirely from items that also carry
+ * dozens of dismissed, reopenable `return_credit` claims (D44); those never
+ * enter this index range at all, so a normal item (at most a handful of
+ * `price_adjustment` claims over its life) now costs a handful of reads
+ * instead of however many claims of every type it has ever had.
+ */
 async function hasOpenPriceClaim(ctx: QueryCtx, itemId: Id<"items">): Promise<boolean> {
   const claims = await ctx.db
     .query("claims")
-    .withIndex("by_item", (q) => q.eq("itemId", itemId))
+    .withIndex("by_item_type_status", (q) => q.eq("itemId", itemId).eq("type", "price_adjustment"))
     .collect();
-  return claims.some((c) => c.type === "price_adjustment" && !CLOSED_STATUSES.includes(c.status));
+  return claims.some((c) => !CLOSED_STATUSES.includes(c.status));
 }
 
 /** Cents already asked for and settled on this item's price drops; dismissed claims do not count. */
@@ -169,19 +181,37 @@ async function watchWindow(
 /**
  * Items the cron should scrape this tick. Unauthenticated on purpose: the only
  * caller is `runAll`, which runs from the cron with no identity at all.
+ *
+ * D74/D93 fairness: scans `items.by_nextCheck` ascending (items never yet
+ * stamped sort first, then the most-overdue-by-rotation ones) instead of a
+ * table-wide `order("desc")` scan, and caps each user at
+ * `PRICE_CHECK_PER_USER_PER_TICK` eligible items -- checked BEFORE any of the
+ * per-item reads below, so a user already at their cap costs nothing further
+ * this tick, however many more of their items remain in the scanned page.
+ * That ordering is also what keeps this bounded under D80's reproduced
+ * overflow (500 items x 65 claims each): `hasOpenPriceClaim` now reads only
+ * the item's own `price_adjustment` claims (see its docstring), so even
+ * scanning the full SCAN_LIMIT page costs a small, fixed multiple of
+ * SCAN_LIMIT reads, never the old O(claims-per-item) blowup. D87: a
+ * tombstoned owner's items are skipped.
  */
 export const eligibleItems = internalQuery({
   args: {},
   returns: v.array(v.id("items")),
   handler: async (ctx) => {
     const now = Date.now();
-    const items = await ctx.db.query("items").order("desc").take(SCAN_LIMIT);
+    const items = await ctx.db.query("items").withIndex("by_nextCheck").take(SCAN_LIMIT);
+    const perUser = new Map<Id<"users">, number>();
     const out: Id<"items">[] = [];
     for (const item of items) {
       if (out.length >= FANOUT_LIMIT) break;
       if (!item.productUrl) continue;
+      const count = perUser.get(item.userId) ?? 0;
+      if (count >= PRICE_CHECK_PER_USER_PER_TICK) continue; // no DB read spent on an over-cap user
+      if (await isTombstoned(ctx, item.userId)) continue;
       if (!(await watchWindow(ctx, item, now))) continue;
       if (await hasOpenPriceClaim(ctx, item._id)) continue;
+      perUser.set(item.userId, count + 1);
       out.push(item._id);
     }
     return out;
@@ -198,6 +228,8 @@ export const itemForCheck = internalQuery({
   handler: async (ctx, { itemId }) => {
     const item = await ctx.db.get(itemId);
     if (!item || !item.productUrl) return null;
+    // D87: a scheduled job outlives the account it was queued for; refuse to spend on a deleted user.
+    if (await isTombstoned(ctx, item.userId)) return null;
     // M1: rows written before every write path validated the link are re-checked here, the last stop before the scraper.
     const parsed = parseProductUrl(item.productUrl);
     if (!parsed) return null;
@@ -466,7 +498,34 @@ export async function observePrice(
 // ---------------------------------------------------------------------------
 
 /**
- * The cron target (every 6h). Idempotent: a tick with nothing eligible does
+ * Patches `items.nextCheckAt` (D74 rotation) and schedules `checkItem` for
+ * the items `runAll` decided to actually check this tick. Split out as its
+ * own mutation because `runAll` is an action (no `ctx.db`): scheduled items
+ * get bumped a full `WATCH_CHECK_INTERVAL_MS` ahead, matching the normal
+ * cadence; items that were eligible but cut purely by the global budget are
+ * bumped only `WATCH_SWEEP_BUMP_MS`, so they are near the front of the next
+ * tick's scan instead of waiting a full cycle.
+ */
+export const rotateAndSchedule = internalMutation({
+  args: { scheduleIds: v.array(v.id("items")), bumpOnlyIds: v.array(v.id("items")) },
+  returns: v.number(),
+  handler: async (ctx, { scheduleIds, bumpOnlyIds }) => {
+    const now = Date.now();
+    for (let i = 0; i < scheduleIds.length; i++) {
+      await ctx.db.patch(scheduleIds[i], { nextCheckAt: now + WATCH_CHECK_INTERVAL_MS });
+      await ctx.scheduler.runAfter(i * STAGGER_MS, internal.priceWatch.checkItem, {
+        itemId: scheduleIds[i],
+      });
+    }
+    for (const itemId of bumpOnlyIds) {
+      await ctx.db.patch(itemId, { nextCheckAt: now + WATCH_SWEEP_BUMP_MS });
+    }
+    return scheduleIds.length;
+  },
+});
+
+/**
+ * The cron target (every 2h). Idempotent: a tick with nothing eligible does
  * nothing, and an item whose claim is already open is not eligible. Fans out
  * through the scheduler rather than looping `ctx.runAction`, so one slow
  * retailer cannot eat the action time limit for every other item.
@@ -478,13 +537,11 @@ export const runAll = internalAction({
     const eligible: Id<"items">[] = await ctx.runQuery(internal.priceWatch.eligibleItems, {});
     // H3: every check is paid, so the tick schedules only what the deployment-wide daily switch still allows.
     const allowed: number = await ctx.runMutation(internal.budget.takeGlobalPriceChecks, { want: eligible.length });
-    const itemIds = eligible.slice(0, allowed);
-    for (let i = 0; i < itemIds.length; i++) {
-      await ctx.scheduler.runAfter(i * STAGGER_MS, internal.priceWatch.checkItem, {
-        itemId: itemIds[i],
-      });
-    }
-    return itemIds.length;
+    const scheduled: number = await ctx.runMutation(internal.priceWatch.rotateAndSchedule, {
+      scheduleIds: eligible.slice(0, allowed),
+      bumpOnlyIds: eligible.slice(allowed),
+    });
+    return scheduled;
   },
 });
 
