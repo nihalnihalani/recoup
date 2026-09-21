@@ -3,6 +3,8 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { applySendOutcome } from "./drafts";
+import { agentmail } from "./mail";
+import { DAILY_BUDGETS, MAX_SENDS_PER_CLAIM } from "./limits";
 
 /**
  * Drafts, the approved send and the D13 reconcile job. Nothing here talks to
@@ -102,6 +104,7 @@ async function newDraft(
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -679,5 +682,190 @@ describe("emailDomain (review H4)", () => {
     expect(emailDomain("Acme Support <Help@Acme.com>")).toBe("acme.com");
     expect(emailDomain("help@acme.com")).toBe("acme.com");
     expect(emailDomain("no address here")).toBeNull();
+  });
+});
+
+describe("the send path is not a mail relay (pre-launch review B1)", () => {
+  type T = ReturnType<typeof setup>;
+  const VICTIM = "victim@elsewhere.example";
+
+  /** The one seam to the network, replaced with a spy (same approach as notify.test.ts). */
+  function spySend() {
+    let n = 0;
+    return vi.spyOn(agentmail, "sendMessage").mockImplementation(async () => `outbound-${++n}` as never);
+  }
+
+  async function claimFor(t: T, userId: Id<"users">, token: string, flags: { claim?: boolean; purchase?: boolean } = {}) {
+    const seeded = await seed(t, userId);
+    await t.run(async (ctx) => {
+      await ctx.db.patch(seeded.claimId, { token, isExample: flags.claim });
+      if (flags.purchase) await ctx.db.patch(seeded.purchaseId, { isExample: true });
+    });
+    return seeded;
+  }
+
+  function sendArgs(draftId: Id<"drafts">, over: Record<string, unknown> = {}) {
+    return {
+      draftId, to: VICTIM, subject: "Refund for order AC-1", body: "Hello, could you confirm the credit?",
+      claimVersion: 1, draftVersion: 1, recipientConfirmed: true, ...over,
+    };
+  }
+
+  it("never sends for an example claim or an example purchase, even with the recipient ticked", async () => {
+    vi.useFakeTimers();
+    const send = spySend();
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    await withInbox(t, userId);
+    for (const flags of [{ claim: true }, { purchase: true }]) {
+      const { claimId } = await claimFor(t, userId, "EX0001", flags);
+      const draftId = await newDraft(t, claimId, userId, "");
+      await expect(as.mutation(api.drafts.approveAndSend, sendArgs(draftId))).rejects.toThrow("Example claims cannot be sent");
+    }
+    expect(send).not.toHaveBeenCalled();
+    expect(await t.run(async (ctx) => (await ctx.db.query("usage").collect()).length)).toBe(0);
+  });
+
+  // Drafting an example claim is allowed (budgeted like any draft); only sending one is refused, above.
+  it("generate refuses closed claims before charging or calling the model", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      for (const status of ["confirmed", "dismissed"] as const) {
+        const closed = await seed(t, userId, { status });
+        await expect(as.action(api.drafts.generate, { claimId: closed.claimId })).rejects.toThrow("This claim is closed");
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(await t.run(async (ctx) => (await ctx.db.query("usage").collect()).length)).toBe(0);
+      expect(await t.run(async (ctx) => (await ctx.db.query("drafts").collect()).length)).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it(`generate is charged before the model is called and stops at ${DAILY_BUDGETS.draft_generate.max} a day`, async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const { claimId } = await seed(t, userId);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("usage", {
+        userId, day: new Date().toISOString().slice(0, 10), kind: "draft_generate", count: DAILY_BUDGETS.draft_generate.max,
+      });
+    });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      await expect(as.action(api.drafts.generate, { claimId })).rejects.toThrow(/today's limit for writing drafts/);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("strips CR/LF and control characters from the subject and recipient, and caps the body", async () => {
+    vi.useFakeTimers();
+    const send = spySend();
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    await withInbox(t, userId);
+    const { claimId } = await seed(t, userId);
+    const draftId = await newDraft(t, claimId, userId, "");
+    await as.mutation(
+      api.drafts.approveAndSend,
+      sendArgs(draftId, {
+        to: " Victim@Elsewhere.example\u0000 ",
+        subject: "Refund\r\nBcc: everyone@elsewhere.example\u001b",
+        body: "x".repeat(5_000),
+      }),
+    );
+    const message = send.mock.calls[0][2] as { to: string; subject: string; text: string };
+    expect(message.to).toBe(VICTIM);
+    expect(message.subject).toBe("RefundBcc: everyone@elsewhere.example [RC-AB12CD]");
+    expect(message.subject).not.toMatch(/[\r\n]/);
+    expect(message.text).toHaveLength(1_200);
+    const draft = await t.run((ctx) => ctx.db.get(draftId));
+    expect(draft?.body).toHaveLength(1_200);
+    expect(draft?.subject).toBe(message.subject);
+
+    const second = await newDraft(t, claimId, userId, "");
+    await t.run((ctx) => ctx.db.patch(claimId, { status: "sent" }));
+    await expect(
+      as.mutation(api.drafts.approveAndSend, sendArgs(second, { draftVersion: 2, to: "a@b.example\r\nBcc: c@d.example" })),
+    ).rejects.toThrow(/valid recipient/);
+  });
+
+  it(`sends at most ${MAX_SENDS_PER_CLAIM} times per claim, ever; a bounced send does not count`, async () => {
+    vi.useFakeTimers();
+    const send = spySend();
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    await withInbox(t, userId);
+    const { claimId } = await seed(t, userId);
+
+    const sendNext = async (version: number) => {
+      const draftId = await newDraft(t, claimId, userId, "");
+      const result = as.mutation(api.drafts.approveAndSend, sendArgs(draftId, { draftVersion: version }));
+      return { draftId, result };
+    };
+    const delivered = async () => await t.run((ctx) => ctx.db.patch(claimId, { status: "sent" }));
+
+    const first = await sendNext(1);
+    await first.result;
+    // It bounced: the binding is cleared, the claim is back to drafted, and the send is not held against the claim.
+    await t.run((ctx) =>
+      applySendOutcome(ctx, first.draftId, 1, { status: "bounced", agentmailMessageId: null, threadId: null, errorMessage: "no such user" }),
+    );
+    for (let v = 2; v <= MAX_SENDS_PER_CLAIM + 1; v++) {
+      await (await sendNext(v)).result;
+      await delivered();
+    }
+    expect(send).toHaveBeenCalledTimes(MAX_SENDS_PER_CLAIM + 1);
+
+    const over = await sendNext(MAX_SENDS_PER_CLAIM + 2);
+    await expect(over.result).rejects.toThrow(/at most 3 times/);
+    expect(send).toHaveBeenCalledTimes(MAX_SENDS_PER_CLAIM + 1);
+  });
+
+  it(`sends at most ${DAILY_BUDGETS.claim_email.max} claim emails a day per user, across claims, and another user is unaffected`, async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.UTC(2026, 8, 20, 12));
+    const send = spySend();
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    await withInbox(t, a.userId);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("profiles", { userId: b.userId, inboxId: "inbox_b", inboxEmail: "b@agentmail.to" });
+    });
+
+    const sendOne = async (who: typeof a, i: number) => {
+      const { claimId } = await claimFor(t, who.userId, `T${String(i).padStart(5, "0")}`);
+      const draftId = await newDraft(t, claimId, who.userId, "");
+      return who.as.mutation(api.drafts.approveAndSend, sendArgs(draftId));
+    };
+    for (let i = 0; i < DAILY_BUDGETS.claim_email.max; i++) await sendOne(a, i);
+    await expect(sendOne(a, 99)).rejects.toThrow(/today's limit for sending claim emails/);
+    expect(send).toHaveBeenCalledTimes(DAILY_BUDGETS.claim_email.max);
+
+    await sendOne(b, 100);
+    vi.setSystemTime(Date.UTC(2026, 8, 21, 0, 0, 1));
+    await sendOne(a, 101);
+    expect(send).toHaveBeenCalledTimes(DAILY_BUDGETS.claim_email.max + 2);
+  });
+
+  it("a refused send (unconfirmed recipient) does not use up the day's budget", async () => {
+    vi.useFakeTimers();
+    spySend();
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    await withInbox(t, userId);
+    const { claimId } = await seed(t, userId);
+    const draftId = await newDraft(t, claimId, userId, "");
+    await expect(
+      as.mutation(api.drafts.approveAndSend, sendArgs(draftId, { recipientConfirmed: undefined })),
+    ).rejects.toThrow("Confirm this recipient before sending");
+    expect(await t.run(async (ctx) => (await ctx.db.query("usage").collect()).length)).toBe(0);
   });
 });

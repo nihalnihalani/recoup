@@ -10,12 +10,16 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import schema from "./schema";
+import { processedRoute, processedStatus } from "./schema";
 import { requireUserId } from "./lib/access";
 import { extract } from "./lib/ai";
 import { InboundEmail, type InboundEmailT } from "./lib/schemas";
 import { normalizeDomain } from "./lib/policyText";
 import { applyEvent, openClaim } from "./claims";
+import { parseProductUrl } from "./lib/watchUrl";
+import { cleanLine } from "./lib/text";
+import { charge } from "./lib/budget";
+import { MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER } from "./limits";
 
 /**
  * What the model is told. The email itself is untrusted content and goes in
@@ -40,7 +44,8 @@ const ATTENTION_LIMIT = 50;
 const MIN_PASTE_CHARS = 40;
 const MAX_PASTE_CHARS = 60_000;
 
-const processedDoc = schema.doc("processedEvents");
+/** One day: an ownerless failed row older than this will never find its inbox. */
+const OWNERLESS_AFTER_MS = 86_400_000;
 
 // ---------------------------------------------------------------------------
 // Normalisation. Model output is proposed data, never authority
@@ -120,6 +125,7 @@ export const beginEvent = internalMutation({
     }
     await ctx.db.patch(processedEventId, {
       status: "processing",
+      processingStartedAt: Date.now(),
       attempts: row.attempts + 1,
       lastError: undefined,
     });
@@ -219,7 +225,27 @@ async function applyOrder(
     return;
   }
 
-  const orderRef = order.orderRef?.trim() || undefined;
+  // B5/H5: this very email already produced a purchase (a manual re-run, or two racing extractions). An order
+  // with no `orderRef` has no D22 key, so the source message is the only thing that can say so.
+  const held = await ctx.db
+    .query("purchases")
+    .withIndex("by_user", (q) => q.eq("userId", userId))
+    .take(MAX_PURCHASES_PER_USER);
+  if (sourceMessageId !== undefined && held.some((p) => p.sourceMessageId === sourceMessageId)) {
+    await finish(ctx, processedEventId, "needs_review", "This email is already on your board as a purchase.");
+    return;
+  }
+  if (held.length >= MAX_PURCHASES_PER_USER) {
+    await finish(
+      ctx,
+      processedEventId,
+      "needs_review",
+      `You already keep ${MAX_PURCHASES_PER_USER} purchases, so this order was not added.`,
+    );
+    return;
+  }
+
+  const orderRef = cleanLine(order.orderRef ?? "").slice(0, 100) || undefined;
   if (orderRef) {
     // D22: (userId, merchantDomain, orderRef) is the order's natural key.
     const duplicate = await ctx.db
@@ -242,15 +268,17 @@ async function applyOrder(
   type CleanItem = { name: string; unitCents: number; qty: number; productUrl: string | undefined };
   const items: CleanItem[] = [];
   for (const it of order.items) {
+    if (items.length >= MAX_ITEMS_PER_PURCHASE) break;
     const unitCents = safeCents(it.unitPrice);
     const qty = safeQty(it.qty);
-    const name = it.name.trim().slice(0, 200);
+    const name = cleanLine(it.name).slice(0, 200);
     if (unitCents === null || qty === null || name.length === 0) continue;
     items.push({
       name,
       unitCents,
       qty,
-      productUrl: it.productUrl?.startsWith("http") ? it.productUrl.slice(0, 2_000) : undefined,
+      // M1: the link came out of an email via a model; one we would refuse to scrape is dropped, not stored.
+      productUrl: it.productUrl ? parseProductUrl(it.productUrl)?.productUrl : undefined,
     });
   }
 
@@ -267,7 +295,7 @@ async function applyOrder(
   const currency = safeCurrency(order.currency);
   const purchaseId = await ctx.db.insert("purchases", {
     userId,
-    merchant: order.merchant.trim().slice(0, 120) || merchantDomain,
+    merchant: cleanLine(order.merchant).slice(0, 120) || merchantDomain,
     merchantDomain,
     orderRef,
     purchasedAt: safeDate(order.purchasedAt),
@@ -294,7 +322,7 @@ async function applyOrder(
     ctx,
     processedEventId,
     "needs_review",
-    `Order from ${order.merchant.trim() || merchantDomain} with ${items.length} item${items.length === 1 ? "" : "s"} — confirm the details to start tracking it.${note}`,
+    `Order from ${cleanLine(order.merchant).slice(0, 120) || merchantDomain} with ${items.length} item${items.length === 1 ? "" : "s"} — confirm the details to start tracking it.${note}`,
   );
 }
 
@@ -477,9 +505,12 @@ export const applyExtraction = internalMutation({
     const payload = (row.payload ?? {}) as Record<string, unknown>;
     const sourceMessageId =
       typeof payload.messageId === "string" ? payload.messageId : undefined;
+    // A paste has no message id; its content hash is just as stable, so a re-run of the same paste is
+    // recognised as "already applied" too (B5).
+    const orderSourceId = sourceMessageId ?? (row.kind === "paste" ? row.externalId : undefined);
 
     if (parsed.kind === "order" && parsed.order) {
-      await applyOrder(ctx, args.processedEventId, row.userId, sourceMessageId, parsed.order);
+      await applyOrder(ctx, args.processedEventId, row.userId, orderSourceId, parsed.order);
       return null;
     }
     if (parsed.kind === "refund" && parsed.refund) {
@@ -519,7 +550,9 @@ export const paste = action({
       throw new ConvexError("That email is too long to process");
     }
 
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+    // The user is part of the hashed input (review LOW): the same email pasted by two people is two events, so
+    // nobody learns what somebody else pasted and nobody can pre-block an email for another account.
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${userId}\n${body}`));
     const externalId = `paste:${Array.from(new Uint8Array(digest))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("")}`;
@@ -544,6 +577,11 @@ export const createPasteEvent = internalMutation({
     // different user must not be handed somebody else's row.
     if (seen && seen.userId === args.userId) return seen._id;
     if (seen) throw new ConvexError("That email has already been processed");
+    if (args.text.length > MAX_PASTE_CHARS) throw new ConvexError("That email is too long to process");
+
+    // B5: one new paste is one model call. Charged here, in the transaction that schedules it, and only for a
+    // paste that is really new; throws at the daily cap with nothing written.
+    await charge(ctx, args.userId, "paste");
 
     const processedEventId = await ctx.db.insert("processedEvents", {
       externalId: args.externalId,
@@ -559,7 +597,29 @@ export const createPasteEvent = internalMutation({
   },
 });
 
-/** Re-runs an event the caller owns that ended `failed` or `needs_review` (D14). */
+/** True when this intake event's email is already a purchase on the caller's board. */
+async function alreadyProducedPurchase(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  row: Doc<"processedEvents">,
+): Promise<boolean> {
+  const payload = (row.payload ?? {}) as Record<string, unknown>;
+  const sourceId =
+    typeof payload.messageId === "string" ? payload.messageId : row.kind === "paste" ? row.externalId : undefined;
+  if (sourceId === undefined) return false;
+  const held = await ctx.db
+    .query("purchases")
+    .withIndex("by_user", (q) => q.eq("userId", userId))
+    .take(MAX_PURCHASES_PER_USER);
+  return held.some((p) => p.sourceMessageId === sourceId);
+}
+
+/**
+ * Re-runs an event the caller owns that ended `failed` or `needs_review` (D14).
+ *
+ * Every re-run is another model call, so it is charged to the caller's daily `intake_retry` budget (B5).
+ * `attempts` is never reset: a row that is out of attempts is granted exactly one more per (budgeted) click.
+ */
 export const retryEvent = mutation({
   args: { processedEventId: v.id("processedEvents") },
   returns: v.null(),
@@ -578,7 +638,12 @@ export const retryEvent = mutation({
       if (!row.claimId || typeof payload?.messageId !== "string") {
         throw new ConvexError("This event cannot be re-run");
       }
-      await ctx.db.patch(processedEventId, { status: "processing", lastError: undefined });
+      await charge(ctx, userId, "intake_retry");
+      await ctx.db.patch(processedEventId, {
+        status: "processing",
+        processingStartedAt: Date.now(),
+        lastError: undefined,
+      });
       await ctx.scheduler.runAfter(0, internal.replies.classify, {
         processedEventId,
         claimId: row.claimId,
@@ -590,13 +655,19 @@ export const retryEvent = mutation({
       return null;
     }
     if (row.route !== "intake") throw new ConvexError("This event cannot be re-run");
+    // B5: `needs_review` is the NORMAL end of an order email. Re-reading one that already became a purchase
+    // would pay for the model again and, with no orderRef, used to insert the purchase a second time.
+    if (row.status === "needs_review" && (await alreadyProducedPurchase(ctx, userId, row))) {
+      throw new ConvexError("This email is already on your board as a purchase; confirm it there");
+    }
 
+    await charge(ctx, userId, "intake_retry");
     await ctx.db.patch(processedEventId, {
       status: "received",
       lastError: undefined,
       summary: undefined,
-      // A retry starts a fresh budget; the row is only here because a human asked.
-      attempts: 0,
+      // Never back to 0 (B5). A human asked, so an exhausted row gets one more attempt, not five.
+      attempts: Math.min(row.attempts, MAX_ATTEMPTS - 1),
     });
     await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId });
     return null;
@@ -610,11 +681,17 @@ const STUCK_AFTER_MS = 15 * 60_000;
 
 /**
  * Hourly safety net for inbound mail (idea from origin's a2ceb98, rewritten for this pipeline).
- * Unauthenticated on purpose: the only caller is the cron. Two jobs, both bounded and idempotent:
- *  1. rows stuck in `processing` become `failed`, so they are visible and retryable;
- *  2. `failed` rows with attempts left are re-run once. `beginEvent` counts intake attempts and
- *     gives up at MAX_ATTEMPTS; reply re-runs are counted here. A row out of attempts stays
- *     `failed` on the user's needs-attention list, where `retryEvent` can still re-run it by hand.
+ * Unauthenticated on purpose: the only caller is the cron. Bounded and idempotent:
+ *  1. rows stuck in `processing` become `failed`, so they are visible and retryable. "Stuck" is measured from
+ *     `processingStartedAt`, the moment the row last entered `processing` (review H5); `_creationTime` is only
+ *     the fallback for rows written before that field existed. An old row a user re-ran a second ago is
+ *     therefore left alone instead of being failed and scheduled a second time.
+ *  2. `failed` rows with attempts left are re-run once. `beginEvent` counts intake attempts; reply re-runs are
+ *     counted here.
+ *  3. `failed` rows this job can never re-run LEAVE the `failed` page (review H4), because the page is the
+ *     oldest 50 and rows that stay in it forever end up hiding every newer failure: a row out of attempts, or
+ *     one with nothing to re-run, moves to `needs_review` (still on the owner's needs-attention list, where
+ *     `retryEvent` can re-run it by hand); an ownerless row older than a day is closed as ignored.
  */
 export const retryFailed = internalMutation({
   args: {},
@@ -629,7 +706,7 @@ export const retryFailed = internalMutation({
       .withIndex("by_status", (q) => q.eq("status", "processing"))
       .take(RETRY_PAGE);
     for (const row of processing) {
-      if (now - row._creationTime < STUCK_AFTER_MS) continue;
+      if (now - (row.processingStartedAt ?? row._creationTime) < STUCK_AFTER_MS) continue;
       await ctx.db.patch(row._id, { status: "failed", lastError: "Timed out while being read" });
       unstuck++;
     }
@@ -639,16 +716,32 @@ export const retryFailed = internalMutation({
       .withIndex("by_status", (q) => q.eq("status", "failed"))
       .take(RETRY_PAGE);
     for (const row of failed) {
-      if (!row.userId || row.attempts >= MAX_ATTEMPTS) continue;
+      if (!row.userId) {
+        if (now - row._creationTime >= OWNERLESS_AFTER_MS) {
+          await ctx.db.patch(row._id, { status: "succeeded", summary: "Ignored: no matching inbox" });
+        }
+        continue;
+      }
+      if (row.attempts >= MAX_ATTEMPTS) {
+        await ctx.db.patch(row._id, {
+          status: "needs_review",
+          summary: `This email could not be read after ${MAX_ATTEMPTS} attempts. You can try it again by hand.`,
+        });
+        continue;
+      }
+      const payload = (row.payload ?? {}) as Record<string, unknown>;
+      const read = (key: string) => (typeof payload[key] === "string" ? (payload[key] as string) : "");
       if (row.route === "intake") {
         await ctx.db.patch(row._id, { status: "received", lastError: undefined });
         await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId: row._id });
         retried++;
-      } else if (row.route === "reply" && row.claimId) {
-        const payload = (row.payload ?? {}) as Record<string, unknown>;
-        const read = (key: string) => (typeof payload[key] === "string" ? (payload[key] as string) : "");
-        if (!read("messageId")) continue;
-        await ctx.db.patch(row._id, { status: "processing", lastError: undefined, attempts: row.attempts + 1 });
+      } else if (row.route === "reply" && row.claimId && read("messageId")) {
+        await ctx.db.patch(row._id, {
+          status: "processing",
+          processingStartedAt: now,
+          lastError: undefined,
+          attempts: row.attempts + 1,
+        });
         await ctx.scheduler.runAfter(0, internal.replies.classify, {
           processedEventId: row._id,
           claimId: row.claimId,
@@ -658,10 +751,35 @@ export const retryFailed = internalMutation({
           text: read("text"),
         });
         retried++;
+      } else {
+        // Nothing here can be re-run (never routed, or a reply with no message id).
+        await ctx.db.patch(row._id, {
+          status: "needs_review",
+          summary: row.summary ?? "This message could not be routed and cannot be re-read automatically.",
+        });
       }
     }
     return { unstuck, retried };
   },
+});
+
+/**
+ * One row of the needs-attention list: the `processedEvents` document WITHOUT `payload` (review M5). The payload
+ * holds the whole email, up to 60 KB a row, and nothing on screen reads it.
+ */
+const attentionRow = v.object({
+  _id: v.id("processedEvents"),
+  _creationTime: v.number(),
+  externalId: v.string(),
+  kind: v.string(),
+  status: processedStatus,
+  attempts: v.number(),
+  lastError: v.optional(v.string()),
+  errorSummary: v.optional(v.string()),
+  userId: v.optional(v.id("users")),
+  claimId: v.optional(v.id("claims")),
+  route: v.optional(processedRoute),
+  summary: v.optional(v.string()),
 });
 
 /**
@@ -670,7 +788,7 @@ export const retryFailed = internalMutation({
  */
 export const needsAttention = query({
   args: {},
-  returns: v.array(processedDoc),
+  returns: v.array(attentionRow),
   handler: async (ctx) => {
     const userId = await requireUserId(ctx);
     const statuses = ["failed", "needs_review"] as const;
@@ -683,6 +801,9 @@ export const needsAttention = query({
           .take(ATTENTION_LIMIT),
       ),
     );
-    return pages.flat().sort((a, b) => b._creationTime - a._creationTime);
+    return pages
+      .flat()
+      .sort((a, b) => b._creationTime - a._creationTime)
+      .map(({ payload: _payload, processingStartedAt: _startedAt, ...row }) => row);
   },
 });

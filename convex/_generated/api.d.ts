@@ -9,6 +9,7 @@
  */
 
 import type * as auth from "../auth.js";
+import type * as budget from "../budget.js";
 import type * as claims from "../claims.js";
 import type * as crons from "../crons.js";
 import type * as drafts from "../drafts.js";
@@ -21,6 +22,7 @@ import type * as intake from "../intake.js";
 import type * as lib_access from "../lib/access.js";
 import type * as lib_ai from "../lib/ai.js";
 import type * as lib_balance from "../lib/balance.js";
+import type * as lib_budget from "../lib/budget.js";
 import type * as lib_imageUrl from "../lib/imageUrl.js";
 import type * as lib_latestPolicy from "../lib/latestPolicy.js";
 import type * as lib_ledger from "../lib/ledger.js";
@@ -29,6 +31,7 @@ import type * as lib_offerMatch from "../lib/offerMatch.js";
 import type * as lib_passage from "../lib/passage.js";
 import type * as lib_policyText from "../lib/policyText.js";
 import type * as lib_schemas from "../lib/schemas.js";
+import type * as lib_text from "../lib/text.js";
 import type * as lib_verdict from "../lib/verdict.js";
 import type * as lib_watchUrl from "../lib/watchUrl.js";
 import type * as limits from "../limits.js";
@@ -51,6 +54,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
+  budget: typeof budget;
   claims: typeof claims;
   crons: typeof crons;
   drafts: typeof drafts;
@@ -63,6 +67,7 @@ declare const fullApi: ApiFromModules<{
   "lib/access": typeof lib_access;
   "lib/ai": typeof lib_ai;
   "lib/balance": typeof lib_balance;
+  "lib/budget": typeof lib_budget;
   "lib/imageUrl": typeof lib_imageUrl;
   "lib/latestPolicy": typeof lib_latestPolicy;
   "lib/ledger": typeof lib_ledger;
@@ -71,6 +76,7 @@ declare const fullApi: ApiFromModules<{
   "lib/passage": typeof lib_passage;
   "lib/policyText": typeof lib_policyText;
   "lib/schemas": typeof lib_schemas;
+  "lib/text": typeof lib_text;
   "lib/verdict": typeof lib_verdict;
   "lib/watchUrl": typeof lib_watchUrl;
   limits: typeof limits;

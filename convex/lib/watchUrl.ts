@@ -4,12 +4,23 @@ import { normalizeDomain } from "./policyText";
 export const MAX_URL_CHARS = 2_000;
 const MAX_DEFAULT_NAME_CHARS = 80;
 
+/**
+ * Names that only resolve inside somebody's network (review M2). `metadata.google.internal` has two labels and a
+ * letter-only TLD, so the shape checks below would let it through.
+ */
+const PRIVATE_SUFFIXES = [".local", ".internal", ".localhost", ".lan", ".corp", ".home.arpa"] as const;
+
+function isPrivateName(host: string): boolean {
+  return PRIVATE_SUFFIXES.some((suffix) => host === suffix.slice(1) || host.endsWith(suffix));
+}
+
 export type ProductUrl = { productUrl: string; merchantDomain: string };
 
 /**
  * A pasted product link, or null when it is not one we will scrape: not
- * http(s), carrying credentials, or pointing at a bare IP / single-label host
- * (nothing on a private network is a shop).
+ * http(s), carrying credentials, on an unusual port, or pointing at a bare IP,
+ * a single-label host or an internal-only name (nothing on a private network
+ * is a shop). Every `productUrl` written anywhere goes through this (review M1).
  */
 export function parseProductUrl(input: string): ProductUrl | null {
   const raw = input.trim();
@@ -22,8 +33,11 @@ export function parseProductUrl(input: string): ProductUrl | null {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
   if (url.username !== "" || url.password !== "") return null;
+  // `URL` drops a scheme's default port, so "" covers :80 on http and :443 on https; a shop is never on another one.
+  if (url.port !== "" && url.port !== "80" && url.port !== "443") return null;
   const merchantDomain = normalizeDomain(url.hostname);
   if (!merchantDomain) return null;
+  if (isPrivateName(merchantDomain)) return null;
   const tld = merchantDomain.split(".").pop() ?? "";
   if (!/^[a-z][a-z0-9-]*$/.test(tld)) return null; // 127.0.0.1 and friends
   url.hash = "";

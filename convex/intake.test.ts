@@ -413,7 +413,7 @@ describe("intake.beginEvent", () => {
 });
 
 describe("intake.retryFailed (hourly safety net)", () => {
-  it("re-queues a failed intake row that has attempts left and leaves an exhausted one alone", async () => {
+  it("re-queues a failed intake row that has attempts left and parks an exhausted one for review (H4)", async () => {
     const t = setup();
     const { userId } = await signedIn(t);
     const retryable = await queueEvent(t, userId, "evt-retry");
@@ -429,8 +429,73 @@ describe("intake.retryFailed (hourly safety net)", () => {
     const again = await eventRow(t, retryable);
     expect(again.status).toBe("received");
     expect(again.lastError).toBeUndefined();
-    const still = await eventRow(t, exhausted);
-    expect(still.status).toBe("failed");
+    // H4: an exhausted row leaves the `failed` page, stays on the owner's list, and is not re-run.
+    const parked = await eventRow(t, exhausted);
+    expect(parked.status).toBe("needs_review");
+    expect(parked.summary).toContain("5 attempts");
+    expect(parked.attempts).toBe(5);
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+  });
+
+  it("dead rows do not block newer failures behind them (H4)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    // 50 rows nobody can re-run automatically fill the whole page the job reads...
+    for (let i = 0; i < 50; i++) {
+      const id = await queueEvent(t, userId, `evt-dead-${i}`);
+      await t.run(async (ctx) => await ctx.db.patch(id, { status: "failed", attempts: 5 }));
+    }
+    // ...and a retryable failure arrives after them.
+    const live = await queueEvent(t, userId, "evt-live");
+    await t.run(async (ctx) => await ctx.db.patch(live, { status: "failed", attempts: 1 }));
+
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect((await eventRow(t, live)).status).toBe("failed");
+    // The first tick cleared the page, so the second one reaches the live row.
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 1 });
+    expect((await eventRow(t, live)).status).toBe("received");
+  });
+
+  it("parks a failed row that has an owner but nothing to re-run", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const id = await t.run(
+      async (ctx) =>
+        await ctx.db.insert("processedEvents", {
+          externalId: "evt-unrouted", kind: "agentmail.message.received", status: "failed", attempts: 0, userId,
+        }),
+    );
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect((await eventRow(t, id)).status).toBe("needs_review");
+  });
+
+  it("does not fail or double-schedule an OLD row that re-entered processing a moment ago (H5)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const old = await queueEvent(t, userId, "evt-old");
+    // The row is a day old...
+    vi.advanceTimersByTime(24 * 3_600_000);
+    // ...and a retry has just put it back to work.
+    expect(await t.mutation(internal.intake.beginEvent, { processedEventId: old })).not.toBeNull();
+    const started = (await eventRow(t, old)).processingStartedAt;
+    expect(started).toBe(Date.now());
+
+    vi.advanceTimersByTime(60_000);
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect((await eventRow(t, old)).status).toBe("processing");
+
+    // Only once THIS run has been going for 15 minutes is it stuck.
+    vi.advanceTimersByTime(15 * 60_000);
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 1, retried: 1 });
+  });
+
+  it("falls back to the creation time for a processing row written before processingStartedAt existed", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const legacy = await queueEvent(t, userId, "evt-legacy");
+    await t.run(async (ctx) => await ctx.db.patch(legacy, { status: "processing", attempts: 1 }));
+    vi.advanceTimersByTime(16 * 60_000);
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 1, retried: 1 });
   });
 
   it("marks a row stuck in processing as failed so it becomes visible and retryable", async () => {
@@ -451,16 +516,164 @@ describe("intake.retryFailed (hourly safety net)", () => {
     expect(row.status).toBe("received");
   });
 
-  it("ignores rows that belong to nobody", async () => {
+  it("never re-runs a row that belongs to nobody, and closes it as ignored after a day (H4)", async () => {
     const t = setup();
-    await t.run(async (ctx) => {
-      await ctx.db.insert("processedEvents", {
-        externalId: "evt-orphan",
-        kind: "agentmail.message.received",
-        status: "failed",
-        attempts: 0,
-      });
-    });
+    const orphan = await t.run(
+      async (ctx) =>
+        await ctx.db.insert("processedEvents", {
+          externalId: "evt-orphan",
+          kind: "agentmail.message.received",
+          status: "failed",
+          attempts: 0,
+        }),
+    );
     expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect((await eventRow(t, orphan)).status).toBe("failed");
+
+    vi.advanceTimersByTime(25 * 3_600_000);
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    const closed = await eventRow(t, orphan);
+    expect(closed.status).toBe("succeeded");
+    expect(closed.summary).toBe("Ignored: no matching inbox");
+  });
+});
+
+describe("intake spend caps (pre-launch review B5, M1, M5)", () => {
+  const email = (n: number) => `Order confirmation number ${n} from Acme, thank you for your purchase of one jacket.`;
+
+  it(`allows ${30} new pastes a day, refuses the next with nothing written, and resets at midnight UTC`, async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    for (let i = 0; i < 30; i++) {
+      await t.mutation(internal.intake.createPasteEvent, { userId, externalId: `paste:${i}`, text: email(i) });
+    }
+    await expect(
+      t.mutation(internal.intake.createPasteEvent, { userId, externalId: "paste:31", text: email(31) }),
+    ).rejects.toThrow(/today's limit for reading pasted emails/);
+    expect(await t.run(async (ctx) => (await ctx.db.query("processedEvents").collect()).length)).toBe(30);
+
+    // A repeat of an earlier paste is not new work and is still answered.
+    await t.mutation(internal.intake.createPasteEvent, { userId, externalId: "paste:0", text: email(0) });
+    // Another user is unaffected.
+    const other = await signedIn(t, "Other");
+    await t.mutation(internal.intake.createPasteEvent, { userId: other.userId, externalId: "paste:o", text: email(0) });
+
+    vi.advanceTimersByTime(24 * 3_600_000);
+    await t.mutation(internal.intake.createPasteEvent, { userId, externalId: "paste:next-day", text: email(99) });
+  });
+
+  it("the same text pasted by two users is two separate events (userId is in the digest)", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    const text = email(1);
+    const first = await a.as.action(api.intake.paste, { text });
+    const second = await b.as.action(api.intake.paste, { text });
+    expect(second).not.toBe(first);
+    expect(await a.as.action(api.intake.paste, { text })).toBe(first);
+    const rows = await t.run(async (ctx) => await ctx.db.query("processedEvents").collect());
+    expect(new Set(rows.map((r) => r.externalId)).size).toBe(2);
+  });
+
+  it("retryEvent is budgeted at 20 a day and never resets attempts", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-r");
+    for (let i = 0; i < 20; i++) {
+      await t.run(async (ctx) => await ctx.db.patch(id, { status: "failed", attempts: 3 }));
+      await as.mutation(api.intake.retryEvent, { processedEventId: id });
+      expect((await eventRow(t, id)).attempts).toBe(3);
+    }
+    await t.run(async (ctx) => await ctx.db.patch(id, { status: "failed" }));
+    await expect(as.mutation(api.intake.retryEvent, { processedEventId: id })).rejects.toThrow(
+      /today's limit for re-reading emails/,
+    );
+    expect((await eventRow(t, id)).status).toBe("failed");
+  });
+
+  it("a manual retry of an exhausted row grants exactly one more attempt", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-x");
+    await t.run(async (ctx) => await ctx.db.patch(id, { status: "needs_review", attempts: 5 }));
+    await as.mutation(api.intake.retryEvent, { processedEventId: id });
+    expect((await eventRow(t, id)).attempts).toBe(4);
+    expect(await t.mutation(internal.intake.beginEvent, { processedEventId: id })).not.toBeNull();
+    expect((await eventRow(t, id)).attempts).toBe(5);
+  });
+
+  it("refuses to re-run an order email that already became a purchase, and charges nothing", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-order");
+    await t.mutation(internal.intake.beginEvent, { processedEventId: id });
+    await t.mutation(internal.intake.applyExtraction, { processedEventId: id, parsed: orderEmail({ orderRef: null }) });
+    expect((await eventRow(t, id)).status).toBe("needs_review");
+
+    await expect(as.mutation(api.intake.retryEvent, { processedEventId: id })).rejects.toThrow(/already on your board/);
+    expect(await t.run(async (ctx) => (await ctx.db.query("usage").collect()).length)).toBe(0);
+  });
+
+  it("applying the same order email twice inserts one purchase even with no orderRef (H5 race)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-twice");
+    const parsed = orderEmail({ orderRef: null });
+    await t.mutation(internal.intake.applyExtraction, { processedEventId: id, parsed });
+    await t.mutation(internal.intake.applyExtraction, { processedEventId: id, parsed });
+    expect(await t.run(async (ctx) => (await ctx.db.query("purchases").collect()).length)).toBe(1);
+    expect((await eventRow(t, id)).summary).toContain("already on your board");
+  });
+
+  it("a pasted order re-applied is recognised by its content hash", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const id = await t.mutation(internal.intake.createPasteEvent, { userId, externalId: "paste:abc", text: email(1) });
+    const parsed = orderEmail({ orderRef: null });
+    await t.mutation(internal.intake.applyExtraction, { processedEventId: id, parsed });
+    await t.mutation(internal.intake.applyExtraction, { processedEventId: id, parsed });
+    const purchases = await t.run(async (ctx) => await ctx.db.query("purchases").collect());
+    expect(purchases).toHaveLength(1);
+    expect(purchases[0].sourceMessageId).toBe("paste:abc");
+  });
+
+  it("drops an extracted product link the scraper must never see, keeps a good one, and caps the items (M1)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-urls");
+    const item = (name: string, productUrl: string | null) => ({ name, unitPrice: 10, qty: 1, productUrl });
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: id,
+      parsed: orderEmail({
+        items: [
+          item("internal", "http://metadata.google.internal/computeMetadata/v1/"),
+          item("ip", "http://169.254.169.254/latest/meta-data"),
+          item("port", "https://shop.acme.example:8443/p/1"),
+          item("good", "https://www.acme.example/p/jacket#reviews"),
+          ...Array.from({ length: 60 }, (_, i) => item(`filler ${i}`, null)),
+        ],
+      }),
+    });
+    const items = await t.run(async (ctx) => await ctx.db.query("items").collect());
+    expect(items).toHaveLength(50);
+    const url = (name: string) => items.find((i) => i.name === name)?.productUrl;
+    expect(url("internal")).toBeUndefined();
+    expect(url("ip")).toBeUndefined();
+    expect(url("port")).toBeUndefined();
+    expect(url("good")).toBe("https://www.acme.example/p/jacket");
+  });
+
+  it("needsAttention never returns the stored email (M5)", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-big");
+    await t.run(async (ctx) => await ctx.db.patch(id, { status: "failed", lastError: "boom", processingStartedAt: 1 }));
+    const [row] = await as.query(api.intake.needsAttention, {});
+    expect(row._id).toBe(id);
+    expect(row).not.toHaveProperty("payload");
+    expect(row).not.toHaveProperty("processingStartedAt");
+    expect(Object.keys(row).sort()).toEqual(
+      ["_creationTime", "_id", "attempts", "externalId", "kind", "lastError", "route", "status", "userId"].sort(),
+    );
   });
 });

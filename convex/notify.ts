@@ -29,9 +29,33 @@ import {
   DROP_MIN_PERCENT,
   MAX_DROP_EMAILS_PER_DAY,
 } from "./limits";
+import { takeGlobalBudget } from "./lib/budget";
 
 /** Stored on a row that was recorded but not mailed because the user is over the daily cap. */
+/**
+ * Where a recipient can open the app. APP_URL is the public site; SITE_URL is what auth uses and is
+ * localhost on a dev deployment. A localhost link is useless to the reader and a spam signal (found
+ * live: the first alert carried one and landed in spam), so it is left out rather than printed.
+ */
+export function publicAppUrl(): string | null {
+  for (const raw of [process.env.APP_URL, process.env.SITE_URL]) {
+    const url = raw?.trim().replace(/\/+$/, "");
+    if (!url || !/^https:\/\//i.test(url)) continue;
+    if (/^https:\/\/(localhost|127\.|\[::1\])/i.test(url)) continue;
+    return url;
+  }
+  return null;
+}
+
 export const DAILY_LIMIT_ERROR = "daily alert limit";
+/** Stored when the deployment-wide drop-mail switch is spent for the day (review B2). */
+export const GLOBAL_LIMIT_ERROR = "alert emails are paused for today";
+/**
+ * The whole subject, always (review B2). `users.email` is unverified, so this mail can land in a stranger's inbox:
+ * it carries no text the account holder (or the watched page) chose and no third-party link. The product's name
+ * and link are shown in the app, behind sign-in.
+ */
+export const DROP_SUBJECT = "Recoup price alert: an item you are watching dropped";
 const MAX_ERROR_CHARS = 1000;
 /** Rows `drops` returns. */
 const DROPS_LIMIT = 30;
@@ -96,7 +120,8 @@ export async function claimDrop(
   ctx: MutationCtx,
   watch: Doc<"watches">,
   cents: number,
-  currency: string,
+  /** Unused since B2 took the price out of the subject; kept so the caller's contract does not change. */
+  _currency: string,
 ): Promise<Id<"mailLog"> | null> {
   if (watch.status !== "active") return null;
   const previousCents = watch.lastCents;
@@ -110,16 +135,21 @@ export async function claimDrop(
   if (already) return null;
 
   const user = await ctx.db.get(watch.userId);
-  const capped = await overDailyCap(ctx, watch.userId, Date.now());
+  const now = Date.now();
+  let limitError: string | undefined;
+  if (await overDailyCap(ctx, watch.userId, now)) limitError = DAILY_LIMIT_ERROR;
+  // Only a mail that would really go out draws from the global switch.
+  else if ((await takeGlobalBudget(ctx, "drop_email", 1, now)) === 0) limitError = GLOBAL_LIMIT_ERROR;
+  const capped = limitError !== undefined;
   const mailLogId = await ctx.db.insert("mailLog", {
     userId: watch.userId,
     dedupeKey,
     kind: "price_drop",
     watchId: watch._id,
     to: user?.email ?? "",
-    subject: `Price drop: ${watch.name} is now ${money(cents, currency)}`.slice(0, 250),
+    subject: DROP_SUBJECT,
     status: capped ? "failed" : "claimed",
-    error: capped ? DAILY_LIMIT_ERROR : undefined,
+    error: limitError,
     cents,
     previousCents,
   });
@@ -175,9 +205,12 @@ export const dropContext = internalQuery({
 
     let text = "";
     if (watch && row.cents !== undefined) {
-      const currency = watch.currency ?? "USD";
+      // Validated at write time (`recordWatchCheck`); re-checked here because it is printed into mail.
+      const currency = /^[A-Z]{3}$/.test(watch.currency ?? "") ? (watch.currency as string) : "USD";
+      // B2: fixed wording plus numbers, a validated store domain and our own link. Never `watch.name`, never
+      // `watch.productUrl`: both are chosen by whoever made the watch, and the recipient address is unverified.
       const lines = [
-        `${watch.name} dropped in price.`,
+        "An item you are watching in Recoup dropped in price.",
         "",
         `Now: ${money(row.cents, currency)}`,
         row.previousCents === undefined
@@ -185,18 +218,14 @@ export const dropContext = internalQuery({
           : `Before: ${money(row.previousCents, currency)}`,
       ];
       if (watch.targetCents !== undefined) lines.push(`Your target: ${money(watch.targetCents, currency)}`);
-      lines.push(
-        `Store: ${watch.merchantDomain}`,
-        `Link: ${watch.productUrl}`,
-        `Checked: ${new Date(row._creationTime).toUTCString()}`,
-        "",
-        `See it in Recoup: ${process.env.SITE_URL ?? ""}/watching`,
-        "",
-        "Recoup uses no affiliate links.",
-      );
+      lines.push(`Store: ${watch.merchantDomain}`, `Checked: ${new Date(row._creationTime).toUTCString()}`, "");
+      const appUrl = publicAppUrl();
+      if (appUrl) lines.push(`See it in Recoup: ${appUrl}/watching`, "");
+      lines.push("Recoup uses no affiliate links.");
       text = lines.join("\n");
     }
-    return { problem, inboxId, to, subject: row.subject, text, watchId: row.watchId ?? null };
+    // Rows claimed before B2 still hold a subject built from the watch name; the constant is what is sent.
+    return { problem, inboxId, to, subject: DROP_SUBJECT, text, watchId: row.watchId ?? null };
   },
 });
 

@@ -2,7 +2,7 @@ import { ConvexError, v } from "convex/values";
 import { FirecrawlClient } from "@firecrawl/firecrawl-convex";
 import type { SearchResponse } from "@firecrawl/firecrawl-convex";
 import { action, internalAction, internalMutation, internalQuery, mutation } from "./_generated/server";
-import type { ActionCtx, QueryCtx } from "./_generated/server";
+import type { ActionCtx, MutationCtx, QueryCtx } from "./_generated/server";
 import { components, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { getAuthUserId } from "@convex-dev/auth/server";
@@ -14,7 +14,9 @@ import { latestPolicy } from "./lib/latestPolicy";
 import { assertWindowDays } from "./lib/money";
 import { channel, policyKind } from "./schema";
 import { requireUserId, ownedPolicy } from "./lib/access";
-import { POLICY_REFETCH_MIN_AGE_MS } from "./limits";
+import { MAX_WATCHES_PER_USER, POLICY_REFETCH_MIN_AGE_MS } from "./limits";
+import { normalizeDomain } from "./lib/policyText";
+import { charge, tryCharge } from "./lib/budget";
 
 
 const firecrawl = new FirecrawlClient(components.firecrawl);
@@ -188,6 +190,22 @@ export const fetchBoth = internalAction({
   },
 });
 
+/**
+ * Schedules `fetchBoth` for a store the caller just added, inside the caller's transaction (review B4). Charged
+ * to the shared `policy_fetch` budget and the global policy switch. Over either one the research is skipped
+ * rather than the write refused: the purchase is the user's own data, the policy is a paid extra they can still
+ * ask for with `refresh` tomorrow. Returns whether the fetch was scheduled.
+ */
+export async function schedulePolicyFetch(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  merchantDomain: string,
+): Promise<boolean> {
+  if (!(await tryCharge(ctx, userId, "policy_fetch"))) return false;
+  await ctx.scheduler.runAfter(0, internal.policies.fetchBoth, { userId, merchantDomain });
+  return true;
+}
+
 /** Always inserts a new immutable snapshot row; never patches (D17). Renamed from the plan's `upsert`. */
 export const insertSnapshot = internalMutation({
   args: {
@@ -203,8 +221,9 @@ export const insertSnapshot = internalMutation({
     confidence: v.number(),
     note: v.optional(v.string()),
   },
+  returns: v.id("policies"),
   handler: async (ctx, args) => {
-    return ctx.db.insert("policies", { ...args, retrievedAt: Date.now(), confirmedByUser: false });
+    return await ctx.db.insert("policies", { ...args, retrievedAt: Date.now(), confirmedByUser: false });
   },
 });
 
@@ -219,13 +238,50 @@ export async function latest(ctx: QueryCtx, userId: Id<"users">, merchantDomain:
   return latestPolicy(ctx, userId, merchantDomain, kind);
 }
 
+const LIVE_WATCH_STATUSES = ["active", "paused", "bought"] as const;
+
+/**
+ * The gate in front of `refresh` (review B3), one transaction: the domain must be a store the caller actually has
+ * a real purchase or a live watch at, and the call is charged to `policy_refresh` and the global policy switch.
+ * Throws on either, so a refused refresh has spent nothing.
+ * Unauthenticated on purpose: the only caller is `refresh`, which resolved `userId` from `ctx.auth`.
+ */
+export const beginRefresh = internalMutation({
+  args: { userId: v.id("users"), merchantDomain: v.string() },
+  returns: v.null(),
+  handler: async (ctx, { userId, merchantDomain }) => {
+    const purchase = await ctx.db
+      .query("purchases")
+      .withIndex("by_user_domain_order", (q) => q.eq("userId", userId).eq("merchantDomain", merchantDomain))
+      // Example stores are not real sites (D27); a handful of rows at most share one store.
+      .take(50);
+    let owns = purchase.some((p) => !p.isExample);
+    for (const status of LIVE_WATCH_STATUSES) {
+      if (owns) break;
+      const watches = await ctx.db
+        .query("watches")
+        .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", status))
+        .take(MAX_WATCHES_PER_USER);
+      owns = watches.some((w) => w.merchantDomain === merchantDomain);
+    }
+    if (!owns) throw new ConvexError("You can only look up policies for stores you have bought from or are watching");
+    await charge(ctx, userId, "policy_refresh");
+    return null;
+  },
+});
+
 /** User-triggered re-research. Returns the id of the newly inserted snapshot. */
 export const refresh = action({
   args: { merchantDomain: v.string(), kind: policyKind },
+  returns: v.id("policies"),
   handler: async (ctx, args): Promise<Id<"policies">> => {
     const userId = await getAuthUserId(ctx);
     if (!userId) throw new ConvexError("Not signed in");
-    return researchPolicy(ctx, { userId, merchantDomain: args.merchantDomain, kind: args.kind });
+    const merchantDomain = normalizeDomain(args.merchantDomain);
+    if (!merchantDomain) throw new ConvexError("merchantDomain must be a domain like example.com");
+    // Before anything paid: ownership and budget, in one transaction.
+    await ctx.runMutation(internal.policies.beginRefresh, { userId, merchantDomain });
+    return await researchPolicy(ctx, { userId, merchantDomain, kind: args.kind });
   },
 });
 

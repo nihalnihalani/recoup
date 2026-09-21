@@ -19,6 +19,9 @@ import { extract } from "./lib/ai";
 import { DraftOut } from "./lib/schemas";
 import { agentmail } from "./mail";
 import { scheduleClaimReminder } from "./followUps";
+import { charge } from "./lib/budget";
+import { stripControl } from "./lib/text";
+import { MAX_SENDS_PER_CLAIM } from "./limits";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -42,6 +45,10 @@ const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000] as const;
 const TERMINAL_FAILURES = ["failed", "bounced", "rejected"] as const;
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+/** Draft versions one claim may hold; `insert` refuses past it, so a read of this many is always the whole set. */
+const MAX_DRAFTS_PER_CLAIM = 200;
+/** B1: example claims carry invented stores and contacts; nothing about them may ever leave as mail. */
+const EXAMPLE_ERROR = "Example claims cannot be sent";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -193,6 +200,13 @@ export const generate = action({
     if (!c || c.claim.userId !== userId) throw new ConvexError("Claim not found");
     const { claim, item, purchase } = c;
     if (!item || !purchase) throw new ConvexError("Claim not found");
+    // B1/B5: refusals first, then the budget, then the model, so a refused call spends nothing.
+    // Writing a draft for an example claim is allowed (it is how a new account sees what Recoup writes, and it
+    // is budgeted like any other draft); SENDING one is what `approveAndSend` refuses.
+    if (claim.status === "confirmed" || claim.status === "dismissed") {
+      throw new ConvexError("This claim is closed");
+    }
+    await ctx.runMutation(internal.budget.consume, { userId, kind: "draft_generate" });
 
     const currency = purchase.currency;
     const purchasedOn = day(purchase.purchasedAt);
@@ -261,7 +275,10 @@ export const insert = internalMutation({
     const prev = await ctx.db
       .query("drafts")
       .withIndex("by_claim", (q) => q.eq("claimId", args.claimId))
-      .collect();
+      .take(MAX_DRAFTS_PER_CLAIM);
+    if (prev.length >= MAX_DRAFTS_PER_CLAIM) {
+      throw new ConvexError("This claim has too many drafts; edit an existing one instead");
+    }
     const draftId = await ctx.db.insert("drafts", {
       claimId: args.claimId,
       userId: args.userId,
@@ -370,12 +387,14 @@ export const approveAndSend = mutation({
       throw new ConvexError("This claim is closed");
     }
 
-    const to = args.to.trim().toLowerCase();
+    // B1: nothing that could break out of a header survives, whatever the transport does with it.
+    const to = stripControl(args.to).trim().toLowerCase();
     if (to.length === 0) throw new ConvexError("Enter a recipient email address");
     if (!EMAIL_RE.test(to)) throw new ConvexError("Enter a valid recipient email address");
 
     const purchase = await ctx.db.get(claim.purchaseId);
     if (!purchase) throw new ConvexError("Purchase not found");
+    if (claim.isExample || purchase.isExample) throw new ConvexError(EXAMPLE_ERROR);
 
     // D18: an unticked recipient is only allowed when it is exactly the
     // contact from a policy snapshot this user confirmed themselves.
@@ -392,11 +411,26 @@ export const approveAndSend = mutation({
       .unique();
     if (!profile) throw new ConvexError("Set up your Recoup inbox first");
 
-    const body = args.body.trim();
+    // The same cap `update` applies; the client's copy of the text is never trusted to have gone through it.
+    const body = args.body.trim().slice(0, MAX_BODY_CHARS);
     if (body.length === 0) throw new ConvexError("The message body is empty");
     const token = `[RC-${claim.token}]`;
-    const stripped = args.subject.trim().slice(0, 200);
+    const stripped = stripControl(args.subject).trim().slice(0, 200);
     const subject = stripped.includes(token) ? stripped : `${stripped} ${token}`.trim();
+
+    // B1: `queued` only blocks a second send for the ~30s until reconcile, so sends are counted. A draft whose
+    // delivery failed has its `outboundId` and `approvedAt` cleared by `applySendOutcome` and does not count.
+    const sentDrafts = (
+      await ctx.db
+        .query("drafts")
+        .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+        .take(MAX_DRAFTS_PER_CLAIM)
+    ).filter((d) => d.outboundId !== undefined || d.approvedAt !== undefined);
+    if (sentDrafts.length >= MAX_SENDS_PER_CLAIM) {
+      throw new ConvexError(`A claim can be emailed at most ${MAX_SENDS_PER_CLAIM} times. Reply from your own mailbox to follow up.`);
+    }
+    // Last, so every refusal above costs nothing; throws at 10 sends a day.
+    await charge(ctx, userId, "claim_email");
 
     const outboundId = await agentmail.sendMessage(sendCtx(ctx), profile.inboxId, {
       to,

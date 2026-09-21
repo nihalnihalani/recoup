@@ -116,7 +116,9 @@ export const finishEvent = internalMutation({
   returns: v.null(),
   handler: async (ctx, { processedEventId }) => {
     const row = await ctx.db.get(processedEventId);
-    if (row) await ctx.db.patch(processedEventId, { status: "succeeded", lastError: undefined, summary: "Reply read and recorded on the claim." });
+    // Only a row still being read may be closed (review LOW): one the safety net already failed, or a user
+    // re-ran, is somebody else's to finish.
+    if (row && row.status === "processing") await ctx.db.patch(processedEventId, { status: "succeeded", lastError: undefined, summary: "Reply read and recorded on the claim." });
     return null;
   },
 });

@@ -324,3 +324,24 @@ describe("replies.listForClaim", () => {
     );
   });
 });
+
+describe("replies.finishEvent status guard (pre-launch review LOW)", () => {
+  it("closes a row that is still being read, and leaves any other row alone", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const insert = (externalId: string, status: "processing" | "failed" | "received") =>
+      t.run((ctx) =>
+        ctx.db.insert("processedEvents", { externalId, kind: "agentmail.message.received", status, attempts: 1, userId, route: "reply" }),
+      );
+    const reading = await insert("evt-reading", "processing");
+    const timedOut = await insert("evt-timed-out", "failed");
+    const requeued = await insert("evt-requeued", "received");
+    for (const processedEventId of [reading, timedOut, requeued]) {
+      await t.mutation(internal.replies.finishEvent, { processedEventId });
+    }
+    const status = async (id: Id<"processedEvents">) => (await t.run((ctx) => ctx.db.get(id)))?.status;
+    expect(await status(reading)).toBe("succeeded");
+    expect(await status(timedOut)).toBe("failed");
+    expect(await status(requeued)).toBe("received");
+  });
+});

@@ -34,6 +34,8 @@ import { openClaim } from "./claims";
 import { Price } from "./lib/schemas";
 import { extract } from "./lib/ai";
 import { imageUrlChange, pageImageUrl } from "./lib/imageUrl";
+import { charge } from "./lib/budget";
+import { parseProductUrl } from "./lib/watchUrl";
 
 const firecrawl = new FirecrawlClient(components.firecrawl);
 
@@ -196,9 +198,12 @@ export const itemForCheck = internalQuery({
   handler: async (ctx, { itemId }) => {
     const item = await ctx.db.get(itemId);
     if (!item || !item.productUrl) return null;
+    // M1: rows written before every write path validated the link are re-checked here, the last stop before the scraper.
+    const parsed = parseProductUrl(item.productUrl);
+    if (!parsed) return null;
     const purchase = await ctx.db.get(item.purchaseId);
     if (!purchase) return null;
-    return { name: item.name, productUrl: item.productUrl, currency: purchase.currency };
+    return { name: item.name, productUrl: parsed.productUrl, currency: purchase.currency };
   },
 });
 
@@ -470,7 +475,10 @@ export const runAll = internalAction({
   args: {},
   returns: v.number(),
   handler: async (ctx) => {
-    const itemIds: Id<"items">[] = await ctx.runQuery(internal.priceWatch.eligibleItems, {});
+    const eligible: Id<"items">[] = await ctx.runQuery(internal.priceWatch.eligibleItems, {});
+    // H3: every check is paid, so the tick schedules only what the deployment-wide daily switch still allows.
+    const allowed: number = await ctx.runMutation(internal.budget.takeGlobalPriceChecks, { want: eligible.length });
+    const itemIds = eligible.slice(0, allowed);
     for (let i = 0; i < itemIds.length; i++) {
       await ctx.scheduler.runAfter(i * STAGGER_MS, internal.priceWatch.checkItem, {
         itemId: itemIds[i],
@@ -489,10 +497,9 @@ export const runAll = internalAction({
  * so the cooldown read and the schedule happen in one transaction: two rapid
  * clicks cannot both get past the guard.
  *
- * The guard is deliberately cheap — it refuses when a check was *recorded* in
- * the last minute. A check scheduled seconds ago has not recorded yet, so the
- * real protection against a hammering client is the per-user rate limiter the
- * app applies to paid paths; this only stops the obvious double-click.
+ * The cooldown is stamped on the item at schedule time (`checkRequestedAt`, the same shape as
+ * `watches.checkNow`), because a check scheduled seconds ago has not recorded anything yet (review H1). The
+ * per-user daily budget and the global switch are charged in the same transaction.
  */
 export const checkNow = mutation({
   args: { itemId: v.id("items") },
@@ -501,16 +508,26 @@ export const checkNow = mutation({
     const userId = await requireUserId(ctx);
     const item = await ownedItem(ctx, itemId, userId);
     if (!item.productUrl) throw new ConvexError("This item has no product page to check");
+    if (!parseProductUrl(item.productUrl)) throw new ConvexError("This item's product link cannot be checked");
+    const purchase = await ctx.db.get(item.purchaseId);
+    // D27: examples never scrape; an archived purchase is gone from the board (D47).
+    if (!purchase || purchase.isExample || purchase.status === "archived") {
+      throw new ConvexError("This item cannot be checked");
+    }
 
+    const now = Date.now();
     const last = await ctx.db
       .query("priceChecks")
       .withIndex("by_item", (q) => q.eq("itemId", itemId))
       .order("desc")
       .first();
-    if (last && Date.now() - last.observedAt < CHECK_COOLDOWN_MS) {
+    const lastAt = Math.max(item.checkRequestedAt ?? 0, last?.observedAt ?? 0);
+    if (now - lastAt < CHECK_COOLDOWN_MS) {
       throw new ConvexError("This item was just checked; try again in a minute");
     }
 
+    await charge(ctx, userId, "item_check", now);
+    await ctx.db.patch(itemId, { checkRequestedAt: now });
     await ctx.scheduler.runAfter(0, internal.priceWatch.checkItem, { itemId });
     return null;
   },

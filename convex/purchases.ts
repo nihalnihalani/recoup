@@ -1,6 +1,5 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { internal } from "./_generated/api";
 import type { Doc } from "./_generated/dataModel";
 import { ownedItem, ownedPurchase, requireUserId } from "./lib/access";
 import { netRecovered } from "./lib/ledger";
@@ -10,6 +9,40 @@ import { cancelPending } from "./followUps";
 import { normalizeDomain } from "./lib/policyText";
 import { latestPolicy } from "./lib/latestPolicy";
 import { verdict } from "./lib/verdict";
+import { parseProductUrl } from "./lib/watchUrl";
+import { boundedLine } from "./lib/text";
+import { schedulePolicyFetch } from "./policies";
+import {
+  MAX_ITEMS_PER_PURCHASE,
+  MAX_ITEM_NAME_CHARS,
+  MAX_MERCHANT_CHARS,
+  MAX_ORDER_REF_CHARS,
+  MAX_PURCHASES_PER_USER,
+} from "./limits";
+
+const MAX_SOURCE_ID_CHARS = 500;
+
+/**
+ * An item's product link as it may be stored (review M1): every stored link is later scraped, so it goes through
+ * the same validator as a watch. Empty means "no link"; a link we would refuse to scrape is refused here.
+ */
+function cleanProductUrl(input: string | undefined): string | undefined {
+  if (input === undefined || input.trim().length === 0) return undefined;
+  const parsed = parseProductUrl(input);
+  if (!parsed) throw new ConvexError("Product link must be a full store link starting with http:// or https://");
+  return parsed.productUrl;
+}
+
+function cleanItemName(name: string): string {
+  const clean = boundedLine(name, "Item name", MAX_ITEM_NAME_CHARS);
+  if (clean.length === 0) throw new ConvexError("Item name must not be empty");
+  return clean;
+}
+
+function cleanOrderRef(orderRef: string | undefined): string | undefined {
+  if (orderRef === undefined) return undefined;
+  return boundedLine(orderRef, "orderRef", MAX_ORDER_REF_CHARS) || undefined;
+}
 
 const itemInput = v.object({
   name: v.string(),
@@ -30,9 +63,10 @@ export const create = mutation({
     status: v.optional(v.union(v.literal("needs_review"), v.literal("active"))),
     isExample: v.optional(v.boolean()),
   },
+  returns: v.id("purchases"),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
-    const { items, status, purchasedAt, ...rest } = args;
+    const { items, status, purchasedAt } = args;
     const resolvedStatus = status ?? "active";
     if (resolvedStatus === "active" && purchasedAt === undefined) {
       throw new ConvexError("purchasedAt is required for an active purchase");
@@ -43,27 +77,49 @@ export const create = mutation({
     const merchantDomain = normalizeDomain(args.merchantDomain);
     if (!merchantDomain) throw new ConvexError("merchantDomain must be a domain like example.com");
     if (items.length === 0) throw new ConvexError("A purchase needs at least one item");
+    if (items.length > MAX_ITEMS_PER_PURCHASE) {
+      throw new ConvexError(`A purchase can have at most ${MAX_ITEMS_PER_PURCHASE} items`);
+    }
     if (purchasedAt !== undefined) assertTimestamp(purchasedAt, "purchasedAt");
-    for (const it of items) {
-      assertCents(it.unitCents, "unitCents");
-      assertQty(it.qty);
+    const merchant = boundedLine(args.merchant, "merchant", MAX_MERCHANT_CHARS);
+    const orderRef = cleanOrderRef(args.orderRef);
+    const sourceMessageId =
+      args.sourceMessageId === undefined
+        ? undefined
+        : boundedLine(args.sourceMessageId, "sourceMessageId", MAX_SOURCE_ID_CHARS) || undefined;
+    const cleanItems = items.map((it) => ({
+      name: cleanItemName(it.name),
+      unitCents: assertCents(it.unitCents, "unitCents"),
+      qty: assertQty(it.qty),
+      productUrl: cleanProductUrl(it.productUrl),
+    }));
+
+    // B4: archived rows count, so archive-and-recreate cannot get around the cap.
+    const held = await ctx.db
+      .query("purchases")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .take(MAX_PURCHASES_PER_USER);
+    if (held.length >= MAX_PURCHASES_PER_USER) {
+      throw new ConvexError(`You can keep up to ${MAX_PURCHASES_PER_USER} purchases`);
     }
 
     const purchaseId = await ctx.db.insert("purchases", {
-      ...rest,
+      merchant,
       merchantDomain,
+      orderRef,
       purchasedAt,
+      currency: args.currency,
+      sourceMessageId,
+      isExample: args.isExample,
       userId,
       status: resolvedStatus,
     });
-    for (const it of items) {
+    for (const it of cleanItems) {
       await ctx.db.insert("items", { ...it, purchaseId, userId, returned: false });
     }
-    if (resolvedStatus === "active") {
-      await ctx.scheduler.runAfter(0, internal.policies.fetchBoth, {
-        userId,
-        merchantDomain,
-      });
+    // D27: an example store is not a real site; researching it would only burn credit.
+    if (resolvedStatus === "active" && !args.isExample) {
+      await schedulePolicyFetch(ctx, userId, merchantDomain);
     }
     return purchaseId;
   },
@@ -86,6 +142,7 @@ export const confirm = mutation({
       }),
     ),
   },
+  returns: v.null(),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const purchase = await ownedPurchase(ctx, args.purchaseId, userId);
@@ -95,34 +152,44 @@ export const confirm = mutation({
     const merchantDomain = normalizeDomain(args.merchantDomain);
     if (!merchantDomain) throw new ConvexError("merchantDomain must be a domain like example.com");
     if (args.items.length === 0) throw new ConvexError("A purchase needs at least one item");
+    if (args.items.length > MAX_ITEMS_PER_PURCHASE) {
+      throw new ConvexError(`A purchase can have at most ${MAX_ITEMS_PER_PURCHASE} items`);
+    }
     assertTimestamp(args.purchasedAt, "purchasedAt");
+    const merchant = boundedLine(args.merchant, "merchant", MAX_MERCHANT_CHARS);
+    const orderRef = cleanOrderRef(args.orderRef);
+    const cleanItems = [];
     for (const it of args.items) {
       const item = await ownedItem(ctx, it.itemId, userId);
       if (item.purchaseId !== args.purchaseId) {
         throw new ConvexError("Item does not belong to this purchase");
       }
-      assertCents(it.unitCents, "unitCents");
-      assertQty(it.qty);
+      cleanItems.push({
+        itemId: it.itemId,
+        name: cleanItemName(it.name),
+        unitCents: assertCents(it.unitCents, "unitCents"),
+        qty: assertQty(it.qty),
+        productUrl: cleanProductUrl(it.productUrl),
+      });
     }
     await ctx.db.patch(args.purchaseId, {
-      merchant: args.merchant,
+      merchant,
       merchantDomain,
-      orderRef: args.orderRef,
+      orderRef,
       purchasedAt: args.purchasedAt,
       status: "active",
     });
-    for (const it of args.items) {
-      await ctx.db.patch(it.itemId, {
-        name: it.name,
-        unitCents: it.unitCents,
-        qty: it.qty,
-        productUrl: it.productUrl,
-      });
+    for (const { itemId, ...fields } of cleanItems) {
+      await ctx.db.patch(itemId, fields);
     }
-    await ctx.scheduler.runAfter(0, internal.policies.fetchBoth, {
-      userId,
-      merchantDomain,
-    });
+    // B4: re-confirming the same purchase must not buy another policy research. Only a purchase that just became
+    // active, or one whose store changed, has anything new to look up.
+    const becameActive = purchase.status !== "active";
+    const domainChanged = purchase.merchantDomain !== merchantDomain;
+    if ((becameActive || domainChanged) && !purchase.isExample) {
+      await schedulePolicyFetch(ctx, userId, merchantDomain);
+    }
+    return null;
   },
 });
 

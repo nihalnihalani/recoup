@@ -5,6 +5,8 @@ import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { observePrice } from "./priceWatch";
 import {
+  DAILY_BUDGETS,
+  GLOBAL_DAILY_BUDGETS,
   MAX_WATCHES_PER_USER,
   MAX_WATCH_CREATES_PER_HOUR,
   WATCH_CHECK_COOLDOWN_MS,
@@ -772,5 +774,96 @@ describe("watch images", () => {
     expect(items[0].imageUrl).toBe(IMG);
     const overview = await as.query(api.tracking.overview, {});
     expect(overview.items.find((i) => i.itemId === items[0]._id)?.imageUrl).toBe(IMG);
+  });
+});
+
+describe("watch spend caps (pre-launch review H2, H3, B4)", () => {
+  const usage = async (t: T) => await t.run((ctx) => ctx.db.query("usage").collect());
+  const pendingNamed = async (t: T, name: string) => (await scheduled(t)).filter((j) => j.name.includes(name)).length;
+  const spendGlobal = async (t: T, kind: "price_check" | "policy_fetch", left: number) =>
+    await t.run((ctx) => ctx.db.insert("usage", { day: "2026-09-20", kind, count: GLOBAL_DAILY_BUDGETS[kind].max - left }));
+
+  it(`checkNow stops at ${DAILY_BUDGETS.watch_check.max} a day per user, on top of the per-watch cooldown`, async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const max = DAILY_BUDGETS.watch_check.max;
+    const ids: Id<"watches">[] = [];
+    for (let i = 0; i <= max; i++) ids.push(await seedWatch(t, userId));
+
+    for (let i = 0; i < max; i++) await as.mutation(api.watches.checkNow, { watchId: ids[i] });
+    // The cooldown still applies to a watch that was just checked...
+    await expect(as.mutation(api.watches.checkNow, { watchId: ids[0] })).rejects.toThrow(/just checked/);
+    // ...and a fresh watch is refused by the daily budget, with nothing stamped or scheduled.
+    await expect(as.mutation(api.watches.checkNow, { watchId: ids[max] })).rejects.toThrow(
+      /today's limit for checking prices on watched items/,
+    );
+    expect((await watchRow(t, ids[max])).checkRequestedAt).toBeUndefined();
+    expect(await pendingNamed(t, "checkWatch")).toBe(max);
+    expect((await usage(t)).find((r) => r.userId === undefined)).toMatchObject({ kind: "price_check", count: max });
+
+    const other = await signedIn(t, "Other");
+    await other.as.mutation(api.watches.checkNow, { watchId: await seedWatch(t, other.userId) });
+
+    vi.setSystemTime(T0 + DAY);
+    await as.mutation(api.watches.checkNow, { watchId: ids[max] });
+  });
+
+  it("the sweep schedules only what the global switch still allows and leaves the rest due", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const ids: Id<"watches">[] = [];
+    for (let i = 0; i < 5; i++) ids.push(await seedWatch(t, userId, { nextCheckAt: T0 - (5 - i) * HOUR }));
+    await spendGlobal(t, "price_check", 2);
+
+    expect(await t.mutation(internal.watches.sweep, {})).toBe(2);
+    expect(await pendingNamed(t, "checkWatch")).toBe(2);
+    // The two longest overdue went; the others were not bumped, so they are first in line tomorrow.
+    expect((await watchRow(t, ids[0])).nextCheckAt).toBe(T0 + WATCH_SWEEP_BUMP_MS);
+    expect((await watchRow(t, ids[4])).nextCheckAt).toBe(T0 - HOUR);
+    expect(await t.mutation(internal.watches.sweep, {})).toBe(0);
+
+    vi.setSystemTime(T0 + DAY);
+    expect(await t.mutation(internal.watches.sweep, {})).toBe(5);
+  });
+
+  it("create is refused, with no row written, once the global switch is spent", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    await spendGlobal(t, "price_check", 0);
+    await expect(as.mutation(api.watches.create, { productUrl: URL })).rejects.toThrow(/Recoup has reached today's limit/);
+    expect(await t.run((ctx) => ctx.db.query("watches").collect())).toHaveLength(0);
+  });
+
+  it("create refuses an internal host and an unusual port (M2)", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    for (const productUrl of ["http://metadata.google.internal/x", "https://printer.local/x", "https://acme.example:8080/p"]) {
+      await expect(as.mutation(api.watches.create, { productUrl })).rejects.toThrow(ConvexError);
+    }
+  });
+
+  it(`markBought shares the ${DAILY_BUDGETS.policy_fetch.max}-a-day policy research budget; past it the purchase is still made`, async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const max = DAILY_BUDGETS.policy_fetch.max;
+    for (let i = 0; i < max + 2; i++) {
+      const watchId = await seedWatch(t, userId, { currency: "USD" });
+      await as.mutation(api.watches.markBought, { watchId, paidCents: 8_000, purchasedAt: T0 - DAY });
+    }
+    expect(await pendingNamed(t, "fetchBoth")).toBe(max);
+    expect(await t.run((ctx) => ctx.db.query("purchases").collect())).toHaveLength(max + 2);
+    const rows = await usage(t);
+    expect(rows.find((r) => r.userId === userId && r.kind === "policy_fetch")?.count).toBe(max);
+    expect(rows.find((r) => r.userId === undefined && r.kind === "policy_fetch")?.count).toBe(max * 2);
+  });
+
+  it("a spent global policy switch skips the research for everyone and charges nobody", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    await spendGlobal(t, "policy_fetch", 1); // one unit left, a fetchBoth needs two
+    const watchId = await seedWatch(t, userId, { currency: "USD" });
+    await as.mutation(api.watches.markBought, { watchId, paidCents: 8_000, purchasedAt: T0 - DAY });
+    expect(await pendingNamed(t, "fetchBoth")).toBe(0);
+    expect((await usage(t)).filter((r) => r.userId === userId)).toHaveLength(0);
   });
 });

@@ -49,6 +49,8 @@ export default defineSchema({
     productUrl: v.optional(v.string()), returned: v.boolean(), returnedAt: v.optional(v.number()),
     /** The product page's Open Graph image (absolute https), captured by a price check or carried from a watch. */
     imageUrl: v.optional(v.string()),
+    /** Stamped when a manual price check is scheduled; carries the `priceWatch.checkNow` cooldown (review H1), as on watches. */
+    checkRequestedAt: v.optional(v.number()),
   }).index("by_purchase", ["purchaseId"]).index("by_user", ["userId"]),
 
   /** Immutable policy snapshots; refresh inserts a new row (D17). */
@@ -84,6 +86,15 @@ export default defineSchema({
     currency: v.optional(v.string()), confidence: v.optional(v.number()), variantMatch: v.optional(variantMatch), observedAt: v.number(),
     sourceUrl: v.string(), note: v.optional(v.string()),
   }).index("by_watch", ["watchId", "observedAt"]),
+
+  /**
+   * Per-user, per-day spend counters (pre-launch review B3-B5, H1-H2). One row per (user, UTC day, kind); the
+   * scheduling mutation increments it in the same transaction that schedules the paid work, so the cap fails closed.
+   * `userId` is optional only for the deployment-wide kill-switch rows.
+   */
+  usage: defineTable({
+    userId: v.optional(v.id("users")), day: v.string(), kind: v.string(), count: v.number(),
+  }).index("by_user_day_kind", ["userId", "day", "kind"]),
 
   /**
    * Outbound notification mail to the account holder (W2). Claim-before-send: the row is inserted with a unique
@@ -159,5 +170,7 @@ export default defineSchema({
     errorSummary: v.optional(v.string()),
     userId: v.optional(v.id("users")), claimId: v.optional(v.id("claims")), route: v.optional(processedRoute),
     summary: v.optional(v.string()), payload: v.optional(v.any()),
+    /** When the row last entered `processing`; stuck detection compares against this, not `_creationTime` (review H5). */
+    processingStartedAt: v.optional(v.number()),
   }).index("by_external", ["externalId"]).index("by_status", ["status"]).index("by_user_status", ["userId", "status"]),
 });

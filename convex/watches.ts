@@ -31,8 +31,13 @@ import { claimDrop } from "./notify";
 import { defaultWatchName, parseProductUrl } from "./lib/watchUrl";
 import { verdict, type Verdict } from "./lib/verdict";
 import { imageUrlChange } from "./lib/imageUrl";
+import { cleanLine } from "./lib/text";
+import { charge, consumeGlobalBudget, takeGlobalBudget } from "./lib/budget";
+import { schedulePolicyFetch } from "./policies";
 import { errorNote, observePrice, rejectionReason, truncate, type PageObservation } from "./priceWatch";
 import {
+  GLOBAL_DAILY_BUDGETS,
+  MAX_PURCHASES_PER_USER,
   MAX_WATCHES_PER_USER,
   MAX_WATCH_CREATES_PER_HOUR,
   WATCH_CHECK_COOLDOWN_MS,
@@ -277,7 +282,8 @@ export const create = mutation({
     const userId = await requireUserId(ctx);
     const parsed = parseProductUrl(args.productUrl);
     if (!parsed) throw new ConvexError("Paste a full product link starting with http:// or https://");
-    const givenName = args.name?.trim();
+    // Control characters never reach a stored name (review LOW, subject injection).
+    const givenName = args.name === undefined ? undefined : cleanLine(args.name);
     if (givenName !== undefined && givenName.length > MAX_NAME_CHARS) {
       throw new ConvexError(`name must be at most ${MAX_NAME_CHARS} characters`);
     }
@@ -285,6 +291,8 @@ export const create = mutation({
 
     const now = Date.now();
     await consumeCreateLimit(ctx, userId, now);
+    // The first check is paid: it draws from the deployment-wide switch like every other check.
+    await consumeGlobalBudget(ctx, "price_check", GLOBAL_DAILY_BUDGETS.price_check.max, 1, now);
 
     const watchId = await ctx.db.insert("watches", {
       userId,
@@ -319,6 +327,8 @@ export const checkNow = mutation({
     if (now - last < WATCH_CHECK_COOLDOWN_MS) {
       throw new ConvexError("This item was just checked; try again in a few minutes");
     }
+    // H2: the cooldown is per watch, so 50 watches could still buy 7,200 checks a day. Per-user and global caps.
+    await charge(ctx, userId, "watch_check", now);
     await ctx.db.patch(watchId, { checkRequestedAt: now });
     await ctx.scheduler.runAfter(0, internal.watches.checkWatch, { watchId });
     return null;
@@ -344,7 +354,7 @@ export const rename = mutation({
   handler: async (ctx, { watchId, name }) => {
     const userId = await requireUserId(ctx);
     await ownedWatch(ctx, watchId, userId);
-    const trimmed = assertNonEmpty(name, "name").trim();
+    const trimmed = assertNonEmpty(cleanLine(name), "name");
     if (trimmed.length > MAX_NAME_CHARS) {
       throw new ConvexError(`name must be at most ${MAX_NAME_CHARS} characters`);
     }
@@ -424,9 +434,18 @@ export const markBought = mutation({
     const purchasedAt = assertTimestamp(args.purchasedAt, "purchasedAt");
     const qty = assertQty(args.qty ?? 1);
     const currency = assertCurrency(watch.currency ?? "USD");
-    const orderRef = args.orderRef?.trim() || undefined;
+    const orderRef = (args.orderRef === undefined ? "" : cleanLine(args.orderRef)) || undefined;
     if (orderRef !== undefined && orderRef.length > MAX_ORDER_REF_CHARS) {
       throw new ConvexError(`orderRef must be at most ${MAX_ORDER_REF_CHARS} characters`);
+    }
+
+    // B4: the same ceiling as `purchases.create`, archived rows included.
+    const held = await ctx.db
+      .query("purchases")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .take(MAX_PURCHASES_PER_USER);
+    if (held.length >= MAX_PURCHASES_PER_USER) {
+      throw new ConvexError(`You can keep up to ${MAX_PURCHASES_PER_USER} purchases`);
     }
 
     const purchaseId = await ctx.db.insert("purchases", {
@@ -476,10 +495,8 @@ export const markBought = mutation({
     }
 
     await ctx.db.patch(watch._id, { status: "bought", purchaseId });
-    await ctx.scheduler.runAfter(0, internal.policies.fetchBoth, {
-      userId,
-      merchantDomain: watch.merchantDomain,
-    });
+    // B4: same shared daily budget as `purchases.create`; over it the purchase is still made, without the research.
+    await schedulePolicyFetch(ctx, userId, watch.merchantDomain);
     return purchaseId;
   },
 });
@@ -599,7 +616,8 @@ export const recordWatchCheck = internalMutation({
       patch.lastCents = observedCents;
       if (watch.currency === undefined) patch.currency = args.currency;
     }
-    const productName = args.productName?.trim();
+    // The page controls this string; it is stored as one clean line like a name the user typed.
+    const productName = args.productName === undefined ? undefined : cleanLine(args.productName);
     if (
       productName &&
       args.variantMatch !== "none" &&
@@ -642,6 +660,10 @@ export const sweep = internalMutation({
       .query("watches")
       .withIndex("by_status_nextCheck", (q) => q.eq("status", "active").lte("nextCheckAt", now))
       .take(WATCH_SWEEP_PAGE);
+    // H3: every check is paid, so the tick only schedules what the deployment-wide daily switch still allows.
+    // Rows left out stay due and are picked up by the first tick after the switch resets.
+    const allowed = await takeGlobalBudget(ctx, "price_check", due.length, now);
+    due.length = allowed;
     for (let i = 0; i < due.length; i++) {
       await ctx.db.patch(due[i]._id, {
         nextCheckAt: now + WATCH_SWEEP_BUMP_MS,

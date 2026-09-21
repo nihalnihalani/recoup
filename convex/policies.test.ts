@@ -110,6 +110,57 @@ describe("refresh", () => {
   });
 });
 
+describe("refresh is gated before anything is paid for (pre-launch review B3)", () => {
+  async function purchaseAt(t: ReturnType<typeof setup>, userId: any, merchantDomain: string, isExample = false) {
+    await t.run(async (ctx) => {
+      await ctx.db.insert("purchases", { userId, merchant: "M", merchantDomain, currency: "USD", status: "active", isExample });
+    });
+  }
+  const usage = async (t: ReturnType<typeof setup>) => await t.run(async (ctx) => await ctx.db.query("usage").collect());
+
+  it("rejects something that is not a domain, and a store the caller has nothing at, without charging or fetching", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const other = await signedIn(t, "Other");
+    await purchaseAt(t, other.userId, "theirs.example");
+    await purchaseAt(t, userId, "demo.example", true);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    for (const merchantDomain of ["not a domain", "", "random-store.example", "theirs.example", "demo.example"]) {
+      await expect(as.action(api.policies.refresh, { merchantDomain, kind: "returns" })).rejects.toThrow(ConvexError);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await usage(t)).toHaveLength(0);
+    expect(await t.run(async (ctx) => (await ctx.db.query("policies").collect()).length)).toBe(0);
+  });
+
+  it("accepts a store the caller bought from or watches, normalised, up to 10 a day", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await purchaseAt(t, userId, "bought.example");
+    await t.run(async (ctx) => {
+      await ctx.db.insert("watches", {
+        userId, name: "W", productUrl: "https://watched.example/p", merchantDomain: "watched.example", status: "paused", nextCheckAt: 0,
+      });
+      await ctx.db.insert("watches", {
+        userId, name: "Gone", productUrl: "https://archived.example/p", merchantDomain: "archived.example", status: "archived", nextCheckAt: 0,
+      });
+    });
+    await expect(t.mutation(internal.policies.beginRefresh, { userId, merchantDomain: "archived.example" })).rejects.toThrow(
+      /stores you have bought from or are watching/,
+    );
+    await t.mutation(internal.policies.beginRefresh, { userId, merchantDomain: "watched.example" });
+    for (let i = 0; i < 9; i++) await t.mutation(internal.policies.beginRefresh, { userId, merchantDomain: "bought.example" });
+    await expect(t.mutation(internal.policies.beginRefresh, { userId, merchantDomain: "bought.example" })).rejects.toThrow(
+      /today's limit for re-reading store policies/,
+    );
+    const rows = await usage(t);
+    expect(rows.find((r) => r.userId === userId)).toMatchObject({ kind: "policy_refresh", count: 10 });
+    expect(rows.find((r) => r.userId === undefined)).toMatchObject({ kind: "policy_fetch", count: 10 });
+  });
+});
+
 describe("researchPolicy", () => {
   it("inserts an unknown snapshot with a note when there are no hits", async () => {
     const t = setup();

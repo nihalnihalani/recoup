@@ -30,6 +30,42 @@ describe("parseProductUrl", () => {
   });
 });
 
+describe("parseProductUrl: internal names and ports (pre-launch review M2)", () => {
+  it.each([
+    "http://metadata.google.internal/computeMetadata/v1/",
+    "https://printer.local/status",
+    "https://nas.lan/",
+    "https://wiki.corp/page",
+    "https://intranet.ACME.CORP/page",
+    "https://router.home.arpa/",
+    "https://app.localhost/x",
+    "https://db.internal./x",
+    "https://acme.example:8080/p",
+    "https://acme.example:22/p",
+    "http://acme.example:8443/p",
+    "http://169.254.169.254/latest/meta-data",
+    "http://2130706433/p",
+    "http://0x7f.1/p",
+  ])("rejects %s", (input) => {
+    expect(parseProductUrl(input)).toBeNull();
+  });
+
+  it.each([
+    ["https://acme.example:443/p", "https://acme.example/p"],
+    ["http://acme.example:80/p", "http://acme.example/p"],
+    ["https://acme.example:80/p", "https://acme.example:80/p"],
+    ["http://acme.example:443/p", "http://acme.example:443/p"],
+  ])("allows the web ports: %s", (input, stored) => {
+    expect(parseProductUrl(input)?.productUrl).toBe(stored);
+  });
+
+  it("does not mistake a public name that merely contains a private word", () => {
+    expect(parseProductUrl("https://local.acme.example/p")?.merchantDomain).toBe("local.acme.example");
+    expect(parseProductUrl("https://thelocal.com/p")?.merchantDomain).toBe("thelocal.com");
+    expect(parseProductUrl("https://internal-shop.com/p")?.merchantDomain).toBe("internal-shop.com");
+  });
+});
+
 describe("defaultWatchName", () => {
   it("uses the host and a readable path tail", () => {
     expect(defaultWatchName("https://www.acme.example/p/mens-down_jacket.html?x=1")).toBe(

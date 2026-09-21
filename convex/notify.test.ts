@@ -3,8 +3,8 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { agentmail } from "./mail";
-import { DAILY_LIMIT_ERROR, isAlertableDrop } from "./notify";
-import { MAX_DROP_EMAILS_PER_DAY } from "./limits";
+import { DAILY_LIMIT_ERROR, DROP_SUBJECT, GLOBAL_LIMIT_ERROR, isAlertableDrop } from "./notify";
+import { GLOBAL_DAILY_BUDGETS, MAX_DROP_EMAILS_PER_DAY } from "./limits";
 
 /**
  * Drop emails (W2). No network: the AgentMail component cannot dispatch under
@@ -129,7 +129,7 @@ describe("claiming a drop inside recordWatchCheck", () => {
       status: "claimed",
       cents: 7_999,
       to: "sam@home.example",
-      subject: "Price drop: Down Jacket is now $79.99",
+      subject: "Recoup price alert: an item you are watching dropped",
     });
     expect(row.previousCents).toBeUndefined();
     expect(send).not.toHaveBeenCalled();
@@ -140,14 +140,13 @@ describe("claiming a drop inside recordWatchCheck", () => {
     const [, inboxId, message] = send.mock.calls[0] as [unknown, string, { to: string; subject: string; text: string; html?: string }];
     expect(inboxId).toBe(`inbox-${userId}`);
     expect(message.to).toBe("sam@home.example");
-    expect(message.subject).toBe("Price drop: Down Jacket is now $79.99");
+    expect(message.subject).toBe("Recoup price alert: an item you are watching dropped");
+    expect(message.subject).toBe(DROP_SUBJECT);
     expect(message.html).toBeUndefined();
     for (const part of [
-      "Down Jacket",
       "Now: $79.99",
       "Your target: $80.00",
       "Store: acme.example",
-      `Link: ${URL}`,
       `Checked: ${new Date(row._creationTime).toUTCString()}`,
       "https://recoup.example/watching",
       "Recoup uses no affiliate links.",
@@ -318,7 +317,108 @@ describe("a drop that cannot be mailed is still recorded", () => {
   });
 });
 
+describe("the alert carries nothing its sender chose (pre-launch review B2)", () => {
+  it("contains neither the watch name nor the product URL, and its only link is back to Recoup", async () => {
+    process.env.SITE_URL = "https://recoup.example";
+    const t = setup();
+    const { userId } = await account(t, { email: "victim@corp.example" });
+    const bait = "https://evil-shop.example/p/login-here?x=1";
+    const watchId = await t.run((ctx) =>
+      ctx.db.insert("watches", {
+        userId,
+        name: "URGENT: your account is locked, sign in at evil-shop.example/login",
+        productUrl: bait,
+        merchantDomain: "evil-shop.example",
+        targetCents: 99_999_999,
+        status: "active",
+        nextCheckAt: T0,
+      }),
+    );
+    await observe(t, watchId, 1_000);
+    await flush(t);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    const message = send.mock.calls[0][2] as { subject: string; text: string; html?: string };
+    expect(message.subject).toBe("Recoup price alert: an item you are watching dropped");
+    expect(message.html).toBeUndefined();
+    expect(message.text).not.toContain("URGENT");
+    expect(message.text).not.toContain("account is locked");
+    expect(message.text).not.toContain(bait);
+    expect(message.text).not.toContain("/p/login-here");
+    expect(message.text).not.toContain("/login");
+    const links = message.text.match(/https?:\/\/\S+/g) ?? [];
+    expect(links).toEqual(["https://recoup.example/watching"]);
+    // The stored row, which the in-app list reads, has the same fixed subject.
+    expect((await mailRows(t))[0].subject).toBe(DROP_SUBJECT);
+  });
+
+  it("a row claimed before the fix, with the old name-bearing subject, is still sent with the fixed one", async () => {
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 8_000 });
+    await observe(t, watchId, 7_000);
+    const [row] = await mailRows(t);
+    await t.run((ctx) => ctx.db.patch(row._id, { subject: "Price drop: <phish> is now $70.00" }));
+    await flush(t);
+    expect((send.mock.calls[0][2] as { subject: string }).subject).toBe(DROP_SUBJECT);
+  });
+
+  it("control characters never reach a stored watch name", async () => {
+    const t = setup();
+    const { userId, as } = await account(t);
+    const created = await as.mutation(api.watches.create, { productUrl: URL, name: "Down\r\nBcc: x@evil.example\u0000 Jacket" });
+    const name = async (id: Id<"watches">) => (await t.run((ctx) => ctx.db.get(id)))?.name;
+    expect(await name(created)).toBe("DownBcc: x@evil.example Jacket");
+
+    await as.mutation(api.watches.rename, { watchId: created, name: " Parka\n\u001b[31m " });
+    expect(await name(created)).toBe("Parka[31m");
+    await expect(as.mutation(api.watches.rename, { watchId: created, name: "\r\n" })).rejects.toThrow();
+
+    // The extractor's product name is page-controlled and fills a default name.
+    const unnamed = await t.run((ctx) =>
+      ctx.db.insert("watches", {
+        userId, name: "acme.example: down jacket", productUrl: URL, merchantDomain: "acme.example", status: "active", nextCheckAt: T0,
+      }),
+    );
+    await t.mutation(internal.watches.recordWatchCheck, {
+      watchId: unnamed, sourceUrl: URL, observedCents: 5_000, currency: "USD", confidence: 0.9, isRange: false,
+      variantMatch: "exact", productName: "Alpine\r\nSubject: hi\tJacket",
+    });
+    expect(await name(unnamed)).toBe("AlpineSubject: hiJacket");
+  });
+});
+
 describe("daily cap", () => {
+  it("is 5 a day per user", () => {
+    expect(MAX_DROP_EMAILS_PER_DAY).toBe(5);
+  });
+
+  it("a spent global switch records the drop in the app and mails nobody, until the next UTC day", async () => {
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 100_000 });
+    const max = GLOBAL_DAILY_BUDGETS.drop_email.max;
+    expect(max).toBe(300);
+    await t.run((ctx) => ctx.db.insert("usage", { day: "2026-09-20", kind: "drop_email", count: max - 1 }));
+    const globalCount = async () =>
+      (await t.run((ctx) => ctx.db.query("usage").collect())).find((r) => r.kind === "drop_email")?.count;
+
+    await observe(t, watchId, 50_000); // takes the last global unit
+    await observe(t, watchId, 49_000); // global switch is spent
+    await flush(t);
+
+    const rows = await mailRows(t);
+    expect(rows.map((r) => r.status)).toEqual(["sent", "failed"]);
+    expect(rows[1].error).toBe(GLOBAL_LIMIT_ERROR);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(await globalCount()).toBe(max);
+
+    // Next UTC day: the switch is whole again.
+    vi.setSystemTime(T0 + 24 * 3_600_000);
+    await observe(t, watchId, 48_000);
+    expect((await mailRows(t))[2].status).toBe("claimed");
+  });
+
   it(`mails at most ${MAX_DROP_EMAILS_PER_DAY} drops per 24h; the next is recorded as failed, and the window rolls`, async () => {
     const t = setup();
     const { userId, as } = await account(t);
@@ -421,5 +521,31 @@ describe("notify.drops", () => {
     const listed = await as.query(api.notify.drops, {});
     expect(listed).toHaveLength(30);
     expect(listed[0].cents).toBe(34);
+  });
+});
+
+describe("publicAppUrl (link in alert emails)", () => {
+  const saved = { app: process.env.APP_URL, site: process.env.SITE_URL };
+  afterEach(() => {
+    process.env.APP_URL = saved.app;
+    process.env.SITE_URL = saved.site;
+    if (saved.app === undefined) delete process.env.APP_URL;
+    if (saved.site === undefined) delete process.env.SITE_URL;
+  });
+
+  it("prefers APP_URL and trims a trailing slash", async () => {
+    const { publicAppUrl } = await import("./notify");
+    process.env.APP_URL = "https://recoup.example/";
+    process.env.SITE_URL = "http://localhost:5173";
+    expect(publicAppUrl()).toBe("https://recoup.example");
+  });
+
+  it("never returns a localhost or non-https address", async () => {
+    const { publicAppUrl } = await import("./notify");
+    delete process.env.APP_URL;
+    process.env.SITE_URL = "http://localhost:5173";
+    expect(publicAppUrl()).toBeNull();
+    process.env.SITE_URL = "https://localhost:5173";
+    expect(publicAppUrl()).toBeNull();
   });
 });

@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
+import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS } from "./limits";
 
 /**
  * Price watch (T09). These tests exercise `eligibleItems`, `recordCheck` and
@@ -545,5 +546,104 @@ describe("item images", () => {
 
     await t.mutation(internal.priceWatch.recordCheck, { ...good(itemId, 11_900), variantMatch: "none", imageUrl: "https://cdn.acme.example/other.jpg" });
     expect((await item())?.imageUrl).toBe("https://cdn.acme.example/i/jacket.jpg");
+  });
+});
+
+describe("priceWatch.checkNow spend caps (pre-launch review H1, M1)", () => {
+  afterEach(() => vi.useRealTimers());
+  const T0 = Date.UTC(2026, 8, 20, 12);
+  type T = ReturnType<typeof setup>;
+  const pending = async (t: T) =>
+    (await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect())).filter((j) => j.name.includes("checkItem")).length;
+  const usage = async (t: T) => await t.run((ctx) => ctx.db.query("usage").collect());
+
+  it("a second click before the first check has recorded anything is refused (the racy cooldown)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const { itemId } = await world(t, userId);
+
+    await as.mutation(api.priceWatch.checkNow, { itemId });
+    expect((await t.run((ctx) => ctx.db.get(itemId)))?.checkRequestedAt).toBe(T0);
+    // Nothing has been recorded yet; the old guard let every one of these through.
+    for (let i = 0; i < 5; i++) {
+      vi.setSystemTime(T0 + (i + 1) * 5_000);
+      await expect(as.mutation(api.priceWatch.checkNow, { itemId })).rejects.toThrow(/just checked/);
+    }
+    expect(await pending(t)).toBe(1);
+    expect((await usage(t)).find((r) => r.userId === userId)?.count).toBe(1);
+
+    vi.setSystemTime(T0 + 61_000);
+    await as.mutation(api.priceWatch.checkNow, { itemId });
+    expect(await pending(t)).toBe(2);
+  });
+
+  it(`stops at ${DAILY_BUDGETS.item_check.max} manual checks a day per user, across items, and draws from the global switch`, async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const max = DAILY_BUDGETS.item_check.max;
+    const items: Id<"items">[] = [];
+    for (let i = 0; i <= max; i++) items.push((await world(t, userId)).itemId);
+
+    for (let i = 0; i < max; i++) await as.mutation(api.priceWatch.checkNow, { itemId: items[i] });
+    await expect(as.mutation(api.priceWatch.checkNow, { itemId: items[max] })).rejects.toThrow(
+      /today's limit for checking prices on your purchases/,
+    );
+    expect(await pending(t)).toBe(max);
+    const rows = await usage(t);
+    expect(rows.find((r) => r.userId === undefined)).toMatchObject({ kind: "price_check", count: max });
+
+    const other = await signedIn(t, "Other");
+    const theirs = await world(t, other.userId);
+    await other.as.mutation(api.priceWatch.checkNow, { itemId: theirs.itemId });
+  });
+
+  it("a spent global switch refuses a manual check and charges the user nothing", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const { itemId } = await world(t, userId);
+    await t.run((ctx) =>
+      ctx.db.insert("usage", { day: "2026-09-20", kind: "price_check", count: GLOBAL_DAILY_BUDGETS.price_check.max }),
+    );
+    await expect(as.mutation(api.priceWatch.checkNow, { itemId })).rejects.toThrow(/Recoup has reached today's limit for price checks/);
+    expect(await pending(t)).toBe(0);
+    expect((await usage(t)).filter((r) => r.userId === userId)).toHaveLength(0);
+    expect((await t.run((ctx) => ctx.db.get(itemId)))?.checkRequestedAt).toBeUndefined();
+  });
+
+  it("never scrapes an example purchase, an archived one, or a stored link the validator refuses", async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const example = await world(t, userId, { isExample: true });
+    const archived = await world(t, userId, { status: "archived" });
+    const legacy = await world(t, userId, { productUrl: "http://metadata.google.internal/computeMetadata/v1/" });
+    for (const { itemId } of [example, archived, legacy]) {
+      await expect(as.mutation(api.priceWatch.checkNow, { itemId })).rejects.toThrow(ConvexError);
+    }
+    // The cron's last stop before the scraper refuses the legacy link too.
+    expect(await t.query(internal.priceWatch.itemForCheck, { itemId: legacy.itemId })).toBeNull();
+    expect(await pending(t)).toBe(0);
+    expect(await usage(t)).toHaveLength(0);
+  });
+
+  it("the cron fans out only what the global switch still allows", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const t = setup();
+    const { userId } = await signedIn(t);
+    for (let i = 0; i < 5; i++) await world(t, userId);
+    await t.run((ctx) =>
+      ctx.db.insert("usage", { day: "2026-09-20", kind: "price_check", count: GLOBAL_DAILY_BUDGETS.price_check.max - 2 }),
+    );
+    expect(await t.action(internal.priceWatch.runAll, {})).toBe(2);
+    expect(await pending(t)).toBe(2);
+    expect(await t.action(internal.priceWatch.runAll, {})).toBe(0);
+    expect(await pending(t)).toBe(2);
   });
 });
