@@ -716,7 +716,7 @@ describe("priceWatch.eligibleItems: transaction-limit overflow (D80)", () => {
       const { userId } = await signedIn(t, "Overflowed");
       await overflowFixture(t, userId, NOW, { items: 500, claimsPerItem: 65 });
 
-      const m = await measure(t, (ctx) => ctx.runQuery(internal.priceWatch.eligibleItems, {}));
+      const m = await measure(t, (ctx) => ctx.runMutation(internal.priceWatch.eligibleItems, {}));
       report("priceWatch.eligibleItems (500x65, expected fixed)", "500 items x65 claims/item", m);
       if (m.error) throw new Error(`${m.error.name}: ${m.error.message}`);
       expect(Array.isArray(m.result)).toBe(true);
@@ -731,7 +731,7 @@ describe("priceWatch.eligibleItems: transaction-limit overflow (D80)", () => {
       const { userId } = await signedIn(t, "Overflowed2");
       await overflowFixture(t, userId, NOW, { items: 500, claimsPerItem: 65 });
 
-      const m = await measure(t, (ctx) => ctx.runQuery(internal.priceWatch.eligibleItems, {}));
+      const m = await measure(t, (ctx) => ctx.runMutation(internal.priceWatch.eligibleItems, {}));
       report("priceWatch.eligibleItems (500x65, after T12)", "500 items x65 claims/item", m);
       // Was: throws with documentsRead === 32_001 (the old unbounded
       // per-item claims `.collect()`). T12's `claims.by_item_type_status`
@@ -763,7 +763,7 @@ describe("priceWatch.eligibleItems: transaction-limit overflow (D80)", () => {
       const { userId } = await signedIn(t, "AtCeiling");
       await overflowFixture(t, userId, NOW, { items: 500, claimsPerItem: 61 });
 
-      const m = await measure(t, (ctx) => ctx.runQuery(internal.priceWatch.eligibleItems, {}));
+      const m = await measure(t, (ctx) => ctx.runMutation(internal.priceWatch.eligibleItems, {}));
       report("priceWatch.eligibleItems (500x61, after T12)", "500 items x61 claims/item", m);
       expect(m.error).toBeNull();
       expect(m.documentsRead).toBeLessThanOrEqual(2_500);
