@@ -820,7 +820,8 @@ describe("malformed input matrix: control characters in names", () => {
     });
     const watch = await t.run((ctx) => ctx.db.get("watches", watchId));
     expect(watch!.name.length).toBeGreaterThan(0);
-    expect(watch!.name).not.toMatch(/[ -]/);
+    // eslint-disable-next-line no-control-regex -- intentional: asserting no control character (0x00-0x1f) survived.
+    expect(watch!.name).not.toMatch(/[\x00-\x1f]/);
   });
 
   it("purchases.create strips control characters from an item name rather than storing them (current behaviour)", async () => {
