@@ -17,6 +17,8 @@ import { MAX_WATCHES_PER_USER, POLICY_REFETCH_MIN_AGE_MS } from "./limits";
 import { normalizeDomain } from "./lib/policyText";
 import { charge, tryCharge } from "./lib/budget";
 import { clearMerchantItemSchedule } from "./lib/schedule";
+import { logEvent } from "./lib/log";
+import { sanitizeError } from "./lib/errors";
 import { parseSingleEmail } from "./lib/email";
 
 
@@ -244,7 +246,15 @@ export async function fetchBothImpl(
         await ctx.runMutation(internal.policies.clearMerchantSchedule, args);
       }
     } catch (err) {
-      console.error("policies.fetchBoth failed", { merchantDomain: args.merchantDomain, kind, err });
+      // T24c (D109): structured, redacted line instead of a bare console.error with the raw
+      // provider error object (the previous line passed `err` itself into console.error, unredacted).
+      // `policyKind`, not `kind`: `logEvent`'s envelope reserves the `kind` key for its own closed
+      // LOG_KINDS tag and silently drops a caller-supplied field of the same name.
+      logEvent("extraction_failed", {
+        merchantDomain: args.merchantDomain,
+        policyKind: kind,
+        error: sanitizeError(err instanceof Error ? err.message : String(err)),
+      });
     }
   }
 }

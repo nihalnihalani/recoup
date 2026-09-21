@@ -4,6 +4,7 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { tokenFromSubject } from "./lib/ledger";
 import { sanitizeError } from "./lib/errors";
+import { logEvent } from "./lib/log";
 import { rateLimiter } from "./lib/rateLimits";
 import { isTombstoned } from "./lib/accountState";
 
@@ -236,7 +237,8 @@ export const onMessageReceived = internalMutation({
           summary: "Inbound message could not be routed.",
         });
       } else {
-        console.error(`inbound.onMessageReceived failed for ${args.eventId}: ${lastError}`);
+        // T24c (D109): structured, redacted line instead of a bare console.error.
+        logEvent("extraction_failed", { eventId: args.eventId, error: sanitizeError(lastError) });
       }
       return null;
     }

@@ -1122,3 +1122,30 @@ describe("priceWatch.checkNow spend caps (pre-launch review H1, M1)", () => {
     expect(await pending(t)).toBe(2);
   });
 });
+
+describe("T24c (D109): checkItem's scrape-failure line is structured and redacted", () => {
+  it("logs one price_check_failed JSON line via logEvent, never a raw provider body, on a scrape failure", async () => {
+    // Same technique policies.test.ts uses for researchPolicy's own scrape-failure path: no real
+    // network, only the Firecrawl component's own real (short) retry/backoff timers elapse for real.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { itemId } = await world(t, userId);
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await t.action(internal.priceWatch.checkItem, { itemId });
+
+    expect(spy).toHaveBeenCalled();
+    const line = JSON.parse(spy.mock.calls.at(-1)![0] as string) as Record<string, unknown>;
+    spy.mockRestore();
+    expect(line.kind).toBe("price_check_failed");
+    expect(line.itemId).toBe(String(itemId));
+    expect(typeof line.error).toBe("string");
+    const raw = JSON.stringify(line);
+    // sanitizeError collapses the raw provider message down to one of a small set of fixed,
+    // user-safe categories (convex/lib/errors.ts) -- never the provider's own body verbatim.
+    expect(raw).not.toMatch(/sk-[A-Za-z0-9_-]{10,}/);
+    expect(raw).not.toMatch(/fc-[A-Za-z0-9_-]{10,}/);
+    expect(raw).not.toMatch(/[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+  }, 20_000);
+});

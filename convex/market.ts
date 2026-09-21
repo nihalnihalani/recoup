@@ -34,6 +34,8 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { ownedWatch, requireUserId } from "./lib/access";
 import { isTombstoned } from "./lib/accountState";
+import { logEvent } from "./lib/log";
+import { sanitizeError } from "./lib/errors";
 import { tryCharge, tryConsumeGlobalBudget } from "./lib/budget";
 import { cleanStoreUrl, FIND_MARKER, registrableHost, sameStore } from "./lib/offerMatch";
 import { WATCH_ROWS } from "./offers";
@@ -523,8 +525,9 @@ export const lookup = internalAction({
       snapshot = await fetchSnapshot(watch.productUrl, now);
     } catch (err) {
       fetchError = classifyFetchError(err);
-      // The raw reason stays in the server console only (D71/T22): marketNote is always the fixed copy.
-      console.error("market lookup failed", { watchId, error: err instanceof Error ? err.message : String(err) });
+      // T24c (D109): structured, redacted line instead of a bare console.error -- marketNote (what
+      // the user sees) is always the fixed copy regardless; this is operator-only.
+      logEvent("market_failed", { watchId, error: sanitizeError(err instanceof Error ? err.message : String(err)) });
     }
 
     if (fetchError !== null) {

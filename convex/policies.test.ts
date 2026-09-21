@@ -338,6 +338,49 @@ describe("fetchBothImpl un-stamps after an automatic price_adjustment re-researc
   });
 });
 
+describe("T24c (D109): fetchBothImpl's failure line is structured and redacted", () => {
+  it("logs one extraction_failed JSON line via logEvent, never a raw console.error with the provider error object", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const merchantDomain = "extract-fails.example";
+    // `researchPolicy` catches a `search` failure itself (never throws past it), but a `deps.extract`
+    // failure is NOT caught internally -- it is the one path that still reaches fetchBothImpl's own
+    // catch, which is what this sweep item replaced.
+    const markdown = "# Returns\n\nReturns are accepted within 30 days of purchase.\n" + " ".repeat(200);
+    const deps: ResearchDeps = {
+      search: async () => ({ web: [{ url: `https://${merchantDomain}/policy`, markdown }] }),
+      extract: async () => {
+        throw new Error("upstream failed using key sk-abcdefghij1234567890, contact sam@home.example");
+      },
+    };
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await fetchBothImpl(
+      { runMutation: (ref: any, a: any) => t.mutation(ref, a), runQuery: (ref: any, a: any) => t.query(ref, a) },
+      { userId, merchantDomain },
+      deps,
+    );
+
+    // Once per kind ("price_adjustment", "returns") -- deps.extract fails identically both times.
+    expect(spy).toHaveBeenCalledTimes(2);
+    const lines = spy.mock.calls.map((call) => JSON.parse(call[0] as string) as Record<string, unknown>);
+    spy.mockRestore();
+    for (const line of lines) {
+      expect(line.kind).toBe("extraction_failed");
+      expect(line.merchantDomain).toBe(merchantDomain);
+      expect(typeof line.error).toBe("string");
+    }
+    // `policyKind` (not `kind`, which `logEvent`'s envelope reserves for its own tag) survives.
+    expect(lines.map((l) => l.policyKind)).toEqual(["price_adjustment", "returns"]);
+    const raw = JSON.stringify(lines);
+    // sanitizeError collapses the raw provider error down to one of a small set of fixed, user-safe
+    // categories (convex/lib/errors.ts) -- the injected secret/email never survives into the line.
+    expect(raw).not.toMatch(/sk-[A-Za-z0-9_-]{10,}/);
+    expect(raw).not.toMatch(/fc-[A-Za-z0-9_-]{10,}/);
+    expect(raw).not.toMatch(/sam@home\.example/);
+  });
+});
+
 describe("refresh", () => {
   it("requires auth", async () => {
     await expect(setup().action(api.policies.refresh, { merchantDomain: "n.example", kind: "returns" })).rejects.toThrow();

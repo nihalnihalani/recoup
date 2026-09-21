@@ -33,6 +33,8 @@ import { internalMutation, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { suppressAddress } from "./alerts";
 import { isTombstoned } from "./lib/accountState";
+import { logEvent } from "./lib/log";
+import { sanitizeError } from "./lib/errors";
 
 const MAX_ERROR_CHARS = 1000;
 
@@ -225,7 +227,8 @@ export const onEvent = internalMutation({
         }
       }
     } catch (err) {
-      console.error(`mailEvents.onEvent failed for ${event.event_id}`, err);
+      // T24c (D109): structured, redacted line instead of a bare console.error.
+      logEvent("notification_failed", { eventId: event.event_id, error: sanitizeError(err instanceof Error ? err.message : String(err)) });
     }
     return null;
   },

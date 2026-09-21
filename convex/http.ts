@@ -109,7 +109,8 @@ http.route({
         await ctx.runMutation(internal.alerts.unsubscribeByToken, { token });
       } catch (err) {
         // Never surface an error to the caller (would leak state); log and still answer 200.
-        console.error("POST /alerts/unsubscribe failed", err);
+        // T24c (D109): structured, redacted line instead of a bare console.error.
+        logEvent("notification_failed", { route: "/alerts/unsubscribe", error: sanitizeError(err instanceof Error ? err.message : String(err)) });
       }
     }
     return new Response("You will no longer receive price alert emails from Recoup.", {

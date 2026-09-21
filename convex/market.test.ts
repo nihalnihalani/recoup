@@ -242,6 +242,34 @@ describe("retryable failures and backoff", () => {
     expect(afterSecondFailure.marketAttempts).toBe(1);
     expect(afterSecondFailure.marketNextRetryAt).toBe(secondCycleStart + MARKET_RETRY_BACKOFF_MS[0]);
   });
+
+  it("T24c (D109): a fetch failure logs one market_failed JSON line via logEvent, never a raw console.error with the provider body", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ error: "upstream failed for key sk-abcdefghij1234567890, contact sam@home.example" }, 503)),
+    );
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
+    await t.action(internal.market.lookup, { watchId });
+
+    expect(spy).toHaveBeenCalled();
+    const line = JSON.parse(spy.mock.calls.at(-1)![0] as string) as Record<string, unknown>;
+    spy.mockRestore();
+    expect(line.kind).toBe("market_failed");
+    expect(line.watchId).toBe(String(watchId));
+    expect(typeof line.error).toBe("string");
+    const raw = JSON.stringify(line);
+    // sanitizeError collapses the raw provider body down to one of a small set of fixed,
+    // user-safe categories (convex/lib/errors.ts) -- the injected secret/email never survives.
+    expect(raw).not.toMatch(/sk-[A-Za-z0-9_-]{10,}/);
+    expect(raw).not.toMatch(/fc-[A-Za-z0-9_-]{10,}/);
+    expect(raw).not.toMatch(/sam@home\.example/);
+  });
 });
 
 describe("empty result", () => {

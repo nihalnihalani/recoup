@@ -29,6 +29,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { variantMatch } from "./schema";
 import { ownedItem, requireUserId } from "./lib/access";
 import { isTombstoned } from "./lib/accountState";
+import { logEvent } from "./lib/log";
+import { sanitizeError } from "./lib/errors";
 import { toCents } from "./lib/money";
 import { priceDropCents, windowEndsAt } from "./lib/ledger";
 import { openClaim } from "./claims";
@@ -473,7 +475,8 @@ export const checkItem = internalAction({
       );
       observed = rest;
     } catch (err) {
-      console.error(`priceWatch.checkItem failed for ${itemId}`, err);
+      // T24c (D109): structured, redacted line instead of a bare console.error.
+      logEvent("price_check_failed", { itemId, error: sanitizeError(err instanceof Error ? err.message : String(err)) });
       observed = { note: errorNote("Price check failed", err) };
     }
     await ctx.runMutation(internal.priceWatch.recordCheck, {
