@@ -143,11 +143,12 @@ describe("POST /agentmail/webhook", () => {
       headers: { "content-type": "application/json" }, // no svix-* headers at all
     });
     expect(res.status).toBe(401);
+    expect(await res.text()).toBe("");
     await t.finishAllScheduledFunctions(vi.runAllTimers);
     expect(await processedEventCount(t)).toBe(0);
   });
 
-  it("a bad signature is refused with 401 and writes no processedEvents row", async () => {
+  it("a bad signature is refused with 401 (empty body) and writes no processedEvents row", async () => {
     const t = setup();
     const body = messageReceivedBody();
     const timestamp = Math.floor(Date.now() / 1000);
@@ -161,9 +162,39 @@ describe("POST /agentmail/webhook", () => {
       }),
     });
     expect(res.status).toBe(401);
+    expect(await res.text()).toBe("");
     await t.finishAllScheduledFunctions(vi.runAllTimers);
     expect(await processedEventCount(t)).toBe(0);
   });
+
+  it(
+    "F-T22-1: with AGENTMAIL_WEBHOOK_SECRET unset, the request is refused with 401 and an empty body " +
+      "-- never a 500 -- and the component is never invoked",
+    async () => {
+      const t = setup();
+      const previous = process.env.AGENTMAIL_WEBHOOK_SECRET;
+      delete process.env.AGENTMAIL_WEBHOOK_SECRET;
+      try {
+        // Even a validly-shaped, well-formed request (correct content-type, a real
+        // event body) must not reach `agentmail.handleWebhook` -- if it did, the
+        // component's own `assertConfigured("webhook")` would throw a plain `Error`
+        // that (absent this fix) surfaces as an unhandled 500, not a clean 401.
+        const body = messageReceivedBody();
+        const res = await t.fetch(PATH, {
+          method: "POST",
+          body,
+          headers: { "content-type": "application/json" },
+        });
+        expect(res.status).toBe(401);
+        expect(await res.text()).toBe("");
+        await t.finishAllScheduledFunctions(vi.runAllTimers);
+        expect(await processedEventCount(t)).toBe(0);
+      } finally {
+        if (previous === undefined) delete process.env.AGENTMAIL_WEBHOOK_SECRET;
+        else process.env.AGENTMAIL_WEBHOOK_SECRET = previous;
+      }
+    },
+  );
 
   it("malformed JSON with fake (unverified) svix headers is refused 4xx, not 500", async () => {
     const t = setup();
