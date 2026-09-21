@@ -36,4 +36,12 @@ crons.interval("retry failed inbound", { hours: 1 }, internal.intake.retryFailed
  */
 crons.interval("mail sweep", { hours: 1 }, internal.notify.sweepStalled, {});
 
+/**
+ * Data retention (D75, T16). `retention.sweep` self-reschedules through a
+ * bounded page at a time until every rule has caught up for the day, then
+ * stops; this daily firing starts the next cycle. See convex/retention.ts's
+ * module docstring for the cursor/self-reschedule design.
+ */
+crons.interval("retention sweep", { hours: 24 }, internal.retention.sweep, {});
+
 export default crons;

@@ -215,6 +215,12 @@ export const RETENTION_MAILLOG_DAYS = 90;
 /** Rows one resumable retention pass reads before rescheduling itself. */
 export const RETENTION_PAGE = 200;
 
+/** `opsState` stash rows (`mailEvent:*` F8 pending events, `e2e:code:*` capture, D99 N7) older than this are pruned. */
+export const RETENTION_STASH_DAYS = 7;
+
+/** D107 hygiene: `users` rows with no `emailVerificationTime` older than this are pruned (verification gates sign-in, so they own no application data). */
+export const RETENTION_UNVERIFIED_DAYS = 7;
+
 // --- Input bounds (B4, M1) ---------------------------------------------------
 
 /** Purchases per user, archived included: bounds every `by_user` read and the policy research a user can ever trigger. */
