@@ -1,9 +1,11 @@
 import { ConvexError } from "convex/values";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { researchPolicy, fetchBothImpl } from "./policies";
 import { verifyPassage } from "./lib/passage";
+import { inboxTransport } from "./account";
 import type { ResearchDeps } from "./policies";
 
 const DAY = 86_400_000;
@@ -12,6 +14,21 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
+
+/**
+ * T18.6 (D129 B-1): `insertSnapshot` now refuses (returns `null`) for a
+ * tombstoned user -- every pre-existing test in this file inserts for a
+ * live, never-deleted one and always expects a real id back, so this thin
+ * wrapper keeps every one of those call sites unchanged in shape while
+ * asserting that away in one place. The B-1 regression tests below call the
+ * raw mutation directly instead, since they specifically assert the `null`
+ * refusal.
+ */
+async function insertSnapshotForTest(t: ReturnType<typeof setup>, args: Parameters<typeof t.mutation<typeof internal.policies.insertSnapshot>>[1]) {
+  const id = await t.mutation(internal.policies.insertSnapshot, args);
+  if (id === null) throw new Error("insertSnapshot unexpectedly refused (tombstoned user?)");
+  return id;
+}
 
 const baseSnapshot = {
   merchantDomain: "n.example",
@@ -28,8 +45,8 @@ describe("insertSnapshot / latest", () => {
     const t = setup();
     const { userId } = await signedIn(t);
 
-    const firstId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, passage: "First passage" });
-    const secondId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, passage: "Second passage" });
+    const firstId = await insertSnapshotForTest(t, { userId, ...baseSnapshot, passage: "First passage" });
+    const secondId = await insertSnapshotForTest(t, { userId, ...baseSnapshot, passage: "Second passage" });
 
     expect(firstId).not.toBe(secondId);
 
@@ -52,7 +69,7 @@ describe("confirm", () => {
   it("patches only the owner's snapshot and sets confirmedByUser", async () => {
     const t = setup();
     const { userId, as } = await signedIn(t, "Owner");
-    const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+    const policyId = await insertSnapshotForTest(t, { userId, ...baseSnapshot });
 
     await as.mutation(api.policies.confirm, { policyId, channel: "email", contactEmail: "confirmed@n.example", windowDays: 30 });
 
@@ -65,7 +82,7 @@ describe("confirm", () => {
   it("rejects an out-of-range windowDays (D43)", async () => {
     const t = setup();
     const { userId, as } = await signedIn(t, "Owner");
-    const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+    const policyId = await insertSnapshotForTest(t, { userId, ...baseSnapshot });
     for (const windowDays of [-1, 1.5, 3651]) {
       await expect(
         as.mutation(api.policies.confirm, { policyId, channel: "email", windowDays }),
@@ -76,7 +93,7 @@ describe("confirm", () => {
   it("an edited passage or sourceUrl clears the evidence markers (D45)", async () => {
     const t = setup();
     const { userId, as } = await signedIn(t, "Owner");
-    const policyId = await t.mutation(internal.policies.insertSnapshot, {
+    const policyId = await insertSnapshotForTest(t, {
       userId,
       ...baseSnapshot,
       passageStart: 12,
@@ -104,7 +121,7 @@ describe("confirm", () => {
     it("accepts a passage at exactly the 600-char cap (matching the auto-extracted path)", async () => {
       const t = setup();
       const { userId, as } = await signedIn(t, "Owner");
-      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const policyId = await insertSnapshotForTest(t, { userId, ...baseSnapshot });
       const passage = "a".repeat(600);
 
       await as.mutation(api.policies.confirm, { policyId, channel: "email", passage });
@@ -115,7 +132,7 @@ describe("confirm", () => {
     it("rejects a passage over the 600-char cap", async () => {
       const t = setup();
       const { userId, as } = await signedIn(t, "Owner");
-      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const policyId = await insertSnapshotForTest(t, { userId, ...baseSnapshot });
       const passage = "a".repeat(601);
 
       await expect(as.mutation(api.policies.confirm, { policyId, channel: "email", passage })).rejects.toThrow(
@@ -126,7 +143,7 @@ describe("confirm", () => {
     it("accepts a sourceUrl at exactly the 2,048-char cap", async () => {
       const t = setup();
       const { userId, as } = await signedIn(t, "Owner");
-      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const policyId = await insertSnapshotForTest(t, { userId, ...baseSnapshot });
       const prefix = "https://n.example/";
       const sourceUrl = `${prefix}${"a".repeat(2_048 - prefix.length)}`;
       expect(sourceUrl.length).toBe(2_048);
@@ -139,7 +156,7 @@ describe("confirm", () => {
     it("rejects a sourceUrl over the 2,048-char cap", async () => {
       const t = setup();
       const { userId, as } = await signedIn(t, "Owner");
-      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const policyId = await insertSnapshotForTest(t, { userId, ...baseSnapshot });
       const prefix = "https://n.example/";
       const sourceUrl = `${prefix}${"a".repeat(2_049 - prefix.length)}`;
 
@@ -151,7 +168,7 @@ describe("confirm", () => {
     it("rejects a non-http(s) sourceUrl", async () => {
       const t = setup();
       const { userId, as } = await signedIn(t, "Owner");
-      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const policyId = await insertSnapshotForTest(t, { userId, ...baseSnapshot });
 
       await expect(
         as.mutation(api.policies.confirm, { policyId, channel: "email", sourceUrl: "javascript:alert(1)" }),
@@ -161,7 +178,7 @@ describe("confirm", () => {
     it("accepts a contactEmail at exactly the 320-char cap", async () => {
       const t = setup();
       const { userId, as } = await signedIn(t, "Owner");
-      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const policyId = await insertSnapshotForTest(t, { userId, ...baseSnapshot });
       const local = "a".repeat(320 - "@n.example".length);
       const contactEmail = `${local}@n.example`;
       expect(contactEmail.length).toBe(320);
@@ -174,7 +191,7 @@ describe("confirm", () => {
     it("rejects a contactEmail over the 320-char cap", async () => {
       const t = setup();
       const { userId, as } = await signedIn(t, "Owner");
-      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const policyId = await insertSnapshotForTest(t, { userId, ...baseSnapshot });
       const local = "a".repeat(321 - "@n.example".length);
       const contactEmail = `${local}@n.example`;
 
@@ -186,7 +203,7 @@ describe("confirm", () => {
     it("rejects a contactEmail that parses as more than one address", async () => {
       const t = setup();
       const { userId, as } = await signedIn(t, "Owner");
-      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const policyId = await insertSnapshotForTest(t, { userId, ...baseSnapshot });
 
       await expect(
         as.mutation(api.policies.confirm, { policyId, channel: "email", contactEmail: "a@n.example, b@n.example" }),
@@ -198,7 +215,7 @@ describe("confirm", () => {
     const t = setup();
     const { userId } = await signedIn(t, "Owner");
     const { as: asOther } = await signedIn(t, "Other");
-    const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+    const policyId = await insertSnapshotForTest(t, { userId, ...baseSnapshot });
 
     await expect(asOther.mutation(api.policies.confirm, { policyId, channel: "email" })).rejects.toThrow();
   });
@@ -216,7 +233,7 @@ describe("confirm", () => {
       }),
     );
 
-    const priceId = await t.mutation(internal.policies.insertSnapshot, {
+    const priceId = await insertSnapshotForTest(t, {
       userId, merchantDomain, kind: "price_adjustment", channel: "email", passage: "", sourceUrl: `https://${merchantDomain}`, confidence: 0,
     });
     await as.mutation(api.policies.confirm, { policyId: priceId, channel: "email", windowDays: 14 });
@@ -226,7 +243,7 @@ describe("confirm", () => {
     // eligibility never depends on a returns policy (see `priceWatch.watchWindow`),
     // so this must not be touched.
     await t.run((ctx) => ctx.db.patch(itemId, { nextCheckAt: Date.now() + 999_999 }));
-    const returnsId = await t.mutation(internal.policies.insertSnapshot, {
+    const returnsId = await insertSnapshotForTest(t, {
       userId, merchantDomain, kind: "returns", channel: "email", passage: "", sourceUrl: `https://${merchantDomain}`, confidence: 0,
     });
     await as.mutation(api.policies.confirm, { policyId: returnsId, channel: "email", windowDays: 30 });
@@ -273,7 +290,7 @@ describe("fetchBothImpl un-stamps after an automatic price_adjustment re-researc
     // "closed window reopened via policies.confirm" C3/D107 resurrection
     // path -- except here the re-research is the AUTOMATIC one (fetchBoth),
     // not the user calling `confirm`.
-    const staleId = await t.mutation(internal.policies.insertSnapshot, {
+    const staleId = await insertSnapshotForTest(t, {
       userId,
       merchantDomain,
       kind: "price_adjustment",
@@ -477,11 +494,11 @@ describe("researchPolicy", () => {
     const t = setup();
     const { userId } = await signedIn(t);
 
-    const id = await researchPolicy(
+    const id = (await researchPolicy(
       { runMutation: (ref: any, args: any) => t.mutation(ref, args) },
       { userId, merchantDomain: "n.example", kind: "returns" },
       { search: async () => ({ web: [] }), extract: async () => { throw new Error("should not be called"); } },
-    );
+    ))!;
 
     const doc = await t.run(async (ctx) => ctx.db.get(id));
     expect(doc?.channel).toBe("unknown");
@@ -497,14 +514,14 @@ describe("researchPolicy", () => {
     const markdown = "# Returns Policy\n\nWe accept returns within 45 days of delivery for a full refund.\nContact us at help@n.example.";
     const passage = "We accept returns within 45 days of delivery for a full refund.";
 
-    const id = await researchPolicy(
+    const id = (await researchPolicy(
       { runMutation: (ref: any, args: any) => t.mutation(ref, args) },
       { userId, merchantDomain: "n.example", kind: "returns" },
       {
         search: async () => ({ web: [{ url: "https://n.example/returns", markdown: markdown + " ".repeat(150) }] }),
         extract: async () => ({ found: true, windowDays: 45, channel: "email", contactEmail: "help@n.example", passage, confidence: 0.92 }),
       },
-    );
+    ))!;
 
     const doc = await t.run(async (ctx) => ctx.db.get(id));
     expect(doc?.passage).toBe(passage);
@@ -519,7 +536,7 @@ describe("researchPolicy", () => {
     const { userId } = await signedIn(t);
     const markdown = "# Returns Policy\n\n" + "Some unrelated boilerplate content padding this page out. ".repeat(6);
 
-    const id = await researchPolicy(
+    const id = (await researchPolicy(
       { runMutation: (ref: any, args: any) => t.mutation(ref, args) },
       { userId, merchantDomain: "n.example", kind: "returns" },
       {
@@ -533,7 +550,7 @@ describe("researchPolicy", () => {
           confidence: 0.92,
         }),
       },
-    );
+    ))!;
 
     const doc = await t.run(async (ctx) => ctx.db.get(id));
     expect(doc?.passage).toBe("");
@@ -549,7 +566,7 @@ describe("researchPolicy", () => {
     const t = setup();
     const { userId } = await signedIn(t);
 
-    const id = await researchPolicy(
+    const id = (await researchPolicy(
       { runMutation: (ref: any, args: any) => t.mutation(ref, args) },
       { userId, merchantDomain: "n.example", kind: "returns" },
       {
@@ -558,7 +575,7 @@ describe("researchPolicy", () => {
         },
         extract: async () => { throw new Error("should not be called"); },
       },
-    );
+    ))!;
 
     const doc = await t.run(async (ctx) => ctx.db.get(id));
     expect(doc?.confidence).toBe(0);
@@ -577,12 +594,12 @@ describe("latest prefers a user-confirmed snapshot (review M1)", () => {
         return latest(ctx, userId, "n.example", "returns");
       });
 
-    const oldConfirmed = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, windowDays: 14 });
+    const oldConfirmed = await insertSnapshotForTest(t, { userId, ...baseSnapshot, windowDays: 14 });
     await as.mutation(api.policies.confirm, { policyId: oldConfirmed, channel: "email" });
-    const confirmed = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, windowDays: 30 });
+    const confirmed = await insertSnapshotForTest(t, { userId, ...baseSnapshot, windowDays: 30 });
     await as.mutation(api.policies.confirm, { policyId: confirmed, channel: "email" });
     // A later failed re-fetch, the shape researchPolicy records.
-    const failed = await t.mutation(internal.policies.insertSnapshot, {
+    const failed = await insertSnapshotForTest(t, {
       userId,
       ...baseSnapshot,
       channel: "unknown",
@@ -602,10 +619,10 @@ describe("latest prefers a user-confirmed snapshot (review M1)", () => {
     const t = setup();
     const owner = await signedIn(t, "Owner");
     const other = await signedIn(t, "Other");
-    const theirs = await t.mutation(internal.policies.insertSnapshot, { userId: other.userId, ...baseSnapshot });
+    const theirs = await insertSnapshotForTest(t, { userId: other.userId, ...baseSnapshot });
     await other.as.mutation(api.policies.confirm, { policyId: theirs, channel: "email" });
-    const mine = await t.mutation(internal.policies.insertSnapshot, { userId: owner.userId, ...baseSnapshot });
-    await t.mutation(internal.policies.insertSnapshot, { userId: owner.userId, ...baseSnapshot, kind: "price_adjustment" });
+    const mine = await insertSnapshotForTest(t, { userId: owner.userId, ...baseSnapshot });
+    await insertSnapshotForTest(t, { userId: owner.userId, ...baseSnapshot, kind: "price_adjustment" });
 
     const found = await t.run(async (ctx) => {
       const { latest } = await import("./policies");
@@ -623,9 +640,9 @@ describe("fetchBoth skips a kind researched in the last 24h (review M1)", () => 
     vi.stubGlobal("fetch", fetchSpy);
     const t = setup();
     const { userId, as } = await signedIn(t);
-    const confirmed = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, kind: "price_adjustment", windowDays: 14 });
+    const confirmed = await insertSnapshotForTest(t, { userId, ...baseSnapshot, kind: "price_adjustment", windowDays: 14 });
     await as.mutation(api.policies.confirm, { policyId: confirmed, channel: "email" });
-    await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, kind: "returns" });
+    await insertSnapshotForTest(t, { userId, ...baseSnapshot, kind: "returns" });
 
     await t.action(internal.policies.fetchBoth, { userId, merchantDomain: "n.example" });
 
@@ -643,7 +660,7 @@ describe("fetchBoth skips a kind researched in the last 24h (review M1)", () => 
     const key = { merchantDomain: "n.example", kind: "returns" as const };
 
     expect(await t.query(internal.policies.hasFreshSnapshot, { userId, ...key })).toBe(false);
-    await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+    await insertSnapshotForTest(t, { userId, ...baseSnapshot });
     expect(await t.query(internal.policies.hasFreshSnapshot, { userId, ...key })).toBe(true);
     expect(await t.query(internal.policies.hasFreshSnapshot, { userId: other.userId, ...key })).toBe(false);
     expect(await t.query(internal.policies.hasFreshSnapshot, { userId, ...key, kind: "price_adjustment" })).toBe(false);
@@ -663,9 +680,9 @@ describe("fetchBoth skips a kind researched in the last 24h (review M1)", () => 
     vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
     const t = setup();
     const { userId } = await signedIn(t);
-    const stale = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, kind: "returns" });
+    const stale = await insertSnapshotForTest(t, { userId, ...baseSnapshot, kind: "returns" });
     vi.setSystemTime(now + 25 * 3_600_000);
-    await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, kind: "price_adjustment" });
+    await insertSnapshotForTest(t, { userId, ...baseSnapshot, kind: "price_adjustment" });
 
     await t.action(internal.policies.fetchBoth, { userId, merchantDomain: "n.example" });
 
@@ -725,5 +742,76 @@ describe("T18.5 (D124 B2): fetchBoth refuses to spend or write for a deleted use
       deps,
     );
     expect(searchCalls).toBe(2); // both kinds researched
+  });
+});
+
+describe("T18.6 (D129 B-1): insertSnapshot itself is gated at the write -- D124 B2's fetchBoth-start check alone leaves the multi-second research window (search/extract) exposed to a deletion racing it", () => {
+  async function purgeToCompletion(t: ReturnType<typeof setup>, userId: Id<"users">) {
+    let done = false;
+    for (let i = 0; i < 300 && !done; i++) {
+      done = (await t.mutation(internal.account.purgeStep, { userId })).done;
+    }
+    expect(done).toBe(true);
+  }
+
+  it("fetchBothImpl: requestDeletion + full purge complete while `search` is in flight -> 0 policies rows survive for the dead userId", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+    let fired = false;
+    const deps: ResearchDeps = {
+      search: async () => {
+        if (!fired) {
+          fired = true;
+          await as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+          await purgeToCompletion(t, userId);
+        }
+        return { web: [] };
+      },
+      extract: (async () => { throw new Error("not reached"); }) as any,
+    };
+    await fetchBothImpl(
+      { runMutation: (ref: any, a: any) => t.mutation(ref, a), runQuery: (ref: any, a: any) => t.query(ref, a) },
+      { userId, merchantDomain: "acme-race.example" },
+      deps,
+    );
+    const rows = await t.run((ctx) =>
+      ctx.db.query("policies").withIndex("by_user_domain_kind", (q) => q.eq("userId", userId).eq("merchantDomain", "acme-race.example")).collect(),
+    );
+    console.log("[T18.6 B-1] policies rows surviving a mid-research deletion (fetchBothImpl):", rows.length);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("insertSnapshot refuses a direct call for a fully-purged user, returning null instead of writing", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+    await as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    await purgeToCompletion(t, userId);
+
+    const id = await t.mutation(internal.policies.insertSnapshot, {
+      userId, merchantDomain: "acme-race2.example", kind: "returns", channel: "unknown", passage: "", sourceUrl: "https://acme-race2.example", confidence: 0,
+    });
+    expect(id).toBeNull();
+    expect(await t.run((ctx) => ctx.db.query("policies").withIndex("by_user_domain_kind", (q) => q.eq("userId", userId).eq("merchantDomain", "acme-race2.example")).collect())).toHaveLength(0);
+  });
+
+  it("researchPolicy (refresh's own write path): a deletion landing while `search` is in flight returns null instead of inserting a snapshot for the now-purged user", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+    const deps: ResearchDeps = {
+      search: async () => {
+        await as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+        await purgeToCompletion(t, userId);
+        return { web: [] };
+      },
+      extract: (async () => { throw new Error("not reached"); }) as any,
+    };
+    const ctx = { runMutation: (ref: any, a: any) => t.mutation(ref, a) };
+    const result = await researchPolicy(ctx as any, { userId, merchantDomain: "acme-refresh-race.example", kind: "returns" }, deps);
+    console.log("[T18.6 B-1] researchPolicy result for a mid-research deletion:", result);
+    expect(result).toBeNull();
+    expect(await t.run((ctx) => ctx.db.query("policies").withIndex("by_user_domain_kind", (q) => q.eq("userId", userId).eq("merchantDomain", "acme-refresh-race.example")).collect())).toHaveLength(0);
   });
 });

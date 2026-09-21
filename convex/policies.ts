@@ -95,7 +95,7 @@ export async function researchPolicy(
   ctx: { runMutation: ActionCtx["runMutation"] },
   args: { userId: Id<"users">; merchantDomain: string; kind: PolicyKind },
   deps: ResearchDeps = defaultDeps,
-): Promise<Id<"policies">> {
+): Promise<Id<"policies"> | null> {
   const { userId, merchantDomain, kind } = args;
 
   let hits: Array<{ markdown: string; url?: string; metadata?: { sourceURL?: string } }>;
@@ -308,7 +308,26 @@ export async function schedulePolicyFetch(
   return true;
 }
 
-/** Always inserts a new immutable snapshot row; never patches (D17). Renamed from the plan's `upsert`. */
+/**
+ * Always inserts a new immutable snapshot row; never patches (D17).
+ * Renamed from the plan's `upsert`.
+ *
+ * B-1 (D129, checkpoint 6d): D124 B2 gated `fetchBoth` only at its own
+ * START (`isDeletedUser`, before the per-kind loop) -- but `search`/`extract`
+ * (Firecrawl + OpenAI, both real network calls `researchPolicy` awaits) can
+ * take multiple seconds, and a `requestDeletion` landing (and even fully
+ * completing its purge) DURING that window reached this, the actual write,
+ * ungated: `refresh`'s user-driven path has the identical shape (its own
+ * upstream gate, `requireActiveUserId`, is checked once before
+ * `researchPolicy` is ever called, not again at its end). Gated here, at the
+ * write itself, closes BOTH callers' race in one place regardless of how
+ * long their own research took -- `researchPolicy`'s every branch already
+ * just returns whatever this call returns, so a `null` here propagates
+ * automatically to both `fetchBothImpl` (which discards it) and `refresh`
+ * (which turns it into a clean, sanitized error instead of returning a
+ * since-deleted user's snapshot id to a client that no longer has a live
+ * session anyway).
+ */
 export const insertSnapshot = internalMutation({
   args: {
     userId: v.id("users"),
@@ -323,8 +342,9 @@ export const insertSnapshot = internalMutation({
     confidence: v.number(),
     note: v.optional(v.string()),
   },
-  returns: v.id("policies"),
+  returns: v.union(v.id("policies"), v.null()),
   handler: async (ctx, args) => {
+    if (await isTombstoned(ctx, args.userId)) return null;
     return await ctx.db.insert("policies", { ...args, retrievedAt: Date.now(), confirmedByUser: false });
   },
 });
@@ -412,6 +432,16 @@ export const refresh = action({
     // Before anything paid: ownership and budget, in one transaction.
     await ctx.runMutation(internal.policies.beginRefresh, { userId, merchantDomain });
     const policyId = await researchPolicy(ctx, { userId, merchantDomain, kind: args.kind });
+    // B-1 (D129, checkpoint 6d): `null` means the account was tombstoned
+    // while `researchPolicy`'s own search/extract was in flight (the
+    // upstream `requireActiveUserId` gate above only proves the caller was
+    // live when THIS action started) -- `insertSnapshot`'s own write-time
+    // gate refused, so there is no snapshot id to return. The caller's
+    // session is, by construction, mid-account-deletion at this point, so a
+    // clean error here (rather than a validator crash trying to return
+    // `null` where the client expects an id, or silently returning a
+    // fabricated one) is the honest outcome.
+    if (policyId === null) throw new ConvexError("This account is being deleted.");
     // C3(c)/D107: a refreshed price-adjustment snapshot may have just reopened
     // (or newly opened) this merchant's watch window -- see `confirm`'s
     // matching call for why this is scoped to that one kind.
