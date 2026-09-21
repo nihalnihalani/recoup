@@ -190,6 +190,14 @@ export default defineSchema({
     status: offerStatus, variantMatch: v.optional(variantMatch), matchConfidence: v.optional(v.number()),
     lastCents: v.optional(v.number()), currency: v.optional(v.string()), lastCheckedAt: v.optional(v.number()),
     note: v.optional(v.string()), source: v.optional(priceSource),
+    /**
+     * The product's own name, distinct from `title` (which for a ShopSavvy-sourced offer is the
+     * RETAILER's name, e.g. "Walmart" -- never a product name). Set once, at confirm time and (as a
+     * fallback when unset) on the first recheck that returns one; frozen after that. The only thing
+     * a recheck's drift check (`titleSimilarity`) compares against -- checkpoint-5 addendum, F4/D103,
+     * pre-declared by sonnet-integrations (T13.1), added here per the T01 schema-ownership convention.
+     */
+    productName: v.optional(v.string()),
   }).index("by_watch", ["watchId"]).index("by_user", ["userId"]),
 
   /**
