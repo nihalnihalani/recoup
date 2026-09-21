@@ -1,23 +1,19 @@
-# Handoff (lead-owned) — updated 2026-09-21 ~01:00 UTC
+# Handoff (lead-owned) — updated 2026-09-21 ~03:30 UTC
 
-## Situation
-Two lines exist:
-- **origin/main** (345e8da): a collaborator's line ("Charlie", Convex team `allgas`, dev deployment `earnest-setter-354` with all keys). 394 tests. Live-verified I0–I3, I6, W1–W4, T1 on their deployment. Product pivot recorded in `docs/team/HANDOFF-product-direction.md`: returns story removed from pitch/UI (backend kept). Pushed over our main at 17:49 PT with their implementations winning conflicts.
-- **origin/nihal-team** (22690c6): this team's line. 233 tests. Contains D39, D45 floor, D52–D58, T10.1, scenario suite. Our dev deployment `adorable-lion-138` has no provider keys.
+## Where the product is
+- **Production:** https://cool-oyster-399.convex.site (Charlie Gillet's deployment, all keys). Full loop verified live by their session (their status log I7a). Remaining on their side: video, social post, submission. Deadline 2026-09-22 12:00 PT; their code freeze 08:00 PT.
+- **main** (acb5e6f): Charlie's line. Do not push to it from this team; coordinate by PR.
+- **PR #1** https://github.com/nihalnihalani/recoup/pull/1: `port-checkpoint-fixes` = b878dc9 + our unique fixes (D52–D58, F3, F5). 564 tests, clean, no conflicts with acb5e6f. Awaiting Charlie/Nihal merge.
+- **nihal-team**: this team's full line and all `docs/team/*` history (DECISIONS D01–D59, CONNECTIONS with live statuses from their log, VERIFICATION).
 
 ## Open decision (user)
-Which line is canonical, and whether the returns case stays in the pitch. Lead recommends: adopt origin/main, keep returns in product and demo per the approved design. See the lead's report in the session transcript.
+Whether the under-credited-return story stays in the pitch/video. Charlie's handoff removes it; Nihal's approved design leads with it. Backend supports both.
 
-## In flight
-- DONE: `origin/port-checkpoint-fixes` (2c03d4b) = origin/main + D52–D58 ports (D39/D45 were already present as `netRecovered`/`MIN_PASSAGE_CHARS`). 413 tests, typecheck/lint clean. Ready to merge into main once the user decides.
-- `opus-devils-advocate` checkpoint 3: adversarial review of the collaborator's new surfaces (watches/offers/notify/tracking/limits/patch) on the port branch.
+## Our dev deployment
+`adorable-lion-138` (team nihal-nihalani): no provider keys; superseded by production above. Can be deleted or kept for tests.
 
-## Rules now in force
-- Nobody pulls/merges/rebases/pushes `main` until the user decides.
-- Our local checkout stays on our line until then.
+## Backlog (low severity, from checkpoint 3)
+Single-label/internal hosts reach Firecrawl (their egress policy); patch-package is a devDependency (prod installs must include it); dashboard read budget on heavy accounts; verdict uses stale lastCents when all recent checks fail; insights double-counts a bought watch; no email verification on sign-up (global mail cap is the mitigation).
 
-## External blockers (unchanged for our deployment)
-OPENAI_API_KEY, AGENTMAIL_API_KEY, AGENTMAIL_WEBHOOK_SECRET absent on `adorable-lion-138`. Charlie's deployment has them.
-
-## C04 root cause
-`ctx.runAction(components.agentmail.lib.createInbox)` fails to resolve on our unpatched component; Charlie's line patches `@agentmail/convex` `convex.config.js` (patch-package) to declare `env: { AGENTMAIL_API_KEY }` and created an inbox live. Adopting their line closes C04.
+## If resuming this session
+`ListAgents` first; no teammates are expected to be alive. Re-read this file, then PR #1 status.
