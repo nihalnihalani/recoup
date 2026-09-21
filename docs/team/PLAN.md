@@ -16,7 +16,7 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | T08 | Policy research (Firecrawl) + T08.1 D43/D45 | sonnet-integrations | T06 | verified (31ab7dc; live BLOCKED_EXTERNAL) | upsert test; live BLOCKED_EXTERNAL until keys |
 | T09 | Price watch cron + checkNow | sonnet-backend | T05,T08 | review (10 tests; live BLOCKED_EXTERNAL) | threshold/window/dedupe tests |
 | T10 | Drafts, queued send + reconcile, replies | sonnet-integrations | T07 | review (01cafa8; opus checkpoint) | stale-version + empty-recipient tests |
-| T11 | Frontend screens (T11a scaffold now; T11b flows after T05/T10) | sonnet-frontend | T11a: T02 · T11b: T05,T07,T10 | T11a verified · T11b-1 verified · T11b-2 in_progress | browser rehearsal against dev deployment |
+| T11 | Frontend screens (T11a scaffold now; T11b flows after T05/T10) | sonnet-frontend | T11a: T02 · T11b: T05,T07,T10 | T11a, T11b-1, T11b-2 verified (be2019b, 6c10942) | browser rehearsal against dev deployment |
 | T12 | Example loader | sonnet-backend | T05 | verified (6 tests, archive semantics D47) | owned+labelled; no real recipients |
 | T13 | Hardening: scenario suite ✓ (26), checkpoint 2 ✓ (S1–S12 → D52–D58), fixes T10.1/T05.2 in progress, T13.1 scheduler-driven tests pending | sonnet-integrations, sonnet-backend, sonnet-tester | T10,T11 | in_progress | invariant checklist; adversarial fixtures |
 | T14 | Deploy to convex.site | sonnet-verifier | T13 | blocked | needs OPENAI/AGENTMAIL keys for live path |
