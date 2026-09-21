@@ -320,7 +320,7 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 **Risks:** Fixture sizes; keep under harness limits.
 
 ### T12.2 — Phase 2 acceptance blockers (D107 C1, C3, C5, C6)
-**Owner:** sonnet-backend-2 · **Phase:** 2 (fix) · **Blocks on:** D107 · **High-risk:** True · **Status:** in_progress
+**Owner:** sonnet-backend-2 · **Phase:** 2 (fix) · **Blocks on:** D107 · **High-risk:** True · **Status:** verified (07242b1; lead re-ran 6 files 143/143; 60×50×12 = 266 ranges / 3,310 docs; purchases.ts call sites landed directly)
 **Files:** convex/tracking.ts, convex/priceWatch.ts, convex/policies.ts, convex/market.ts, convex/lib/schedule.ts (+tests); purchases.ts call sites only after T16 commits (else handoff note under docs/team/handoffs/).
 
 **Contract:** see D107 rows C1, C3, C5, C6 (verbatim routing). Acceptance: 6×1 → 6 purchases, `truncated:false`; 60×50×12 `< 4096` ranges and `< 32,000` docs; resurrection paths scheduled within 2 ticks behind 500 rotating items; needs_review no-link items get a transient stamp; retries charge global only; manual refresh from terminal resets attempts.
