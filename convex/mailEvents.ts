@@ -30,6 +30,7 @@
 import { v } from "convex/values";
 import { vEvent, type AgentMailEvent } from "@agentmail/convex";
 import { internalMutation, type MutationCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { suppressAddress } from "./alerts";
 import { isTombstoned } from "./lib/accountState";
@@ -199,6 +200,23 @@ export const onEvent = internalMutation({
         await clearPendingMailEvent(ctx, messageId);
       } else {
         await storePendingMailEvent(ctx, messageId, isBounceLike ? "bounced" : "complained", providerStatus, now);
+        // B-8 (D129, checkpoint 6d): this handler has just recorded
+        // everything Recoup itself will ever need for this message id (the
+        // stash above); the component's OWN raw webhook audit row
+        // (`handleEvent`'s unconditional `events` insert, which always runs
+        // BEFORE this callback) is now redundant. Left alone, that row is
+        // unpurgeable forever once nothing maps to it: `purgeInboxData`
+        // never touches the shared alerts inbox, and a `purgeOutbound`
+        // keyed on an `outboundId` that was already reclaimed (or never
+        // existed for this id at all) has nothing to key off of either.
+        // Purging it here, by message id, is safe for the ordinary "still
+        // queued" F8 race too -- nothing ever reads the component's raw
+        // `events` table itself (`notify.ts`/`drafts.ts` only ever consult
+        // the opsState stash above), so deleting it costs nothing once this
+        // handler has already extracted what it needs from the event
+        // payload it was called with. Bounded the same way every other
+        // component purge call is (<= 200 events per call via `.take()`).
+        await ctx.runMutation(internal.mailPurge.purgeOutbound, { messageId });
       }
 
       if (draftRow) {

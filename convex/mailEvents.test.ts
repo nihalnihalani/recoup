@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { internal } from "./_generated/api";
+import { components, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 
@@ -320,6 +320,71 @@ describe("mailEvents.onEvent: F8 stashes an unmapped bounce/complaint for a late
     );
     expect(row).not.toBeNull();
     expect(JSON.parse(row!.cursor!)).toMatchObject({ reason: "complained", providerStatus: "complained" });
+  });
+});
+
+describe("mailEvents.onEvent: B-8 (D129, checkpoint 6d) purges the component's own raw event row for a message id that matches neither a mailLog nor a drafts row", () => {
+  const RUNTIME_CONFIG = { retryAttempts: 1, initialBackoffMs: 10 };
+  const alerts = "inbox_alerts_b8";
+
+  /** Drains one inbox's own component rows (inboundMessages/outboundMessages/events) wholesale via purgeInbox and reports how many were left. */
+  async function componentResidue(t: T): Promise<number> {
+    let deleted = 0;
+    let cursor: string | undefined;
+    for (let i = 0; i < 5; i++) {
+      const r: { cursor: string | null; deleted: number } = await t.mutation(components.agentmail.lib.purgeInbox, { inboxId: alerts, cursor });
+      deleted += r.deleted;
+      if (r.cursor === null) break;
+      cursor = r.cursor;
+    }
+    return deleted;
+  }
+
+  it("a bounce for an unmapped/already-purged message id leaves no residue in the component, while the F8 stash is still recorded", async () => {
+    const t = setup();
+    // The component's own webhook ingest (`handleEvent`) stores the raw event
+    // unconditionally, BEFORE the app's `onEvent` callback ever runs (see
+    // that function's own unconditional `ctx.db.insert("events", ...)`) --
+    // this is the row a purged/late webhook would otherwise leave behind
+    // forever, since neither `purgeInboxData` (never pointed at the shared
+    // alerts inbox) nor a stale `purgeOutbound({ outboundId })` (the row it
+    // needs may never have existed, e.g. a delivery for a draft/claim mail
+    // send instead of an alert) can ever reach it.
+    await t.mutation(components.agentmail.lib.handleEvent, {
+      config: RUNTIME_CONFIG,
+      event: { type: "event", event_type: "message.bounced", event_id: "evt-b8-1", bounce: { inbox_id: alerts, message_id: "msg-b8-1" } },
+    });
+
+    await t.mutation(internal.mailEvents.onEvent, {
+      event: { type: "event", event_type: "message.bounced", event_id: "evt-b8-1", bounce: { message_id: "msg-b8-1" } },
+    });
+
+    // F8's stash is unaffected -- it is opsState bookkeeping, independent of
+    // the component's own raw webhook audit row.
+    const stash = await t.run((ctx) =>
+      ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", "mailEvent:msg-b8-1")).unique(),
+    );
+    expect(stash).not.toBeNull();
+
+    const residue = await componentResidue(t);
+    console.log("[B-8] component residue left for an unmapped message id:", residue);
+    expect(residue).toBe(0);
+  });
+
+  it("does NOT purge when a mailLog row already matched (the ordinary bounce-on-a-sent-row path keeps its component event, matching A2's own probe)", async () => {
+    const t = setup();
+    const { userId } = await verifiedUser(t);
+    await sentMailLog(t, userId, "msg-b8-2");
+    await t.mutation(components.agentmail.lib.handleEvent, {
+      config: RUNTIME_CONFIG,
+      event: { type: "event", event_type: "message.bounced", event_id: "evt-b8-2", bounce: { inbox_id: alerts, message_id: "msg-b8-2" } },
+    });
+
+    await t.mutation(internal.mailEvents.onEvent, { event: bounceEvent("msg-b8-2") });
+
+    const residue = await componentResidue(t);
+    console.log("[B-8 control] component residue for a MATCHED message id:", residue);
+    expect(residue).toBe(1); // the raw event row is left alone -- only the truly unmapped case is purged
   });
 });
 
