@@ -12,6 +12,7 @@ import { verdict } from "./lib/verdict";
 import { parseProductUrl } from "./lib/watchUrl";
 import { boundedLine } from "./lib/text";
 import { schedulePolicyFetch } from "./policies";
+import { assertCoarseNow } from "./watches";
 import {
   MAX_ITEMS_PER_PURCHASE,
   MAX_ITEM_NAME_CHARS,
@@ -232,8 +233,8 @@ export const remove = mutation({
 const POLICY_KINDS = ["price_adjustment", "returns"] as const;
 
 export const get = query({
-  args: { purchaseId: v.id("purchases") },
-  handler: async (ctx, { purchaseId }) => {
+  args: { purchaseId: v.id("purchases"), now: v.optional(v.number()) },
+  handler: async (ctx, { purchaseId, now: argsNow }) => {
     const userId = await requireUserId(ctx);
     const purchase = await ownedPurchase(ctx, purchaseId, userId);
     if (purchase.status === "archived") throw new ConvexError("Purchase not found");
@@ -241,7 +242,16 @@ export const get = query({
       .query("items")
       .withIndex("by_purchase", (q) => q.eq("purchaseId", purchaseId))
       .collect();
-    const now = Date.now();
+    // purchases.get: this is a QUERY (reactive) -- reading the wall clock
+    // directly inside one does not get tracked as a dependency, so the
+    // cached result never invalidates as time passes on its own (P06/D73).
+    // `now` (D103) is the same optional, validated, coarse contract
+    // `watches.list`/`get` and `tracking.overview` already use; when
+    // omitted, each item falls back to its own newest observation (or the
+    // purchase's own date), which can only ever make the verdict's
+    // staleness math look MORE current than the real clock, never falsely
+    // stale.
+    const validatedNow = assertCoarseNow(argsNow);
     const items = await Promise.all(
       rawItems.map(async (it) => {
         const priceChecks = await ctx.db
@@ -255,6 +265,7 @@ export const get = query({
         const history = priceChecks.flatMap((c) =>
           c.observedCents === undefined ? [] : [{ observedAt: c.observedAt, cents: c.observedCents }],
         );
+        const now = validatedNow ?? history[0]?.observedAt ?? purchase.purchasedAt ?? purchase._creationTime;
         return {
           ...it,
           claims: await claimsWithBalance(ctx, it._id),

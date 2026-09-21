@@ -370,6 +370,31 @@ describe("merchant domain normalisation (review H7)", () => {
     expect(after.items[0].verdict.reason).toContain("$70.00");
     expect(after.items[1].verdict.label).toBe("unknown");
   });
+
+  it("D103: purchases.get takes an optional coarse `now` and never reads Date.now() directly (P06/D73)", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const id = await as.mutation(api.purchases.create, basePurchase);
+
+    // A query must not read the wall clock itself: this is a source-level
+    // invariant (watches.ts's `list`/`get`/`summarise` are checked the same
+    // way), not something a black-box query call could otherwise prove.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./purchases.ts", import.meta.url), "utf8");
+    const start = src.indexOf("export const get = query({");
+    const end = src.indexOf("\nexport const board = query(", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(src.slice(start, end)).not.toContain("Date.now()");
+
+    // The `now` arg is validated the same way as watches.list/get (D73's
+    // assertCoarseNow): wildly out of bounds is refused, not silently used.
+    await expect(as.query(api.purchases.get, { purchaseId: id, now: Date.now() + 5 * 86_400_000 })).rejects.toThrow();
+
+    // A plausible `now` is accepted and does not change stored fields.
+    const got = await as.query(api.purchases.get, { purchaseId: id, now: Date.now() });
+    expect(got.purchase._id).toBe(id);
+  });
 });
 
 describe("input bounds and the policy-research budget (pre-launch review B4, M1)", () => {
