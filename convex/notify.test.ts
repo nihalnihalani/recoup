@@ -3,24 +3,34 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { agentmail } from "./mail";
-import { DAILY_LIMIT_ERROR, DROP_SUBJECT, GLOBAL_LIMIT_ERROR, isAlertableDrop } from "./notify";
+import { applyDropOutcome, DAILY_LIMIT_ERROR, DROP_SUBJECT, GLOBAL_LIMIT_ERROR, isAlertableDrop } from "./notify";
 import { GLOBAL_DAILY_BUDGETS, MAX_DROP_EMAILS_PER_DAY } from "./limits";
 
 /**
  * Drop emails (W2). No network: the AgentMail component cannot dispatch under
- * convex-test (see the note in drafts.test.ts), so the one seam, the shared
- * `agentmail.sendMessage` handle, is replaced with a spy. Fake timers keep the
- * scheduled `sendDrop` from firing until a test flushes it.
+ * convex-test (see the note in drafts.test.ts), so the two seams, the shared
+ * `agentmail.sendMessage` and `agentmail.status` handles, are replaced with
+ * spies. `status` defaults to a definitive "sent" outcome on the first
+ * `reconcileDrop` attempt, so a plain `flush(t)` still carries a row all the
+ * way from `claimed` through `queued` to `sent` (F3); tests of the queued
+ * state or of a slower/failed reconcile override it per-call.
  */
 const T0 = Date.UTC(2026, 8, 20, 12);
 const URL = "https://www.acme.example/p/down-jacket";
 
 let send: ReturnType<typeof vi.spyOn>;
+let status: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(T0);
   send = vi.spyOn(agentmail, "sendMessage").mockResolvedValue("outbound-1" as never);
+  status = vi.spyOn(agentmail, "status").mockResolvedValue({
+    status: "sent",
+    agentmailMessageId: "msg-1",
+    threadId: null,
+    errorMessage: null,
+  } as never);
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -159,6 +169,7 @@ describe("claiming a drop inside recordWatchCheck", () => {
     expect(message.text).not.toContain("Link:");
     const [sent] = await mailRows(t);
     expect(sent.status).toBe("sent");
+    expect(sent.outboundId).toBe("outbound-1");
     expect(sent.sentAt).toBe(Date.now());
     expect(sent.error).toBeUndefined();
   });
@@ -551,5 +562,127 @@ describe("publicAppUrl (link in alert emails)", () => {
     expect(publicAppUrl()).toBeNull();
     process.env.SITE_URL = "https://localhost:5173";
     expect(publicAppUrl()).toBeNull();
+  });
+});
+
+describe("F3: claimed -> queued -> sent (never straight to sent)", () => {
+  it("sits at queued, with the component's outboundId, until reconcileDrop confirms delivery", async () => {
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+
+    await observe(t, watchId, 4_000);
+    // Run only the immediate `sendDrop` action the claim scheduled, not the
+    // `reconcileDrop` it goes on to schedule itself.
+    vi.advanceTimersByTime(0);
+    await t.finishInProgressScheduledFunctions();
+
+    const [queued] = await mailRows(t);
+    expect(queued.status).toBe("queued");
+    expect(queued.outboundId).toBe("outbound-1");
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(status).not.toHaveBeenCalled();
+
+    await flush(t);
+    const [resolved] = await mailRows(t);
+    expect(resolved.status).toBe("sent");
+    expect(status).toHaveBeenCalledWith(expect.anything(), "outbound-1");
+  });
+});
+
+describe("notify.applyDropOutcome (F3)", () => {
+  async function queuedMailLog(t: ReturnType<typeof setup>, userId: Id<"users">) {
+    return await t.run((ctx) =>
+      ctx.db.insert("mailLog", {
+        userId,
+        dedupeKey: `watch:seed:${Math.random()}`,
+        kind: "price_drop",
+        to: "sam@home.example",
+        subject: "Price drop: Thing is now $10.00",
+        status: "queued",
+        outboundId: "outbound-1" as never,
+        cents: 1_000,
+      }),
+    );
+  }
+
+  it("moves a queued row to sent on a real message id", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const mailLogId = await queuedMailLog(t, userId);
+
+    const outcome = await t.run((ctx) =>
+      applyDropOutcome(ctx, mailLogId, 1, { status: "sent", agentmailMessageId: "msg-1", errorMessage: null }),
+    );
+    expect(outcome).toBe("sent");
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("sent");
+    expect(row?.sentAt).toBe(Date.now());
+  });
+
+  it("treats a bounce that still carries a message id as a failure, never as sent (review H3's rule, ported)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const mailLogId = await queuedMailLog(t, userId);
+
+    const outcome = await t.run((ctx) =>
+      applyDropOutcome(ctx, mailLogId, 1, {
+        status: "bounced",
+        agentmailMessageId: "msg-1",
+        errorMessage: "mailbox does not exist",
+      }),
+    );
+    expect(outcome).toBe("failed");
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("failed");
+    expect(row?.error).toBe("mailbox does not exist");
+  });
+
+  it("reschedules while pending and attempts remain, leaving the row queued", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const mailLogId = await queuedMailLog(t, userId);
+
+    const outcome = await t.run((ctx) =>
+      applyDropOutcome(ctx, mailLogId, 1, { status: "pending", agentmailMessageId: null, errorMessage: null }),
+    );
+    expect(outcome).toBe("retrying");
+    const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    expect(scheduled).toHaveLength(1);
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("queued");
+  });
+
+  it("leaves the row queued, not failed, once every backoff attempt is spent", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const mailLogId = await queuedMailLog(t, userId);
+
+    const outcome = await t.run((ctx) =>
+      applyDropOutcome(ctx, mailLogId, 5, { status: "pending", agentmailMessageId: null, errorMessage: null }),
+    );
+    expect(outcome).toBe("unknown");
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("queued");
+  });
+
+  it("is a no-op on a row that already resolved", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const mailLogId = await t.run((ctx) =>
+      ctx.db.insert("mailLog", {
+        userId,
+        dedupeKey: "watch:seed:x",
+        kind: "price_drop",
+        to: "sam@home.example",
+        subject: "s",
+        status: "sent",
+        cents: 1,
+      }),
+    );
+    const outcome = await t.run((ctx) =>
+      applyDropOutcome(ctx, mailLogId, 1, { status: "sent", agentmailMessageId: "msg-2", errorMessage: null }),
+    );
+    expect(outcome).toBe("gone");
   });
 });

@@ -38,11 +38,13 @@ const POLICY_SCAN = 20;
  * D13 reconcile backoff. `approveAndSend` schedules attempt 1 at BACKOFF[0];
  * attempt N (1-based) reschedules itself at BACKOFF[N]. Running out of
  * entries means five checks happened and delivery is still unknown.
+ * Exported so `notify.reconcileDrop` (F3) can reconcile a queued drop email
+ * on the same backoff, rather than inventing a second schedule.
  */
-const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000] as const;
+export const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000] as const;
 
-/** Component statuses that mean the message will never be delivered (D13). */
-const TERMINAL_FAILURES = ["failed", "bounced", "rejected"] as const;
+/** Component statuses that mean the message will never be delivered (D13). Exported for `notify.ts` (F3), same reason as `BACKOFF_MS`. */
+export const TERMINAL_FAILURES = ["failed", "bounced", "rejected"] as const;
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 /** Draft versions one claim may hold; `insert` refuses past it, so a read of this many is always the whole set. */
