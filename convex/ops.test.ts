@@ -8,7 +8,7 @@ import { ConvexError } from "convex/values";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
-import { GLOBAL_DAILY_BUDGETS, MARKET_CLAIM_STALE_MS } from "./limits";
+import { GLOBAL_DAILY_BUDGETS, MARKET_CLAIM_STALE_MS, STUCK_DELETION_AGE_MS } from "./limits";
 import { tryConsumeGlobalBudget } from "./lib/budget";
 
 type T = ReturnType<typeof setup>;
@@ -320,5 +320,76 @@ describe("ops.backlog: retention cursor diagnostic (D112)", () => {
     await t.run((ctx) => ctx.db.insert("opsState", { key: "retention", cursor: "not json", updatedAt: NOW - 49 * HOUR }));
     const result = await t.query(internal.ops.backlog, {});
     expect(result.retention).toEqual({ rule: "processedEvents", cursorAgeMs: 49 * HOUR, stalled: false });
+  });
+});
+
+describe("T18.5 (D124 B6): ops.backlog wires in account.stuckDeletions as `deletions`", () => {
+  it("before/after: backlog reports a stuck deleting row that stuckDeletions itself also reports [FAILS pre-T18.5 (no `deletions` field)]", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", {
+        userId, status: "deleting", requestedAt: NOW - STUCK_DELETION_AGE_MS - 1, attempts: 0,
+      }),
+    );
+
+    const result = await t.query(internal.ops.backlog, {});
+    expect((result as any).deletions).toEqual({ stuck: 1, deletingTotal: 1 });
+
+    const direct = await t.query(internal.account.stuckDeletions, {});
+    expect((result as any).deletions).toEqual({ stuck: direct.stuck, deletingTotal: direct.deleting });
+  });
+
+  it("a live (non-stuck) deleting row counts toward deletingTotal but not stuck", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: NOW, attempts: 0 }),
+    );
+    const result = await t.query(internal.ops.backlog, {});
+    expect((result as any).deletions).toEqual({ stuck: 0, deletingTotal: 1 });
+  });
+
+  it("reports all zeros on an empty deployment", async () => {
+    const t = setup();
+    const result = await t.query(internal.ops.backlog, {});
+    expect((result as any).deletions).toEqual({ stuck: 0, deletingTotal: 0 });
+  });
+});
+
+describe("T18.5 addendum (F-T23-3): ops.resetRetentionCursor", () => {
+  const RETENTION_KEY = "retention";
+
+  it("with no args, resets an existing cursor to step 0 and returns the previous value", async () => {
+    const t = setup();
+    await t.run((ctx) => ctx.db.insert("opsState", { key: RETENTION_KEY, cursor: JSON.stringify({ step: 3, page: "abc" }), updatedAt: NOW - HOUR }));
+
+    const previous = await t.mutation(internal.ops.resetRetentionCursor, {});
+    expect(previous).toEqual({ step: 3, page: "abc" });
+
+    const row = await t.run((ctx) => ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", RETENTION_KEY)).unique());
+    expect(row?.cursor).toBe(JSON.stringify({ step: 0, page: null }));
+    expect(row?.updatedAt).toBe(NOW);
+  });
+
+  it("with {step: N}, skips only that step (cursor becomes {step:N, page:null}); returns null when no row existed yet", async () => {
+    const t = setup();
+    expect(await t.run((ctx) => ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", RETENTION_KEY)).unique())).toBeNull();
+
+    const previous = await t.mutation(internal.ops.resetRetentionCursor, { step: 2 });
+    expect(previous).toBeNull();
+
+    const row = await t.run((ctx) => ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", RETENTION_KEY)).unique());
+    expect(row?.cursor).toBe(JSON.stringify({ step: 2, page: null }));
+
+    // The cycle now resumes from the requested step, confirmed via backlog's own read of the same row.
+    const result = await t.query(internal.ops.backlog, {});
+    expect(result.retention.rule).toBe("priceChecks"); // RETENTION_STEPS[2]
+  });
+
+  it("refuses an out-of-range step", async () => {
+    const t = setup();
+    await expect(t.mutation(internal.ops.resetRetentionCursor, { step: 999 })).rejects.toThrow(ConvexError);
+    await expect(t.mutation(internal.ops.resetRetentionCursor, { step: -1 })).rejects.toThrow(ConvexError);
   });
 });

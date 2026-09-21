@@ -5,6 +5,7 @@
  */
 import { ConvexError, v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { GLOBAL_DAILY_BUDGETS, MARKET_CLAIM_STALE_MS, type GlobalBudgetKind } from "./limits";
 import { utcDay } from "./lib/budget";
 
@@ -167,6 +168,20 @@ export const backlog = internalQuery({
      * means something (most likely a poison page an item on it keeps throwing on) stopped it.
      */
     retention: v.object({ rule: v.string(), cursorAgeMs: v.number(), stalled: v.boolean() }),
+    /**
+     * T18.5 (D124 B6): `account.stuckDeletions`'s own read, wired in here so
+     * an operator sees account-deletion health alongside every other
+     * backlog signal instead of having to run a second `npx convex run`.
+     * `stuck` is `deleting` for over `STUCK_DELETION_AGE_MS` with no live
+     * scheduled `purge` job (the daily `reDriveStuckDeletions` cron will
+     * pick these up on its own within 24h; a persistently nonzero count
+     * across repeated `backlog` calls means that cron itself is not
+     * running, not that any one row is unrecoverable). `deletingTotal` is
+     * every `deleting` row currently scanned (bounded the same way
+     * `stuckDeletions` itself bounds its scan, `STUCK_SCAN_CAP` in
+     * `account.ts`) -- most of it is ordinary in-flight purge, not stuck.
+     */
+    deletions: v.object({ stuck: v.number(), deletingTotal: v.number() }),
   }),
   handler: async (ctx, { scanLimit }) => {
     const limit = scanLimit !== undefined && scanLimit > 0 ? Math.floor(scanLimit) : DEFAULT_SCAN_LIMIT;
@@ -212,6 +227,14 @@ export const backlog = internalQuery({
     const retentionCursorAgeMs = retentionRow ? now - retentionRow.updatedAt : 0;
     const retentionMidCycle = retentionCursor.step !== 0 || retentionCursor.page !== null;
 
+    // Explicit type: `ops.backlog`'s own handler return type would otherwise
+    // be inferred circularly through `internal`'s full api type (which
+    // includes `ops.backlog` itself) the moment a handler calls
+    // `ctx.runQuery(internal.<anything>, …)` without an explicit annotation
+    // somewhere in the chain -- the same fix `drafts.generate` needed after
+    // T18.5 (D124 B5) for the identical reason.
+    const deletions: { stuck: number; deleting: number } = await ctx.runQuery(internal.account.stuckDeletions, {});
+
     return {
       now,
       dueWatches: summarize(dueWatchRows.length, limit),
@@ -225,6 +248,50 @@ export const backlog = internalQuery({
         cursorAgeMs: retentionCursorAgeMs,
         stalled: retentionMidCycle && retentionCursorAgeMs > RETENTION_STALL_MS,
       },
+      deletions: { stuck: deletions.stuck, deletingTotal: deletions.deleting },
     };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// resetRetentionCursor (F-T23-3, T18.5 addendum)
+// ---------------------------------------------------------------------------
+
+/**
+ * Hand-resets `retention.ts`'s resumable-sweep cursor (the `opsState` row
+ * keyed `"retention"`, `RETENTION_OPS_KEY`), the same write RUNBOOK.md's
+ * old §11 instructed by hand via `npx convex run --inline-mutation` -- a
+ * flag that does not exist in this repo's pinned `convex@1.46.0` CLI (only
+ * `--inline-query` does; there is no equivalent ad hoc inline-mutation
+ * escape hatch). `{"step":0,"page":null}` (the default, `step` omitted or 0)
+ * restarts the whole cycle from `RETENTION_STEPS[0]`; `{"step":N}` skips
+ * only the stuck step for this cycle, matching the two RUNBOOK options
+ * exactly. Returns the cursor as it was before the reset (parsed the same
+ * way `backlog`'s own `retention` field is, so an operator can confirm what
+ * they just overwrote) -- `null` if the row did not exist yet (the sweep has
+ * never run: nothing to reset, and this call still creates the row so the
+ * next `retention.sweep` starts from the requested step instead of its own
+ * default).
+ */
+export const resetRetentionCursor = internalMutation({
+  args: { step: v.optional(v.number()) },
+  returns: v.union(v.object({ step: v.number(), page: v.union(v.string(), v.null()) }), v.null()),
+  handler: async (ctx, { step }) => {
+    if (step !== undefined && (!Number.isInteger(step) || step < 0 || step >= RETENTION_STEPS.length)) {
+      throw new ConvexError(`step must be an integer in [0, ${RETENTION_STEPS.length - 1}]`);
+    }
+    const row = await ctx.db
+      .query("opsState")
+      .withIndex("by_key", (q) => q.eq("key", RETENTION_OPS_KEY))
+      .unique();
+    const previous = row ? parseRetentionCursor(row.cursor) : null;
+    const cursor = JSON.stringify({ step: step ?? 0, page: null });
+    const now = Date.now();
+    if (row) {
+      await ctx.db.patch(row._id, { cursor, updatedAt: now });
+    } else {
+      await ctx.db.insert("opsState", { key: RETENTION_OPS_KEY, cursor, updatedAt: now });
+    }
+    return previous;
   },
 });
