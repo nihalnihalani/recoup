@@ -16,6 +16,7 @@ import type * as examples from "../examples.js";
 import type * as followUps from "../followUps.js";
 import type * as http from "../http.js";
 import type * as inbound from "../inbound.js";
+import type * as insights from "../insights.js";
 import type * as intake from "../intake.js";
 import type * as lib_access from "../lib/access.js";
 import type * as lib_ai from "../lib/ai.js";
@@ -56,6 +57,7 @@ declare const fullApi: ApiFromModules<{
   followUps: typeof followUps;
   http: typeof http;
   inbound: typeof inbound;
+  insights: typeof insights;
   intake: typeof intake;
   "lib/access": typeof lib_access;
   "lib/ai": typeof lib_ai;
