@@ -16,6 +16,17 @@ export const rateLimiter = new RateLimiter(components.rateLimiter, {
   authMailPerEmail: { kind: "fixed window", rate: 3, period: HOUR },
   /** Verification/reset codes sent across all addresses, deployment-wide (T05). */
   authMailGlobal: { kind: "fixed window", rate: 200, period: HOUR },
+  /**
+   * `signUp` attempts (T05.1 F5), consumed *before* any `users`/`authAccounts`
+   * row is created. Same named config used two ways: an unkeyed call scopes
+   * one deployment-wide bucket (20/hour of new-account attempts total); a
+   * call keyed by the normalized email adds a coarse per-address floor on
+   * top (the tight per-address throttle is `authMailPerEmail`, already
+   * consumed once verification mail actually sends — this just stops a
+   * targeted burst of signUps against one address from creating rows before
+   * that limit is ever reached).
+   */
+  authSignUp: { kind: "fixed window", rate: 20, period: HOUR },
   /** AgentMail inbox provisioning per user (T18 reprovision / signUp race guard). */
   inboxProvision: { kind: "fixed window", rate: 1, period: 5 * MINUTE },
   /** Manual "recheck now" on one stalled mailLog row (T06). */
