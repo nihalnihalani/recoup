@@ -361,6 +361,9 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 ### T24e — Audit F-AUD-1 (purchases.board bounded reads) + LOWs
 **Owner:** sonnet-backend-2 · **Status:** verified (f9cba83, e25096b, 21d0fe5; lead re-ran 4 files 185/185; board at 100×50 and 200×50 = 125 ranges / 3,061 docs; `isExample` no longer client-settable) · **Files:** convex/purchases.ts (+test), convex/lib/authMigrate.ts (+test), convex/boundary.test.ts (byte strip), src/pages/Board.tsx only if the shape changes.
 
+### T18.6 — Checkpoint 6d remainder (D129 B-9 + LOWs)
+**Owner:** sonnet-backend · **Status:** in_progress · **Files:** patches/@agentmail+convex+0.1.0.patch, convex/mailPurge.ts (+test), convex/account.ts (+test), convex/mailEvents.ts (+test), convex/policies.ts (+test), convex/purchases.ts (+test), convex/profiles.ts (+test), docs/ops/RUNBOOK.md §12.
+
 ### T16 — P07 retention (bounded, resumable, audit-preserving) plus P08 backend fixes: returns validators and string bounds on cla
 **Owner:** sonnet-backend · **Phase:** 2 · **Blocks on:** T12 · **High-risk:** True
 **Files:** convex/retention.ts, convex/retention.test.ts, convex/claims.ts, convex/claims.test.ts, convex/purchases.ts, convex/purchases.test.ts, convex/intake.ts, convex/intake.test.ts, convex/replies.ts, convex/replies.test.ts, convex/profiles.ts, convex/profiles.test.ts, convex/crons.ts, convex/lib/errors.ts
