@@ -1,38 +1,28 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
-import { useNavigate } from "react-router-dom";
-import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
-import { Sparkline } from "../components/charts/Sparkline";
 import { Money } from "../components/Money";
-import { Empty, ErrorBox, Loading } from "../components/States";
+import { ErrorBox } from "../components/States";
+import { WatchCard } from "../components/watching/WatchCard";
 import {
+  cardClass,
+  cardTitleClass,
   dollarsToCents,
   errorText,
-  fromDateInput,
   inputClass,
-  labelClass,
   pageTitleClass,
-  pillBadClass,
   pillGoodClass,
   pillMutedClass,
   pillWarnClass,
   primaryButtonClass,
   secondaryButtonClass,
   sectionClass,
+  useNow,
   when,
 } from "../lib/ui";
 
-type Watch = FunctionReturnType<typeof api.watches.list>[number];
-
-const VERDICT: Record<Watch["verdict"]["label"], { text: string; className: string }> = {
-  good_price: { text: "Good price", className: pillGoodClass },
-  fair: { text: "Fair price", className: pillMutedClass },
-  wait: { text: "Wait", className: pillWarnClass },
-  inflated_discount: { text: "Discount looks inflated", className: pillBadClass },
-  not_enough_history: { text: "Not enough history yet", className: pillMutedClass },
-  unknown: { text: "No price yet", className: pillMutedClass },
-};
+/** Cards whose "other stores" section starts open, so a long list does not open a query per card. */
+const STORES_OPEN_BY_DEFAULT = 4;
 
 function AddWatch() {
   const create = useMutation(api.watches.create);
@@ -62,316 +52,61 @@ function AddWatch() {
   }
 
   return (
-    <form onSubmit={onSubmit} className={`${sectionClass} space-y-3`}>
-      <div className="grid gap-3 sm:grid-cols-[1fr_10rem_auto] sm:items-end">
-        <div>
-          <label className={labelClass} htmlFor="watch-url">
-            Paste a product link
+    <form onSubmit={onSubmit} className={`${sectionClass} space-y-3`} aria-label="Watch a product">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center">
+        <div className="relative min-w-0 flex-1">
+          <label className="sr-only" htmlFor="watch-url">
+            Product link
           </label>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            aria-hidden="true"
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
+          >
+            <path
+              d="M6.8 9.2a2.8 2.8 0 0 0 4 0l2.4-2.4a2.8 2.8 0 0 0-4-4l-.9.9M9.2 6.8a2.8 2.8 0 0 0-4 0L2.8 9.2a2.8 2.8 0 0 0 4 4l.9-.9"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            />
+          </svg>
           <input
             id="watch-url"
-            className={inputClass}
+            className={`${inputClass} py-2.5 pl-9`}
             type="url"
             required
-            placeholder="https://store.com/product…"
+            placeholder="Paste a product link from any store"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
           />
         </div>
-        <div>
-          <label className={labelClass} htmlFor="watch-target">
-            Tell me at (optional)
-          </label>
-          <input
-            id="watch-target"
-            className={inputClass}
-            inputMode="decimal"
-            placeholder="$ target"
-            value={target}
-            onChange={(e) => setTarget(e.target.value)}
-          />
+        <div className="flex gap-3">
+          <div className="min-w-0 flex-1 md:w-40 md:flex-none">
+            <label className="sr-only" htmlFor="watch-target">
+              Target price, optional
+            </label>
+            <input
+              id="watch-target"
+              className={`${inputClass} py-2.5 tabular-nums`}
+              inputMode="decimal"
+              placeholder="Tell me at $ (optional)"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+            />
+          </div>
+          <button type="submit" disabled={busy} className={`${primaryButtonClass} shrink-0 px-5 py-2.5`}>
+            {busy ? "Adding…" : "Watch"}
+          </button>
         </div>
-        <button type="submit" disabled={busy} className={primaryButtonClass}>
-          {busy ? "Adding…" : "Watch this"}
-        </button>
       </div>
       {error && <ErrorBox error={error} />}
       <p className="text-xs text-gray-400">
-        No affiliate links. Every price shows where and when it was read.
+        Works with retailers and marketplaces alike. No affiliate links; every price shows where and when it was read.
       </p>
     </form>
-  );
-}
-
-/** W4: the watched item was bought. It becomes a purchase with its price-adjustment window counting down. */
-function BoughtForm({ watch, onDone }: { watch: Watch; onDone: () => void }) {
-  const markBought = useMutation(api.watches.markBought);
-  const navigate = useNavigate();
-  const [paid, setPaid] = useState(watch.lastCents === null ? "" : (watch.lastCents / 100).toFixed(2));
-  const [date, setDate] = useState(() => {
-    // Today in the shopper's own timezone; an ISO (UTC) date is tomorrow for evening shoppers in the Americas.
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  });
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function onSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    setError(null);
-    const paidCents = dollarsToCents(paid);
-    const purchasedAt = fromDateInput(date);
-    if (paidCents === null || paidCents <= 0) return setError("Enter what you paid, like 89.99");
-    if (purchasedAt === null) return setError("Pick the day you bought it");
-    setBusy(true);
-    try {
-      const purchaseId = await markBought({ watchId: watch._id, paidCents, purchasedAt });
-      onDone();
-      navigate(`/purchases/${purchaseId}`);
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form onSubmit={onSubmit} className="space-y-3 rounded-lg bg-gray-50 p-3">
-      <p className="text-sm text-gray-600">
-        Recoup will keep watching after you buy and tell you if the store owes you the difference.
-      </p>
-      <div className="grid gap-3 sm:grid-cols-[10rem_12rem_auto_auto] sm:items-end">
-        <div>
-          <label className={labelClass} htmlFor={`paid-${watch._id}`}>
-            Price you paid
-          </label>
-          <input
-            id={`paid-${watch._id}`}
-            className={inputClass}
-            inputMode="decimal"
-            value={paid}
-            onChange={(e) => setPaid(e.target.value)}
-          />
-        </div>
-        <div>
-          <label className={labelClass} htmlFor={`date-${watch._id}`}>
-            Bought on
-          </label>
-          <input
-            id={`date-${watch._id}`}
-            className={inputClass}
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-          />
-        </div>
-        <button type="submit" disabled={busy} className={primaryButtonClass}>
-          {busy ? "Saving…" : "Start the window"}
-        </button>
-        <button type="button" className={secondaryButtonClass} onClick={onDone}>
-          Cancel
-        </button>
-      </div>
-      {error && <ErrorBox error={error} />}
-    </form>
-  );
-}
-
-/** W3: the same item at other stores. Candidates are greyed until the user confirms the match. */
-function OtherStores({ watch }: { watch: Watch }) {
-  const data = useQuery(api.offers.listForWatch, { watchId: watch._id });
-  const find = useMutation(api.offers.find);
-  const confirm = useMutation(api.offers.confirm);
-  const reject = useMutation(api.offers.reject);
-  const [error, setError] = useState<string | null>(null);
-
-  async function run(work: () => Promise<unknown>) {
-    setError(null);
-    try {
-      await work();
-    } catch (err) {
-      setError(errorText(err));
-    }
-  }
-
-  if (data === undefined) return null;
-  const canFind = !data.searching && data.nextFindAt === null;
-
-  return (
-    <div className="space-y-2 rounded-lg bg-gray-50 p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm font-medium text-gray-800">
-          Other stores
-          {data.best && (
-            <span className="ml-2 font-normal text-green-700">
-              Cheapest confirmed: {data.best.storeDomain} at{" "}
-              <Money cents={data.best.cents} currency={data.best.currency} />
-            </span>
-          )}
-        </p>
-        <button
-          type="button"
-          disabled={!canFind}
-          className={secondaryButtonClass}
-          onClick={() => void run(() => find({ watchId: watch._id }))}
-        >
-          {data.searching ? "Searching…" : data.nextFindAt !== null ? "Searched recently" : "Find other stores"}
-        </button>
-      </div>
-      {data.offers.length === 0 ? (
-        <p className="text-xs text-gray-400">
-          {data.searching ? "Reading store pages. This takes about a minute." : "No other stores listed yet."}
-        </p>
-      ) : (
-        <ul className="divide-y divide-gray-200">
-          {data.offers.map((offer) => {
-            const confirmed = offer.status === "confirmed";
-            return (
-              <li
-                key={offer._id}
-                className={`flex flex-wrap items-center justify-between gap-2 py-2 text-sm ${confirmed ? "" : "opacity-60"}`}
-              >
-                <span className="min-w-0">
-                  <a
-                    href={offer.productUrl}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="font-medium text-gray-800 underline-offset-2 hover:underline"
-                  >
-                    {offer.storeDomain}
-                  </a>
-                  <span className="ml-2 text-xs text-gray-400">
-                    {confirmed ? "you confirmed this match" : offer.variantMatch === "exact" ? "looks like the same item" : "may be a different version"}
-                    {offer.lastCheckedAt !== null && ` · read ${when(offer.lastCheckedAt)}`}
-                    {offer.note && ` · ${offer.note}`}
-                  </span>
-                </span>
-                <span className="flex items-center gap-2">
-                  <span className="font-semibold text-gray-800">
-                    {offer.lastCents === null ? "—" : <Money cents={offer.lastCents} currency={offer.currency ?? "USD"} />}
-                  </span>
-                  {!confirmed && (
-                    <button type="button" className={secondaryButtonClass} onClick={() => void run(() => confirm({ offerId: offer._id }))}>
-                      Same item
-                    </button>
-                  )}
-                  <button type="button" className={secondaryButtonClass} onClick={() => void run(() => reject({ offerId: offer._id }))}>
-                    Not it
-                  </button>
-                </span>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      <p className="text-xs text-gray-400">Ranked by price only. No affiliate links, no sponsored placement.</p>
-      {error && <ErrorBox error={error} />}
-    </div>
-  );
-}
-
-function WatchRow({ watch }: { watch: Watch }) {
-  const [buying, setBuying] = useState(false);
-  const checkNow = useMutation(api.watches.checkNow);
-  const archive = useMutation(api.watches.archive);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const verdict = VERDICT[watch.verdict.label];
-  const currency = watch.currency ?? "USD";
-
-  async function run(work: () => Promise<unknown>) {
-    setError(null);
-    setBusy(true);
-    try {
-      await work();
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <li className={`${sectionClass} space-y-3`}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate font-semibold text-gray-800">{watch.name}</p>
-          <a
-            href={watch.productUrl}
-            target="_blank"
-            rel="noreferrer noopener"
-            className="text-xs text-gray-400 underline-offset-2 hover:underline"
-          >
-            {watch.merchantDomain}
-          </a>
-        </div>
-        <div className="text-right">
-          <p className="text-2xl font-bold text-gray-800">
-            {watch.lastCents === null ? "—" : <Money cents={watch.lastCents} currency={currency} />}
-          </p>
-          {watch.listCents !== null && watch.lastCents !== null && watch.listCents > watch.lastCents && (
-            <p className="text-xs text-gray-400">
-              store says was <Money cents={watch.listCents} currency={currency} />
-            </p>
-          )}
-        </div>
-      </div>
-
-      {watch.spark.length >= 2 && (
-        <Sparkline
-          points={watch.spark.map((p) => ({ at: p.observedAt, cents: p.observedCents }))}
-          paidCents={watch.targetCents ?? watch.spark[0].observedCents}
-        />
-      )}
-
-      <div className="flex flex-wrap items-center gap-2">
-        <span className={verdict.className}>{verdict.text}</span>
-        {watch.targetHit && <span className={pillGoodClass}>At or below your target</span>}
-        {watch.status === "paused" && <span className={pillMutedClass}>Paused</span>}
-        <span className="text-sm text-gray-600">{watch.verdict.reason}</span>
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-400">
-        <span>
-          {watch.checking
-            ? "Checking the page now…"
-            : watch.lastCheckedAt === null
-              ? "Not checked yet"
-              : `Checked ${when(watch.lastCheckedAt)}`}
-          {watch.targetCents !== null && (
-            <>
-              {" · target "}
-              <Money cents={watch.targetCents} currency={currency} />
-            </>
-          )}
-          {watch.lastNote && !watch.checking && ` · ${watch.lastNote}`}
-        </span>
-        <span className="flex gap-2">
-          <button
-            type="button"
-            disabled={busy || watch.checking}
-            className={secondaryButtonClass}
-            onClick={() => void run(() => checkNow({ watchId: watch._id }))}
-          >
-            Check now
-          </button>
-          <button type="button" className={secondaryButtonClass} onClick={() => setBuying((v) => !v)}>
-            I bought it
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            className={secondaryButtonClass}
-            onClick={() => void run(() => archive({ watchId: watch._id }))}
-          >
-            Stop watching
-          </button>
-        </span>
-      </div>
-      {buying && <BoughtForm watch={watch} onDone={() => setBuying(false)} />}
-      <OtherStores watch={watch} />
-      {error && <ErrorBox error={error} />}
-    </li>
   );
 }
 
@@ -381,7 +116,7 @@ function Drops() {
   if (drops === undefined || drops.length === 0) return null;
   return (
     <section className={`${sectionClass} space-y-2`}>
-      <h2 className="text-lg font-semibold text-gray-800">Price drops</h2>
+      <h2 className={cardTitleClass}>Price drops</h2>
       <ul className="divide-y divide-gray-100">
         {drops.map((drop) => (
           <li key={drop._id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
@@ -413,30 +148,120 @@ function Drops() {
   );
 }
 
+function CardSkeleton() {
+  return (
+    <div className={`col-span-full xl:col-span-6 ${cardClass} animate-pulse`}>
+      <div className="flex items-center gap-3 border-b border-gray-100 px-5 py-4">
+        <div className="h-10 w-10 rounded-full bg-gray-100" />
+        <div className="flex-1 space-y-2">
+          <div className="h-4 w-2/3 rounded bg-gray-100" />
+          <div className="h-3 w-1/3 rounded bg-gray-100" />
+        </div>
+      </div>
+      <div className="space-y-4 px-5 py-4">
+        <div className="h-9 w-36 rounded bg-gray-100" />
+        <div className="h-40 rounded-lg bg-gray-100" />
+        <div className="grid grid-cols-3 gap-4">
+          <div className="h-8 rounded bg-gray-100" />
+          <div className="h-8 rounded bg-gray-100" />
+          <div className="h-8 rounded bg-gray-100" />
+        </div>
+        <div className="h-10 rounded-lg bg-gray-100" />
+      </div>
+    </div>
+  );
+}
+
+/** First-run invitation. The curve is a decorative shape, not data: no axis, no numbers. */
+function EmptyWatching() {
+  return (
+    <div className={`${cardClass} overflow-hidden text-center`}>
+      <div className="px-6 pt-10">
+        <p className="text-lg font-semibold text-gray-800">Nothing watched yet</p>
+        <p className="mx-auto mt-2 max-w-md text-sm text-gray-500">
+          Paste a product link and Recoup starts reading its price. Each check adds a point, and the chart of its ups and
+          downs builds from there.
+        </p>
+        <button
+          type="button"
+          className={`${secondaryButtonClass} mt-4`}
+          onClick={() => document.getElementById("watch-url")?.focus()}
+        >
+          Paste your first link
+        </button>
+      </div>
+      <svg viewBox="0 0 600 120" preserveAspectRatio="none" className="mt-6 block h-28 w-full" aria-hidden="true">
+        <defs>
+          <linearGradient id="empty-watch-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--color-violet-500)" stopOpacity={0.12} />
+            <stop offset="100%" stopColor="var(--color-violet-500)" stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <path d="M0,40 H90 V52 H170 V34 H260 V70 H340 V62 H420 V88 H510 V76 H600 V120 H0 Z" fill="url(#empty-watch-fill)" />
+        <path
+          d="M0,40 H90 V52 H170 V34 H260 V70 H340 V62 H420 V88 H510 V76 H600"
+          fill="none"
+          stroke="var(--color-violet-500)"
+          strokeOpacity={0.25}
+          strokeWidth={2}
+          strokeDasharray="4 6"
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+    </div>
+  );
+}
+
 export default function Watching() {
   const watches = useQuery(api.watches.list);
+  const now = useNow();
+  // Live watches first, in the order the server gives them; bought ones settle at the end.
+  const ordered =
+    watches === undefined
+      ? undefined
+      : [...watches.filter((w) => w.status !== "bought"), ...watches.filter((w) => w.status === "bought")];
+  const active = watches?.filter((w) => w.status === "active").length ?? 0;
+  const atTarget = watches?.filter((w) => w.targetHit && w.status !== "bought").length ?? 0;
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className={pageTitleClass}>Watching</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          Haven’t bought yet? Paste the link. Recoup reads the price and tells you when to buy.
-        </p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className={pageTitleClass}>Watching</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Haven’t bought yet? Paste the link. Recoup reads the price and tells you when to buy.
+          </p>
+        </div>
+        {watches !== undefined && watches.length > 0 && (
+          <p className="flex flex-wrap items-center gap-2 text-sm text-gray-500">
+            <span className={pillMutedClass}>
+              {active} of {watches.length} active
+            </span>
+            {atTarget > 0 && <span className={pillGoodClass}>↓ {atTarget} at target</span>}
+          </p>
+        )}
       </div>
 
       <AddWatch />
 
       <Drops />
 
-      {watches === undefined ? (
-        <Loading rows={3} />
-      ) : watches.length === 0 ? (
-        <Empty title="Nothing watched yet" hint="Paste a product link above to start a price history." />
+      {ordered === undefined ? (
+        <div className="grid grid-cols-12 gap-6" role="status" aria-label="Loading watched items">
+          <CardSkeleton />
+          <CardSkeleton />
+        </div>
+      ) : ordered.length === 0 ? (
+        <EmptyWatching />
       ) : (
-        <ul className="space-y-3">
-          {watches.filter((w) => w.status !== "bought").map((watch) => (
-            <WatchRow key={watch._id} watch={watch} />
+        <ul className="grid grid-cols-12 gap-6">
+          {ordered.map((watch, index) => (
+            <WatchCard
+              key={watch._id}
+              watch={watch}
+              now={now}
+              storesOpen={index < STORES_OPEN_BY_DEFAULT && watch.status !== "bought"}
+            />
           ))}
         </ul>
       )}

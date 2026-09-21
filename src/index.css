@@ -51,3 +51,42 @@
 body {
   @apply bg-gray-100 font-sans text-gray-600 antialiased;
 }
+
+/*
+  Dashboard motion. One draw-in for chart lines on mount, a morph when the same
+  points change value, and a slide-in for new feed rows. All off under reduced motion.
+*/
+@keyframes chart-draw {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes chart-fade {
+  from { opacity: 0; }
+}
+@keyframes feed-in {
+  from { opacity: 0; transform: translateY(-6px); }
+}
+.chart-draw {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+  animation: chart-draw 900ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.chart-fade {
+  animation: chart-fade 600ms ease-out 500ms both;
+}
+.chart-morph {
+  transition: d 450ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.feed-in {
+  animation: feed-in 400ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chart-draw,
+  .chart-fade,
+  .feed-in {
+    animation: none;
+  }
+  .chart-morph {
+    transition: none;
+  }
+}
