@@ -14,9 +14,18 @@ import {
   when,
 } from "../lib/ui";
 
+/** `alertSettings.suppressedReason` rendered in the user's own words (never provider jargon). */
+const SUPPRESSION_COPY: Record<string, string> = {
+  bounced: "Alerts paused: a message to this address bounced. Turn alerts back on to resume.",
+  complained: "Alerts paused: a message to this address was marked as spam. Turn alerts back on to resume.",
+  user_unsubscribed: "Alerts paused: you unsubscribed from price alerts. Turn alerts back on to resume.",
+};
+
 export default function Settings() {
   const profile = useQuery(api.profiles.me);
   const attention = useQuery(api.intake.needsAttention);
+  const alerts = useQuery(api.alerts.settings);
+  const setAlerts = useMutation(api.alerts.setAlerts);
   const ensureInbox = useAction(api.profiles.ensureInbox);
   const paste = useAction(api.intake.paste);
   const retryEvent = useMutation(api.intake.retryEvent);
@@ -27,7 +36,21 @@ export default function Settings() {
   const [pasteError, setPasteError] = useState<string | null>(null);
   const [pasteResult, setPasteResult] = useState<string | null>(null);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [alertsError, setAlertsError] = useState<string | null>(null);
+  const [alertsBusy, setAlertsBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  async function handleToggleAlerts(enabled: boolean) {
+    setAlertsError(null);
+    setAlertsBusy(true);
+    try {
+      await setAlerts({ enabled });
+    } catch (error) {
+      setAlertsError(errorText(error));
+    } finally {
+      setAlertsBusy(false);
+    }
+  }
 
   async function handleCopy(address: string) {
     setInboxError(null);
@@ -129,6 +152,46 @@ export default function Settings() {
             </div>
           )}
           {inboxError && <ErrorBox error={inboxError} className="mt-3" />}
+        </SettingsCard>
+
+        <SettingsCard title="Price alerts" icon={<BellIcon />}>
+          {alerts === undefined ? (
+            <Loading rows={1} />
+          ) : (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-gray-900" title={alerts.email ?? undefined}>
+                    {alerts.email ?? "No email on file"}
+                  </p>
+                  <p
+                    className={`mt-0.5 text-xs font-semibold ${alerts.emailVerified ? "text-green-700" : "text-yellow-700"}`}
+                  >
+                    {alerts.emailVerified ? "Verified" : "Verify your email to receive alerts"}
+                  </p>
+                </div>
+                <AlertsToggle
+                  id="alerts-toggle"
+                  checked={alerts.alertsEnabled}
+                  disabled={alertsBusy}
+                  onChange={(enabled) => void handleToggleAlerts(enabled)}
+                />
+              </div>
+
+              {alerts.suppressedReason && (
+                <p role="status" className="rounded-xl border border-yellow-500/40 bg-yellow-500/10 px-3.5 py-2.5 text-sm text-yellow-700">
+                  {SUPPRESSION_COPY[alerts.suppressedReason] ?? "Alerts paused. Turn alerts back on to resume."}
+                </p>
+              )}
+
+              {alertsError && <ErrorBox error={alertsError} />}
+
+              <p className="border-t border-dashed border-gray-200 pt-3 text-xs leading-relaxed text-gray-500">
+                Merchant requests: you approve every message before it is sent. Price alerts: automatic once you opt
+                in and verify your email.
+              </p>
+            </div>
+          )}
         </SettingsCard>
 
         <SettingsCard title="Add a purchase" icon={<ReceiptIcon />}>
@@ -292,6 +355,41 @@ function Line({ children, className = "size-5" }: { children: ReactNode; classNa
   );
 }
 
+/** Accessible on/off switch: a real checkbox (native checked/unchecked semantics for screen readers), visually styled as a track + thumb via sibling `peer-checked` selectors. */
+function AlertsToggle({
+  id,
+  checked,
+  disabled,
+  onChange,
+}: {
+  id: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <span className="relative inline-flex h-6 w-11 shrink-0 items-center">
+      <input
+        id={id}
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        aria-label="Price alerts"
+        className="peer absolute inset-0 z-10 size-full cursor-pointer appearance-none outline-none disabled:cursor-not-allowed"
+      />
+      <span
+        aria-hidden="true"
+        className="absolute inset-0 rounded-full bg-gray-200 transition-colors peer-checked:bg-gray-900 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-violet-500 peer-disabled:opacity-60"
+      />
+      <span
+        aria-hidden="true"
+        className="relative inline-block size-5 translate-x-0.5 rounded-full bg-white shadow transition-transform peer-checked:translate-x-5"
+      />
+    </span>
+  );
+}
+
 function InboxIcon() {
   return (
     <Line>
@@ -315,6 +413,15 @@ function AlertIcon() {
     <Line>
       <path d="M12 4 3.500 19h17z" />
       <path d="M12 10v4M12 16.750v.010" />
+    </Line>
+  );
+}
+
+function BellIcon() {
+  return (
+    <Line>
+      <path d="M6 10.5a6 6 0 0 1 12 0c0 4 1.500 5.500 1.500 5.500H4.500S6 14.5 6 10.5z" />
+      <path d="M10 19a2 2 0 0 0 4 0" />
     </Line>
   );
 }
