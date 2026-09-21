@@ -326,7 +326,7 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 **Contract:** see D107 rows C1, C3, C5, C6 (verbatim routing). Acceptance: 6×1 → 6 purchases, `truncated:false`; 60×50×12 `< 4096` ranges and `< 32,000` docs; resurrection paths scheduled within 2 ticks behind 500 rotating items; needs_review no-link items get a transient stamp; retries charge global only; manual refresh from terminal resets attempts.
 
 ### T14.2 — Frontend adoption of D103/D107 shapes (C4)
-**Owner:** sonnet-frontend · **Phase:** 2 (fix) · **Blocks on:** T12.2 landing · **High-risk:** False · **Status:** in_progress
+**Owner:** sonnet-frontend · **Phase:** 2 (fix) · **Blocks on:** T12.2 landing · **High-risk:** False · **Status:** verified (3f0171d; lead re-ran src/lib 27/27; residual: `onTable` sum still picks one display currency — register F-T14-1 LOW)
 **Files:** src/components/dashboard/StatCards.tsx, src/pages/Purchase.tsx (+ any src/lib helper), tests under src/lib.
 
 **Contract:** `StatCards` renders `totals.byCurrency` (one line per currency, `primaryCurrency` first) instead of formatting the scoped `recoveredCents` with a guessed currency; `Purchase.tsx` passes `useCoarseNow()` as `now` to `purchases.get` so verdict staleness is real. Typecheck/lint clean; a `src/lib` unit test for the byCurrency formatter.
