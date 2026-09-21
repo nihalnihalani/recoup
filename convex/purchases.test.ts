@@ -176,6 +176,51 @@ describe("purchases", () => {
     ).rejects.toThrow();
   });
 
+  it("6a-4/D112: re-confirm with a partial item list still clears the omitted item's schedule stamp", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const purchaseId = await as.mutation(api.purchases.create, {
+      ...basePurchase,
+      status: "needs_review" as const,
+      purchasedAt: undefined,
+    });
+    const got = await as.query(api.purchases.get, { purchaseId });
+    const [includedItem, omittedItem] = got!.items;
+
+    // Simulate both items already carrying a `priceWatch` schedule stamp
+    // (e.g. from a tick before the purchase was ever confirmed).
+    await t.run(async (ctx) => {
+      await ctx.db.patch(includedItem._id, { nextCheckAt: Date.now() + 999_999 });
+      await ctx.db.patch(omittedItem._id, { nextCheckAt: Date.now() + 999_999 });
+    });
+
+    // A normal partial re-confirm: the caller's form only resubmits one row.
+    await as.mutation(api.purchases.confirm, {
+      purchaseId,
+      merchant: basePurchase.merchant,
+      merchantDomain: basePurchase.merchantDomain,
+      orderRef: basePurchase.orderRef,
+      purchasedAt: basePurchase.purchasedAt,
+      items: [
+        {
+          itemId: includedItem._id,
+          name: includedItem.name,
+          unitCents: includedItem.unitCents,
+          qty: includedItem.qty,
+          productUrl: includedItem.productUrl,
+        },
+      ],
+    });
+
+    const after = await as.query(api.purchases.get, { purchaseId });
+    const includedAfter = after!.items.find((i) => i._id === includedItem._id)!;
+    const omittedAfter = after!.items.find((i) => i._id === omittedItem._id)!;
+    expect(includedAfter.nextCheckAt).toBeUndefined();
+    // The bug this regresses: the old code only un-stamped `args.items`, so
+    // an item the caller's form did not resubmit kept its stale stamp.
+    expect(omittedAfter.nextCheckAt).toBeUndefined();
+  });
+
   it("board totals exclude example purchases", async () => {
     const t = setup();
     const { as, userId } = await signedIn(t);

@@ -217,7 +217,22 @@ export const confirm = mutation({
     // purchasedAt/productUrl, or its purchase becomes "active") -- un-stamp
     // every item on this purchase so `priceWatch`'s next tick reconsiders
     // them instead of resting behind whatever it was last stamped with.
-    await clearItemSchedule(ctx, cleanItems.map((it) => it.itemId));
+    // 6a-4/D112: every item ON THE PURCHASE, not only `args.items` -- a
+    // re-confirm can submit a partial item list (the caller only resubmits
+    // the rows its own form has open), and an item the caller omitted still
+    // just had its purchase flip to "active"/gain a `purchasedAt`, so its
+    // schedule needs the same reset. `items.by_purchase` is the same index
+    // `clearMerchantItemSchedule` already reads per-purchase; the page size
+    // matches `clearItemSchedule`'s own `MAX_ITEM_IDS` bound (50), which is
+    // also `MAX_ITEMS_PER_PURCHASE`, so a purchase's full item list is never
+    // truncated here.
+    const purchaseItemIds = (
+      await ctx.db
+        .query("items")
+        .withIndex("by_purchase", (q) => q.eq("purchaseId", args.purchaseId))
+        .take(MAX_ITEMS_PER_PURCHASE)
+    ).map((it) => it._id);
+    await clearItemSchedule(ctx, purchaseItemIds);
     // B4: re-confirming the same purchase must not buy another policy research. Only a purchase that just became
     // active, or one whose store changed, has anything new to look up.
     const becameActive = purchase.status !== "active";
