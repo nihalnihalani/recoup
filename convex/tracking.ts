@@ -5,11 +5,23 @@ import { claimStatus, claimType } from "./schema";
 import { claimBalance } from "./lib/balance";
 import { windowEndsAt } from "./lib/ledger";
 import { latest } from "./policies";
+import { assertCoarseNow } from "./watches";
+import { MAX_ITEMS_PER_PURCHASE } from "./limits";
 
 /** Most recent purchases the dashboard reads; older ones stay reachable from their own page. */
 const MAX_PURCHASES = 60;
-/** Observations kept per item for the chart, newest first in the read, oldest first in the payload. */
-const MAX_POINTS = 90;
+/**
+ * Observations read per item for the chart, newest first in the read, oldest
+ * first in the payload. D93: lowered from 90 -- at MAX_PURCHASES x
+ * MAX_ITEMS_PER_PURCHASE owner maxima (60x50), 90 checks/item alone would
+ * read up to 270,000 priceChecks documents, the actual dominant cost behind
+ * the measured 40x50x30 overflow (62,040 documents; the items-per-purchase
+ * cap alone does not fix this, since a purchase legitimately holds up to
+ * MAX_ITEMS_PER_PURCHASE items already). 12 matches `insights.ts`'s
+ * `CHECKS_PER_PRODUCT` for the same reason and keeps this comfortably under
+ * the 32,000-document ceiling even at owner maxima.
+ */
+const MAX_POINTS = 12;
 
 const point = v.object({ at: v.number(), cents: v.number() });
 
@@ -53,9 +65,14 @@ const trackedItem = v.object({
  * Everything the price dashboard draws, in one reactive read: each owned item
  * with its paid price, its observed price history and the claim a drop opened.
  * Signed-out callers get an empty dashboard rather than an error.
+ *
+ * `now` (P06/D73, optional, same contract as `watches.list`/`get`) drives
+ * only the display-derived `watching` count. When omitted, each purchase
+ * falls back to its own `purchasedAt` (never `Date.now()`), which can only
+ * ever make a window look open, never falsely closed.
  */
 export const overview = query({
-  args: {},
+  args: { now: v.optional(v.number()) },
   returns: v.object({
     items: v.array(trackedItem),
     totals: v.object({
@@ -67,13 +84,14 @@ export const overview = query({
       /** Unresolved money on labelled example purchases; excluded from foundCents (D27). */
       exampleFoundCents: v.number(),
     }),
-    capped: v.boolean(),
+    /** True when the purchase list and/or some purchase's item list was cut off (P07/D93): the UI should say so rather than silently showing a partial account. */
+    truncated: v.boolean(),
   }),
-  handler: async (ctx) => {
+  handler: async (ctx, args) => {
     const empty = {
       items: [],
       totals: { tracked: 0, watching: 0, foundCents: 0, recoveredCents: 0, checks: 0, exampleFoundCents: 0 },
-      capped: false,
+      truncated: false,
     };
     const userId = await getAuthUserId(ctx);
     if (!userId) return empty;
@@ -83,8 +101,8 @@ export const overview = query({
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .order("desc")
       .take(MAX_PURCHASES + 1);
-    const capped = purchases.length > MAX_PURCHASES;
-    const now = Date.now();
+    let truncated = purchases.length > MAX_PURCHASES;
+    const validatedNow = assertCoarseNow(args.now);
 
     const items = [];
     let watching = 0;
@@ -101,13 +119,18 @@ export const overview = query({
         windowDays !== undefined && purchase.purchasedAt !== undefined
           ? windowEndsAt(purchase.purchasedAt, windowDays)
           : undefined;
+      const now = validatedNow ?? purchase.purchasedAt ?? purchase._creationTime;
 
+      // D93: bounded per purchase (MAX_ITEMS_PER_PURCHASE), not an unbounded
+      // .collect() -- a purchase with an unusually large item list only ever
+      // truncates that purchase's own items, and is reported via `truncated`.
       const rows = await ctx.db
         .query("items")
         .withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id))
-        .collect();
+        .take(MAX_ITEMS_PER_PURCHASE + 1);
+      if (rows.length > MAX_ITEMS_PER_PURCHASE) truncated = true;
 
-      for (const item of rows) {
+      for (const item of rows.slice(0, MAX_ITEMS_PER_PURCHASE)) {
         const recent = await ctx.db
           .query("priceChecks")
           .withIndex("by_item", (q) => q.eq("itemId", item._id))
@@ -119,12 +142,15 @@ export const overview = query({
           .reverse();
         const latestPoint = points[points.length - 1];
 
+        // D93: narrowed to this item's own price_adjustment claims (see
+        // `priceWatch.hasOpenPriceClaim`'s docstring for why this bounds the
+        // read regardless of how many dismissed return_credit claims exist).
         const claims = await ctx.db
           .query("claims")
-          .withIndex("by_item", (q) => q.eq("itemId", item._id))
+          .withIndex("by_item_type_status", (q) => q.eq("itemId", item._id).eq("type", "price_adjustment"))
           .collect();
         const priceClaim = claims
-          .filter((c) => c.type === "price_adjustment" && c.status !== "dismissed")
+          .filter((c) => c.status !== "dismissed")
           .sort((a, b) => b._creationTime - a._creationTime)[0];
         const balance = priceClaim ? await claimBalance(ctx, priceClaim) : undefined;
 
@@ -178,7 +204,7 @@ export const overview = query({
     return {
       items,
       totals: { tracked: items.length, watching, foundCents, recoveredCents, checks, exampleFoundCents },
-      capped,
+      truncated,
     };
   },
 });
