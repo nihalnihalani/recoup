@@ -340,7 +340,7 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 **Files:** convex/priceWatch.test.ts, convex/purchases.ts (+test), convex/policies.ts (+test), convex/lib/schedule.ts (+test). Contract: D112 rows 6a-3..6a-6 verbatim.
 
 ### T24b — Backend register items + structured-log sweep
-**Owner:** sonnet-backend-2 · **Phase:** 4 (fix) · **Status:** in_progress
+**Owner:** sonnet-backend-2 · **Phase:** 4 (fix) · **Status:** verified (fc2fa87..96033d0; lead re-ran 4 files 72/72, typecheck clean; sweep deferred to T24c; webhook 401 matrix verified live via `npm run smoke`)
 **Files:** convex/http.ts (+http.test.ts), convex/limits.ts, convex/ops.ts (+ops.test.ts), convex/insights.ts (+freshness.test.ts flip only), package.json (script only), docs/ops/RUNBOOK.md (two lines), and the `console.error` → `logEvent` sweep in notify.ts, priceWatch.ts, watches.ts, offers.ts, policies.ts, market.ts, inbound.ts. Contract: F-T22-1/2/3, F-T15-1, D112 RUNBOOK/ops lines, D109 sweep.
 
 ### T18.1 — Checkpoint 6b: export IDOR/termination, byte-aware pages, sign-in gate, purge re-drive, test strength (D115 6b-1/2/4/6/8)
