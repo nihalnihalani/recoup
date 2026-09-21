@@ -93,7 +93,7 @@
  *     and threw a differently-worded error — an account-enumeration oracle
  *     triggerable with zero valid credentials.
  */
-import { ConvexError } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { ConvexCredentials } from "@convex-dev/auth/providers/ConvexCredentials";
 import type { ConvexCredentialsUserConfig } from "@convex-dev/auth/providers/ConvexCredentials";
 import { Password } from "@convex-dev/auth/providers/Password";
@@ -101,7 +101,8 @@ import { convexAuth, retrieveAccount } from "@convex-dev/auth/server";
 import type { GenericActionCtxWithAuthConfig } from "@convex-dev/auth/server";
 import type { Value } from "convex/values";
 import type { DataModel, Id } from "./_generated/dataModel";
-import type { QueryCtx } from "./_generated/server";
+import { internalQuery, type QueryCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { normalizeEmail } from "./lib/email";
 import { authMail } from "./lib/authMail";
 import { rateLimiter } from "./lib/rateLimits";
@@ -184,6 +185,32 @@ async function accountExists(ctx: Ctx, email: string): Promise<boolean> {
   }
 }
 
+/**
+ * T18.5 (D124 LOW): existence-only lookup (no `secret`), the same shape
+ * `accountExists` above already uses for the F2 signUp probe, but resolving
+ * a `userId` instead of a boolean so `guardedAuthorize`'s `flow === "reset"`
+ * branch can check the tombstone before `passwordOptions.authorize` sends
+ * any mail. `null` for `InvalidAccountId` (no such account -- the normal
+ * "unknown address" case); anything else propagates to the caller's own
+ * catch, same as `accountExists`.
+ */
+async function resolveAccountUserId(ctx: Ctx, email: string): Promise<Id<"users"> | null> {
+  try {
+    const result = await retrieveAccount(ctx, { provider: PASSWORD_PROVIDER_ID, account: { id: email } });
+    return result.user?._id ?? null;
+  } catch (err) {
+    if (err instanceof Error && err.message === "InvalidAccountId") return null;
+    throw err;
+  }
+}
+
+/** `guardedAuthorize` runs in an action-like ctx (no `ctx.db`); this is the query-side half of the tombstone check above. */
+export const isTombstonedUser = internalQuery({
+  args: { userId: v.id("users") },
+  returns: v.boolean(),
+  handler: async (ctx, { userId }) => isTombstoned(ctx, userId),
+});
+
 async function guardedAuthorize(params: AuthorizeParams, ctx: Ctx): Promise<AuthorizeResult> {
   const email = normalizeEmail(params.email);
   const flow = params.flow;
@@ -201,6 +228,25 @@ async function guardedAuthorize(params: AuthorizeParams, ctx: Ctx): Promise<Auth
       const status = await rateLimiter.check(ctx, "authMailPerEmail", { key: email });
       if (!status.ok) {
         throw new ConvexError({ kind: "RateLimited", name: "authMailPerEmail", retryAfter: status.retryAfter });
+      }
+
+      // T18.5 (D124 LOW): a tombstoned account's `reset-verification` step
+      // was already refused (`beforeSessionCreation` throws before any
+      // session/password change), but nothing stopped THIS step from still
+      // sending the reset-code mail itself -- pointless (no session can ever
+      // result) and one more piece of mail generated for an account already
+      // being deleted. Refused with the SAME error shape a wrong password
+      // gets (byte-identical `WRONG_CREDENTIALS_MESSAGE`, thrown here rather
+      // than falling through to the library's own `null`-for-known-address
+      // success path) -- this does mean a tombstoned account's reset now
+      // reads differently from BOTH an unknown address (null) and an active
+      // known one (also null): a deliberate, accepted, low-severity
+      // trade-off (confirms only "this address was deleted", never anything
+      // about an account that still exists) in exchange for not sending
+      // mail nobody can act on.
+      const resetUserId = await resolveAccountUserId(ctx, email);
+      if (resetUserId && (await ctx.runQuery(internal.auth.isTombstonedUser, { userId: resetUserId }))) {
+        throw new ConvexError(WRONG_CREDENTIALS_MESSAGE);
       }
     }
 

@@ -453,3 +453,40 @@ describe("T09 acceptance — guarded Password provider (P01)", () => {
     });
   });
 });
+
+describe("T18.5 (D124 LOW): reset-code mail is refused for a tombstoned account", () => {
+  it("before/after: reset flow for a tombstoned account throws the wrong-credentials message and sends no mail [FAILS pre-T18.5]", async () => {
+    const t = setup();
+    const send = vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
+    const email = "tombstoned-reset@example.com";
+    await signIn(t, { flow: "signUp", email, password: PASSWORD });
+    send.mockClear();
+
+    const userId = await t.run(async (ctx) => {
+      const user = await ctx.db.query("users").withIndex("email", (q) => q.eq("email", email)).unique();
+      return user!._id;
+    });
+    await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }));
+
+    await expect(signIn(t, { flow: "reset", email })).rejects.toThrow(WRONG_CREDENTIALS_MESSAGE);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("an active (non-tombstoned) account's reset flow is unaffected: still sends the code and returns no tokens", async () => {
+    const t = setup();
+    const send = vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
+    const email = "active-reset@example.com";
+    await signIn(t, { flow: "signUp", email, password: PASSWORD });
+    send.mockClear();
+
+    const result = await signIn(t, { flow: "reset", email });
+    expect(result.tokens).toBeNull();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("an unknown address's reset flow is unaffected (no account to resolve, so no tombstone check can even run)", async () => {
+    const t = setup();
+    const result = await signIn(t, { flow: "reset", email: "never-registered-reset@example.com" });
+    expect(result.tokens).toBeNull();
+  });
+});
