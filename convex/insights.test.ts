@@ -1,20 +1,44 @@
+/// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
+import { convexTest } from "convex-test";
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
+import schema from "./schema";
+
+/**
+ * A second, isolated harness with strict transaction limits enforced (the
+ * options-object form is required — the positional `convexTest(schema,
+ * modules)` form silently ignores `transactionLimits`, per
+ * node_modules/convex-test/dist/index.js). `setup()` in test.setup.ts does not
+ * take options, so heavy-account safety is verified with its own instance
+ * here rather than by editing that shared file (owned by another lane).
+ */
+const heavyModules = import.meta.glob("./**/*.*s");
+function heavySetup() {
+  return convexTest({ schema, modules: heavyModules, transactionLimits: true });
+}
 
 describe("insights.activity", () => {
   it("is empty for a signed-out caller", async () => {
     const t = setup();
-    expect(await t.query(api.insights.activity, {})).toEqual([]);
-    expect(await t.query(api.insights.sources, {})).toEqual([]);
+    expect(await t.query(api.insights.activity, {})).toEqual({ events: [], truncated: false, windowNote: expect.any(String) });
+    expect(await t.query(api.insights.sources, {})).toEqual({ rows: [], truncated: false, windowNote: expect.any(String) });
+  });
+
+  it("renders an empty signed-in account as all-zero, not an error", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    expect(await as.query(api.insights.activity, {})).toEqual({ events: [], truncated: false, windowNote: expect.any(String) });
+    expect(await as.query(api.insights.sources, {})).toEqual({ rows: [], truncated: false, windowNote: expect.any(String) });
   });
 
   it("lists the example's price moves newest first, with signed deltas and no unchanged prices", async () => {
     const t = setup();
     const { as } = await signedIn(t);
     await as.mutation(api.examples.load, {});
-    const feed = await as.query(api.insights.activity, {});
+    const { events: feed, truncated } = await as.query(api.insights.activity, {});
+    expect(truncated).toBe(false);
     expect(feed.length).toBeGreaterThan(3);
     const times = feed.map((e) => e.at);
     expect([...times].sort((a, b) => b - a)).toEqual(times);
@@ -31,8 +55,8 @@ describe("insights.activity", () => {
     const { as: alice } = await signedIn(t, "Alice");
     const { as: bob } = await signedIn(t, "Bob");
     await alice.mutation(api.examples.load, {});
-    expect(await bob.query(api.insights.activity, {})).toEqual([]);
-    expect(await bob.query(api.insights.sources, {})).toEqual([]);
+    expect(await bob.query(api.insights.activity, {})).toEqual({ events: [], truncated: false, windowNote: expect.any(String) });
+    expect(await bob.query(api.insights.sources, {})).toEqual({ rows: [], truncated: false, windowNote: expect.any(String) });
   });
 });
 
@@ -47,6 +71,7 @@ describe("insights.sources", () => {
         name: "Desk lamp",
         productUrl: "https://shop.example/p/lamp",
         merchantDomain: "shop.example",
+        currency: "USD",
         status: "active",
         nextCheckAt: Date.now() + 3_600_000,
       });
@@ -56,14 +81,176 @@ describe("insights.sources", () => {
           watchId,
           userId,
           observedCents: cents,
+          currency: "USD",
           observedAt: at - ago * 3_600_000,
           sourceUrl: "https://shop.example/p/lamp",
         });
       }
     });
-    const rows = await as.query(api.insights.sources, {});
+    const { rows, truncated } = await as.query(api.insights.sources, {});
+    expect(truncated).toBe(false);
     expect(rows.map((r) => r.domain)).toEqual(["shop.example"]);
-    expect(rows[0]).toMatchObject({ watching: 1, checks: 3, priced: 2, drops: 1, bestCents: 4500, bestSubject: "Desk lamp" });
+    expect(rows[0]).toMatchObject({
+      watching: 1,
+      checks: 3,
+      priced: 2,
+      drops: 1,
+      bests: { USD: { cents: 4500, subject: "Desk lamp" } },
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P05 reproduction fixes: status-indexed reads, canonical counting,
+// confirmed-offer-behind-candidates, per-currency bests, transaction safety.
+// ---------------------------------------------------------------------------
+
+describe("insights P05 accounting", () => {
+  it("archive churn beyond the cap hides nothing active (watches and purchases)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const keeper = await seedWatch(t, userId, { name: "Keeper", slug: "keeper", checks: [[1, 1_000]] });
+    for (let i = 0; i < 45; i++) {
+      await seedWatch(t, userId, { name: `Gone ${i}`, slug: `gone${i}`, status: "archived", checks: [[1, 1]] });
+    }
+    await t.run(async (ctx) => {
+      await ctx.db.insert("purchases", {
+        userId, merchant: "Keeper store", merchantDomain: "keptstore.example", currency: "USD", status: "active",
+      });
+      for (let i = 0; i < 45; i++) {
+        await ctx.db.insert("purchases", {
+          userId, merchant: "Gone store", merchantDomain: `gonestore${i}.example`, currency: "USD", status: "archived",
+        });
+      }
+    });
+
+    const { rows, truncated } = await as.query(api.insights.sources, {});
+    expect(truncated).toBe(false);
+    expect(rows.map((r) => r.domain).sort()).toEqual(["acme.example", "keptstore.example"]);
+    const keeperRow = rows.find((r) => r.domain === "acme.example")!;
+    expect(keeperRow.watching).toBe(1);
+
+    const { events } = await as.query(api.insights.activity, {});
+    expect(events.some((e) => e.watchId === keeper)).toBe(true);
+    expect(events.some((e) => e.subject === "Keeper store")).toBe(true);
+  });
+
+  it("45 active watches at one store are capped at MAX_WATCHES and flagged truncated", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    for (let i = 0; i < 45; i++) {
+      await seedWatch(t, userId, { name: `Lamp ${i}`, slug: `lamp${i}`, checks: [[1, 1_000]] });
+    }
+    const { rows, truncated } = await as.query(api.insights.sources, {});
+    expect(truncated).toBe(true);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].watching).toBe(40);
+  });
+
+  it("a bought watch's checks and count are carried by the purchase item exactly once", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId, { checks: [[1, 5_000], [2, 4_500], [3, 4_000]] });
+
+    const purchaseId = await as.mutation(api.watches.markBought, {
+      watchId,
+      paidCents: 4_000,
+      purchasedAt: BASE + 10 * HOUR,
+      qty: 1,
+    });
+    expect(purchaseId).toBeTruthy();
+
+    const { rows } = await as.query(api.insights.sources, {});
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      domain: "acme.example",
+      watching: 0,
+      bought: 1,
+      checks: 3,
+      priced: 3,
+      drops: 2,
+      bests: { USD: { cents: 4_000, subject: "Desk lamp" } },
+    });
+
+    const { events } = await as.query(api.insights.activity, {});
+    const drops = events.filter((e) => e.kind === "price_drop");
+    expect(drops).toHaveLength(2);
+    expect(events.some((e) => e.kind === "watch_added" && e.watchId === watchId)).toBe(false);
+    expect(events.some((e) => e.kind === "purchase_added")).toBe(true);
+  });
+
+  it("a confirmed offer behind 25 unconfirmed candidates still appears", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId, { checks: [[1, 5_000]] });
+    for (let i = 0; i < 25; i++) {
+      await seedOffer(t, userId, watchId, { store: `noise${i}.example`, status: "candidate", lastCents: 1 });
+    }
+    await seedOffer(t, userId, watchId, { store: "cheap.example", status: "confirmed", lastCents: 999, lastCheckedAt: BASE + 1 * HOUR });
+
+    const { rows } = await as.query(api.insights.sources, {});
+    const store = rows.find((r) => r.domain === "cheap.example");
+    expect(store).toBeDefined();
+    expect(store).toMatchObject({ offers: 1, bests: { USD: { cents: 999, subject: "Desk lamp" } } });
+  });
+
+  it("reports USD and EUR bests separately at the same store, never a cross-currency min", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    await seedWatch(t, userId, { name: "Dollar lamp", slug: "dollar", currency: "USD", checks: [[1, 5_000]] });
+    await seedWatch(t, userId, { name: "Euro lamp", slug: "euro", currency: "EUR", checks: [[1, 4_000]] });
+
+    const { rows } = await as.query(api.insights.sources, {});
+    expect(rows).toHaveLength(1);
+    expect(rows[0].bests).toEqual({
+      USD: { cents: 5_000, subject: "Dollar lamp" },
+      EUR: { cents: 4_000, subject: "Euro lamp" },
+    });
+  });
+
+  it("never leaks another user's watches, purchases or offers into sources/activity", async () => {
+    const t = setup();
+    const { as: alice, userId: aliceId } = await signedIn(t, "Alice");
+    const { as: bob } = await signedIn(t, "Bob");
+    const watchId = await seedWatch(t, aliceId, { name: "Alice lamp", checks: [[1, 5_000]] });
+    await seedOffer(t, aliceId, watchId, { store: "rei.example", status: "confirmed", lastCents: 4_000 });
+    expect(await bob.query(api.insights.sources, {})).toEqual({ rows: [], truncated: false, windowNote: expect.any(String) });
+    expect(await bob.query(api.insights.activity, {})).toEqual({ events: [], truncated: false, windowNote: expect.any(String) });
+    const aliceSources = await alice.query(api.insights.sources, {});
+    expect(aliceSources.rows.map((r) => r.domain).sort()).toEqual(["acme.example", "rei.example"]);
+  });
+
+  it("does not throw on a heavy account under strict transaction limits", async () => {
+    const t = heavySetup();
+    const { as, userId } = await signedIn(t);
+
+    for (let i = 0; i < 45; i++) {
+      const watchId = await seedWatch(t, userId, { name: `Heavy ${i}`, slug: `heavy${i}`, checks: [[1, 5_000], [2, 4_800]] });
+      await seedOffer(t, userId, watchId, { store: `store${i}.example`, status: "confirmed", lastCents: 4_700, checks: [[1, 4_700]] });
+    }
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 45; i++) {
+        const purchaseId = await ctx.db.insert("purchases", {
+          userId, merchant: "Store", merchantDomain: `shop${i}.example`, currency: "USD", status: "active",
+        });
+        for (let j = 0; j < 5; j++) {
+          const itemId = await ctx.db.insert("items", {
+            purchaseId, userId, name: `Item ${j}`, unitCents: 1_000, qty: 1, returned: false,
+          });
+          for (let k = 0; k < 3; k++) {
+            await ctx.db.insert("priceChecks", {
+              itemId, userId, observedCents: 900 + k, currency: "USD", observedAt: BASE + k * HOUR, sourceUrl: "https://shopx.example/p",
+            });
+          }
+        }
+      }
+    });
+
+    const sources = await as.query(api.insights.sources, {});
+    expect(sources.truncated).toBe(true);
+    expect(sources.rows.length).toBeGreaterThan(0);
+    const activity = await as.query(api.insights.activity, {});
+    expect(activity.events.length).toBeGreaterThan(0);
   });
 });
 
@@ -78,17 +265,18 @@ type T = ReturnType<typeof setup>;
 async function seedWatch(
   t: T,
   userId: Id<"users">,
-  o: { name?: string; slug?: string; status?: "active" | "paused" | "archived" | "bought"; imageUrl?: string; targetCents?: number; checks?: Array<[number, number | undefined]> } = {},
+  o: { name?: string; slug?: string; status?: "active" | "paused" | "archived" | "bought"; imageUrl?: string; targetCents?: number; currency?: string; checks?: Array<[number, number | undefined]> } = {},
 ) {
   return await t.run(async (ctx) => {
     const productUrl = `https://www.acme.example/p/${o.slug ?? "lamp"}`;
     const priced = (o.checks ?? []).filter(([, c]) => c !== undefined);
+    const currency = o.currency ?? "USD";
     const watchId = await ctx.db.insert("watches", {
       userId,
       name: o.name ?? "Desk lamp",
       productUrl,
       merchantDomain: "acme.example",
-      currency: "USD",
+      currency,
       status: o.status ?? "active",
       nextCheckAt: BASE + 100 * HOUR,
       lastCents: priced.length > 0 ? priced[priced.length - 1][1] : undefined,
@@ -98,7 +286,7 @@ async function seedWatch(
     });
     for (const [hour, cents] of o.checks ?? []) {
       await ctx.db.insert("watchChecks", {
-        watchId, userId, observedCents: cents, currency: "USD", observedAt: BASE + hour * HOUR, sourceUrl: productUrl,
+        watchId, userId, observedCents: cents, currency, observedAt: BASE + hour * HOUR, sourceUrl: productUrl,
         note: cents === undefined ? "The page does not show a single price" : undefined,
       });
     }

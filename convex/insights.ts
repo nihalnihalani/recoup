@@ -4,11 +4,21 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { watchStatus } from "./schema";
 import { confirmedOffers } from "./offers";
+import { MAX_ITEMS_PER_PURCHASE } from "./limits";
 
 /**
  * Read models for the dashboard: what happened lately, and how each store is
  * behaving. Both are derived on read from rows that already exist; nothing here
  * writes, and nothing is shown that was not observed or recorded.
+ *
+ * D72 canonical counting: a watch with `purchaseId` set (i.e. bought) is
+ * skipped entirely here — its checks and drops are carried by the purchase
+ * item `markBought` created, so a converted watch is counted exactly once.
+ * Every read below is a bounded, status-indexed page, never a table scan
+ * filtered after the fact, so archive/needs_review/rejected churn beyond a
+ * page's bound can never push an active/confirmed row out of view (P05). A
+ * page that comes back full sets `truncated`, so a sampled window is always
+ * labelled as such and never presented as an account total (D72 invariant).
  */
 
 const MAX_WATCHES = 40;
@@ -16,6 +26,11 @@ const MAX_PURCHASES = 40;
 const MAX_CLAIMS = 40;
 const CHECKS_PER_PRODUCT = 12;
 const FEED_LIMIT = 40;
+/** Watch statuses that can still contribute to the dashboard (archived never read at all). */
+const COUNTED_WATCH_STATUSES = ["active", "paused", "bought"] as const;
+
+/** Shown alongside `activity`/`sources` so the UI can render the sampled window instead of implying a total. */
+export const WINDOW_NOTE = `recent activity (up to ${MAX_WATCHES} watches, ${MAX_PURCHASES} purchases, last ${CHECKS_PER_PRODUCT} checks per item)`;
 
 const activityKind = v.union(
   v.literal("price_drop"),
@@ -83,34 +98,58 @@ function priceEvents(
   return out;
 }
 
-async function userWatches(ctx: QueryCtx, userId: Id<"users">) {
-  return await ctx.db
-    .query("watches")
-    .withIndex("by_user", (q) => q.eq("userId", userId))
-    .order("desc")
-    .take(MAX_WATCHES);
+type Paged<T> = { rows: T[]; truncated: boolean };
+
+/**
+ * The caller's active/paused/bought watches, newest first: one bounded
+ * indexed page per status (`by_user_status`, T01) instead of a `by_user` page
+ * filtered after the fact. Archived rows are never read, so no amount of
+ * archive churn can hide an active one behind the page bound (P05).
+ */
+async function userWatches(ctx: QueryCtx, userId: Id<"users">): Promise<Paged<Doc<"watches">>> {
+  const pages = await Promise.all(
+    COUNTED_WATCH_STATUSES.map((status) =>
+      ctx.db
+        .query("watches")
+        .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", status))
+        .order("desc")
+        .take(MAX_WATCHES),
+    ),
+  );
+  return { rows: pages.flat(), truncated: pages.some((page) => page.length >= MAX_WATCHES) };
 }
 
-async function userPurchases(ctx: QueryCtx, userId: Id<"users">) {
+/** The caller's active purchases, newest first: one bounded indexed page (`by_user_status`, T01). */
+async function userPurchases(ctx: QueryCtx, userId: Id<"users">): Promise<Paged<Doc<"purchases">>> {
   const rows = await ctx.db
     .query("purchases")
-    .withIndex("by_user", (q) => q.eq("userId", userId))
+    .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", "active"))
     .order("desc")
     .take(MAX_PURCHASES);
-  return rows.filter((p) => p.status === "active");
+  return { rows, truncated: rows.length >= MAX_PURCHASES };
 }
 
-/** The newest things that happened on the caller's account, newest first. `[]` when signed out. */
+/**
+ * The newest things that happened on the caller's account, newest first, with
+ * `truncated` set when any bounded page below came back full (D72: a sampled
+ * window, never presented as the full history). `{ events: [], truncated:
+ * false, windowNote }` when signed out.
+ */
 export const activity = query({
   args: {},
-  returns: v.array(activityEvent),
+  returns: v.object({ events: v.array(activityEvent), truncated: v.boolean(), windowNote: v.string() }),
   handler: async (ctx) => {
     const userId = await getAuthUserId(ctx);
-    if (!userId) return [];
+    if (!userId) return { events: [], truncated: false, windowNote: WINDOW_NOTE };
     const events: ActivityEvent[] = [];
+    const watches = await userWatches(ctx, userId);
+    const purchases = await userPurchases(ctx, userId);
+    let truncated = watches.truncated || purchases.truncated;
 
-    for (const watch of await userWatches(ctx, userId)) {
-      if (watch.status === "archived") continue;
+    // D72 canonical counting: a bought watch's checks and drops are carried by
+    // the purchase item `markBought` created, so it contributes nothing here.
+    for (const watch of watches.rows) {
+      if (watch.purchaseId) continue;
       const base = { subject: watch.name, storeDomain: watch.merchantDomain, watchId: watch._id };
       events.push({ ...base, id: `${watch._id}:added`, at: watch._creationTime, kind: "watch_added" });
       const checks = await ctx.db
@@ -118,10 +157,11 @@ export const activity = query({
         .withIndex("by_watch", (q) => q.eq("watchId", watch._id))
         .order("desc")
         .take(CHECKS_PER_PRODUCT);
+      if (checks.length >= CHECKS_PER_PRODUCT) truncated = true;
       events.push(...priceEvents(checks, base));
     }
 
-    for (const purchase of await userPurchases(ctx, userId)) {
+    for (const purchase of purchases.rows) {
       events.push({
         id: `${purchase._id}:added`,
         at: purchase._creationTime,
@@ -134,13 +174,15 @@ export const activity = query({
       const items = await ctx.db
         .query("items")
         .withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id))
-        .collect();
+        .take(MAX_ITEMS_PER_PURCHASE);
+      if (items.length >= MAX_ITEMS_PER_PURCHASE) truncated = true;
       for (const item of items) {
         const checks = await ctx.db
           .query("priceChecks")
           .withIndex("by_item", (q) => q.eq("itemId", item._id))
           .order("desc")
           .take(CHECKS_PER_PRODUCT);
+        if (checks.length >= CHECKS_PER_PRODUCT) truncated = true;
         events.push(
           ...priceEvents(checks, {
             subject: item.name,
@@ -173,6 +215,7 @@ export const activity = query({
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .order("desc")
       .take(MAX_CLAIMS);
+    if (claims.length >= MAX_CLAIMS) truncated = true;
     for (const claim of claims) {
       const item = await ctx.db.get(claim.itemId);
       const purchase = await ctx.db.get(claim.purchaseId);
@@ -235,9 +278,14 @@ export const activity = query({
       }
     }
 
-    return events.sort((a, b) => b.at - a.at).slice(0, FEED_LIMIT);
+    const sorted = events.sort((a, b) => b.at - a.at);
+    if (sorted.length > FEED_LIMIT) truncated = true;
+    return { events: sorted.slice(0, FEED_LIMIT), truncated, windowNote: WINDOW_NOTE };
   },
 });
+
+/** The cheapest current price held in one currency, with the product it belongs to. */
+const bestInCurrency = v.object({ cents: v.number(), subject: v.string() });
 
 const sourceRow = v.object({
   domain: v.string(),
@@ -251,33 +299,42 @@ const sourceRow = v.object({
   priced: v.number(),
   drops: v.number(),
   lastCheckedAt: v.optional(v.number()),
-  /** Cheapest current price we hold at this store, with its product, for the card's headline. */
-  bestCents: v.optional(v.number()),
-  bestSubject: v.optional(v.string()),
-  currency: v.optional(v.string()),
+  /**
+   * Cheapest current price held at this store, one entry per currency (D72):
+   * money is never summed or compared across currencies, so a store with both
+   * a USD and a EUR listing gets two independent entries, not one min().
+   */
+  bests: v.record(v.string(), bestInCurrency),
 });
 
 type SourceRow = typeof sourceRow.type;
 
 /**
  * One row per store the caller's products touch: how much we watch there, how
- * often the page could actually be read, and how often the price fell. `[]`
- * when signed out.
+ * often the page could actually be read, and how often the price fell.
+ * `truncated` is set when any bounded page below came back full (D72: a
+ * sampled window, never presented as the full history).
+ * `{ rows: [], truncated: false, windowNote }` when signed out.
  */
 export const sources = query({
   args: {},
-  returns: v.array(sourceRow),
+  returns: v.object({ rows: v.array(sourceRow), truncated: v.boolean(), windowNote: v.string() }),
   handler: async (ctx) => {
     const userId = await getAuthUserId(ctx);
-    if (!userId) return [];
+    if (!userId) return { rows: [], truncated: false, windowNote: WINDOW_NOTE };
     const rows = new Map<string, SourceRow>();
     const row = (domain: string): SourceRow => {
       let existing = rows.get(domain);
       if (!existing) {
-        existing = { domain, watching: 0, bought: 0, offers: 0, checks: 0, priced: 0, drops: 0 };
+        existing = { domain, watching: 0, bought: 0, offers: 0, checks: 0, priced: 0, drops: 0, bests: {} };
         rows.set(domain, existing);
       }
       return existing;
+    };
+    /** Records a currency's best price only against prior prices in that SAME currency (D72). */
+    const considerBest = (target: SourceRow, cents: number, currency: string, subject: string) => {
+      const existing = target.bests[currency];
+      if (!existing || cents < existing.cents) target.bests[currency] = { cents, subject };
     };
     const tally = (
       target: SourceRow,
@@ -286,59 +343,66 @@ export const sources = query({
     ) => {
       const oldestFirst = [...checks].reverse();
       let previous: number | undefined;
+      let previousCurrency: string | undefined;
       for (const check of oldestFirst) {
         target.checks += 1;
         target.lastCheckedAt = Math.max(target.lastCheckedAt ?? 0, check.observedAt);
         if (check.observedCents === undefined) continue;
         target.priced += 1;
-        if (previous !== undefined && check.observedCents < previous) target.drops += 1;
+        // A "drop" only means something between two prices in the same currency (D72).
+        if (previous !== undefined && previousCurrency === check.currency && check.observedCents < previous) {
+          target.drops += 1;
+        }
         previous = check.observedCents;
-        target.currency = target.currency ?? check.currency;
+        previousCurrency = check.currency;
       }
-      if (previous !== undefined && (target.bestCents === undefined || previous < target.bestCents)) {
-        target.bestCents = previous;
-        target.bestSubject = subject;
+      if (previous !== undefined && previousCurrency !== undefined) {
+        considerBest(target, previous, previousCurrency, subject);
       }
     };
 
-    for (const watch of await userWatches(ctx, userId)) {
-      if (watch.status === "archived") continue;
+    let truncated = false;
+    const watches = await userWatches(ctx, userId);
+    const purchases = await userPurchases(ctx, userId);
+    truncated = watches.truncated || purchases.truncated;
+
+    // D72 canonical counting: a bought watch's checks, drops and offers are
+    // carried by the purchase item `markBought` created, so it is skipped here.
+    for (const watch of watches.rows) {
+      if (watch.purchaseId) continue;
       const target = row(watch.merchantDomain);
-      if (watch.status === "bought") target.bought += 1;
-      else target.watching += 1;
+      target.watching += 1;
       const checks = await ctx.db
         .query("watchChecks")
         .withIndex("by_watch", (q) => q.eq("watchId", watch._id))
         .order("desc")
         .take(CHECKS_PER_PRODUCT);
+      if (checks.length >= CHECKS_PER_PRODUCT) truncated = true;
       tally(target, checks, watch.name);
 
-      const offers = await ctx.db
-        .query("offers")
-        .withIndex("by_watch", (q) => q.eq("watchId", watch._id))
-        .take(20);
-      for (const offer of offers) {
-        if (offer.status !== "confirmed") continue;
+      // Shared with priceHistory/trackedTable (offers.ts): reads every row for
+      // the watch, so a confirmed offer behind any number of candidate or
+      // rejected rows is never missed (P05).
+      for (const offer of await confirmedOffers(ctx, watch._id, userId)) {
         const store = row(offer.storeDomain);
         store.offers += 1;
         if (offer.lastCheckedAt !== undefined) {
           store.lastCheckedAt = Math.max(store.lastCheckedAt ?? 0, offer.lastCheckedAt);
         }
-        if (offer.lastCents !== undefined && (store.bestCents === undefined || offer.lastCents < store.bestCents)) {
-          store.bestCents = offer.lastCents;
-          store.bestSubject = watch.name;
-          store.currency = store.currency ?? offer.currency;
+        if (offer.lastCents !== undefined && offer.currency !== undefined) {
+          considerBest(store, offer.lastCents, offer.currency, watch.name);
         }
       }
     }
 
-    for (const purchase of await userPurchases(ctx, userId)) {
+    for (const purchase of purchases.rows) {
       if (purchase.isExample) continue;
       const target = row(purchase.merchantDomain);
       const items = await ctx.db
         .query("items")
         .withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id))
-        .collect();
+        .take(MAX_ITEMS_PER_PURCHASE);
+      if (items.length >= MAX_ITEMS_PER_PURCHASE) truncated = true;
       for (const item of items) {
         target.bought += 1;
         const checks = await ctx.db
@@ -346,13 +410,15 @@ export const sources = query({
           .withIndex("by_item", (q) => q.eq("itemId", item._id))
           .order("desc")
           .take(CHECKS_PER_PRODUCT);
+        if (checks.length >= CHECKS_PER_PRODUCT) truncated = true;
         tally(target, checks, item.name);
       }
     }
 
-    return [...rows.values()].sort(
+    const sorted = [...rows.values()].sort(
       (a, b) => b.watching + b.bought + b.offers - (a.watching + a.bought + a.offers) || b.checks - a.checks,
     );
+    return { rows: sorted, truncated, windowNote: WINDOW_NOTE };
   },
 });
 
