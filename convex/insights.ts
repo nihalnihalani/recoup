@@ -269,13 +269,18 @@ export const activity = query({
     );
     events.push(...purchaseEventLists.flat());
 
+    // D89: `by_user_status` (schema, T16) reads only "sent" rows directly
+    // instead of paging 20 rows of any status and filtering after the fact
+    // -- a page that used to come back full of non-"sent" rows (claimed/
+    // queued/failed/suppressed) could crowd out real sent-alert events
+    // without ever showing as truncated.
     const mails = await ctx.db
       .query("mailLog")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", "sent"))
       .order("desc")
       .take(20);
+    if (mails.length >= 20) truncated = true;
     for (const mail of mails) {
-      if (mail.status !== "sent") continue;
       events.push({
         id: mail._id,
         at: mail.sentAt ?? mail._creationTime,

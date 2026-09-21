@@ -173,7 +173,9 @@ export default defineSchema({
     /** AgentMail's own message id; `onEvent` carries no outboundId, so this is the join key (`by_message`) instead. */
     agentmailMessageId: v.optional(v.string()),
   }).index("by_dedupe", ["dedupeKey"]).index("by_user", ["userId"]).index("by_watch", ["watchId"])
-    .index("by_status_nextCheck", ["status", "nextCheckAt"]).index("by_message", ["agentmailMessageId"]),
+    .index("by_status_nextCheck", ["status", "nextCheckAt"]).index("by_message", ["agentmailMessageId"])
+    /** D89 (T16): a status-scoped page per user, e.g. `insights.activity`'s "sent" alerts feed, without reading every other status in between. */
+    .index("by_user_status", ["userId", "status"]),
 
   /** One row per user; alert opt-in/out and unsubscribe-token state, owns suppression via `alerts.suppressAddress` (T01). */
   alertSettings: defineTable({
