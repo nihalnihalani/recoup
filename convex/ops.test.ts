@@ -8,7 +8,7 @@ import { ConvexError } from "convex/values";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
-import { GLOBAL_DAILY_BUDGETS } from "./limits";
+import { GLOBAL_DAILY_BUDGETS, MARKET_CLAIM_STALE_MS } from "./limits";
 import { tryConsumeGlobalBudget } from "./lib/budget";
 
 type T = ReturnType<typeof setup>;
@@ -170,6 +170,7 @@ describe("ops.backlog", () => {
     expect(result.mailLogQueued).toEqual({ count: 0, truncated: false });
     expect(result.mailLogUnknown).toEqual({ count: 0, truncated: false });
     expect(result.staleMarketRunning).toEqual({ count: 0, truncated: false });
+    expect(result.retention).toEqual({ rule: "processedEvents", cursorAgeMs: 0, stalled: false });
   });
 
   it("counts only active watches due now or earlier, not paused or not-yet-due ones", async () => {
@@ -232,6 +233,16 @@ describe("ops.backlog", () => {
     expect(result.staleMarketRunning).toEqual({ count: 2, truncated: false });
   });
 
+  it("F-T22-2: the stale threshold is exactly limits.ts's shared MARKET_CLAIM_STALE_MS (also market.ts's own reclaim threshold), not a private copy that could drift", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await insertWatch(t, userId, { marketState: "running", marketClaimedAt: NOW - MARKET_CLAIM_STALE_MS }); // exactly at the threshold: stale (>=)
+    await insertWatch(t, userId, { marketState: "running", marketClaimedAt: NOW - MARKET_CLAIM_STALE_MS + 1 }); // 1ms inside it: still fresh
+
+    const result = await t.query(internal.ops.backlog, {});
+    expect(result.staleMarketRunning).toEqual({ count: 1, truncated: false });
+  });
+
   it("caps every count at scanLimit and reports truncated", async () => {
     const t = setup();
     const { userId } = await signedIn(t);
@@ -248,5 +259,66 @@ describe("ops.backlog", () => {
     vi.setSystemTime(NOW + DAY);
     const result = await t.query(internal.ops.backlog, {});
     expect(result.now).toBe(NOW + DAY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// retention cursor diagnostic (D112)
+// ---------------------------------------------------------------------------
+
+async function insertRetentionRow(t: T, cursor: { step: number; page: string | null }, updatedAt: number) {
+  await t.run((ctx) => ctx.db.insert("opsState", { key: "retention", cursor: JSON.stringify(cursor), updatedAt }));
+}
+
+describe("ops.backlog: retention cursor diagnostic (D112)", () => {
+  it("reports the default 'processedEvents'/age-0/not-stalled shape when retention has never run", async () => {
+    const t = setup();
+    const result = await t.query(internal.ops.backlog, {});
+    expect(result.retention).toEqual({ rule: "processedEvents", cursorAgeMs: 0, stalled: false });
+  });
+
+  it("names the step/table the cursor is currently on and reports its age", async () => {
+    const t = setup();
+    await insertRetentionRow(t, { step: 2, page: "some-continuation-cursor" }, NOW - HOUR);
+    const result = await t.query(internal.ops.backlog, {});
+    expect(result.retention).toEqual({ rule: "priceChecks", cursorAgeMs: HOUR, stalled: false });
+  });
+
+  it("is not stalled just because it is idle between cycles (cursor reset to the start), however old", async () => {
+    const t = setup();
+    // {step:0, page:null} is both "never started" and "just finished a full cycle" -- either way,
+    // this is the expected resting state between one day's cron firing and the next, so age alone
+    // (even well past RETENTION_STALL_MS) must never flag it.
+    await insertRetentionRow(t, { step: 0, page: null }, NOW - 10 * DAY);
+    const result = await t.query(internal.ops.backlog, {});
+    expect(result.retention).toEqual({ rule: "processedEvents", cursorAgeMs: 10 * DAY, stalled: false });
+  });
+
+  it("is not stalled mid-cycle when the cursor is merely within the normal daily cadence", async () => {
+    const t = setup();
+    await insertRetentionRow(t, { step: 4, page: "cursor" }, NOW - 6 * HOUR);
+    const result = await t.query(internal.ops.backlog, {});
+    expect(result.retention).toEqual({ rule: "mailLog", cursorAgeMs: 6 * HOUR, stalled: false });
+  });
+
+  it("is stalled when mid-cycle (a page cursor set) and untouched for over 48h -- a likely poison page", async () => {
+    const t = setup();
+    await insertRetentionRow(t, { step: 5, page: "cursor" }, NOW - 49 * HOUR);
+    const result = await t.query(internal.ops.backlog, {});
+    expect(result.retention).toEqual({ rule: "opsState", cursorAgeMs: 49 * HOUR, stalled: true });
+  });
+
+  it("is stalled when mid-cycle at a non-zero step even with no page cursor (just moved to a new step and then froze)", async () => {
+    const t = setup();
+    await insertRetentionRow(t, { step: 6, page: null }, NOW - 49 * HOUR);
+    const result = await t.query(internal.ops.backlog, {});
+    expect(result.retention).toEqual({ rule: "users", cursorAgeMs: 49 * HOUR, stalled: true });
+  });
+
+  it("falls back to the default cursor (not a crash) when the stored cursor JSON is malformed", async () => {
+    const t = setup();
+    await t.run((ctx) => ctx.db.insert("opsState", { key: "retention", cursor: "not json", updatedAt: NOW - 49 * HOUR }));
+    const result = await t.query(internal.ops.backlog, {});
+    expect(result.retention).toEqual({ rule: "processedEvents", cursorAgeMs: 49 * HOUR, stalled: false });
   });
 });

@@ -5,7 +5,7 @@
  */
 import { ConvexError, v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
-import { GLOBAL_DAILY_BUDGETS, type GlobalBudgetKind } from "./limits";
+import { GLOBAL_DAILY_BUDGETS, MARKET_CLAIM_STALE_MS, type GlobalBudgetKind } from "./limits";
 import { utcDay } from "./lib/budget";
 
 function assertGlobalBudgetKind(kind: string): asserts kind is GlobalBudgetKind {
@@ -80,16 +80,6 @@ export const resumeKind = internalMutation({
 /** Rows one indexed count reads before giving up and reporting `truncated: true`. Overridable per call (mainly for tests) via `args.scanLimit`. */
 const DEFAULT_SCAN_LIMIT = 2000;
 
-/**
- * Mirrors `market.ts`'s private `MARKET_CLAIM_STALE_MS` (F8/D103: a
- * `queued`/`running` claim older than this is treated as abandoned, almost
- * certainly a crashed or killed `lookup` action rather than one still
- * genuinely in flight -- a real ShopSavvy call times out at 30s). Not
- * exported there, so duplicated here; keep the two in sync if that constant
- * ever changes.
- */
-const MARKET_RUNNING_STALE_MS = 15 * 60_000;
-
 const countShape = v.object({
   /** Capped at the scan limit; see `truncated`. */
   count: v.number(),
@@ -99,6 +89,48 @@ const countShape = v.object({
 
 function summarize(rowCount: number, limit: number): { count: number; truncated: boolean } {
   return rowCount > limit ? { count: limit, truncated: true } : { count: rowCount, truncated: false };
+}
+
+// ---------------------------------------------------------------------------
+// retention cursor diagnostic (D112 RUNBOOK/ops item, T24b)
+// ---------------------------------------------------------------------------
+
+/** The `opsState` key `retention.ts`'s resumable sweep keeps its cursor under. */
+const RETENTION_OPS_KEY = "retention";
+
+/**
+ * Mirrors `retention.ts`'s private `STEPS` cycle order and `Cursor` shape
+ * (`{ step, page }` JSON in the opsState row's `cursor` string field) --
+ * ops.ts does not own `retention.ts` in this task, so this is a deliberate,
+ * documented, read-only duplicate (the same shape as this file's own
+ * pre-T24b duplicate of `market.ts`'s stale-claim threshold, which F-T22-2
+ * above replaced with a shared import; there is no equivalent shared export
+ * to import here). Keep this in sync if `retention.ts`'s `STEPS` or cursor
+ * JSON shape ever changes.
+ */
+const RETENTION_STEPS = ["processedEvents", "watchChecks", "priceChecks", "offerChecks", "mailLog", "opsState", "users"] as const;
+
+/** Longer than the daily cron cadence (D110) with real margin, so the normal idle gap between one
+ * cycle finishing and the next day's cron starting is never itself mistaken for a stall. */
+const RETENTION_STALL_MS = 48 * 60 * 60_000;
+
+function parseRetentionCursor(raw: string | undefined): { step: number; page: string | null } {
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as { step?: unknown; page?: unknown };
+      if (
+        typeof parsed.step === "number" &&
+        Number.isInteger(parsed.step) &&
+        parsed.step >= 0 &&
+        parsed.step < RETENTION_STEPS.length
+      ) {
+        return { step: parsed.step, page: typeof parsed.page === "string" ? parsed.page : null };
+      }
+    } catch {
+      // Malformed/foreign cursor value: same fallback as retention.ts's own `parseCursor`.
+    }
+  }
+  return { step: 0, page: null };
 }
 
 /**
@@ -123,8 +155,18 @@ export const backlog = internalQuery({
     mailLogQueued: countShape,
     /** `mailLog` rows `unknown` (reconciliation exhausted its backoff with no message id) -- same sweep, same caveat. */
     mailLogUnknown: countShape,
-    /** Watches whose `marketState` is `running` and whose claim (`marketClaimedAt`) is older than `MARKET_RUNNING_STALE_MS` -- almost certainly an abandoned lookup (F8/D103); `market.requestLookup`'s own stale-reclaim only fires on the NEXT `requestLookup` call for that watch, so a watch nobody asks about again can sit here indefinitely until an operator notices. No index on `marketState` exists, so this one scans watches in `_creationTime` order up to `scanLimit` rather than reading an indexed page -- `truncated` here means "more than `scanLimit` watches exist beyond what was scanned", not "more matches exist within the scanned rows". */
+    /** Watches whose `marketState` is `running` and whose claim (`marketClaimedAt`) is older than `MARKET_CLAIM_STALE_MS` (limits.ts, shared with `market.ts`'s own reclaim, F-T22-2) -- almost certainly an abandoned lookup (F8/D103); `market.requestLookup`'s own stale-reclaim only fires on the NEXT `requestLookup` call for that watch, so a watch nobody asks about again can sit here indefinitely until an operator notices. No index on `marketState` exists, so this one scans watches in `_creationTime` order up to `scanLimit` rather than reading an indexed page -- `truncated` here means "more than `scanLimit` watches exist beyond what was scanned", not "more matches exist within the scanned rows". */
     staleMarketRunning: countShape,
+    /**
+     * D112: read from the `retention` opsState row `retention.ts`'s resumable sweep maintains.
+     * `rule` names the table/step the cursor currently sits at (`RETENTION_STEPS[cursor.step]`);
+     * `cursorAgeMs` is how long ago that row was last patched (0 when the sweep has never run at
+     * all); `stalled` is true when the cursor is mid-cycle (not sitting at the idle "just started
+     * or just completed a full cycle" position) AND has not advanced in over `RETENTION_STALL_MS`
+     * -- a healthy sweep self-reschedules on every page, so a real multi-day gap while mid-cycle
+     * means something (most likely a poison page an item on it keeps throwing on) stopped it.
+     */
+    retention: v.object({ rule: v.string(), cursorAgeMs: v.number(), stalled: v.boolean() }),
   }),
   handler: async (ctx, { scanLimit }) => {
     const limit = scanLimit !== undefined && scanLimit > 0 ? Math.floor(scanLimit) : DEFAULT_SCAN_LIMIT;
@@ -159,8 +201,16 @@ export const backlog = internalQuery({
     // No index on marketState: bounded table scan, newest first.
     const scannedWatches = await ctx.db.query("watches").order("desc").take(limit);
     const staleMarketCount = scannedWatches.filter(
-      (w) => w.marketState === "running" && (w.marketClaimedAt === undefined || now - w.marketClaimedAt >= MARKET_RUNNING_STALE_MS),
+      (w) => w.marketState === "running" && (w.marketClaimedAt === undefined || now - w.marketClaimedAt >= MARKET_CLAIM_STALE_MS),
     ).length;
+
+    const retentionRow = await ctx.db
+      .query("opsState")
+      .withIndex("by_key", (q) => q.eq("key", RETENTION_OPS_KEY))
+      .unique();
+    const retentionCursor = parseRetentionCursor(retentionRow?.cursor);
+    const retentionCursorAgeMs = retentionRow ? now - retentionRow.updatedAt : 0;
+    const retentionMidCycle = retentionCursor.step !== 0 || retentionCursor.page !== null;
 
     return {
       now,
@@ -170,6 +220,11 @@ export const backlog = internalQuery({
       mailLogQueued: summarize(queuedMailRows.length, limit),
       mailLogUnknown: summarize(unknownMailRows.length, limit),
       staleMarketRunning: { count: staleMarketCount, truncated: scannedWatches.length >= limit },
+      retention: {
+        rule: RETENTION_STEPS[retentionCursor.step],
+        cursorAgeMs: retentionCursorAgeMs,
+        stalled: retentionMidCycle && retentionCursorAgeMs > RETENTION_STALL_MS,
+      },
     };
   },
 });
