@@ -11,6 +11,7 @@ import { latestPolicy } from "./lib/latestPolicy";
 import { verdict } from "./lib/verdict";
 import { parseProductUrl } from "./lib/watchUrl";
 import { boundedLine } from "./lib/text";
+import { clearItemSchedule } from "./lib/schedule";
 import { schedulePolicyFetch } from "./policies";
 import { assertCoarseNow } from "./watches";
 import schema, { processedStatus, verdictValidator } from "./schema";
@@ -211,6 +212,12 @@ export const confirm = mutation({
     for (const { itemId, ...fields } of cleanItems) {
       await ctx.db.patch(itemId, fields);
     }
+    // C3(d)/D107: confirming is exactly the moment a needs_review item's
+    // permanent-vs-transient classification can flip (it gains a
+    // purchasedAt/productUrl, or its purchase becomes "active") -- un-stamp
+    // every item on this purchase so `priceWatch`'s next tick reconsiders
+    // them instead of resting behind whatever it was last stamped with.
+    await clearItemSchedule(ctx, cleanItems.map((it) => it.itemId));
     // B4: re-confirming the same purchase must not buy another policy research. Only a purchase that just became
     // active, or one whose store changed, has anything new to look up.
     const becameActive = purchase.status !== "active";
@@ -233,6 +240,11 @@ export const setReturned = mutation({
       returned: args.returned,
       returnedAt: args.returned ? (args.returnedAt ?? Date.now()) : undefined,
     });
+    // C3(d)/D107: un-returning an item is a resurrection -- it was stamped
+    // permanently ineligible (INELIGIBLE_REST_MS) the moment it was marked
+    // returned, so un-stamp it here or it would sit out the price watch for
+    // up to a year despite being watchable again.
+    if (!args.returned) await clearItemSchedule(ctx, [args.itemId]);
     return null;
   },
 });
