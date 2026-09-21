@@ -3,7 +3,7 @@ import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
-import { clearItemSchedule } from "./lib/schedule";
+import { fetchBothImpl } from "./policies";
 import {
   DAILY_BUDGETS,
   GLOBAL_DAILY_BUDGETS,
@@ -625,34 +625,68 @@ describe("priceWatch.eligibleItems — F1 starvation regressions (D103)", () => 
 });
 
 /**
- * C3/D107 (Opus checkpoint-5 recheck, F1 resurrection). Each test reproduces
- * the DA scenario: exactly SCAN_LIMIT (500) items -- 499 permanently-
- * ineligible fillers plus one target that also starts permanently
- * ineligible -- so tick 1 stamps everything (including the target) a year
- * out, then a resurrection event happens, then tick 2 must find the target:
- * proof that the resurrection path actually un-stamps the item rather than
- * leaving it to rest behind the year-long bump for up to `INELIGIBLE_REST_MS`.
+ * C3/D107 (Opus checkpoint-5 recheck, F1 resurrection) -- rewritten per
+ * checkpoint 6a's 6a-3/D112 finding.
+ *
+ * The original fixture (499 PERMANENTLY-ineligible fillers + 1 target,
+ * exactly SCAN_LIMIT (500) items total in the whole account) was vacuous:
+ * `eligibleItems` has no `nextCheckAt <= now` filter at all -- `by_nextCheck`
+ * is a rotation key, not a due-queue -- so `take(SCAN_LIMIT)` simply reads
+ * whatever `SCAN_LIMIT` items sort first. With only 500 items in the entire
+ * account, `take(500)` always reads every one of them, every tick, whether
+ * or not the target's own stamp was ever reset. The tests "passed" even when
+ * `clearItemSchedule`/`clearMerchantItemSchedule` did nothing, because each
+ * resurrection call site *also* unconditionally patches the underlying field
+ * (`item.returned`, `item.productUrl`, the policy's `windowDays`) in the
+ * SAME mutation -- so the item became genuinely eligible on the very next
+ * scan regardless of whether its schedule stamp was actually cleared.
+ *
+ * Fixed by giving the account 500 TRANSIENT fillers -- items on a
+ * `needs_review` purchase, so `watchWindow` returns `{permanent: false}` for
+ * them (the purchase-status branch) and `eligibleItems` restamps each one
+ * `+WATCH_CHECK_INTERVAL_MS` (2h) *every tick it scans them* -- plus the
+ * target, on its own separate, real purchase. `SCAN_LIMIT` fillers with a
+ * stamp that keeps refreshing to a low value is exactly the condition the
+ * finding names: "a +1y stamp hides an item only while >= SCAN_LIMIT items
+ * with LOWER stamps exist and those must be transient". The target is
+ * inserted FIRST (before the fillers), so on tick 1 -- when every stamp is
+ * still `undefined` and ties break on ascending `_creationTime` -- it is
+ * read before (at least some of) the 500 fillers and gets its own
+ * `INELIGIBLE_REST_MS` stamp that tick, same as before. If a resurrection
+ * call site's un-stamp step is neutered, the target's stale, high stamp
+ * always sorts after the 500 fillers' freshly-refreshed low ones on every
+ * later tick, so it is never read again -- `eligibleItems` returns `[]`
+ * forever, not `[targetId]`, and the test genuinely fails.
+ *
+ * Proof this is no longer vacuous (done once, locally, per D112's
+ * instruction, then reverted -- not part of this commit): with
+ * `clearItemSchedule` and `clearMerchantItemSchedule` in `lib/schedule.ts`
+ * both edited to return immediately (`export async function
+ * clearItemSchedule() {}` / `export async function
+ * clearMerchantItemSchedule() {}`), all four tests below FAIL (the tick-2
+ * assertion gets `[]` instead of `[targetId]`); with the real helpers
+ * restored, all four PASS. See this task's final report for the exact
+ * command and output.
  */
 describe("priceWatch — C3/D107 resurrection paths", () => {
+  /** Matches SCAN_LIMIT; see the describe-block comment above for why. */
+  const FILLER_COUNT = 500;
+
+  /**
+   * 500 transient fillers (on their own separate `needs_review` purchase, a
+   * different merchant so they never interact with the target's own
+   * merchant/policy) plus one target item on `targetPurchaseId`, inserted
+   * FIRST so it is read on tick 1 (see the describe-block comment).
+   */
   async function fillerAndTarget(
     t: ReturnType<typeof setup>,
     userId: Id<"users">,
-    purchaseId: Id<"purchases">,
+    targetPurchaseId: Id<"purchases">,
     targetOverrides: Partial<{ productUrl: string; returned: boolean }>,
   ): Promise<Id<"items">> {
     return await t.run(async (ctx) => {
-      for (let i = 0; i < 499; i++) {
-        await ctx.db.insert("items", {
-          purchaseId,
-          userId,
-          name: `Filler ${i}`,
-          unitCents: 1_000,
-          qty: 1,
-          returned: false, // no productUrl: permanently ineligible on this active purchase
-        });
-      }
-      return await ctx.db.insert("items", {
-        purchaseId,
+      const targetId = await ctx.db.insert("items", {
+        purchaseId: targetPurchaseId,
         userId,
         name: "Target",
         unitCents: 1_000,
@@ -660,33 +694,50 @@ describe("priceWatch — C3/D107 resurrection paths", () => {
         productUrl: "productUrl" in targetOverrides ? targetOverrides.productUrl : undefined,
         returned: targetOverrides.returned ?? false,
       });
+      const fillerPurchaseId = await ctx.db.insert("purchases", {
+        userId,
+        merchant: "Filler Co",
+        merchantDomain: "filler.example",
+        status: "needs_review",
+        currency: "USD",
+      });
+      for (let i = 0; i < FILLER_COUNT; i++) {
+        await ctx.db.insert("items", {
+          purchaseId: fillerPurchaseId,
+          userId,
+          name: `Filler ${i}`,
+          unitCents: 1_000,
+          qty: 1,
+          returned: false, // needs_review purchase: transient, not permanent (C3a)
+        });
+      }
+      return targetId;
     });
   }
 
-  it("(i) a no-URL item gets a productUrl via a direct patch + clearItemSchedule: scheduled within 2 ticks", async () => {
+  it("(i) a no-URL item gets a productUrl via purchases.confirm: scheduled within 2 ticks", async () => {
     const t = setup();
-    const { userId } = await signedIn(t);
+    const { userId, as } = await signedIn(t);
     const purchaseId = await purchaseAndPolicy(t, userId);
     const targetId = await fillerAndTarget(t, userId, purchaseId, {});
 
-    // Tick 1: the whole SCAN_LIMIT page is the 499 fillers + the target
-    // (also linkless) -- every one of them, including the target, gets
-    // stamped INELIGIBLE_REST_MS.
     const before = Date.now();
     expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([]);
     const stamped = await t.run((ctx) => ctx.db.get(targetId));
     expect(stamped!.nextCheckAt).toBeGreaterThanOrEqual(before + INELIGIBLE_REST_MS);
 
-    // Resurrection: the item gains a link outside any wired mutation (e.g. a
-    // direct data fix); the caller is responsible for clearing the schedule
-    // itself, exactly like `purchases.confirm` does.
-    await t.run(async (ctx) => {
-      await ctx.db.patch(targetId, { productUrl: URL });
-      await clearItemSchedule(ctx, [targetId]);
+    // The real, wired call site (6a-4/D112): purchases.confirm, which now
+    // un-stamps every item on the purchase via items.by_purchase, not only
+    // ones the caller resubmits in args.items.
+    const purchase = (await t.run((ctx) => ctx.db.get(purchaseId)))!;
+    await as.mutation(api.purchases.confirm, {
+      purchaseId,
+      merchant: purchase.merchant,
+      merchantDomain: purchase.merchantDomain,
+      purchasedAt: purchase.purchasedAt!,
+      items: [{ itemId: targetId, name: "Target", unitCents: 1_000, qty: 1, productUrl: URL }],
     });
 
-    // Tick 2: the 499 fillers are now stamped a year out; the target (its
-    // stamp cleared) sorts back to the head and is found.
     expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([targetId]);
   }, 30_000);
 
@@ -735,7 +786,84 @@ describe("priceWatch — C3/D107 resurrection paths", () => {
     expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([targetId]);
   }, 30_000);
 
-  it("(iv) a needs_review item with no link is NOT stamped a year out (only C3a, no resurrection needed)", async () => {
+  it("(iv) a closed price-adjustment window reopened via the automatic re-research (fetchBothImpl, 6a-5/D112): scheduled within 2 ticks", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const purchaseId = await purchaseAndPolicy(t, userId, { purchasedAt: Date.now() - 30 * DAY });
+    const targetId = await fillerAndTarget(t, userId, purchaseId, { productUrl: URL });
+
+    const before = Date.now();
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([]);
+    const stamped = await t.run((ctx) => ctx.db.get(targetId));
+    expect(stamped!.nextCheckAt).toBeGreaterThanOrEqual(before + INELIGIBLE_REST_MS);
+
+    // Make the existing snapshot stale enough that fetchBothImpl actually
+    // re-researches it instead of skipping (M1/POLICY_REFETCH_MIN_AGE_MS).
+    await t.run(async (ctx) => {
+      const policy = await ctx.db
+        .query("policies")
+        .withIndex("by_user_domain_kind", (q) => q.eq("userId", userId).eq("merchantDomain", DOMAIN).eq("kind", "price_adjustment"))
+        .unique();
+      await ctx.db.patch(policy!._id, { retrievedAt: Date.now() - 25 * 3_600_000 });
+    });
+
+    // The real, wired call site (6a-5/D112): fetchBothImpl -- what the
+    // scheduler's internalAction `fetchBoth` calls -- lands a widened
+    // snapshot through the existing mocked-deps seam and un-stamps this
+    // merchant's items via clearMerchantSchedule -> clearMerchantItemSchedule.
+    const markdown = "# Price Match\n\nWe match a lower price within 60 days of purchase.\n" + " ".repeat(150);
+    const passage = "We match a lower price within 60 days of purchase.";
+    await fetchBothImpl(
+      { runMutation: (ref: any, a: any) => t.mutation(ref, a), runQuery: (ref: any, a: any) => t.query(ref, a) },
+      { userId, merchantDomain: DOMAIN },
+      {
+        search: async () => ({ web: [{ url: `https://${DOMAIN}/policy`, markdown }] }),
+        extract: async () => ({
+          found: true,
+          windowDays: 60,
+          channel: "email",
+          contactEmail: `help@${DOMAIN}`,
+          passage,
+          confidence: 0.9,
+        }),
+      },
+    );
+
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([targetId]);
+  }, 30_000);
+
+  // 6a-3/D112 asked that each rewritten test stay under Convex's real
+  // per-transaction ceilings (32,000 documents read, 4,096 index-range
+  // queries) and that the numbers be reported. Measured once here, directly
+  // (same ctx.meta.getTransactionMetrics() mechanism T07's
+  // readBudget.test.ts and 6a-6's lib/schedule.test.ts measurement use),
+  // against the fixture shared by tests (i)-(iv): 500 transient fillers on a
+  // needs_review purchase plus one target, i.e. exactly SCAN_LIMIT+1 items --
+  // the heaviest single `eligibleItems` tick any of the four tests runs.
+  it("read cost: one eligibleItems tick over 500 transient fillers + 1 target stays a small fraction of Convex's per-transaction ceilings", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const purchaseId = await purchaseAndPolicy(t, userId);
+    await fillerAndTarget(t, userId, purchaseId, {});
+
+    const { documentsRead, databaseQueries, bytesRead } = await t.run(async (ctx) => {
+      await ctx.runMutation(internal.priceWatch.eligibleItems, {});
+      const m = await ctx.meta.getTransactionMetrics();
+      return { documentsRead: m.documentsRead.used, databaseQueries: m.databaseQueries.used, bytesRead: m.bytesRead.used };
+    });
+
+    // eslint-disable-next-line no-console
+    console.log(
+      "[read-budget]",
+      JSON.stringify({ name: "priceWatch.eligibleItems", fixture: "500 transient fillers + 1 target", documentsRead, databaseQueries, bytesRead }),
+    );
+    expect(documentsRead).toBeLessThan(32_000);
+    expect(databaseQueries).toBeLessThan(4_096);
+  }, 30_000);
+});
+
+describe("priceWatch.eligibleItems — needs_review linkless item is not stamped a year out (C3a/D107)", () => {
+  it("a needs_review item with no link gets the transient bump, never the permanent one (no resurrection needed)", async () => {
     const t = setup();
     const { userId } = await signedIn(t);
     const { itemId } = await world(t, userId, {
