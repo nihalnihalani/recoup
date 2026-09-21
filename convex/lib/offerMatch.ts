@@ -63,6 +63,56 @@ export type SearchHit = { url: string; title?: string };
 export type StorePage = { storeDomain: string; productUrl: string; title: string };
 
 /**
+ * Not a hostname, so it can never collide with a real store's row. Shared by
+ * `offers.ts` (the pending-search marker row) and `market.ts` (excluded from
+ * the by-watch existing-rows count the same way a marker is).
+ */
+export const FIND_MARKER = "~find";
+
+/**
+ * True when `a` and `b` name the same store once reduced to a registrable
+ * host (T13/P04): `shop.acme.example` and `outlet.acme.example` are the same
+ * store, `acme.example` and `acme-outlet.example` are not. Either side may
+ * already be a bare registrable host (e.g. `watch.merchantDomain`) or a full
+ * hostname; `registrableHost` is idempotent on an already-registrable input,
+ * and a host it cannot parse falls back to a plain lowercase compare so a
+ * malformed value never silently matches everything.
+ */
+export function sameStore(a: string, b: string): boolean {
+  const ra = registrableHost(a) ?? a.trim().toLowerCase();
+  const rb = registrableHost(b) ?? b.trim().toLowerCase();
+  return ra === rb;
+}
+
+/**
+ * Rough, dependency-free similarity between two product titles/names, 0..1:
+ * lowercase, split into alphanumeric tokens, Jaccard overlap of the token
+ * sets (divided by the LARGER set, so a short title fully contained in a
+ * longer one still scores below 1 unless they are close in length). This is
+ * not NLP — it only has to catch "the listing at this URL is obviously a
+ * different product now" (P04: confirmed offer matching must not silently
+ * authorize a later variant), not judge close variants against each other.
+ */
+export function titleSimilarity(a: string, b: string): number {
+  const tokens = (s: string): Set<string> =>
+    new Set(
+      s
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((t) => t.length > 1),
+    );
+  const ta = tokens(a);
+  const tb = tokens(b);
+  if (ta.size === 0 || tb.size === 0) return 0;
+  let overlap = 0;
+  for (const t of ta) if (tb.has(t)) overlap++;
+  return overlap / Math.max(ta.size, tb.size);
+}
+
+/** Below this, two titles are treated as different products (T13). Documented, not tuned against real data. */
+export const TITLE_DRIFT_THRESHOLD = 0.3;
+
+/**
  * Search results -> at most `max` store pages: the watch's own store and the
  * excluded hosts are dropped, and only the first result per registrable host
  * is kept (search order is the ranking we trust).

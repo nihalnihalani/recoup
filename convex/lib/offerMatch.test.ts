@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { cleanStoreUrl, matchConfidence, registrableHost, selectStorePages } from "./offerMatch";
+import {
+  cleanStoreUrl,
+  matchConfidence,
+  registrableHost,
+  sameStore,
+  selectStorePages,
+  titleSimilarity,
+  TITLE_DRIFT_THRESHOLD,
+} from "./offerMatch";
 
 describe("registrableHost", () => {
   it("reduces a hostname to the store's registrable host", () => {
@@ -73,6 +81,41 @@ describe("selectStorePages", () => {
 
   it("stops at max", () => {
     expect(selectStorePages(hits, "acme.example", 1)).toHaveLength(1);
+  });
+});
+
+describe("sameStore", () => {
+  it("is true for a subdomain of the same registrable host, in either direction", () => {
+    expect(sameStore("shop.acme.example", "acme.example")).toBe(true);
+    expect(sameStore("acme.example", "outlet.acme.example")).toBe(true);
+    expect(sameStore("www.johnlewis.co.uk", "outlet.johnlewis.co.uk")).toBe(true);
+  });
+
+  it("is false for a different store, even a similarly named one", () => {
+    expect(sameStore("acme.example", "acme-outlet.example")).toBe(false);
+    expect(sameStore("rei.example", "backcountry.example")).toBe(false);
+  });
+
+  it("falls back to a plain compare for a host registrableHost cannot parse", () => {
+    expect(sameStore("localhost", "localhost")).toBe(true);
+    expect(sameStore("localhost", "acme.example")).toBe(false);
+  });
+});
+
+describe("titleSimilarity", () => {
+  it("is 1 for identical titles and high for a reordered/re-punctuated one", () => {
+    expect(titleSimilarity("Acme Down Jacket, Blue, M", "Acme Down Jacket, Blue, M")).toBe(1);
+    expect(titleSimilarity("Acme Down Jacket, Blue, M", "Acme Down Jacket - Blue (M)")).toBeGreaterThan(
+      TITLE_DRIFT_THRESHOLD,
+    );
+  });
+
+  it("is low for an unrelated product, and 0 for an empty title", () => {
+    expect(titleSimilarity("Acme Down Jacket, Blue, M", "Sony WH-1000XM5 Headphones")).toBeLessThan(
+      TITLE_DRIFT_THRESHOLD,
+    );
+    expect(titleSimilarity("Acme Down Jacket", "")).toBe(0);
+    expect(titleSimilarity("", "")).toBe(0);
   });
 });
 
