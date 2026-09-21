@@ -23,6 +23,7 @@ import type * as lib_access from "../lib/access.js";
 import type * as lib_ai from "../lib/ai.js";
 import type * as lib_balance from "../lib/balance.js";
 import type * as lib_budget from "../lib/budget.js";
+import type * as lib_errors from "../lib/errors.js";
 import type * as lib_imageUrl from "../lib/imageUrl.js";
 import type * as lib_latestPolicy from "../lib/latestPolicy.js";
 import type * as lib_ledger from "../lib/ledger.js";
@@ -70,6 +71,7 @@ declare const fullApi: ApiFromModules<{
   "lib/ai": typeof lib_ai;
   "lib/balance": typeof lib_balance;
   "lib/budget": typeof lib_budget;
+  "lib/errors": typeof lib_errors;
   "lib/imageUrl": typeof lib_imageUrl;
   "lib/latestPolicy": typeof lib_latestPolicy;
   "lib/ledger": typeof lib_ledger;
@@ -126,4 +128,5 @@ export declare const components: {
   agentmail: import("@agentmail/convex/_generated/component.js").ComponentApi<"agentmail">;
   firecrawl: import("@firecrawl/firecrawl-convex/_generated/component.js").ComponentApi<"firecrawl">;
   staticHosting: import("@convex-dev/static-hosting/_generated/component.js").ComponentApi<"staticHosting">;
+  rateLimiter: import("@convex-dev/rate-limiter/_generated/component.js").ComponentApi<"rateLimiter">;
 };
