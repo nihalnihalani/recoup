@@ -51,4 +51,17 @@ crons.interval("retention sweep", { hours: 24 }, internal.retention.sweep, {});
  */
 crons.cron("offer prices", "0 13 * * *", internal.offers.sweepRechecks, {});
 
+/**
+ * Account-deletion re-drive (6b-4c, D115). `account.requestDeletion`'s purge
+ * chain is meant to be self-sustaining (`purge` reschedules itself on every
+ * unfinished step and every inbox-delete retry), but a process crash between
+ * recording that decision and actually arming the next scheduled call can
+ * still orphan a `deleting` row with nothing left in the scheduler --
+ * `beforeSessionCreation` (`convex/auth.ts`) stops such a zombie account
+ * from being signed into, but does nothing to finish deleting it. Daily is
+ * generous next to `STUCK_DELETION_AGE_MS` (24h): a tick with nothing stuck
+ * costs one bounded, indexed read and reschedules nothing.
+ */
+crons.interval("account re-drive", { hours: 24 }, internal.account.reDriveStuckDeletions, {});
+
 export default crons;
