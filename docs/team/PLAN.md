@@ -359,7 +359,7 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 **Owner:** sonnet-backend · **Status:** in_progress · **Files:** convex/account.ts (+test), policies.ts, profiles.ts, priceWatch.ts, drafts.ts (+tests), ops.ts (+test), mailPurge.ts (+test), patches/@agentmail+convex+0.1.0.patch, docs/ops/RUNBOOK.md, src/lib/accountDeletion.ts (+test, copy only if residue remains), convex/auth.ts (reset-code refusal), convex/notify.test.ts (byte strip), schema.ts (comment only).
 
 ### T24e — Audit F-AUD-1 (purchases.board bounded reads) + LOWs
-**Owner:** sonnet-backend-2 · **Status:** in_progress · **Files:** convex/purchases.ts (+test), convex/lib/authMigrate.ts (+test), convex/boundary.test.ts (byte strip), src/pages/Board.tsx only if the shape changes.
+**Owner:** sonnet-backend-2 · **Status:** verified (f9cba83, e25096b, 21d0fe5; lead re-ran 4 files 185/185; board at 100×50 and 200×50 = 125 ranges / 3,061 docs; `isExample` no longer client-settable) · **Files:** convex/purchases.ts (+test), convex/lib/authMigrate.ts (+test), convex/boundary.test.ts (byte strip), src/pages/Board.tsx only if the shape changes.
 
 ### T16 — P07 retention (bounded, resumable, audit-preserving) plus P08 backend fixes: returns validators and string bounds on cla
 **Owner:** sonnet-backend · **Phase:** 2 · **Blocks on:** T12 · **High-risk:** True
