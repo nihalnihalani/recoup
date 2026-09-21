@@ -18,7 +18,7 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | T10 | Drafts, queued send + reconcile, replies | sonnet-integrations | T07 | review (01cafa8; opus checkpoint) | stale-version + empty-recipient tests |
 | T11 | Frontend screens (T11a scaffold now; T11b flows after T05/T10) | sonnet-frontend | T11a: T02 · T11b: T05,T07,T10 | T11a verified · T11b-1 verified · T11b-2 in_progress | browser rehearsal against dev deployment |
 | T12 | Example loader | sonnet-backend | T05 | verified (6 tests, archive semantics D47) | owned+labelled; no real recipients |
-| T13 | Hardening: T08.1 ✓, crons ✓, scenario suite (sonnet-tester) + opus checkpoint 2 | sonnet-tester, opus-devils-advocate | T10,T11 | in_progress | invariant checklist; adversarial fixtures |
+| T13 | Hardening: scenario suite ✓ (26), checkpoint 2 ✓ (S1–S12 → D52–D58), fixes T10.1/T05.2 in progress, T13.1 scheduler-driven tests pending | sonnet-integrations, sonnet-backend, sonnet-tester | T10,T11 | in_progress | invariant checklist; adversarial fixtures |
 | T14 | Deploy to convex.site | sonnet-verifier | T13 | blocked | needs OPENAI/AGENTMAIL keys for live path |
 | T15 | hackathon.md, README, video | lead + sonnet-frontend | T14 | pending | honest limits section |
 | T16 | Submit + social | user | T15 | blocked | user authorization required |
