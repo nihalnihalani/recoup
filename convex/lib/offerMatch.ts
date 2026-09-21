@@ -109,8 +109,27 @@ export function titleSimilarity(a: string, b: string): number {
   return overlap / Math.max(ta.size, tb.size);
 }
 
-/** Below this, two titles are treated as different products (T13). Documented, not tuned against real data. */
-export const TITLE_DRIFT_THRESHOLD = 0.3;
+/**
+ * Below this, two titles/names are treated as different products (T13; retuned checkpoint-5, F4/D103).
+ *
+ * `titleSimilarity` is Jaccard-over-the-larger-set, so a genuine, noisy retailer page title (extra
+ * tokens like "Buy", "Free Shipping", the store's own name) scores lower against a short clean product
+ * name than two clean names would against each other -- penalizing the SIDE that carries more words,
+ * not the product match itself. Retuned against a fixture of 11 real-looking (retailer title, short
+ * product name) pairs for the SAME product (see offerMatch.test.ts, "TITLE_DRIFT_THRESHOLD (F4/D103
+ * fixture)"): the lowest-scoring pair there is 0.308 (Apple AirPods Pro, long Amazon-style title vs.
+ * short name). 0.2 keeps meaningful margin below every pair in that fixture while staying far above
+ * anything sharing no real tokens (0.0 for every different-product pair tried, including comparing a
+ * bare retailer name like "Best Buy" against an actual product name -- the exact shape of the F4 bug
+ * this threshold alone cannot fix: see the callers in offers.ts, which now compare `productName` to
+ * `productName` and never a store's own name to a product's).
+ *
+ * The old value (0.3) was documented as "not tuned against real data" and sat just above the fixture's
+ * worst case -- fragile enough that a slightly noisier real title would have false-flagged a legitimate
+ * match. Biased low on purpose: a false positive here nags a user to reconfirm a purchase that never
+ * changed; a false negative just waits for the next recheck to catch a real swap.
+ */
+export const TITLE_DRIFT_THRESHOLD = 0.2;
 
 /**
  * Search results -> at most `max` store pages: the watch's own store and the

@@ -119,6 +119,61 @@ describe("titleSimilarity", () => {
   });
 });
 
+/**
+ * DA-10b (checkpoint-5, F4/D103): the fixture TITLE_DRIFT_THRESHOLD was retuned against (see that
+ * constant's doc comment). Eleven (retailer page title, short product name) pairs for the SAME
+ * product -- long, noisy, real-looking retail listing titles the way Amazon/BestBuy/Target/REI/etc.
+ * actually write them -- plus a handful of genuinely different-product pairs, including the exact
+ * shape of the original bug (a bare retailer name compared against a real product name). None of the
+ * "same product" pairs may be flagged as drift; every "different product" pair still must be.
+ */
+describe("TITLE_DRIFT_THRESHOLD (F4/D103 fixture)", () => {
+  const samePairs: Array<[retailerTitle: string, productName: string]> = [
+    [
+      "Sony WH-1000XM5 Wireless Industry Leading Noise Canceling Headphones with Auto Noise Canceling Optimizer, Crystal Clear Hands-Free Calling, Black - Best Buy",
+      "Sony WH-1000XM5 Wireless Noise Cancelling Headphones, Black",
+    ],
+    ["Buy Acme Down Jacket, Blue, Size M | Free 2-Day Shipping - Target", "Acme Down Jacket, Blue, M"],
+    [
+      "Instant Pot Duo 7-in-1 Electric Pressure Cooker, 6 Quart, Stainless Steel - Walmart.com",
+      "Instant Pot Duo 7-in-1 Electric Pressure Cooker, 6 Quart",
+    ],
+    ["Apple AirPods Pro (2nd Generation) Wireless Earbuds with MagSafe Charging Case - Amazon.com", "Apple AirPods Pro 2nd Gen"],
+    ["KitchenAid Artisan Series 5 Quart Tilt-Head Stand Mixer, Empire Red | Wayfair", "KitchenAid Artisan 5 Qt Stand Mixer, Empire Red"],
+    ["Nike Air Zoom Pegasus 40 Men's Road Running Shoes - Black/White | Nike.com", "Nike Air Zoom Pegasus 40, Black/White"],
+    ["Dyson V15 Detect Absolute Cordless Vacuum Cleaner - Yellow/Nickel - Best Buy", "Dyson V15 Detect Absolute Vacuum"],
+    ["Samsung 65-Inch Class QLED 4K Q80C Series Smart TV (2023 Model) - Costco", "Samsung 65 Inch QLED 4K Q80C Smart TV"],
+    ["The North Face Men's ThermoBall Eco Jacket, TNF Black, Large - REI Co-op", "North Face ThermoBall Eco Jacket, Black, L"],
+    [
+      "Le Creuset Enameled Cast Iron Signature Round Dutch Oven, 5.5 Qt, Cerise - Williams Sonoma",
+      "Le Creuset Signature Round Dutch Oven 5.5 Qt Cerise",
+    ],
+    ["Acme Down Jacket, Blue, M - Acme Outdoors Official Store", "Acme Down Jacket, Blue, M"],
+  ];
+
+  const differentPairs: Array<[a: string, b: string]> = [
+    ["Acme Down Jacket, Blue, M", "Sony WH-1000XM5 Headphones"],
+    ["Instant Pot Duo 7-in-1 Electric Pressure Cooker, 6 Quart", "Dyson V15 Detect Absolute Vacuum"],
+    // The original F4 bug: a ShopSavvy offer's `title` was the retailer's own name, compared straight
+    // against a recheck's product name. offers.ts no longer does this (it compares productName <->
+    // productName), but the threshold itself must not accidentally treat these as a match either.
+    ["Best Buy", "Sony WH-1000XM5 Wireless Noise Cancelling Headphones"],
+    ["Walmart", "Acme Down Jacket, Blue, M"],
+  ];
+
+  it("never flags a real retailer title against the same product's short name", () => {
+    for (const [retailerTitle, productName] of samePairs) {
+      expect(titleSimilarity(retailerTitle, productName)).toBeGreaterThanOrEqual(TITLE_DRIFT_THRESHOLD);
+    }
+  });
+
+  it("still flags a genuinely different product, including a bare retailer name", () => {
+    for (const [a, b] of differentPairs) {
+      expect(titleSimilarity(a, b)).toBeLessThan(TITLE_DRIFT_THRESHOLD);
+    }
+  });
+});
+
 describe("matchConfidence", () => {
   it("is the confidence for exact, half for unsure, zero for none", () => {
     expect(matchConfidence("exact", 0.9)).toBe(0.9);
