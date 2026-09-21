@@ -211,6 +211,31 @@ describe("searchOffers", () => {
     errors.mockRestore();
   });
 
+  it("T24c (D109): a page/search failure logs structured price_check_failed JSON lines via logEvent, never a raw console.error with the provider body", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { d } = deps(["https://dead.example/p", "https://rei.example/p"], {
+      "dead.example": new Error("upstream failed with key sk-abcdefghij1234567890 for sam@home.example"),
+      "rei.example": exact(18_000),
+    });
+    expect(await searchOffers(runner(t), watchId, d)).toBe(1);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const line = JSON.parse(spy.mock.calls[0][0] as string) as Record<string, unknown>;
+    spy.mockRestore();
+    expect(line.kind).toBe("price_check_failed");
+    expect(line.watchId).toBe(String(watchId));
+    expect(line.storeDomain).toBe("dead.example");
+    expect(typeof line.error).toBe("string");
+    const raw = JSON.stringify(line);
+    expect(raw).not.toMatch(/sk-[A-Za-z0-9_-]{10,}/);
+    expect(raw).not.toMatch(/fc-[A-Za-z0-9_-]{10,}/);
+    expect(raw).not.toMatch(/sam@home\.example/);
+  });
+
   it("user decisions survive a second search; a confirmed price is refreshed only", async () => {
     const t = setup();
     const { userId, as } = await signedIn(t);
@@ -331,6 +356,22 @@ describe("listForWatch", () => {
     await expect(t.mutation(api.offers.confirm, { offerId: row._id })).rejects.toThrow(/Not signed in/);
     await expect(asOther.mutation(api.offers.find, { watchId })).rejects.toThrow(/Watch not found/);
     expect((await rows(t, watchId))[0].status).toBe("confirmed");
+  });
+
+  it("D115 6b-3 / T18.3: returns the empty shape for a tombstoned caller's own (otherwise visible) watch", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId, { lastCents: 15_000 });
+    await searchOffers(runner(t), watchId, deps(["https://b.example/p"], { "b.example": exact(12_000) }).d);
+    const [row] = await rows(t, watchId);
+    await as.mutation(api.offers.confirm, { offerId: row._id });
+    // Prove real data is visible first, so the post-tombstone assertion below is not vacuous.
+    expect((await as.query(api.offers.listForWatch, { watchId })).offers.length).toBeGreaterThan(0);
+
+    await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: T0, attempts: 0 }));
+
+    const empty = { offers: [], best: null, searchingUntil: undefined, nextFindAt: undefined };
+    expect(await as.query(api.offers.listForWatch, { watchId })).toEqual(empty);
   });
 });
 

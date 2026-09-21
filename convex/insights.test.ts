@@ -661,3 +661,60 @@ describe("insights.trackedTable", () => {
     expect(JSON.stringify(bobs)).not.toContain("rei.example");
   });
 });
+
+describe("D115 6b-3 / T18.3: a tombstoned caller sees the same signed-out shape", () => {
+  async function tombstone(t: T, userId: Id<"users">) {
+    await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: BASE, attempts: 0 }));
+  }
+
+  it("activity/sources return the empty shape, not the caller's real data, once tombstoned", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    await as.mutation(api.examples.load, {});
+    // `sources` excludes example purchases entirely (D27); seed a real watch too, so both queries
+    // have real data to hide before the post-tombstone assertion below is not vacuous.
+    await seedWatch(t, userId, { checks: [[1, 5_000]] });
+    expect((await as.query(api.insights.activity, {})).events.length).toBeGreaterThan(0);
+    expect((await as.query(api.insights.sources, {})).rows.length).toBeGreaterThan(0);
+
+    await tombstone(t, userId);
+
+    expect(await as.query(api.insights.activity, {})).toEqual({ events: [], truncated: false, windowNote: expect.any(String) });
+    expect(await as.query(api.insights.sources, {})).toEqual({ rows: [], truncated: false, windowNote: expect.any(String) });
+  });
+
+  it("priceHistory returns null for a tombstoned caller's own (otherwise valid) watch", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId, { checks: [[1, 5_000]] });
+    expect(await as.query(api.insights.priceHistory, { watchId })).not.toBeNull();
+
+    await tombstone(t, userId);
+
+    expect(await as.query(api.insights.priceHistory, { watchId })).toBeNull();
+    expect(await as.query(api.insights.priceHistory, {})).toBeNull();
+  });
+
+  it("trackedTable returns [] for a tombstoned caller with live watches", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    await seedWatch(t, userId, { checks: [[1, 5_000]] });
+    expect((await as.query(api.insights.trackedTable, {})).length).toBeGreaterThan(0);
+
+    await tombstone(t, userId);
+
+    expect(await as.query(api.insights.trackedTable, {})).toEqual([]);
+  });
+
+  it("a normal (non-tombstoned) account is unaffected by the gate", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    await as.mutation(api.examples.load, {});
+    const watchId = await seedWatch(t, userId, { checks: [[1, 5_000]] });
+
+    expect((await as.query(api.insights.activity, {})).events.length).toBeGreaterThan(0);
+    expect((await as.query(api.insights.sources, {})).rows.length).toBeGreaterThan(0);
+    expect(await as.query(api.insights.priceHistory, { watchId })).not.toBeNull();
+    expect((await as.query(api.insights.trackedTable, {})).length).toBeGreaterThan(0);
+  });
+});

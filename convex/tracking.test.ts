@@ -119,6 +119,39 @@ describe("tracking.overview", () => {
   });
 });
 
+describe("D115 6b-3 / T18.3: a tombstoned caller sees the same empty dashboard a signed-out caller does", () => {
+  it("overview returns the all-zero empty shape, not the caller's real data, once tombstoned", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    await as.mutation(api.examples.load, {});
+    // Prove there is real data first, so the post-tombstone assertion below is not vacuous.
+    const before = await as.query(api.tracking.overview, {});
+    expect(before.items.length).toBeGreaterThan(0);
+
+    await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }));
+
+    const after = await as.query(api.tracking.overview, {});
+    expect(after.items).toHaveLength(0);
+    expect(after.totals.tracked).toBe(0);
+    expect(after).toEqual({
+      items: [],
+      totals: {
+        tracked: 0, watching: 0, foundCents: 0, recoveredCents: 0, checks: 0, exampleFoundCents: 0,
+        mixedCurrencies: false, primaryCurrency: null, byCurrency: {},
+      },
+      truncated: false,
+    });
+  });
+
+  it("a normal (non-tombstoned) account is unaffected by the gate", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    await as.mutation(api.examples.load, {});
+    const out = await as.query(api.tracking.overview, {});
+    expect(out.items.length).toBeGreaterThan(0);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // C1 (D107, Opus checkpoint-5 recheck): MAX_ITEMS_TOTAL is now budgeted off
 // rows actually read, purchase by purchase, instead of allotted up front per

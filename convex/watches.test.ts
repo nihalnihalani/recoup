@@ -527,6 +527,31 @@ describe("watches.checkWatch", () => {
     expect(row.nextCheckAt).toBe(T0 + WATCH_CHECK_INTERVAL_MS);
   });
 
+  it("T24c (D109): a scrape failure logs one price_check_failed JSON line via logEvent, never a raw console.error", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId, { name: "Gift for Sam" });
+    vi.mocked(observePrice).mockRejectedValueOnce(
+      new Error("upstream call failed using key sk-abcdefghij1234567890 for sam@home.example"),
+    );
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await t.action(internal.watches.checkWatch, { watchId });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const line = JSON.parse(spy.mock.calls[0][0] as string) as Record<string, unknown>;
+    spy.mockRestore();
+    expect(line.kind).toBe("price_check_failed");
+    expect(line.watchId).toBe(String(watchId));
+    expect(typeof line.error).toBe("string");
+    const raw = JSON.stringify(line);
+    // sanitizeError collapses the raw error down to one of a small set of fixed, user-safe
+    // categories (convex/lib/errors.ts) -- the injected secret/email never survives into the line.
+    expect(raw).not.toMatch(/sk-[A-Za-z0-9_-]{10,}/);
+    expect(raw).not.toMatch(/fc-[A-Za-z0-9_-]{10,}/);
+    expect(raw).not.toMatch(/sam@home\.example/);
+  });
+
   it("does nothing for an archived watch", async () => {
     const t = setup();
     const { userId } = await signedIn(t);
@@ -1233,5 +1258,33 @@ describe("D87: a tombstoned owner's rows are skipped by every scheduled reader",
     const watchId = await seedWatch(t, userId);
     await tombstone(t, userId);
     expect(await t.query(internal.watches.watchForCheck, { watchId })).toBeNull();
+  });
+});
+
+describe("D115 6b-3 / T18.3: watches.list/get see the signed-out shape once tombstoned", () => {
+  async function tombstone(t: T, userId: Id<"users">) {
+    await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: T0, attempts: 0 }));
+  }
+
+  it("list returns [] and get returns null for a tombstoned caller with a real, otherwise-visible watch", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    // Prove both calls see real data first, so the post-tombstone assertions are not vacuous.
+    expect(await as.query(api.watches.list, {})).toHaveLength(1);
+    expect(await as.query(api.watches.get, { watchId })).not.toBeNull();
+
+    await tombstone(t, userId);
+
+    expect(await as.query(api.watches.list, {})).toEqual([]);
+    expect(await as.query(api.watches.get, { watchId })).toBeNull();
+  });
+
+  it("a normal (non-tombstoned) caller is unaffected by the gate", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    expect(await as.query(api.watches.list, {})).toHaveLength(1);
+    expect(await as.query(api.watches.get, { watchId })).not.toBeNull();
   });
 });

@@ -1003,6 +1003,19 @@ describe("notify.drops", () => {
     const byStatus = Object.fromEntries(listed.map((d) => [d.status, d.canRecheck]));
     expect(byStatus).toMatchObject({ claimed: false, queued: true, sent: false, failed: false, unknown: true, suppressed: false });
   });
+
+  it("D115 6b-3 / T18.3: returns [] for a tombstoned caller with real drops, not the caller's real data", async () => {
+    const t = setup();
+    const { userId, as } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 9_000 });
+    await observe(t, watchId, 8_000);
+    // Prove there is real data first, so the post-tombstone assertion below is not vacuous.
+    expect((await as.query(api.notify.drops, {})).length).toBeGreaterThan(0);
+
+    await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: T0, attempts: 0 }));
+
+    expect(await as.query(api.notify.drops, {})).toEqual([]);
+  });
 });
 
 describe("publicAppUrl (link in alert emails)", () => {

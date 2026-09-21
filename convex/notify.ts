@@ -660,13 +660,18 @@ const dropView = v.object({
   canRecheck: v.boolean(),
 });
 
-/** The caller's last 30 price-drop alerts, newest first, mailed or not. `[]` when signed out. */
+/**
+ * The caller's last 30 price-drop alerts, newest first, mailed or not. `[]` when signed out --
+ * and, per D115 6b-3/T18.3, `[]` for a tombstoned (`accountState` status `deleting`/`deleted`)
+ * caller too, so a just-revoked but still momentarily valid JWT cannot keep reading this
+ * account's alert history mid-purge.
+ */
 export const drops = query({
   args: {},
   returns: v.array(dropView),
   handler: async (ctx) => {
     const userId = await getAuthUserId(ctx);
-    if (!userId) return [];
+    if (!userId || (await isTombstoned(ctx, userId))) return [];
     const rows: Doc<"mailLog">[] = [];
     let scanned = 0;
     const newestFirst = ctx.db

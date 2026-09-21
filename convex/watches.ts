@@ -27,6 +27,9 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { variantMatch, verdictValidator, watchStatus } from "./schema";
 import { ownedWatch, requireUserId } from "./lib/access";
 import { isTombstoned } from "./lib/accountState";
+import { isPriceStale } from "./lib/freshness";
+import { logEvent } from "./lib/log";
+import { sanitizeError } from "./lib/errors";
 import { assertCurrency, assertNonEmpty, assertPositiveCents, assertQty, assertTimestamp } from "./lib/money";
 import { claimDrop } from "./notify";
 import { defaultWatchName, parseProductUrl } from "./lib/watchUrl";
@@ -218,8 +221,10 @@ function summarise(
   const currentCents = watch.lastCents ?? null;
   const listCents = latest?.listCents ?? null;
   const now = argsNow ?? watch.lastObservedAt ?? latest?.observedAt ?? watch._creationTime;
-  const priceStale =
-    watch.lastObservedAt === undefined || now - watch.lastObservedAt > STALE_PRICE_MS;
+  // F-T24b-1 (D118): the same rule `lib/freshness.ts`'s `isPriceStale` expresses for
+  // `insights.trackedTable` -- unified here now that this file is free (D115 deferred this exact
+  // edit past T18.3, which has now landed above).
+  const priceStale = isPriceStale(watch.lastObservedAt, now);
   // F10 (D103): fall back to the last check ATTEMPT's timestamp when there
   // has never been an accepted observation, so a message built from it can
   // at least say how long we have been trying (both fields are set together
@@ -303,7 +308,10 @@ function summarise(
 }
 
 /**
- * The caller's non-archived watches, newest first. `[]` when signed out.
+ * The caller's non-archived watches, newest first. `[]` when signed out --
+ * and, per D115 6b-3/T18.3, `[]` for a tombstoned (`accountState` status
+ * `deleting`/`deleted`) caller too, so a just-revoked but still momentarily
+ * valid JWT cannot keep reading this account's watches mid-purge.
  *
  * `now` (P06/D73) is an optional coarse timestamp (validated by
  * `assertCoarseNow`) the client refreshes on its own cadence and re-passes;
@@ -316,7 +324,7 @@ export const list = query({
   returns: v.array(watchSummary),
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
-    if (!userId) return [];
+    if (!userId || (await isTombstoned(ctx, userId))) return [];
     // One bounded indexed page per live status, rather than reading every row
     // the user ever had and dropping the archived ones afterwards.
     const pages = await Promise.all(
@@ -341,13 +349,17 @@ export const list = query({
   },
 });
 
-/** One watch with its recent checks (newest first). `null` when missing, archived or not the caller's. Same `now` contract as `list`. */
+/**
+ * One watch with its recent checks (newest first). `null` when missing, archived or not the
+ * caller's -- and, per D115 6b-3/T18.3, `null` for a tombstoned caller too (see `list`'s doc
+ * comment). Same `now` contract as `list`.
+ */
 export const get = query({
   args: { watchId: v.id("watches"), now: v.optional(v.number()) },
   returns: v.union(v.object({ watch: watchSummary, checks: v.array(watchCheckView) }), v.null()),
   handler: async (ctx, { watchId, now: argsNow }) => {
     const userId = await getAuthUserId(ctx);
-    if (!userId) return null;
+    if (!userId || (await isTombstoned(ctx, userId))) return null;
     const watch = await ctx.db.get(watchId);
     if (!watch || watch.userId !== userId || watch.status === "archived") return null;
     const checks = await recentChecks(ctx, watchId, GET_CHECKS);
@@ -670,7 +682,8 @@ export const checkWatch = internalAction({
     try {
       observed = await observePrice(ctx, watch.name, watch.productUrl);
     } catch (err) {
-      console.error(`watches.checkWatch failed for ${watchId}`, err);
+      // T24c (D109): structured, redacted line instead of a bare console.error.
+      logEvent("price_check_failed", { watchId, error: sanitizeError(err instanceof Error ? err.message : String(err)) });
       observed = { note: errorNote("Price check failed", err) };
     }
     const result = await ctx.runMutation(internal.watches.recordWatchCheck, {

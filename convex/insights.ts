@@ -7,6 +7,7 @@ import { confirmedOffers } from "./offers";
 import { MAX_ITEMS_PER_PURCHASE } from "./limits";
 import { assertCoarseNow } from "./watches";
 import { isPriceStale } from "./lib/freshness";
+import { isTombstoned } from "./lib/accountState";
 
 /**
  * Read models for the dashboard: what happened lately, and how each store is
@@ -196,14 +197,17 @@ async function itemsWithinBudget(
  * The newest things that happened on the caller's account, newest first, with
  * `truncated` set when any bounded page below came back full (D72: a sampled
  * window, never presented as the full history). `{ events: [], truncated:
- * false, windowNote }` when signed out.
+ * false, windowNote }` when signed out -- and, per D115 6b-3/T18.3, the same
+ * shape for a tombstoned (`accountState` status `deleting`/`deleted`) caller
+ * whose JWT is still momentarily valid, so a just-revoked session cannot keep
+ * reading this account's activity mid-purge.
  */
 export const activity = query({
   args: {},
   returns: v.object({ events: v.array(activityEvent), truncated: v.boolean(), windowNote: v.string() }),
   handler: async (ctx) => {
     const userId = await getAuthUserId(ctx);
-    if (!userId) return { events: [], truncated: false, windowNote: WINDOW_NOTE };
+    if (!userId || (await isTombstoned(ctx, userId))) return { events: [], truncated: false, windowNote: WINDOW_NOTE };
     const events: ActivityEvent[] = [];
     const watches = await userWatches(ctx, userId);
     const purchases = await userPurchases(ctx, userId);
@@ -407,14 +411,15 @@ type SourceRow = typeof sourceRow.type;
  * often the page could actually be read, and how often the price fell.
  * `truncated` is set when any bounded page below came back full (D72: a
  * sampled window, never presented as the full history).
- * `{ rows: [], truncated: false, windowNote }` when signed out.
+ * `{ rows: [], truncated: false, windowNote }` when signed out -- and, per
+ * D115 6b-3/T18.3, for a tombstoned caller too (see `activity`'s doc comment).
  */
 export const sources = query({
   args: {},
   returns: v.object({ rows: v.array(sourceRow), truncated: v.boolean(), windowNote: v.string() }),
   handler: async (ctx) => {
     const userId = await getAuthUserId(ctx);
-    if (!userId) return { rows: [], truncated: false, windowNote: WINDOW_NOTE };
+    if (!userId || (await isTombstoned(ctx, userId))) return { rows: [], truncated: false, windowNote: WINDOW_NOTE };
     const rows = new Map<string, SourceRow>();
     const row = (domain: string): SourceRow => {
       let existing = rows.get(domain);
@@ -717,14 +722,15 @@ async function storeSeries(
  * dashboard. Without a `watchId` it picks the caller's watch with the most
  * confirmed stores (then most accepted observations, then newest). `null` when
  * signed out, when the caller has no watches, or when the watch is missing,
- * archived or someone else's.
+ * archived or someone else's -- and, per D115 6b-3/T18.3, `null` for a
+ * tombstoned caller too (see `activity`'s doc comment).
  */
 export const priceHistory = query({
   args: { watchId: v.optional(v.id("watches")) },
   returns: v.union(v.null(), priceHistoryView),
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
-    if (!userId) return null;
+    if (!userId || (await isTombstoned(ctx, userId))) return null;
 
     const watches = await liveWatches(ctx, userId);
     const offersByWatch = new Map<Id<"watches">, Doc<"offers">[]>();
@@ -793,7 +799,8 @@ export const priceHistory = query({
 
 /**
  * Every non-archived watch of the caller's with its stores side by side, newest first. `[]` when
- * signed out.
+ * signed out -- and, per D115 6b-3/T18.3, `[]` for a tombstoned caller too (see `activity`'s doc
+ * comment).
  *
  * `now` (P06/D73, optional, validated by `assertCoarseNow`) is the same coarse-clock contract as
  * `watches.get`/`list`/`tracking.overview`: a query never reads the real wall clock for a display
@@ -808,7 +815,7 @@ export const trackedTable = query({
   returns: v.array(trackedRow),
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
-    if (!userId) return [];
+    if (!userId || (await isTombstoned(ctx, userId))) return [];
     const validatedNow = assertCoarseNow(args.now);
     const out: Infer<typeof trackedRow>[] = [];
     for (const watch of await liveWatches(ctx, userId)) {

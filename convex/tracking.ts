@@ -7,6 +7,7 @@ import { windowEndsAt } from "./lib/ledger";
 import { latest } from "./policies";
 import { assertCoarseNow } from "./watches";
 import { MAX_ITEMS_PER_PURCHASE } from "./limits";
+import { isTombstoned } from "./lib/accountState";
 
 /** Most recent purchases the dashboard reads; older ones stay reachable from their own page. */
 const MAX_PURCHASES = 60;
@@ -92,7 +93,10 @@ const trackedItem = v.object({
 /**
  * Everything the price dashboard draws, in one reactive read: each owned item
  * with its paid price, its observed price history and the claim a drop opened.
- * Signed-out callers get an empty dashboard rather than an error.
+ * Signed-out callers get an empty dashboard rather than an error -- and, per
+ * D115 6b-3/T18.3, so does a tombstoned (`accountState` status
+ * `deleting`/`deleted`) caller, so a just-revoked but still momentarily valid
+ * JWT cannot keep reading this account's dashboard mid-purge.
  *
  * `now` (P06/D73, optional, same contract as `watches.list`/`get`) drives
  * only the display-derived `watching` count. When omitted, each purchase
@@ -142,7 +146,7 @@ export const overview = query({
       truncated: false,
     };
     const userId = await getAuthUserId(ctx);
-    if (!userId) return empty;
+    if (!userId || (await isTombstoned(ctx, userId))) return empty;
 
     // F6 (D103): scoped to "active" by the index itself, like insights.ts's
     // userPurchases -- not a `by_user` page filtered by status afterward,

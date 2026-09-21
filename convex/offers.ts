@@ -37,6 +37,8 @@ import { ownedWatch, requireUserId } from "./lib/access";
 import { takeGlobalBudget } from "./lib/budget";
 import { assertTimestamp } from "./lib/money";
 import { isTombstoned } from "./lib/accountState";
+import { logEvent } from "./lib/log";
+import { sanitizeError } from "./lib/errors";
 import { defaultWatchName } from "./lib/watchUrl";
 import {
   EXCLUDED_HOSTS,
@@ -422,7 +424,10 @@ function byCentsThenUnknown(a: Doc<"offers">, b: Doc<"offers">): number {
 
 /**
  * Offers for one watch. The empty shape when signed out, not the owner, or
- * the watch is archived. No wall clock is read here (T13/P06): `now` is an
+ * the watch is archived -- and, per D115 6b-3/T18.3, for a tombstoned
+ * (`accountState` status `deleting`/`deleted`) caller too, so a just-revoked
+ * but still momentarily valid JWT cannot keep reading this account's offers
+ * mid-purge. No wall clock is read here (T13/P06): `now` is an
  * optional coarse, display-only client clock (same 5-minute-step, ±1-day
  * convention as T12's watches.list/get) that this query does not need for
  * anything it computes -- accepted and validated only so every list-shaped
@@ -435,7 +440,7 @@ export const listForWatch = query({
   handler: async (ctx, { watchId, now }) => {
     if (now !== undefined) assertTimestamp(now, "now");
     const userId = await getAuthUserId(ctx);
-    if (!userId) return EMPTY;
+    if (!userId || (await isTombstoned(ctx, userId))) return EMPTY;
     const watch = await ctx.db.get(watchId);
     if (!watch || watch.userId !== userId || watch.status === "archived") return EMPTY;
 
@@ -574,7 +579,12 @@ export async function searchOffers(
         try {
           return { page, obs: await deps.observe(ctx as ActionCtx, watch.name, page.productUrl) };
         } catch (err) {
-          console.error(`offers.search could not read ${page.storeDomain} for ${watchId}`, err);
+          // T24c (D109): structured, redacted line instead of a bare console.error.
+          logEvent("price_check_failed", {
+            watchId,
+            storeDomain: page.storeDomain,
+            error: sanitizeError(err instanceof Error ? err.message : String(err)),
+          });
           return null; // a failure stores nothing
         }
       }),
@@ -586,13 +596,14 @@ export async function searchOffers(
       candidates.push({ ...entry.page, ...pickObservation(entry.obs) });
     }
   } catch (err) {
-    console.error(`offers.search failed for ${watchId}`, err);
+    // T24c (D109): structured, redacted line instead of a bare console.error.
+    logEvent("price_check_failed", { watchId, error: sanitizeError(err instanceof Error ? err.message : String(err)) });
     failure = truncate(`Search failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   try {
     return await ctx.runMutation(internal.offers.recordCandidates, { watchId, candidates, failure });
   } catch (err) {
-    console.error(`offers.recordCandidates failed for ${watchId}`, err);
+    logEvent("price_check_failed", { watchId, error: sanitizeError(err instanceof Error ? err.message : String(err)) });
     return 0;
   }
 }
@@ -774,7 +785,12 @@ export async function recheckConfirmedOffers(
           // no freshly-searched page title the way `searchOffers`'s candidates do.
           return { offerId: offer.offerId, ...pickObservation(obs), productName: obs.productName };
         } catch (err) {
-          console.error(`offers.recheck could not read offer ${offer.offerId}`, err);
+          // T24c (D109): structured, redacted line instead of a bare console.error.
+          logEvent("price_check_failed", {
+            watchId,
+            offerId: offer.offerId,
+            error: sanitizeError(err instanceof Error ? err.message : String(err)),
+          });
           return null;
         }
       }),
@@ -783,7 +799,8 @@ export async function recheckConfirmedOffers(
     if (results.length === 0) return 0;
     return await ctx.runMutation(internal.offers.recordRechecks, { watchId, results });
   } catch (err) {
-    console.error(`offers.recheck failed for ${watchId}`, err);
+    // T24c (D109): structured, redacted line instead of a bare console.error.
+    logEvent("price_check_failed", { watchId, error: sanitizeError(err instanceof Error ? err.message : String(err)) });
     return 0;
   }
 }
