@@ -64,4 +64,15 @@ crons.cron("offer prices", "0 13 * * *", internal.offers.sweepRechecks, {});
  */
 crons.interval("account re-drive", { hours: 24 }, internal.account.reDriveStuckDeletions, {});
 
+/**
+ * T18.4 (D115 6b-5): daily sweep of the AgentMail component's own
+ * finalized-outbound retention window (`outboundMessages` rows in a
+ * terminal/`sent` status older than the component's default cutoff),
+ * independent of account deletion -- it runs for every inbox so the
+ * outbound log does not grow unbounded for accounts that are never
+ * deleted. See `convex/mailPurge.ts`'s own docstring for the exact line
+ * (reproduced here as instructed by that module).
+ */
+crons.interval("agentmail outbound cleanup", { hours: 24 }, internal.mailPurge.cleanupFinalizedOutbound, {});
+
 export default crons;
