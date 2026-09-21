@@ -378,14 +378,15 @@ describe("checkpoint 4 (D94) regression tests — T05.1", () => {
       vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
       const email = "f2-existing@example.com";
       // This test is about the ACCOUNT_EXISTS gate specifically (F2), not
-      // the separate authAttempt/authSignUp throttles (covered elsewhere) —
-      // reset those between calls so 12 same-email signUp attempts in a row
-      // don't trip a *different* limiter and produce a false negative here.
+      // the separate authAttempt/authSignUp/authSignUpGlobal throttles
+      // (covered elsewhere) — reset those between calls so 12 same-email
+      // signUp attempts in a row don't trip a *different* limiter and
+      // produce a false negative here.
       const resetOtherLimiters = () =>
         t.run(async (ctx) => {
           await rateLimiter.reset(ctx, "authAttempt", { key: email });
           await rateLimiter.reset(ctx, "authSignUp", { key: email });
-          await rateLimiter.reset(ctx, "authSignUp");
+          await rateLimiter.reset(ctx, "authSignUpGlobal");
         });
 
       await signIn(t, { flow: "signUp", email, password: PASSWORD });
@@ -422,16 +423,20 @@ describe("checkpoint 4 (D94) regression tests — T05.1", () => {
       expect(accounts).toHaveLength(1);
     });
 
-    it("never hashes the supplied secret against an existing account (existence check short-circuits first)", async () => {
+    it("never hashes the supplied secret against an existing account (existence check runs before hashing)", async () => {
       const t = setup();
       vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
       const email = "f2-no-hash@example.com";
       await signIn(t, { flow: "signUp", email, password: PASSWORD });
 
-      // A password so short it would fail `validatePasswordRequirements`
-      // *if* that check ran — proves the existence guard fires before any
-      // profile/password validation or hashing does.
-      await expect(signIn(t, { flow: "signUp", email, password: "x" })).rejects.toThrow(ACCOUNT_EXISTS_MESSAGE);
+      // A well-formed but wrong password: passes the N5 format check (D99),
+      // so this exercises the F2 existence guard specifically, proving it
+      // fires before any hashing. A malformed password is covered
+      // separately (N5, below) and short-circuits even earlier, before the
+      // existence check ever runs.
+      await expect(
+        signIn(t, { flow: "signUp", email, password: "a-different-but-well-formed-1" }),
+      ).rejects.toThrow(ACCOUNT_EXISTS_MESSAGE);
     });
   });
 
@@ -476,7 +481,7 @@ describe("checkpoint 4 (D94) regression tests — T05.1", () => {
       ).rejects.toThrow(INVALID_CODE_MESSAGE);
     });
 
-    it("TOO_MANY_ATTEMPTS_MESSAGE reads identically to WRONG_CREDENTIALS_MESSAGE; only `data.retryAfter` distinguishes it", async () => {
+    it("TOO_MANY_ATTEMPTS_MESSAGE reads identically to WRONG_CREDENTIALS_MESSAGE (N1, D99: byte-identical, no retryAfter)", async () => {
       expect(TOO_MANY_ATTEMPTS_MESSAGE).toBe(WRONG_CREDENTIALS_MESSAGE);
 
       const t = setup();
@@ -507,12 +512,13 @@ describe("checkpoint 4 (D94) regression tests — T05.1", () => {
 
       expect(lockoutErr).toBeInstanceOf(ConvexError);
       expect(wrongPasswordErr).toBeInstanceOf(ConvexError);
-      // Same displayed text for both...
-      expect((lockoutErr as ConvexError<string>).message).toContain(WRONG_CREDENTIALS_MESSAGE);
-      expect((wrongPasswordErr as ConvexError<string>).message).toContain(WRONG_CREDENTIALS_MESSAGE);
-      // ...but only the lockout carries a retryAfter the UI can key off.
-      expect((lockoutErr as ConvexError<{ retryAfter: number }>).data.retryAfter).toBeGreaterThan(0);
+      // N1 (D99): byte-identical — same displayed text, same plain-string
+      // `.data`, and no `retryAfter` on either (the locked-out user gets no
+      // countdown, by design — see auth.ts's N1 doc comment).
+      expect((lockoutErr as ConvexError<string>).message).toBe((wrongPasswordErr as ConvexError<string>).message);
+      expect(typeof (lockoutErr as ConvexError<string>).data).toBe("string");
       expect(typeof (wrongPasswordErr as ConvexError<string>).data).toBe("string");
+      expect((lockoutErr as ConvexError<string>).data).toBe((wrongPasswordErr as ConvexError<string>).data);
     });
 
     it("reset on an unknown address phantom-consumes authMailPerEmail: the 4th request throws identically for known and unknown addresses", async () => {
@@ -584,12 +590,12 @@ describe("checkpoint 4 (D94) regression tests — T05.1", () => {
       expect(accounts).toHaveLength(0);
     });
 
-    it("exhausting authSignUp's own global bucket also blocks signUp before any row is created", async () => {
+    it("exhausting authSignUpGlobal's own bucket also blocks signUp before any row is created (N4, D99: now 200, not 20)", async () => {
       const t = setup();
       const send = vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
       await t.run(async (ctx) => {
-        for (let i = 0; i < 20; i++) {
-          await rateLimiter.limit(ctx, "authSignUp", {});
+        for (let i = 0; i < 200; i++) {
+          await rateLimiter.limit(ctx, "authSignUpGlobal", {});
         }
       });
 
@@ -601,11 +607,11 @@ describe("checkpoint 4 (D94) regression tests — T05.1", () => {
       }
 
       expect(isRateLimitError(caught)).toBe(true);
-      expect((caught as ConvexError<{ name: string }>).data.name).toBe("authSignUp");
+      expect((caught as ConvexError<{ name: string }>).data.name).toBe("authSignUpGlobal");
       expect(send).not.toHaveBeenCalled();
       const users = await t.run(async (ctx) => await ctx.db.query("users").collect());
       expect(users).toHaveLength(0);
-    });
+    }, 20_000);
 
     it("a per-address burst of signUps against one email is also capped by authSignUp, independent of the global bucket", async () => {
       const t = setup();
@@ -629,6 +635,179 @@ describe("checkpoint 4 (D94) regression tests — T05.1", () => {
       // A different address is unaffected: its own authSignUp bucket is fresh.
       const other = await signIn(t, { flow: "signUp", email: "f5-per-address-other@example.com", password: PASSWORD });
       expect(other.tokens).toBeNull();
+    });
+  });
+});
+
+describe("checkpoint-4 recheck (D99) regression tests — T05.2", () => {
+  beforeAll(async () => {
+    process.env.SITE_URL = "https://recoup.example";
+    process.env.CONVEX_SITE_URL = "https://recoup-test.convex.site";
+    const { privateKey } = await generateKeyPair("RS256", { extractable: true });
+    process.env.JWT_PRIVATE_KEY = await exportPKCS8(privateKey);
+    process.env.ALERTS_INBOX_ID = "inbox_test";
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe("N1: the library's own lockout throws a plain string, byte-identical to a wrong password", () => {
+    it("after 10 wrong passwords and 61s, a locked-out known address and an unknown address throw identical ConvexErrors", async () => {
+      vi.useFakeTimers();
+      try {
+        const t = setup();
+        vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
+        const known = "n1-locked-known@example.com";
+        const unknown = "n1-locked-unknown@example.com";
+        await signIn(t, { flow: "signUp", email: known, password: PASSWORD });
+
+        // The signUp call above also spent 1 unit of `known`'s authAttempt
+        // bucket (that gate runs before every flow, not just signIn) —
+        // refill it back to full before the loop below, otherwise our own
+        // gate, not the library's, would refuse the 10th wrong password.
+        vi.advanceTimersByTime(61_000);
+
+        // 10 wrong passwords against the known address: our own authAttempt
+        // token bucket (capacity 10, keyed by email) lets all 10 reach the
+        // provider, which is exactly enough to also exhaust the library's
+        // own, independent per-account lockout counter (default 10/hour) —
+        // the 10th is the last attempt our own gate lets through before it
+        // is empty.
+        for (let i = 0; i < 10; i++) {
+          await expect(signIn(t, { flow: "signIn", email: known, password: "wrong" })).rejects.toThrow(
+            WRONG_CREDENTIALS_MESSAGE,
+          );
+        }
+        // The unknown address has its own, independent authAttempt bucket
+        // (keyed by its own email) and exhausts it the same way, even
+        // though every one of these is an InvalidAccountId, not a real
+        // failed password check.
+        for (let i = 0; i < 10; i++) {
+          await expect(signIn(t, { flow: "signIn", email: unknown, password: "wrong" })).rejects.toThrow(
+            WRONG_CREDENTIALS_MESSAGE,
+          );
+        }
+
+        // Advance past our own authAttempt bucket's ~60s-per-token refill
+        // (rate 10 / 10 minutes) so the 11th call reaches the provider for
+        // both addresses — nowhere near the library's own ~6-minute refill
+        // for a single attempt, so its lockout is still fully in effect for
+        // the known address.
+        vi.advanceTimersByTime(61_000);
+
+        let knownErr: unknown;
+        try {
+          await signIn(t, { flow: "signIn", email: known, password: "wrong" });
+        } catch (err) {
+          knownErr = err;
+        }
+        let unknownErr: unknown;
+        try {
+          await signIn(t, { flow: "signIn", email: unknown, password: "wrong" });
+        } catch (err) {
+          unknownErr = err;
+        }
+
+        expect(knownErr).toBeInstanceOf(ConvexError);
+        expect(unknownErr).toBeInstanceOf(ConvexError);
+        expect(typeof (knownErr as ConvexError<string>).data).toBe("string");
+        expect((knownErr as ConvexError<string>).data).toBe((unknownErr as ConvexError<string>).data);
+        expect((knownErr as ConvexError<string>).message).toBe((unknownErr as ConvexError<string>).message);
+      } finally {
+        vi.useRealTimers();
+      }
+    }, 20_000);
+  });
+
+  describe("N4: authSignUp's global ceiling is independent of the per-address floor", () => {
+    it("21 junk signUps from 21 distinct addresses do not block a 22nd, different, legitimate address", async () => {
+      const t = setup();
+      vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
+
+      for (let i = 0; i < 21; i++) {
+        const result = await signIn(t, { flow: "signUp", email: `n4-distinct-${i}@example.com`, password: PASSWORD });
+        expect(result.tokens).toBeNull();
+      }
+
+      // A 22nd, different address: still well under the 200/hour global
+      // bucket, and its own per-address bucket is fresh — must succeed.
+      const legit = await signIn(t, { flow: "signUp", email: "n4-distinct-legit@example.com", password: PASSWORD });
+      expect(legit.tokens).toBeNull();
+
+      const users = await t.run(async (ctx) => await ctx.db.query("users").collect());
+      expect(users).toHaveLength(22);
+    }, 20_000);
+
+    it("the 21st signUp for one address is refused, while the global bucket is untouched", async () => {
+      const t = setup();
+      vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
+      const email = "n4-one-address@example.com";
+      // Pre-exhaust the per-address authSignUp bucket directly (20/20),
+      // the same way an attacker's 20 real signUp attempts against this one
+      // address would (each real attempt consumes it regardless of
+      // outcome, before accountExists ever runs) — done directly here so
+      // this test isolates the per-address bucket from our own separate
+      // authAttempt gate (capacity 10/10min/email), which would otherwise
+      // start refusing repeat calls to the same address first.
+      await t.run(async (ctx) => {
+        for (let i = 0; i < 20; i++) {
+          await rateLimiter.limit(ctx, "authSignUp", { key: email });
+        }
+      });
+
+      let caught: unknown;
+      try {
+        await signIn(t, { flow: "signUp", email, password: PASSWORD });
+      } catch (err) {
+        caught = err;
+      }
+      expect(isRateLimitError(caught)).toBe(true);
+      expect((caught as ConvexError<{ name: string }>).data.name).toBe("authSignUp");
+
+      // The global bucket (200/hour) is nowhere near exhausted: a different
+      // address signs up fine.
+      const other = await signIn(t, { flow: "signUp", email: "n4-one-address-other@example.com", password: PASSWORD });
+      expect(other.tokens).toBeNull();
+    });
+  });
+
+  describe("N5: the password-format check runs before the existence probe", () => {
+    it("a malformed-password signUp against an existing address and an unknown address throw the identical error", async () => {
+      const t = setup();
+      vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
+      const existing = "n5-existing@example.com";
+      await signIn(t, { flow: "signUp", email: existing, password: PASSWORD });
+
+      let existingErr: unknown;
+      try {
+        await signIn(t, { flow: "signUp", email: existing, password: "short" });
+      } catch (err) {
+        existingErr = err;
+      }
+      let unknownErr: unknown;
+      try {
+        await signIn(t, { flow: "signUp", email: "n5-unknown@example.com", password: "short" });
+      } catch (err) {
+        unknownErr = err;
+      }
+
+      expect(existingErr).toBeInstanceOf(ConvexError);
+      expect(unknownErr).toBeInstanceOf(ConvexError);
+      expect((existingErr as ConvexError<string>).message).toBe((unknownErr as ConvexError<string>).message);
+      expect((existingErr as ConvexError<string>).data).toBe((unknownErr as ConvexError<string>).data);
+      // Neither is the account-exists message — the existence probe never ran.
+      expect((existingErr as ConvexError<string>).data).not.toBe(ACCOUNT_EXISTS_MESSAGE);
+      expect((existingErr as ConvexError<string>).message).toMatch(/8-128 characters/);
+
+      // The unknown address really is still unknown: no row was created for it.
+      const unknownUsers = await t.run(async (ctx) =>
+        ctx.db
+          .query("users")
+          .filter((q) => q.eq(q.field("email"), "n5-unknown@example.com"))
+          .collect(),
+      );
+      expect(unknownUsers).toHaveLength(0);
     });
   });
 });

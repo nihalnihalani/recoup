@@ -46,19 +46,52 @@
  *    leaking a distinct "wrong password" wording for a code-entry screen.
  *    `TOO_MANY_ATTEMPTS_MESSAGE` reads identically to
  *    `WRONG_CREDENTIALS_MESSAGE` (both exported, kept as separate constants
- *    only so call sites stay self-documenting) with a `data.retryAfter` the
- *    UI alone can key off. A `flow === "reset"` request against an *unknown*
+ *    only so call sites stay self-documenting); see N1 below for why it no
+ *    longer carries a `retryAfter`. A `flow === "reset"` request against an *unknown*
  *    address now also consumes (not just peeks) `authMailPerEmail` for that
  *    address — previously only a *known* address's real send (deep inside
  *    `authMail`) ever decremented that bucket, so an unknown address could
  *    be probed with unlimited reset requests while a known one got throttled
  *    on the 4th — an account-enumeration side channel.
- * 7. F5: `flow === "signUp"` first consumes `authSignUp` (global, then
- *    per-address) and peeks (never consumes — the real send still does)
- *    `authMailGlobal`, all before any provider work — so a saturated mail
- *    quota or a burst of signUps rejects with `RateLimited` before
- *    `createAccount` ever runs, instead of leaving a fresh, unverified,
- *    permanently-unreachable `users`/`authAccounts` row behind.
+ * 7. F5: `flow === "signUp"` first consumes `authSignUpGlobal` (deployment-
+ *    wide), then `authSignUp` (per-address), and peeks (never consumes —
+ *    the real send still does) `authMailGlobal`, all before any provider
+ *    work — so a saturated mail quota or a burst of signUps rejects with
+ *    `RateLimited` before `createAccount` ever runs, instead of leaving a
+ *    fresh, unverified, permanently-unreachable `users`/`authAccounts` row
+ *    behind.
+ *
+ * Checkpoint-4 recheck (D99) additions:
+ *
+ * 8. N1: the library's own per-account lockout (`TooManyFailedAttempts`,
+ *    tracked in its `authRateLimits` table, distinct from our `authAttempt`
+ *    bucket above) maps to a *plain-string* `ConvexError(WRONG_CREDENTIALS_MESSAGE)`
+ *    — no `retryAfter`, no `{kind: "RateLimited"}` envelope, byte-identical
+ *    to an ordinary wrong password. This is a deliberate tradeoff: the
+ *    locked-out user gets no countdown (the client's `isRateLimitError()`
+ *    returns false for this error, same as for a wrong password, so the UI
+ *    falls back to its generic "wrong email or password" copy) because
+ *    giving one back would let an attacker distinguish "this account is
+ *    locked" from "this password is wrong" by response shape alone, for
+ *    every account they probe — an enumeration oracle in exchange for a
+ *    countdown nobody but the legitimate owner benefits from.
+ * 9. N4: `authSignUp` (per-address, 20/hour) and `authSignUpGlobal`
+ *    (deployment-wide, 200/hour token bucket) are now two distinct named
+ *    limiters — previously both the unkeyed (global) and keyed (per-
+ *    address) calls shared one config, so the *global* bucket was also
+ *    capped at 20/hour: 20 signUps anywhere (e.g. 20 distinct, unrelated
+ *    addresses) refused every further signUp on the entire site until the
+ *    window rolled over, a self-inflicted registration lockout rather than
+ *    an abuse control.
+ * 10. N5: the password-format check (`checkPasswordFormat`, the same rule
+ *     passed to `Password(...)` as `validatePasswordRequirements` below)
+ *     now runs *before* the F2 existence probe. Previously a malformed
+ *     (too-short/too-long) password against an *existing* address
+ *     short-circuited on `ACCOUNT_EXISTS_MESSAGE`, while the identical
+ *     malformed password against an *unknown* address fell through into
+ *     the library's own `authorize` (which validates the password first)
+ *     and threw a differently-worded error — an account-enumeration oracle
+ *     triggerable with zero valid credentials.
  */
 import { ConvexError } from "convex/values";
 import { ConvexCredentials } from "@convex-dev/auth/providers/ConvexCredentials";
@@ -75,17 +108,19 @@ import { rateLimiter } from "./lib/rateLimits";
 /** Client-facing messages. Identical for known/unknown addresses by construction (D67/T05). */
 export const WRONG_CREDENTIALS_MESSAGE = "Wrong email or password";
 /**
- * F3 (D94): deliberately the *same string* as `WRONG_CREDENTIALS_MESSAGE` —
- * the library's own per-account lockout (`authRateLimits`, distinct from our
- * `authAttempt` rate limit) must not read differently from an ordinary wrong
- * password, or the message itself becomes an account-lockout oracle. Kept as
- * a separate exported constant only so call sites document intent; the UI
- * distinguishes this case via `data.retryAfter` on the thrown `ConvexError`,
- * which a plain wrong-credentials error never carries.
+ * F3 (D94) / N1 (D99): deliberately the *same string* as
+ * `WRONG_CREDENTIALS_MESSAGE` — the library's own per-account lockout
+ * (`authRateLimits`, distinct from our `authAttempt` rate limit) must not
+ * read differently from an ordinary wrong password, or the message itself
+ * becomes an account-lockout oracle. Kept as a separate exported constant
+ * only so call sites document intent. N1 (D99): the thrown `ConvexError` is
+ * now a plain string with no `retryAfter` and no `{kind: "RateLimited"}`
+ * envelope — byte-identical to a wrong-password error, including to
+ * `isRateLimitError()` on the client, which returns `false` for both. The
+ * locked-out user gets no countdown, by design: see the module docstring's
+ * "N1" note for the enumeration-oracle tradeoff this avoids.
  */
 export const TOO_MANY_ATTEMPTS_MESSAGE = WRONG_CREDENTIALS_MESSAGE;
-/** Approximate: the library's per-account lockout refills continuously (10/hour by default, not in fixed windows), so this is a conservative single-slot estimate, not an exact countdown. */
-const TOO_MANY_ATTEMPTS_RETRY_AFTER_MS = 6 * 60_000;
 export const INVALID_CODE_MESSAGE = "That code is not valid or has expired";
 export const ACCOUNT_EXISTS_MESSAGE =
   "Could not create an account with those details. If you already have one, sign in or reset your password.";
@@ -97,13 +132,25 @@ const MAX_PASSWORD_CHARS = 128;
 /** Matches `Password<DataModel>({...})` below, which does not override `id`. */
 const PASSWORD_PROVIDER_ID = "password";
 
+/**
+ * N5 (D99): the same 8-128 char rule passed to `Password(...)` below as
+ * `validatePasswordRequirements`, exposed as a standalone function so
+ * `guardedAuthorize` can also run it directly, *before* the F2 existence
+ * probe (see the `flow === "signUp"` branch below) — the library's own
+ * `validatePasswordRequirements` hook is not otherwise reachable ahead of
+ * that probe, and its internal default (`validateDefaultPasswordRequirements`
+ * in `Password.ts`) is not exported, so this mirrors our own already-active
+ * rule rather than importing the library's.
+ */
+function checkPasswordFormat(pw: unknown): void {
+  if (typeof pw !== "string" || pw.length < MIN_PASSWORD_CHARS || pw.length > MAX_PASSWORD_CHARS) {
+    throw new ConvexError(`Password must be ${MIN_PASSWORD_CHARS}-${MAX_PASSWORD_CHARS} characters`);
+  }
+}
+
 const password = Password<DataModel>({
   profile: (params) => ({ email: normalizeEmail(params.email) }),
-  validatePasswordRequirements: (pw: string) => {
-    if (typeof pw !== "string" || pw.length < MIN_PASSWORD_CHARS || pw.length > MAX_PASSWORD_CHARS) {
-      throw new ConvexError(`Password must be ${MIN_PASSWORD_CHARS}-${MAX_PASSWORD_CHARS} characters`);
-    }
-  },
+  validatePasswordRequirements: checkPasswordFormat,
   verify: authMail("verify"),
   reset: authMail("reset"),
 });
@@ -156,13 +203,25 @@ async function guardedAuthorize(params: AuthorizeParams, ctx: Ctx): Promise<Auth
     }
 
     if (flow === "signUp") {
-      // F5: consumed before any users/authAccounts row is created.
-      await rateLimiter.limit(ctx, "authSignUp", { throws: true });
+      // F5/N4: consumed before any users/authAccounts row is created.
+      // Global and per-address are two distinct named limiters (N4, D99) so
+      // a deployment-wide burst from many distinct addresses cannot exhaust
+      // the same bucket a single targeted address is throttled by.
+      await rateLimiter.limit(ctx, "authSignUpGlobal", { throws: true });
       await rateLimiter.limit(ctx, "authSignUp", { key: email, throws: true });
       const mailStatus = await rateLimiter.check(ctx, "authMailGlobal");
       if (!mailStatus.ok) {
         throw new ConvexError({ kind: "RateLimited", name: "authMailGlobal", retryAfter: mailStatus.retryAfter });
       }
+
+      // N5 (D99): format-check the password *before* the existence probe
+      // below — otherwise a malformed password against an existing address
+      // short-circuited on ACCOUNT_EXISTS_MESSAGE while the identical
+      // malformed password against an unknown address fell through into the
+      // library's own (differently-worded) validation error, letting a
+      // junk-password signUp distinguish a registered address from an
+      // unregistered one with zero valid credentials.
+      checkPasswordFormat(params.password);
 
       // F2: signUp against an existing account never authenticates, no
       // matter the supplied secret, and never reaches the hash comparison.
@@ -201,7 +260,14 @@ async function guardedAuthorize(params: AuthorizeParams, ctx: Ctx): Promise<Auth
       throw new ConvexError(WRONG_CREDENTIALS_MESSAGE);
     }
     if (message === "TooManyFailedAttempts") {
-      throw new ConvexError({ message: TOO_MANY_ATTEMPTS_MESSAGE, retryAfter: TOO_MANY_ATTEMPTS_RETRY_AFTER_MS });
+      // N1 (D99): a plain-string ConvexError, byte-identical to a wrong
+      // password — no `retryAfter`, no `{kind: "RateLimited"}` envelope.
+      // The locked-out user gets no countdown, by design: see the module
+      // docstring's "N1" note and TOO_MANY_ATTEMPTS_MESSAGE's own doc
+      // comment for why a distinguishable shape here is an enumeration
+      // oracle (an attacker could tell "locked out" from "wrong password"
+      // for any account they probe, with zero valid credentials).
+      throw new ConvexError(TOO_MANY_ATTEMPTS_MESSAGE);
     }
     if (message === "Could not verify code" || message === "Invalid code") {
       throw new ConvexError(INVALID_CODE_MESSAGE);
