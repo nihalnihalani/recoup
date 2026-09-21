@@ -33,6 +33,7 @@ import { priceDropCents, windowEndsAt } from "./lib/ledger";
 import { openClaim } from "./claims";
 import { Price } from "./lib/schemas";
 import { extract } from "./lib/ai";
+import { imageUrlChange, pageImageUrl } from "./lib/imageUrl";
 
 const firecrawl = new FirecrawlClient(components.firecrawl);
 
@@ -227,6 +228,8 @@ export const recordCheck = internalMutation({
     isRange: v.optional(v.boolean()),
     variantMatch: v.optional(variantMatch),
     note: v.optional(v.string()),
+    /** The page's Open Graph image; stored only when it is an absolute https URL (lib/imageUrl.ts). */
+    imageUrl: v.optional(v.string()),
   },
   returns: recordResult,
   handler: async (ctx, args) => {
@@ -236,6 +239,9 @@ export const recordCheck = internalMutation({
     if (!purchase || purchase.userId !== item.userId) throw new ConvexError("Purchase not found");
 
     const now = Date.now();
+    // A page that is "not that product" says nothing about what this item looks like.
+    const imageUrl = args.variantMatch === "none" ? undefined : imageUrlChange(item.imageUrl, args.imageUrl);
+    if (imageUrl !== undefined) await ctx.db.patch(item._id, { imageUrl });
     const rejection = rejectionReason(args, purchase.currency, "the purchase was");
 
     const priceCheckId = await ctx.db.insert("priceChecks", {
@@ -348,7 +354,7 @@ export const checkItem = internalAction({
     const item = await ctx.runQuery(internal.priceWatch.itemForCheck, { itemId });
     if (!item) return null;
 
-    let observed: Observation;
+    let observed: Observation & { imageUrl?: string };
     try {
       // `listCents` and `productName` are for watches (W1); an owned item
       // already has a name and `priceChecks` has no list-price column.
@@ -385,6 +391,8 @@ export type PageObservation = Observation & {
   /** The page's claimed "was"/list price in minor units, unverified. */
   listCents?: number;
   productName?: string;
+  /** The page's Open Graph image, already an absolute https URL. */
+  imageUrl?: string;
 };
 
 /**
@@ -401,6 +409,8 @@ export async function observePrice(
 ): Promise<PageObservation> {
   const page = await firecrawl.scrape(ctx, productUrl, scrapeOptions());
   const markdown = typeof page.markdown === "string" ? page.markdown : "";
+  // Same scrape, no second request: the Open Graph image rides in the metadata.
+  const imageUrl = pageImageUrl(page.metadata);
   if (markdown.length < MIN_PAGE_CHARS) {
     return { note: "The product page could not be read" };
   }
@@ -432,6 +442,7 @@ export async function observePrice(
   }
   const productName = parsed.productName?.trim();
   return {
+    imageUrl,
     observedCents,
     listCents,
     productName: productName ? productName.slice(0, MAX_NAME_CHARS) : undefined,

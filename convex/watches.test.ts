@@ -718,3 +718,59 @@ describe("watches.markBought (W4)", () => {
     expect((await scheduled(t)).length).toBe(before);
   });
 });
+
+describe("watch images", () => {
+  const IMG = "https://cdn.acme.example/i/jacket.jpg";
+
+  it("stores the page image only when it is an absolute https URL, and exposes it in list and get", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    for (const imageUrl of ["http://cdn.acme.example/i.jpg", "//cdn.acme.example/i.jpg", "/i/jacket.jpg", "data:image/png;base64,AA", `https://cdn.acme.example/${"x".repeat(2_000)}`]) {
+      await t.mutation(internal.watches.recordWatchCheck, { ...good(watchId, 10_000), imageUrl });
+      expect((await watchRow(t, watchId)).imageUrl).toBeUndefined();
+    }
+    expect((await as.query(api.watches.list, {}))[0].imageUrl).toBeNull();
+
+    await t.mutation(internal.watches.recordWatchCheck, { ...good(watchId, 10_000), imageUrl: IMG });
+    expect((await watchRow(t, watchId)).imageUrl).toBe(IMG);
+    expect((await as.query(api.watches.list, {}))[0].imageUrl).toBe(IMG);
+    expect((await as.query(api.watches.get, { watchId }))!.watch.imageUrl).toBe(IMG);
+
+    // A later check without an image, or with a bad one, keeps what we have; a changed one replaces it.
+    await t.mutation(internal.watches.recordWatchCheck, good(watchId, 10_000));
+    await t.mutation(internal.watches.recordWatchCheck, { ...good(watchId, 10_000), imageUrl: "http://x.example/i.jpg" });
+    expect((await watchRow(t, watchId)).imageUrl).toBe(IMG);
+    await t.mutation(internal.watches.recordWatchCheck, { ...good(watchId, 10_000), imageUrl: `${IMG}?v=2` });
+    expect((await watchRow(t, watchId)).imageUrl).toBe(`${IMG}?v=2`);
+  });
+
+  it("ignores the image of a page that is not the product, but keeps one from an unpriced read", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await t.mutation(internal.watches.recordWatchCheck, { ...good(watchId, 10_000), variantMatch: "none", imageUrl: IMG });
+    expect((await watchRow(t, watchId)).imageUrl).toBeUndefined();
+    await t.mutation(internal.watches.recordWatchCheck, { watchId, sourceUrl: URL, note: "The page does not show a single price", imageUrl: IMG });
+    expect((await watchRow(t, watchId)).imageUrl).toBe(IMG);
+  });
+
+  it("checkWatch threads the scraped image through, and markBought carries it to the item", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId, { currency: "USD" });
+    vi.mocked(observePrice).mockResolvedValueOnce({
+      observedCents: 7_500, currency: "USD", confidence: 0.9, isRange: false, variantMatch: "exact", imageUrl: IMG,
+    });
+    await t.action(internal.watches.checkWatch, { watchId });
+    expect(vi.mocked(observePrice)).toHaveBeenCalledTimes(1); // one scrape, not two
+    expect((await watchRow(t, watchId)).imageUrl).toBe(IMG);
+
+    const purchaseId = await as.mutation(api.watches.markBought, { watchId, paidCents: 7_500, purchasedAt: T0 - 86_400_000 });
+    const items = await t.run((ctx) => ctx.db.query("items").withIndex("by_purchase", (q) => q.eq("purchaseId", purchaseId)).collect());
+    expect(items).toHaveLength(1);
+    expect(items[0].imageUrl).toBe(IMG);
+    const overview = await as.query(api.tracking.overview, {});
+    expect(overview.items.find((i) => i.itemId === items[0]._id)?.imageUrl).toBe(IMG);
+  });
+});

@@ -63,6 +63,10 @@ const LIST_LIMIT = 20;
  */
 const WATCH_ROWS = MAX_OFFERS_PER_WATCH + 60;
 const MAX_TITLE_CHARS = 200;
+/** `offerChecks` rows dropped at once when a candidate is replaced by another page; a candidate only gains rows from finds. */
+const STALE_CHECKS_PAGE = 100;
+/** A retry inside this window that saw the same price writes no second `offerChecks` row. */
+export const OFFER_CHECK_DEDUPE_MS = 30 * 60_000;
 const MAX_QUERY_CHARS = 200;
 
 // ---------------------------------------------------------------------------
@@ -142,6 +146,21 @@ async function watchRows(ctx: QueryCtx, watchId: Id<"watches">): Promise<Doc<"of
     .take(WATCH_ROWS);
 }
 
+/**
+ * The CONFIRMED offers of one watch, cheapest first (unknown price last). Complete for the same reason
+ * `watchRows` is. Shared with the dashboard read models (`insights.ts`), which never show anything else.
+ */
+export async function confirmedOffers(
+  ctx: QueryCtx,
+  watchId: Id<"watches">,
+  userId: Id<"users">,
+): Promise<Doc<"offers">[]> {
+  const rows = await watchRows(ctx, watchId);
+  return rows
+    .filter((r) => !isMarker(r) && r.userId === userId && r.status === "confirmed")
+    .sort(byCentsThenUnknown);
+}
+
 /** The name to search and match on, or null when the watch has nothing that names the product. */
 function searchName(watch: Doc<"watches">): string | null {
   if (watch.name !== defaultWatchName(watch.productUrl)) return watch.name.slice(0, MAX_QUERY_CHARS);
@@ -178,6 +197,42 @@ function priceFields(
     lastCheckedAt: now,
     note: note === undefined ? undefined : truncate(note),
   };
+}
+
+/**
+ * Per-store price history. Called from every place that stores an accepted
+ * price into `offers.lastCents`, in the same transaction, so the series and
+ * the row cannot drift. A rejected or unpriced observation (`cents` undefined)
+ * writes nothing, and neither does a repeat of the newest row's price inside
+ * OFFER_CHECK_DEDUPE_MS (an action retry, or a search that lands right after a recheck).
+ */
+async function appendOfferCheck(
+  ctx: MutationCtx,
+  offer: { offerId: Id<"offers">; watchId: Id<"watches">; userId: Id<"users"> },
+  price: { lastCents?: number; currency?: string },
+  observedAt: number,
+): Promise<void> {
+  if (price.lastCents === undefined) return;
+  const newest = await ctx.db
+    .query("offerChecks")
+    .withIndex("by_offer", (q) => q.eq("offerId", offer.offerId))
+    .order("desc")
+    .first();
+  if (
+    newest &&
+    newest.observedCents === price.lastCents &&
+    Math.abs(observedAt - newest.observedAt) < OFFER_CHECK_DEDUPE_MS
+  ) {
+    return;
+  }
+  await ctx.db.insert("offerChecks", {
+    offerId: offer.offerId,
+    watchId: offer.watchId,
+    userId: offer.userId,
+    observedCents: price.lastCents,
+    currency: price.currency,
+    observedAt,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +303,21 @@ async function decide(ctx: MutationCtx, offerId: Id<"offers">, status: "confirme
   const userId = await requireUserId(ctx);
   const offer = await ownedOffer(ctx, offerId, userId);
   if (offer.status !== status) await ctx.db.patch(offerId, { status }); // a retry is a no-op
+  // An offer priced before per-store history existed starts its series at the price it was confirmed with.
+  if (status === "confirmed" && offer.lastCents !== undefined) {
+    const any = await ctx.db
+      .query("offerChecks")
+      .withIndex("by_offer", (q) => q.eq("offerId", offerId))
+      .first();
+    if (!any) {
+      await appendOfferCheck(
+        ctx,
+        { offerId, watchId: offer.watchId, userId: offer.userId },
+        offer,
+        offer.lastCheckedAt ?? Math.floor(offer._creationTime),
+      );
+    }
+  }
   return null;
 }
 
@@ -481,6 +551,7 @@ export const recordCandidates = internalMutation({
       if (existing?.status === "confirmed") {
         if (existing.productUrl !== c.productUrl) continue;
         await ctx.db.patch(existing._id, price);
+        await appendOfferCheck(ctx, { offerId: existing._id, watchId, userId: existing.userId }, price, now);
         written++;
         continue;
       }
@@ -493,15 +564,25 @@ export const recordCandidates = internalMutation({
       };
       if (existing) {
         await ctx.db.patch(existing._id, fields);
+        // Another page of the same store is another listing: its prices do not continue the old page's series.
+        if (existing.productUrl !== c.productUrl) {
+          const stale = await ctx.db
+            .query("offerChecks")
+            .withIndex("by_offer", (q) => q.eq("offerId", existing._id))
+            .take(STALE_CHECKS_PAGE);
+          for (const row of stale) await ctx.db.delete(row._id);
+        }
+        await appendOfferCheck(ctx, { offerId: existing._id, watchId, userId: existing.userId }, price, now);
       } else {
         if (stores >= MAX_OFFERS_PER_WATCH || inserted.has(c.storeDomain)) continue;
-        await ctx.db.insert("offers", {
+        const offerId = await ctx.db.insert("offers", {
           watchId,
           userId: watch.userId,
           storeDomain: c.storeDomain,
           status: "candidate",
           ...fields,
         });
+        await appendOfferCheck(ctx, { offerId, watchId, userId: watch.userId }, price, now);
         inserted.add(c.storeDomain);
         stores++;
       }
@@ -593,7 +674,9 @@ export const recordRechecks = internalMutation({
     for (const r of results.slice(0, MAX_OFFER_RECHECKS)) {
       const offer = await ctx.db.get(r.offerId);
       if (!offer || offer.watchId !== watchId || offer.status !== "confirmed" || isMarker(offer)) continue;
-      await ctx.db.patch(offer._id, priceFields(r, watch.currency, now));
+      const price = priceFields(r, watch.currency, now);
+      await ctx.db.patch(offer._id, price);
+      await appendOfferCheck(ctx, { offerId: offer._id, watchId, userId: offer.userId }, price, now);
       written++;
     }
     return written;

@@ -21,6 +21,7 @@ import type * as intake from "../intake.js";
 import type * as lib_access from "../lib/access.js";
 import type * as lib_ai from "../lib/ai.js";
 import type * as lib_balance from "../lib/balance.js";
+import type * as lib_imageUrl from "../lib/imageUrl.js";
 import type * as lib_latestPolicy from "../lib/latestPolicy.js";
 import type * as lib_ledger from "../lib/ledger.js";
 import type * as lib_money from "../lib/money.js";
@@ -62,6 +63,7 @@ declare const fullApi: ApiFromModules<{
   "lib/access": typeof lib_access;
   "lib/ai": typeof lib_ai;
   "lib/balance": typeof lib_balance;
+  "lib/imageUrl": typeof lib_imageUrl;
   "lib/latestPolicy": typeof lib_latestPolicy;
   "lib/ledger": typeof lib_ledger;
   "lib/money": typeof lib_money;

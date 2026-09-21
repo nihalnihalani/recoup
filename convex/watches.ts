@@ -30,6 +30,7 @@ import { assertCurrency, assertNonEmpty, assertPositiveCents, assertQty, assertT
 import { claimDrop } from "./notify";
 import { defaultWatchName, parseProductUrl } from "./lib/watchUrl";
 import { verdict, type Verdict } from "./lib/verdict";
+import { imageUrlChange } from "./lib/imageUrl";
 import { errorNote, observePrice, rejectionReason, truncate, type PageObservation } from "./priceWatch";
 import {
   MAX_WATCHES_PER_USER,
@@ -72,6 +73,8 @@ const watchSummary = v.object({
   name: v.string(),
   productUrl: v.string(),
   merchantDomain: v.string(),
+  /** The product page's Open Graph image, once a check has seen one. */
+  imageUrl: v.union(v.string(), v.null()),
   currency: v.union(v.string(), v.null()),
   targetCents: v.union(v.number(), v.null()),
   status: watchStatus,
@@ -150,6 +153,7 @@ function summarise(
     name: watch.name,
     productUrl: watch.productUrl,
     merchantDomain: watch.merchantDomain,
+    imageUrl: watch.imageUrl ?? null,
     currency: watch.currency ?? null,
     targetCents: watch.targetCents ?? null,
     status: watch.status,
@@ -443,6 +447,7 @@ export const markBought = mutation({
       qty,
       productUrl: watch.productUrl,
       returned: false,
+      imageUrl: watch.imageUrl,
     });
 
     // Newest accepted checks, bounded; inserted oldest first so `by_item`
@@ -546,6 +551,8 @@ export const recordWatchCheck = internalMutation({
     variantMatch: v.optional(variantMatch),
     productName: v.optional(v.string()),
     note: v.optional(v.string()),
+    /** The page's Open Graph image; stored only when it is an absolute https URL (lib/imageUrl.ts). */
+    imageUrl: v.optional(v.string()),
   },
   returns: recordResult,
   handler: async (ctx, args) => {
@@ -600,6 +607,9 @@ export const recordWatchCheck = internalMutation({
     ) {
       patch.name = productName.slice(0, MAX_NAME_CHARS);
     }
+    // A page that is "not that product" says nothing about what this one looks like.
+    const imageUrl = args.variantMatch === "none" ? undefined : imageUrlChange(watch.imageUrl, args.imageUrl);
+    if (imageUrl !== undefined) patch.imageUrl = imageUrl;
     await ctx.db.patch(watch._id, patch);
 
     // W2: `watch` is still the row as it was before this check, so its

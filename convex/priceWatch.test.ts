@@ -522,3 +522,28 @@ describe("priceWatch.checkNow", () => {
     await expect(as.mutation(api.priceWatch.checkNow, { itemId })).resolves.toBeNull();
   });
 });
+
+describe("item images", () => {
+  it("stores the page image on the item only when it is an absolute https URL", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { itemId } = await world(t, userId);
+    const item = () => t.run((ctx) => ctx.db.get(itemId));
+    for (const imageUrl of ["http://cdn.acme.example/i.jpg", "/i/jacket.jpg", "javascript:alert(1)"]) {
+      await t.mutation(internal.priceWatch.recordCheck, { ...good(itemId, 11_900), imageUrl });
+      expect((await item())?.imageUrl).toBeUndefined();
+    }
+    const overviewBefore = await as.query(api.tracking.overview, {});
+    expect(overviewBefore.items[0].imageUrl).toBeUndefined();
+
+    await t.mutation(internal.priceWatch.recordCheck, { ...good(itemId, 11_900), imageUrl: "https://cdn.acme.example/i/jacket.jpg" });
+    expect((await item())?.imageUrl).toBe("https://cdn.acme.example/i/jacket.jpg");
+    await t.mutation(internal.priceWatch.recordCheck, good(itemId, 11_900)); // no image this time: kept
+    expect((await item())?.imageUrl).toBe("https://cdn.acme.example/i/jacket.jpg");
+    const overview = await as.query(api.tracking.overview, {});
+    expect(overview.items[0].imageUrl).toBe("https://cdn.acme.example/i/jacket.jpg");
+
+    await t.mutation(internal.priceWatch.recordCheck, { ...good(itemId, 11_900), variantMatch: "none", imageUrl: "https://cdn.acme.example/other.jpg" });
+    expect((await item())?.imageUrl).toBe("https://cdn.acme.example/i/jacket.jpg");
+  });
+});

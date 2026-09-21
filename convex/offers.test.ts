@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
-import { recheckConfirmedOffers, searchOffers, type OfferDeps } from "./offers";
+import { OFFER_CHECK_DEDUPE_MS, recheckConfirmedOffers, searchOffers, type OfferDeps } from "./offers";
 import type { PageObservation } from "./priceWatch";
 import { MAX_OFFER_FINDS_PER_DAY, OFFER_FIND_COOLDOWN_MS, OFFER_FIND_WINDOW_MS } from "./limits";
 
@@ -445,5 +445,122 @@ describe("recheck", () => {
     expect((await rows(t, watchId))[0]).toMatchObject({ lastCents: 18_000, lastCheckedAt: T0 });
     // The internal registration exists for the sweep to schedule.
     expect(internal.offers.recheck).toBeDefined();
+  });
+});
+
+describe("offerChecks (per-store price history)", () => {
+  async function history(t: T, offerId: Id<"offers">) {
+    return await t.run((ctx) =>
+      ctx.db.query("offerChecks").withIndex("by_offer", (q) => q.eq("offerId", offerId)).collect(),
+    );
+  }
+  const cand = (store: string, obs: PageObservation, path = "p/1") => ({
+    storeDomain: store,
+    productUrl: `https://${store}/${path}`,
+    title: NAME,
+    observedCents: obs.observedCents,
+    currency: obs.currency,
+    confidence: obs.confidence,
+    isRange: obs.isRange,
+    variantMatch: obs.variantMatch,
+    note: obs.note,
+  });
+
+  it("writes one row per accepted price from a search, and none for a rejected or unpriced page", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    await t.mutation(internal.offers.recordCandidates, {
+      watchId,
+      candidates: [
+        cand("rei.example", exact(18_000)),
+        cand("eur.example", exact(17_000, { currency: "EUR" })), // D16: wrong currency, no cents stored
+        cand("vague.example", exact(16_000, { variantMatch: "unsure" })),
+        cand("blank.example", { variantMatch: "exact", note: "No price shown" }),
+      ],
+    });
+    const stored = await rows(t, watchId);
+    expect(stored).toHaveLength(4);
+    for (const offer of stored) {
+      const checks = await history(t, offer._id);
+      if (offer.storeDomain === "rei.example") {
+        expect(checks).toHaveLength(1);
+        expect(checks[0]).toMatchObject({ offerId: offer._id, watchId, userId, observedCents: 18_000, currency: "USD", observedAt: T0 });
+      } else {
+        expect(offer.lastCents).toBeUndefined();
+        expect(checks).toHaveLength(0);
+      }
+    }
+  });
+
+  it("skips a retry with the same price inside 30 minutes, and records a new price or a later repeat", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    await t.mutation(internal.offers.recordCandidates, { watchId, candidates: [cand("rei.example", exact(18_000))] });
+    const [offer] = await rows(t, watchId);
+    await as.mutation(api.offers.confirm, { offerId: offer._id });
+    // Confirming an offer that already has its series adds nothing.
+    expect(await history(t, offer._id)).toHaveLength(1);
+
+    const recheck = (cents: number) =>
+      t.mutation(internal.offers.recordRechecks, { watchId, results: [{ offerId: offer._id, ...exact(cents) }] });
+
+    vi.setSystemTime(T0 + 60_000);
+    await recheck(18_000); // retry, same price: no row
+    expect(await history(t, offer._id)).toHaveLength(1);
+    // The search finding the confirmed URL again is the same writer path.
+    await t.mutation(internal.offers.recordCandidates, { watchId, candidates: [cand("rei.example", exact(18_000))] });
+    expect(await history(t, offer._id)).toHaveLength(1);
+
+    vi.setSystemTime(T0 + 120_000);
+    await recheck(17_500); // a different price inside the window is news
+    expect((await history(t, offer._id)).map((c) => c.observedCents)).toEqual([18_000, 17_500]);
+
+    vi.setSystemTime(T0 + 120_000 + OFFER_CHECK_DEDUPE_MS);
+    await recheck(17_500); // same price, window over: a new reading
+    const checks = await history(t, offer._id);
+    expect(checks.map((c) => [c.observedCents, c.observedAt])).toEqual([
+      [18_000, T0],
+      [17_500, T0 + 120_000],
+      [17_500, T0 + 120_000 + OFFER_CHECK_DEDUPE_MS],
+    ]);
+
+    // A rejected re-read clears the offer's price and writes no row.
+    vi.setSystemTime(T0 + 3 * OFFER_CHECK_DEDUPE_MS);
+    await t.mutation(internal.offers.recordRechecks, {
+      watchId,
+      results: [{ offerId: offer._id, ...exact(9_000, { confidence: 0.2 }) }],
+    });
+    expect(await history(t, offer._id)).toHaveLength(3);
+  });
+
+  it("confirming an offer priced before the history existed seeds its one known point, once", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    const offerId = await t.run((ctx) =>
+      ctx.db.insert("offers", {
+        watchId, userId, storeDomain: "old.example", productUrl: "https://old.example/p/1", title: NAME,
+        status: "candidate", lastCents: 15_000, currency: "USD", lastCheckedAt: T0 - 86_400_000,
+      }),
+    );
+    await as.mutation(api.offers.confirm, { offerId });
+    await as.mutation(api.offers.confirm, { offerId }); // a retry is a no-op
+    const checks = await history(t, offerId);
+    expect(checks).toHaveLength(1);
+    expect(checks[0]).toMatchObject({ observedCents: 15_000, observedAt: T0 - 86_400_000, userId, watchId });
+  });
+
+  it("a candidate replaced by another page of the store starts a fresh series", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    await t.mutation(internal.offers.recordCandidates, { watchId, candidates: [cand("rei.example", exact(18_000), "p/1")] });
+    vi.setSystemTime(T0 + 7 * 3_600_000);
+    await t.mutation(internal.offers.recordCandidates, { watchId, candidates: [cand("rei.example", exact(12_000), "p/2")] });
+    const [offer] = await rows(t, watchId);
+    expect(offer.productUrl).toBe("https://rei.example/p/2");
+    expect((await history(t, offer._id)).map((c) => c.observedCents)).toEqual([12_000]);
   });
 });

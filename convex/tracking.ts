@@ -23,6 +23,7 @@ const trackedItem = v.object({
   qty: v.number(),
   paidCents: v.number(),
   productUrl: v.optional(v.string()),
+  imageUrl: v.optional(v.string()),
   purchasedAt: v.optional(v.number()),
   isExample: v.boolean(),
   /** Price-adjustment window from the latest policy snapshot, when one states it. */
@@ -142,6 +143,7 @@ export const overview = query({
           qty: item.qty,
           paidCents: item.unitCents,
           productUrl: item.productUrl,
+          imageUrl: item.imageUrl,
           purchasedAt: purchase.purchasedAt,
           isExample,
           windowDays,

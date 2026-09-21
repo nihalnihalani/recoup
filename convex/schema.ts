@@ -47,6 +47,8 @@ export default defineSchema({
   items: defineTable({
     purchaseId: v.id("purchases"), userId: v.id("users"), name: v.string(), unitCents: v.number(), qty: v.number(),
     productUrl: v.optional(v.string()), returned: v.boolean(), returnedAt: v.optional(v.number()),
+    /** The product page's Open Graph image (absolute https), captured by a price check or carried from a watch. */
+    imageUrl: v.optional(v.string()),
   }).index("by_purchase", ["purchaseId"]).index("by_user", ["userId"]),
 
   /** Immutable policy snapshots; refresh inserts a new row (D17). */
@@ -72,6 +74,8 @@ export default defineSchema({
     userId: v.id("users"), name: v.string(), productUrl: v.string(), merchantDomain: v.string(), currency: v.optional(v.string()),
     targetCents: v.optional(v.number()), status: watchStatus, lastCheckedAt: v.optional(v.number()), nextCheckAt: v.number(),
     lastCents: v.optional(v.number()), purchaseId: v.optional(v.id("purchases")), checkRequestedAt: v.optional(v.number()),
+    /** The product page's Open Graph image (absolute https), captured by a watch check. */
+    imageUrl: v.optional(v.string()),
   }).index("by_user", ["userId"]).index("by_user_status", ["userId", "status"]).index("by_status_nextCheck", ["status", "nextCheckAt"]),
 
   /** One observation of a watched page; sibling of priceChecks. observedCents undefined = no usable price (D16). listCents is the page's claimed "was" price. */
@@ -101,6 +105,15 @@ export default defineSchema({
     lastCents: v.optional(v.number()), currency: v.optional(v.string()), lastCheckedAt: v.optional(v.number()),
     note: v.optional(v.string()),
   }).index("by_watch", ["watchId"]).index("by_user", ["userId"]),
+
+  /**
+   * Per-store price history: one row each time a price is accepted into `offers.lastCents`. Sibling of
+   * watchChecks, but only accepted, priced observations are kept (a failed read stays a `note` on the offer).
+   */
+  offerChecks: defineTable({
+    offerId: v.id("offers"), watchId: v.id("watches"), userId: v.id("users"), observedCents: v.number(),
+    currency: v.optional(v.string()), observedAt: v.number(),
+  }).index("by_offer", ["offerId", "observedAt"]).index("by_watch", ["watchId", "observedAt"]),
 
   /** Money the store owes on one item for one reason. Balance is derived from ledgerEvents, never stored. */
   claims: defineTable({
