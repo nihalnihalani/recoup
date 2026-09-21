@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -1153,4 +1153,42 @@ describe("T24c (D109): checkItem's scrape-failure line is structured and redacte
     expect(raw).not.toMatch(/fc-[A-Za-z0-9_-]{10,}/);
     expect(raw).not.toMatch(/[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
   }, 20_000);
+});
+
+describe("T18.5 (D124 B4): priceWatch.recordCheck is tombstone-gated, like every sibling recorder", () => {
+  // Real timers elsewhere in this file would let `requestDeletion`'s
+  // scheduled `purge` actually run in the background between the two
+  // `await`s below (convex-test's scheduler is driven by real setTimeout
+  // when fake timers are not active), racily deleting the item itself
+  // before `recordCheck` runs and masking the very gate this test checks.
+  // Fake timers keep that scheduled call frozen, so only the tombstone row
+  // exists -- exactly the "mid-purge" moment (`accountState` written,
+  // `purgeStep` not yet run) this test means to exercise.
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("before/after: a scrape finishing mid-purge (after requestDeletion) writes no priceChecks row and opens no claim [FAILS pre-T18.5]", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const { itemId } = await world(t, userId);
+
+    await as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+
+    const res = await t.mutation(internal.priceWatch.recordCheck, good(itemId, 9_500));
+    expect(res).toEqual({ priceCheckId: null, claimId: null, accepted: false, note: "Account deleted" });
+
+    expect(await checksFor(t, itemId)).toHaveLength(0);
+    expect(await claimsFor(t, itemId)).toHaveLength(0);
+  });
+
+  it("an active (non-tombstoned) owner's recordCheck is unaffected by the new gate", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { itemId } = await world(t, userId);
+
+    const res = await t.mutation(internal.priceWatch.recordCheck, good(itemId, 9_500));
+    expect(res.accepted).toBe(true);
+    expect(res.priceCheckId).not.toBeNull();
+    expect(await checksFor(t, itemId)).toHaveLength(1);
+  });
 });

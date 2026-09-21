@@ -95,7 +95,10 @@ const SYSTEM =
   "'unsure' when several variants are priced differently, and 'none' when the page is not that product.";
 
 const recordResult = v.object({
-  priceCheckId: v.id("priceChecks"),
+  // T18.5 (D124 B4): nullable so a tombstoned owner's mid-flight scrape can
+  // report "wrote nothing" truthfully instead of being forced to insert a
+  // row to satisfy this shape.
+  priceCheckId: v.union(v.id("priceChecks"), v.null()),
   claimId: v.union(v.id("claims"), v.null()),
   accepted: v.boolean(),
   note: v.optional(v.string()),
@@ -347,6 +350,17 @@ export const recordCheck = internalMutation({
     if (!item) throw new ConvexError("Item not found");
     const purchase = await ctx.db.get(item.purchaseId);
     if (!purchase || purchase.userId !== item.userId) throw new ConvexError("Purchase not found");
+
+    // T18.5 (D124 B4): a scheduled path (checkItem -> here) never writes a
+    // tombstoned owner's rows -- same D87 pattern `offers.recordCandidates`/
+    // `recordRechecks` already use. `itemForCheck` (the scheduling query)
+    // already checks this before the scrape is even attempted, but the
+    // scrape itself takes real time; a `requestDeletion` landing while it is
+    // in flight must not let the LATE result still open a `priceChecks` row
+    // (or a claim) that survives the finished purge.
+    if (await isTombstoned(ctx, item.userId)) {
+      return { priceCheckId: null, claimId: null, accepted: false, note: "Account deleted" };
+    }
 
     const now = Date.now();
     // A page that is "not that product" says nothing about what this item looks like.
