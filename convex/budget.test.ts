@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConvexError } from "convex/values";
-import { internal } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import { setup, signedIn } from "./test.setup";
 import {
   charge,
@@ -206,5 +206,51 @@ describe("internal.budget.consume (for actions)", () => {
     expect(await t.mutation(internal.budget.takeGlobalPriceChecks, { want: 50 })).toBe(50);
     expect(await t.mutation(internal.budget.takeGlobalPriceChecks, { want: 0 })).toBe(0);
     expect(await t.mutation(internal.budget.takeGlobalPriceChecks, { want: Number.NaN })).toBe(0);
+  });
+});
+
+describe("budget.status (P06/D73)", () => {
+  it("reports today's per-user and global usage, and paused when the global row is at max", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    await t.run(async (ctx) => {
+      await charge(ctx, userId, "watch_check", T0); // 1 user unit, 1 global (price_check) unit
+      await ctx.db.insert("usage", {
+        day: "2026-09-20",
+        kind: "market_lookup",
+        count: GLOBAL_DAILY_BUDGETS.market_lookup.max,
+      });
+    });
+
+    const result = await as.query(api.budget.status, { now: T0 });
+    expect(result.day).toBe("2026-09-20");
+
+    const watchCheck = result.kinds.find((k) => k.kind === "watch_check");
+    expect(watchCheck).toMatchObject({
+      userUsed: 1,
+      userMax: DAILY_BUDGETS.watch_check.max,
+      globalUsed: 1,
+      globalMax: GLOBAL_DAILY_BUDGETS.price_check.max,
+      paused: false,
+    });
+
+    const marketLookup = result.kinds.find((k) => k.kind === "market_lookup");
+    expect(marketLookup).toMatchObject({
+      userUsed: 0,
+      globalUsed: GLOBAL_DAILY_BUDGETS.market_lookup.max,
+      globalMax: GLOBAL_DAILY_BUDGETS.market_lookup.max,
+      paused: true,
+    });
+
+    // A kind with no global switch is never "paused" by this field.
+    const paste = result.kinds.find((k) => k.kind === "paste");
+    expect(paste).toMatchObject({ userUsed: 0, userMax: DAILY_BUDGETS.paste.max, globalUsed: 0, globalMax: 0, paused: false });
+  });
+
+  it("refuses a signed-out caller and an out-of-bounds now", async () => {
+    const t = setup();
+    await expect(t.query(api.budget.status, { now: T0 })).rejects.toThrow(ConvexError);
+    const { as } = await signedIn(t);
+    await expect(as.query(api.budget.status, { now: T0 + 5 * 86_400_000 })).rejects.toThrow(ConvexError);
   });
 });
