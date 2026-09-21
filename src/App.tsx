@@ -16,6 +16,11 @@ const Claim = lazy(() => import("./pages/Claim"));
 const Purchase = lazy(() => import("./pages/Purchase"));
 const Settings = lazy(() => import("./pages/Settings"));
 const Watching = lazy(() => import("./pages/Watching"));
+// T19: public, unauthenticated-reachable — deliberately outside the
+// Authenticated/Unauthenticated gate below (its own top-level route, not
+// nested under <Shell>), so it renders identically whether or not anyone is
+// signed in.
+const Privacy = lazy(() => import("./pages/Privacy"));
 
 /**
  * Wraps one route's page in its own error boundary and suspense fallback.
@@ -33,6 +38,28 @@ function RoutedPage({ children }: { children: ReactNode }) {
 }
 
 export default function App() {
+  return (
+    <Routes>
+      <Route
+        path="/privacy"
+        element={
+          <RoutedPage>
+            <Privacy />
+          </RoutedPage>
+        }
+      />
+      <Route path="/*" element={<AuthGate />} />
+    </Routes>
+  );
+}
+
+/**
+ * Everything that depends on sign-in state, unchanged in behaviour from
+ * before T19 — just extracted so `/privacy` (public) can sit beside it as a
+ * sibling route instead of inside the auth gate. Do not revert the
+ * `<AuthLoading>` splash's contrast fix (F-T20-1/T24a).
+ */
+function AuthGate() {
   return (
     <>
       <AuthLoading>

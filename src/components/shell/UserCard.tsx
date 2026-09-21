@@ -55,6 +55,16 @@ export function UserCard({ collapsed }: { collapsed: boolean }) {
       >
         <SettingsIcon />
       </Link>
+      <Link
+        to="/privacy"
+        aria-label="Privacy & services"
+        title="Privacy & services"
+        className={`flex size-9 shrink-0 items-center justify-center rounded-lg text-gray-500 outline-none transition hover:bg-gray-50 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-violet-500 ${
+          collapsed ? "lg:hidden" : ""
+        }`}
+      >
+        <PrivacyIcon />
+      </Link>
       <button
         type="button"
         onClick={() => void signOut()}
@@ -65,5 +75,24 @@ export function UserCard({ collapsed }: { collapsed: boolean }) {
         <SignOutIcon />
       </button>
     </div>
+  );
+}
+
+/** Local to this file (out of `./icons.tsx`'s ownership for T19): a shield glyph, same stroke convention as the shared shell icons. */
+function PrivacyIcon() {
+  return (
+    <svg
+      className="size-5 shrink-0"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 3.5l7 2.5v6c0 4.5-3 7.5-7 8.5-4-1-7-4-7-8.5V6z" />
+      <path d="M9 12l2 2 4-4" />
+    </svg>
   );
 }

@@ -2,6 +2,7 @@ import { useAuthActions } from "@convex-dev/auth/react";
 import { isRateLimitError } from "@convex-dev/rate-limiter";
 import { ConvexError } from "convex/values";
 import { type FormEvent, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "../lib/ui";
 
 /**
@@ -646,6 +647,14 @@ export default function SignIn() {
             </>
           )}
         </div>
+        <footer className="mt-6 text-center text-xs text-gray-500">
+          <Link
+            to="/privacy"
+            className="rounded font-semibold text-gray-500 underline decoration-gray-300 underline-offset-4 outline-none transition hover:text-gray-900 hover:decoration-gray-900 focus-visible:ring-2 focus-visible:ring-violet-500"
+          >
+            Privacy &amp; services
+          </Link>
+        </footer>
       </main>
     </div>
   );
