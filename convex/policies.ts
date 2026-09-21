@@ -169,24 +169,56 @@ export const hasFreshSnapshot = internalQuery({
   },
 });
 
+/** The subset of `ActionCtx` `fetchBothImpl` needs -- same shape `researchPolicy` already takes, plus `runQuery`. */
+type FetchBothCtx = { runMutation: ActionCtx["runMutation"]; runQuery: ActionCtx["runQuery"] };
+
 /**
  * Scheduler-driven: research both policy kinds for a merchant. Never throws (D17).
  * A kind researched in the last 24h is skipped (review M1): confirming a
  * purchase must not bury the policy the user just confirmed under a failed
  * re-fetch, nor pay for the same search twice. `refresh` is the user's way to force one.
+ *
+ * 6a-5/D112: unlike `policies.confirm` and `refresh` (both call
+ * `clearMerchantItemSchedule`/`clearMerchantSchedule` themselves right after
+ * they land a fresh price-adjustment snapshot), this scheduler-driven path
+ * used to never un-stamp anything -- an automatic re-research that widens (or
+ * newly opens) a merchant's price-adjustment window left every item at that
+ * merchant resting behind whatever stamp `priceWatch.eligibleItems` last gave
+ * it, for up to `INELIGIBLE_REST_MS`. Fixed the same way: after a
+ * `price_adjustment` kind is actually researched (not skipped for being
+ * fresh), call `clearMerchantSchedule`. Unconditional on the outcome -- even
+ * a failed/unknown snapshot landing is still a snapshot landing, and
+ * un-stamping is idempotent and cheap, so there is no reason to parse the
+ * result first.
+ *
+ * Plain, exported, deps-injectable `fetchBothImpl` (mirroring
+ * `researchPolicy`'s own `ResearchDeps` seam) so a test can exercise this
+ * exact wiring with mocked search/extract instead of live HTTP -- the
+ * `internalAction` below is a thin wrapper.
  */
+export async function fetchBothImpl(
+  ctx: FetchBothCtx,
+  args: { userId: Id<"users">; merchantDomain: string },
+  deps: ResearchDeps = defaultDeps,
+): Promise<void> {
+  for (const kind of ["price_adjustment", "returns"] as const) {
+    try {
+      if (await ctx.runQuery(internal.policies.hasFreshSnapshot, { ...args, kind })) continue;
+      await researchPolicy(ctx, { ...args, kind }, deps);
+      if (kind === "price_adjustment") {
+        await ctx.runMutation(internal.policies.clearMerchantSchedule, args);
+      }
+    } catch (err) {
+      console.error("policies.fetchBoth failed", { merchantDomain: args.merchantDomain, kind, err });
+    }
+  }
+}
+
 export const fetchBoth = internalAction({
   args: { userId: v.id("users"), merchantDomain: v.string() },
   returns: v.null(),
   handler: async (ctx, args) => {
-    for (const kind of ["price_adjustment", "returns"] as const) {
-      try {
-        if (await ctx.runQuery(internal.policies.hasFreshSnapshot, { ...args, kind })) continue;
-        await researchPolicy(ctx, { ...args, kind });
-      } catch (err) {
-        console.error("policies.fetchBoth failed", { merchantDomain: args.merchantDomain, kind, err });
-      }
-    }
+    await fetchBothImpl(ctx, args);
     return null;
   },
 });

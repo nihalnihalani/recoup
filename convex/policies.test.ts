@@ -2,8 +2,11 @@ import { ConvexError } from "convex/values";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import { setup, signedIn } from "./test.setup";
-import { researchPolicy } from "./policies";
+import { researchPolicy, fetchBothImpl } from "./policies";
 import { verifyPassage } from "./lib/passage";
+import type { ResearchDeps } from "./policies";
+
+const DAY = 86_400_000;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -150,6 +153,91 @@ describe("clearMerchantSchedule (C3(c)/D107: internal wrapper `refresh` calls af
 
     await t.mutation(internal.policies.clearMerchantSchedule, { userId, merchantDomain });
     expect((await t.run((ctx) => ctx.db.get(itemId)))!.nextCheckAt).toBeUndefined();
+  });
+});
+
+describe("fetchBothImpl un-stamps after an automatic price_adjustment re-research (6a-5/D112)", () => {
+  it("a new snapshot widening the window makes a stamped item eligible within 2 ticks", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const merchantDomain = "reopens.example";
+    const purchaseId = await t.run((ctx) =>
+      ctx.db.insert("purchases", {
+        userId,
+        merchant: "M",
+        merchantDomain,
+        currency: "USD",
+        status: "active",
+        purchasedAt: Date.now() - 30 * DAY,
+      }),
+    );
+    // A closed 14-day window (the purchase is 30 days old): priceWatch's
+    // first tick stamps the item permanently ineligible, same as the
+    // "closed window reopened via policies.confirm" C3/D107 resurrection
+    // path -- except here the re-research is the AUTOMATIC one (fetchBoth),
+    // not the user calling `confirm`.
+    const staleId = await t.mutation(internal.policies.insertSnapshot, {
+      userId,
+      merchantDomain,
+      kind: "price_adjustment",
+      channel: "email",
+      windowDays: 14,
+      passage: "",
+      sourceUrl: `https://${merchantDomain}`,
+      confidence: 0,
+    });
+    // Old enough that fetchBothImpl's freshness check does not skip re-researching it.
+    await t.run((ctx) => ctx.db.patch(staleId, { retrievedAt: Date.now() - 25 * 3_600_000 }));
+    const itemId = await t.run((ctx) =>
+      ctx.db.insert("items", {
+        purchaseId,
+        userId,
+        name: "X",
+        unitCents: 1_000,
+        qty: 1,
+        productUrl: `https://${merchantDomain}/p`,
+        returned: false,
+      }),
+    );
+
+    // Tick 1: the window is closed -- permanently ineligible, stamped out.
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([]);
+    expect((await t.run((ctx) => ctx.db.get(itemId)))!.nextCheckAt).toBeDefined();
+
+    // The automatic re-research (fetchBothImpl, the scheduler's own call
+    // shape) lands a widened window through the existing mocked
+    // ResearchDeps seam -- no live Firecrawl/OpenAI call.
+    const markdown = "# Price Match\n\nWe match a lower price within 60 days of purchase.\n" + " ".repeat(150);
+    const passage = "We match a lower price within 60 days of purchase.";
+    const deps: ResearchDeps = {
+      search: async () => ({ web: [{ url: `https://${merchantDomain}/policy`, markdown }] }),
+      extract: async () => ({
+        found: true,
+        windowDays: 60,
+        channel: "email",
+        contactEmail: `help@${merchantDomain}`,
+        passage,
+        confidence: 0.9,
+      }),
+    };
+    await fetchBothImpl(
+      { runMutation: (ref: any, a: any) => t.mutation(ref, a), runQuery: (ref: any, a: any) => t.query(ref, a) },
+      { userId, merchantDomain },
+      deps,
+    );
+
+    // The new, wider snapshot really landed.
+    const rows = await t.run((ctx) =>
+      ctx.db
+        .query("policies")
+        .withIndex("by_user_domain_kind", (q) => q.eq("userId", userId).eq("merchantDomain", merchantDomain).eq("kind", "price_adjustment"))
+        .collect(),
+    );
+    expect(rows.some((r) => r.windowDays === 60)).toBe(true);
+
+    // Tick 2 (well within the "2 ticks" budget -- the very next one):
+    // clearMerchantSchedule reset the item's stamp, so it is found again.
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([itemId]);
   });
 });
 
