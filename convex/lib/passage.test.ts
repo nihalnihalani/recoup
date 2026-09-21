@@ -28,4 +28,12 @@ describe("verifyPassage", () => {
     expect(verifyPassage(markdown, "")).toBeNull();
     expect(verifyPassage(markdown, "   \n\t  ")).toBeNull();
   });
+
+  it("rejects passages shorter than 40 chars", () => {
+    const shortPassage = "Returns within 30 days.";
+    expect(normalizeWhitespace(shortPassage).length).toBeLessThan(40);
+    const markdown = `# Returns\n\n${shortPassage} Contact support for more details on eligibility.`;
+    // Present verbatim in the markdown, but still too short to trust as evidence.
+    expect(verifyPassage(markdown, shortPassage)).toBeNull();
+  });
 });

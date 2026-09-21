@@ -62,6 +62,67 @@ describe("confirm", () => {
 
     await expect(asOther.mutation(api.policies.confirm, { policyId, channel: "email" })).rejects.toThrow();
   });
+
+  it("rejects non-finite or negative windowDays", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t, "Owner");
+    const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+
+    await expect(as.mutation(api.policies.confirm, { policyId, channel: "email", windowDays: -1 })).rejects.toThrow();
+    await expect(as.mutation(api.policies.confirm, { policyId, channel: "email", windowDays: Number.POSITIVE_INFINITY })).rejects.toThrow();
+    await expect(as.mutation(api.policies.confirm, { policyId, channel: "email", windowDays: Number.NaN })).rejects.toThrow();
+
+    const untouched = await t.run(async (ctx) => ctx.db.get(policyId));
+    expect(untouched?.confirmedByUser).toBe(false);
+  });
+
+  it("with an edited passage clears passageStart and confidence and sets userEdited", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t, "Owner");
+    const policyId = await t.mutation(internal.policies.insertSnapshot, {
+      userId,
+      ...baseSnapshot,
+      passageStart: 12,
+      confidence: 0.9,
+    });
+
+    await as.mutation(api.policies.confirm, {
+      policyId,
+      channel: "email",
+      passage: "A different passage the user typed in themselves, not from the source.",
+    });
+
+    const patched = await t.run(async (ctx) => ctx.db.get(policyId));
+    expect(patched?.passageStart).toBeUndefined();
+    expect(patched?.confidence).toBe(0);
+    expect(patched?.userEdited).toBe(true);
+    expect(patched?.confirmedByUser).toBe(true);
+  });
+
+  it("leaves passageStart, confidence, and userEdited alone when passage and sourceUrl are unchanged", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t, "Owner");
+    const policyId = await t.mutation(internal.policies.insertSnapshot, {
+      userId,
+      ...baseSnapshot,
+      passageStart: 12,
+      confidence: 0.9,
+    });
+
+    await as.mutation(api.policies.confirm, {
+      policyId,
+      channel: "email",
+      passage: baseSnapshot.passage,
+      sourceUrl: baseSnapshot.sourceUrl,
+      windowDays: 14,
+    });
+
+    const patched = await t.run(async (ctx) => ctx.db.get(policyId));
+    expect(patched?.passageStart).toBe(12);
+    expect(patched?.confidence).toBe(0.9);
+    expect(patched?.userEdited).toBeUndefined();
+    expect(patched?.windowDays).toBe(14);
+  });
 });
 
 describe("refresh", () => {

@@ -12,6 +12,7 @@ import type { PolicyT } from "./lib/schemas";
 import { verifyPassage } from "./lib/passage";
 import { channel, policyKind } from "./schema";
 import { requireUserId, ownedPolicy } from "./lib/access";
+import { assertWindowDays } from "./lib/money";
 
 const firecrawl = new FirecrawlClient(components.firecrawl);
 
@@ -196,7 +197,17 @@ export const confirm = mutation({
   },
   handler: async (ctx, { policyId, ...edits }) => {
     const userId = await requireUserId(ctx);
-    await ownedPolicy(ctx, policyId, userId);
-    await ctx.db.patch(policyId, { ...edits, confirmedByUser: true });
+    const existing = await ownedPolicy(ctx, policyId, userId);
+    if (edits.windowDays !== undefined) assertWindowDays(edits.windowDays);
+
+    const passageEdited =
+      (edits.passage !== undefined && edits.passage !== existing.passage) ||
+      (edits.sourceUrl !== undefined && edits.sourceUrl !== existing.sourceUrl);
+
+    await ctx.db.patch(policyId, {
+      ...edits,
+      confirmedByUser: true,
+      ...(passageEdited ? { passageStart: undefined, confidence: 0, userEdited: true } : {}),
+    });
   },
 });
