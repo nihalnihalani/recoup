@@ -5,6 +5,7 @@ import { Link } from "react-router-dom";
 import { api } from "../../convex/_generated/api";
 import { useNow, when } from "../lib/ui";
 import { fmt } from "./Money";
+import { frameButtonClass } from "./shell/nav";
 
 type ActivityEvent = FunctionReturnType<typeof api.insights.activity>[number];
 
@@ -44,15 +45,26 @@ function writeSeen(at: number) {
   }
 }
 
-/** Ring colour by what happened. A filled ring means money actually moved. */
-const RINGS: Record<NewsKind, string> = {
-  price_drop: "border-green-500 text-green-700",
-  alert_sent: "border-sky-500 text-sky-700",
-  claim_opened: "border-sky-500 text-sky-700",
-  reply_received: "border-yellow-500 text-yellow-700",
-  credit_promised: "border-yellow-500 text-yellow-700",
-  credit_confirmed: "border-green-500 bg-green-500 text-on-accent",
-  charged_again: "border-red-500 bg-red-500 text-on-accent",
+/** Soft tint by what happened: green good, red bad, amber waiting, blue info. */
+const TINTS: Record<NewsKind, string> = {
+  price_drop: "bg-green-500/15 text-green-700",
+  alert_sent: "bg-sky-500/15 text-sky-700",
+  claim_opened: "bg-sky-500/15 text-sky-700",
+  reply_received: "bg-yellow-500/20 text-yellow-700",
+  credit_promised: "bg-yellow-500/20 text-yellow-700",
+  credit_confirmed: "bg-green-500/15 text-green-700",
+  charged_again: "bg-red-500/15 text-red-700",
+};
+
+/** The bold line names what happened; the muted line under it says to what, and for how much. */
+const TITLES: Record<NewsKind, string> = {
+  price_drop: "Price dropped",
+  alert_sent: "Alert emailed",
+  claim_opened: "Claim opened",
+  reply_received: "The store replied",
+  credit_promised: "Credit promised",
+  credit_confirmed: "Money back on card",
+  charged_again: "Charged again",
 };
 
 const GLYPHS: Record<NewsKind, string> = {
@@ -65,25 +77,21 @@ const GLYPHS: Record<NewsKind, string> = {
   charged_again: "M12 18V6M7 11l5-5 5 5",
 };
 
-function told(event: NewsEvent): string {
+function detail(event: NewsEvent): string {
   const currency = event.currency ?? "USD";
   const money = event.cents === undefined ? undefined : fmt(event.cents, currency);
   const delta = event.deltaCents === undefined ? undefined : fmt(Math.abs(event.deltaCents), currency);
   switch (event.kind) {
     case "price_drop":
-      return `${event.subject} dropped${delta ? ` ${delta}` : ""}${money ? ` to ${money}` : ""}`;
+      return `${event.subject}${delta ? `, down ${delta}` : ""}${money ? ` to ${money}` : ""}`;
     case "alert_sent":
-      return `Alert emailed: ${event.subject}`;
-    case "claim_opened":
-      return `Claim opened for ${event.subject}${money ? `, ${money}` : ""}`;
     case "reply_received":
-      return `The store replied about ${event.subject}`;
+      return event.subject;
+    case "claim_opened":
     case "credit_promised":
-      return `${money ?? "Credit"} promised for ${event.subject}`;
     case "credit_confirmed":
-      return `${money ?? "Credit"} back on card for ${event.subject}`;
     case "charged_again":
-      return `Charged again${money ? ` ${money}` : ""} for ${event.subject}`;
+      return `${event.subject}${money ? `, ${money}` : ""}`;
   }
 }
 
@@ -173,6 +181,7 @@ export function NotificationBell() {
     setOpen(true);
   }
 
+  const freshCount = news.filter((event) => event.at > freshAfter).length;
   const label = unseen > 0 ? `Notifications, ${unseen} new` : "Notifications";
 
   return (
@@ -186,16 +195,14 @@ export function NotificationBell() {
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? "notification-panel" : undefined}
-        className={`relative flex size-8 items-center justify-center rounded-full outline-none transition hover:bg-white hover:text-gray-700 focus-visible:ring-2 focus-visible:ring-violet-500 ${
-          open ? "bg-white text-gray-700" : "text-gray-500"
-        }`}
+        className={`${frameButtonClass} ${open ? "bg-gray-50 text-gray-900" : ""}`}
       >
         <svg
           className="size-5"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
-          strokeWidth={1.6}
+          strokeWidth={1.7}
           strokeLinecap="round"
           strokeLinejoin="round"
           aria-hidden="true"
@@ -206,9 +213,9 @@ export function NotificationBell() {
         {unseen > 0 && (
           <span
             aria-hidden="true"
-            className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full border-2 border-gray-100 bg-red-500 px-0.5 text-[10px] font-bold leading-none text-on-accent tabular-nums"
+            className="absolute -right-2 -top-2 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-white bg-red-500 px-1 text-[10px] font-bold leading-none text-on-accent tabular-nums"
           >
-            {unseen > 9 ? "9+" : unseen}
+            {unseen > 99 ? "99+" : unseen}
           </span>
         )}
       </button>
@@ -220,14 +227,27 @@ export function NotificationBell() {
           role="dialog"
           aria-label="Notifications"
           tabIndex={-1}
-          className="absolute right-0 top-full z-20 mt-2 flex max-h-96 w-80 max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg outline-none"
+          className="absolute right-0 top-full z-20 mt-2 flex max-h-[28rem] w-[22rem] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-lg outline-none"
         >
-          <p className="border-b border-gray-100 px-4 py-3 text-xs font-semibold uppercase text-gray-400">Notifications</p>
+          <div className="mx-4 flex items-center justify-between gap-3 border-b border-dashed border-gray-200 py-3.5">
+            <p className="text-base font-semibold text-gray-900">Notifications</p>
+            {freshCount > 0 && (
+              <span className="rounded-lg border border-gray-200 px-2 py-0.5 text-xs font-semibold text-gray-500 tabular-nums">
+                {freshCount} new
+              </span>
+            )}
+          </div>
 
-          {events === undefined ? null : news.length === 0 ? (
-            <p className="px-4 py-8 text-center text-sm text-gray-500">No news yet</p>
+          {events === undefined ? (
+            <p role="status" className="px-4 py-8 text-center text-sm text-gray-400">
+              Loading…
+            </p>
+          ) : news.length === 0 ? (
+            <p className="px-4 py-8 text-center text-sm text-gray-500">
+              No news yet. Price drops and claim updates show up here.
+            </p>
           ) : (
-            <ul className="min-h-0 flex-1 divide-y divide-gray-100 overflow-auto">
+            <ul className="min-h-0 flex-1 overflow-auto p-2">
               {news.map((event) => {
                 const fresh = event.at > freshAfter;
                 return (
@@ -235,18 +255,18 @@ export function NotificationBell() {
                     <Link
                       to={target(event)}
                       onClick={closePanel}
-                      className="flex items-start gap-3 px-4 py-3 outline-none transition hover:bg-gray-50 focus-visible:bg-gray-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-500"
+                      className="flex items-start gap-3 rounded-xl px-2 py-2.5 outline-none transition hover:bg-gray-50 focus-visible:bg-gray-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-500"
                     >
                       <span
                         aria-hidden="true"
-                        className={`mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border-2 ${RINGS[event.kind]}`}
+                        className={`flex size-8 shrink-0 items-center justify-center rounded-full ${TINTS[event.kind]}`}
                       >
                         <svg
-                          className="size-3.5"
+                          className="size-4"
                           viewBox="0 0 24 24"
                           fill="none"
                           stroke="currentColor"
-                          strokeWidth={2.2}
+                          strokeWidth={2}
                           strokeLinecap="round"
                           strokeLinejoin="round"
                         >
@@ -254,18 +274,27 @@ export function NotificationBell() {
                         </svg>
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className={`block truncate text-sm ${fresh ? "font-semibold text-gray-800" : "font-medium text-gray-600"}`} title={told(event)}>
-                          {told(event)}
+                        <span className="flex items-baseline justify-between gap-2">
+                          <span className="flex min-w-0 items-center gap-1.5 text-sm font-semibold text-gray-900">
+                            <span className="truncate">{TITLES[event.kind]}</span>
+                            {fresh && (
+                              <span className="size-1.5 shrink-0 rounded-full bg-red-500">
+                                <span className="sr-only">New</span>
+                              </span>
+                            )}
+                          </span>
+                          <time
+                            dateTime={new Date(event.at).toISOString()}
+                            title={when(event.at)}
+                            className="shrink-0 text-xs text-gray-400"
+                          >
+                            {ago(event.at, now)}
+                          </time>
                         </span>
-                        <time dateTime={new Date(event.at).toISOString()} title={when(event.at)} className="block text-xs text-gray-400">
-                          {ago(event.at, now)}
-                        </time>
+                        <span className="mt-0.5 line-clamp-2 block text-sm text-gray-500" title={detail(event)}>
+                          {detail(event)}
+                        </span>
                       </span>
-                      {fresh && (
-                        <span className="mt-1.5 size-2 shrink-0 rounded-full bg-violet-500">
-                          <span className="sr-only">New</span>
-                        </span>
-                      )}
                     </Link>
                   </li>
                 );
@@ -276,7 +305,7 @@ export function NotificationBell() {
           <Link
             to="/"
             onClick={closePanel}
-            className="border-t border-gray-100 px-4 py-2.5 text-center text-sm font-medium text-violet-500 outline-none hover:text-violet-600 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-500"
+            className="border-t border-gray-200 px-4 py-3 text-center text-sm font-semibold text-gray-900 outline-none transition hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-500"
           >
             View all activity
           </Link>

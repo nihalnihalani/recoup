@@ -3,13 +3,17 @@ import { useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Doc } from "../../../convex/_generated/dataModel";
 import {
+  bigNumberClass,
+  cardClass,
   day,
   errorText,
   inputClass,
   labelClass,
+  mutedLabelClass,
   primaryButtonClass,
   secondaryButtonClass,
 } from "../../lib/ui";
+import { CardHeading, DotChip, RuleIcon } from "./parts";
 
 type Policy = Doc<"policies">;
 type PolicyChannel = Policy["channel"];
@@ -32,33 +36,28 @@ function hostOf(url: string): string {
   }
 }
 
-/** Ten ticks; filled ones are the share of confidence. The number sits beside it in ink. */
+/** A slim bar filled to the share of confidence. The number sits beside it in ink. */
 function ConfidenceMeter({ value }: { value: number }) {
   const clamped = Math.min(1, Math.max(0, value));
-  const filled = Math.round(clamped * 10);
   return (
     <div
-      className="flex items-center gap-2"
+      className="flex items-center gap-3"
       role="meter"
       aria-label="Confidence in this reading"
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={Math.round(clamped * 100)}
     >
-      <div className="flex gap-0.5" aria-hidden="true">
-        {Array.from({ length: 10 }).map((_, index) => (
-          <span key={index} className={`h-3 w-1.5 rounded-full ${index < filled ? "bg-harbor" : "bg-gray-200"}`} />
-        ))}
+      <div className="h-1.5 w-32 max-w-full overflow-hidden rounded-full bg-gray-100" aria-hidden="true">
+        <div className="h-full rounded-full bg-gray-900" style={{ width: `${clamped * 100}%` }} />
       </div>
-      <span className="text-xs font-medium tabular-nums text-gray-500">{Math.round(clamped * 100)}%</span>
+      <span className="text-sm font-semibold tabular-nums text-gray-900">{Math.round(clamped * 100)}%</span>
     </div>
   );
 }
 
-const cardClass = "rounded-xl bg-white shadow-xs";
-const eyebrowClass = "text-xs font-semibold uppercase text-gray-400";
 const summaryClass =
-  "cursor-pointer px-5 py-3 text-sm font-medium text-gray-600 hover:text-gray-800 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-harbor";
+  "cursor-pointer px-5 py-3.5 text-sm font-semibold text-gray-900 hover:bg-gray-50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-violet-500";
 
 /**
  * The store's price-adjustment rule as a card of facts, not a paragraph.
@@ -132,11 +131,13 @@ export function RuleCard({
   if (!policy) {
     return (
       <section aria-label="Price-adjustment rule" className={`${cardClass} p-5`}>
-        <h2 className="text-lg font-semibold text-gray-800">Price-adjustment rule</h2>
-        <p className="mt-1 text-sm text-gray-500">Not looked up yet for {merchantDomain}.</p>
+        <CardHeading icon={<RuleIcon />} title="Price-adjustment rule" />
+        <p className="mt-4 border-t border-dashed border-gray-200 pt-4 text-sm text-gray-500">
+          Not looked up yet for {merchantDomain}.
+        </p>
         <div className="mt-4">{refreshButton("Look it up")}</div>
         {error && (
-          <p role="alert" className="mt-3 text-sm text-rust">
+          <p role="alert" className="mt-3 text-sm text-red-700">
             {error}
           </p>
         )}
@@ -149,23 +150,19 @@ export function RuleCard({
 
   return (
     <section aria-label="Price-adjustment rule" className={`${cardClass} overflow-hidden`}>
-      <header className="flex flex-wrap items-center justify-between gap-2 px-5 pt-5">
-        <h2 className="text-lg font-semibold text-gray-800">Price-adjustment rule</h2>
-        {policy.confirmedByUser && (
-          <span className="inline-flex items-center gap-1 rounded-full bg-moss/15 px-2.5 py-1 text-xs font-medium text-moss">
-            <svg viewBox="0 0 12 12" className="size-3" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true">
-              <path d="m2.5 6.5 2.5 2.5 4.5-5.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            Confirmed
-          </span>
-        )}
-      </header>
+      <div className="px-5 pt-5">
+        <CardHeading
+          icon={<RuleIcon />}
+          title="Price-adjustment rule"
+          action={policy.confirmedByUser ? <DotChip dot="bg-moss">Confirmed</DotChip> : undefined}
+        />
+      </div>
 
-      <div className="space-y-4 px-5 pb-5 pt-3">
+      <div className="mx-5 mt-4 space-y-5 border-t border-dashed border-gray-200 pb-5 pt-4">
         <div>
-          <p className={eyebrowClass}>Window</p>
+          <p className={mutedLabelClass}>Window</p>
           <p className="mt-1 flex items-baseline gap-2">
-            <span className={`text-3xl font-bold tabular-nums ${known ? "text-gray-800" : "text-gray-300"}`}>
+            <span className={known ? bigNumberClass : "text-3xl font-semibold tracking-tight tabular-nums text-gray-300"}>
               {known ? policy.windowDays : "?"}
             </span>
             <span className="text-sm text-gray-500">{known ? "days from purchase" : "not known"}</span>
@@ -173,17 +170,11 @@ export function RuleCard({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <span
-            className={`rounded-full px-2.5 py-1 text-xs font-medium ${
-              policy.channel === "unknown" ? "bg-gray-100 text-gray-600" : "bg-harbor/10 text-harbor"
-            }`}
-          >
-            {CHANNEL_LABEL[policy.channel]}
-          </span>
+          <DotChip dot={policy.channel === "unknown" ? "bg-gray-300" : "bg-teal"}>{CHANNEL_LABEL[policy.channel]}</DotChip>
           {policy.contactEmail && (
             <a
               href={`mailto:${policy.contactEmail}`}
-              className="truncate rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600 hover:text-gray-800"
+              className="min-w-0 truncate rounded-lg border border-gray-200 px-2 py-0.5 text-xs font-medium text-gray-500 transition hover:text-gray-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500"
             >
               {policy.contactEmail}
             </a>
@@ -191,7 +182,7 @@ export function RuleCard({
         </div>
 
         <div>
-          <p className={eyebrowClass}>Confidence</p>
+          <p className={mutedLabelClass}>Confidence</p>
           <div className="mt-1.5">
             {policy.userEdited ? (
               <p className="text-sm text-gray-500">Your wording, not verified against the site</p>
@@ -202,8 +193,8 @@ export function RuleCard({
         </div>
 
         {(!hasPassage || policy.note) && (
-          <div className="space-y-2 rounded-lg bg-gold/10 px-3 py-2.5">
-            <p className="text-sm text-gray-700">
+          <div className="space-y-2.5 rounded-xl border border-gold/40 bg-gold/5 px-3.5 py-3">
+            <p className="text-sm text-gray-900">
               {policy.note ?? "No rule text was found. Treat this store's rule as unknown."}
             </p>
             {!hasPassage && refreshButton("Read the site again")}
@@ -216,7 +207,7 @@ export function RuleCard({
               href={policy.sourceUrl}
               target="_blank"
               rel="noreferrer"
-              className="font-medium text-harbor hover:underline"
+              className="rounded font-semibold text-gray-900 underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500"
             >
               {hostOf(policy.sourceUrl)}
             </a>
@@ -228,17 +219,17 @@ export function RuleCard({
       </div>
 
       {hasPassage && (
-        <details className="border-t border-gray-100">
+        <details className="border-t border-gray-200">
           <summary className={summaryClass}>Read the rule</summary>
-          <blockquote className="mx-5 mb-4 border-l-2 border-gray-200 pl-3 text-sm leading-relaxed text-gray-600">
+          <blockquote className="mx-5 mb-5 border-l-2 border-gray-200 pl-3 text-sm leading-relaxed text-gray-500">
             {policy.passage}
           </blockquote>
         </details>
       )}
 
-      <details className="border-t border-gray-100">
+      <details className="border-t border-gray-200">
         <summary className={summaryClass}>Correct this</summary>
-        <div className="space-y-3 px-5 pb-5">
+        <div className="space-y-4 px-5 pb-5 pt-1">
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className={labelClass} htmlFor={`window-${policy._id}`}>
@@ -327,7 +318,7 @@ export function RuleCard({
       </details>
 
       {error && (
-        <p role="alert" className="border-t border-rust/20 bg-rust/10 px-5 py-2.5 text-sm text-rust">
+        <p role="alert" className="border-t border-rust/20 bg-rust/5 px-5 py-2.5 text-sm text-red-700">
           {error}
         </p>
       )}

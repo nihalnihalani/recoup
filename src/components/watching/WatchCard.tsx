@@ -5,10 +5,12 @@ import type { FunctionReturnType } from "convex/server";
 import { api } from "../../../convex/_generated/api";
 import { AreaChart } from "../charts/AreaChart";
 import { fmt } from "../Money";
+import { ProductThumb } from "../ProductThumb";
 import { ErrorBox } from "../States";
 import { StoreAvatar } from "../StoreAvatar";
 import { storeInfo } from "../../lib/stores";
 import { StoreCompare } from "./StoreCompare";
+import { Chip, DeltaChip, PencilIcon, quietButtonClass, smallButtonClass, smallLabelClass, type Tone } from "./parts";
 import { ago } from "./time";
 import {
   bigNumberClass,
@@ -20,12 +22,7 @@ import {
   fromDateInput,
   inputClass,
   labelClass,
-  mutedLabelClass,
   percent,
-  pillBadClass,
-  pillGoodClass,
-  pillMutedClass,
-  pillWarnClass,
   primaryButtonClass,
   remainingLabel,
   secondaryButtonClass,
@@ -36,41 +33,45 @@ type Watch = FunctionReturnType<typeof api.watches.list>[number];
 /** `watches.list` returns at most this many accepted observations per watch. */
 const SPARK_CAP = 30;
 
-const VERDICT: Record<Watch["verdict"]["label"], { text: string; className: string }> = {
-  good_price: { text: "Good price", className: pillGoodClass },
-  fair: { text: "Fair price", className: pillMutedClass },
-  wait: { text: "Wait", className: pillWarnClass },
-  inflated_discount: { text: "Discount looks inflated", className: pillBadClass },
-  not_enough_history: { text: "Not enough history yet", className: pillMutedClass },
-  unknown: { text: "No price yet", className: pillMutedClass },
+const VERDICT: Record<Watch["verdict"]["label"], { text: string; tone: Tone }> = {
+  good_price: { text: "Good price", tone: "good" },
+  fair: { text: "Fair price", tone: "muted" },
+  wait: { text: "Wait", tone: "wait" },
+  inflated_discount: { text: "Discount looks inflated", tone: "bad" },
+  not_enough_history: { text: "Not enough history yet", tone: "muted" },
+  unknown: { text: "No price yet", tone: "muted" },
 };
-
-const pillVioletClass = "inline-flex items-center gap-1.5 rounded-full bg-violet-500/20 px-1.5 text-sm font-medium text-violet-700";
-const quietButtonClass =
-  "rounded-lg px-2 py-1.5 text-sm font-medium text-gray-500 transition hover:bg-gray-100 hover:text-gray-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500 disabled:opacity-60";
-const compactSecondaryClass = secondaryButtonClass.replace("px-3 py-2", "px-2.5 py-1.5");
-
-function PulseDot() {
-  return (
-    <span className="relative flex h-2 w-2" aria-hidden="true">
-      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-500 opacity-60 motion-reduce:animate-none" />
-      <span className="relative inline-flex h-2 w-2 rounded-full bg-violet-500" />
-    </span>
-  );
-}
 
 function StatusChip({ watch }: { watch: Watch }) {
   if (watch.checking) {
     return (
-      <span className={pillVioletClass}>
-        <PulseDot />
+      <Chip tone="busy" pulse>
         Checking…
+      </Chip>
+    );
+  }
+  if (watch.status === "paused") return <Chip tone="wait">Paused</Chip>;
+  if (watch.status === "bought") return <Chip tone="muted">Bought</Chip>;
+  return <Chip tone="good">Watching</Chip>;
+}
+
+/** The product photo, with the store's mark pinned to its corner. Without a photo, the store tile stands in. */
+function ProductTile({ watch }: { watch: Watch }) {
+  if (watch.imageUrl === null) {
+    return (
+      <span className="flex size-14 shrink-0 items-center justify-center rounded-xl bg-gray-100">
+        <StoreAvatar domain={watch.merchantDomain} size={32} />
       </span>
     );
   }
-  if (watch.status === "paused") return <span className={pillMutedClass}>Paused</span>;
-  if (watch.status === "bought") return <span className={pillVioletClass}>Bought</span>;
-  return <span className={pillGoodClass}>Active</span>;
+  return (
+    <span className="relative shrink-0">
+      <ProductThumb imageUrl={watch.imageUrl} name={watch.name} size={56} />
+      <span className="absolute -bottom-1 -right-1 rounded-lg bg-white p-0.5">
+        <StoreAvatar domain={watch.merchantDomain} size={18} />
+      </span>
+    </span>
+  );
 }
 
 /** The product name, renamed in place. */
@@ -99,27 +100,19 @@ function Name({ watch }: { watch: Watch }) {
   if (!editing) {
     return (
       <div className="flex min-w-0 items-center gap-1">
-        <h2 className="truncate text-lg font-semibold text-gray-800" title={watch.name}>
+        <h2 className="truncate text-base font-semibold text-gray-900" title={watch.name}>
           {watch.name}
         </h2>
         <button
           type="button"
-          className="shrink-0 rounded-md p-1 text-gray-400 transition hover:text-gray-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500"
+          className="shrink-0 rounded-lg p-1 text-gray-400 transition hover:bg-gray-50 hover:text-gray-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500"
           onClick={() => {
             setValue(watch.name);
             setError(null);
             setEditing(true);
           }}
         >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path
-              d="m10.5 3 2.5 2.5M2.5 13.5l.6-3.1 7.9-7.9a1.4 1.4 0 0 1 2 0l.5.5a1.4 1.4 0 0 1 0 2l-7.9 7.9-3.1.6Z"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+          <PencilIcon className="size-4" />
           <span className="sr-only">Rename {watch.name}</span>
         </button>
       </div>
@@ -134,7 +127,7 @@ function Name({ watch }: { watch: Watch }) {
         </label>
         <input
           id={`name-${watch._id}`}
-          className={`${inputClass} min-w-0 flex-1 basis-40 py-1.5`}
+          className={`${inputClass} min-w-0 flex-1 basis-40 py-2`}
           value={value}
           maxLength={200}
           autoFocus
@@ -143,7 +136,7 @@ function Name({ watch }: { watch: Watch }) {
             if (e.key === "Escape") setEditing(false);
           }}
         />
-        <button type="submit" disabled={busy} className={compactSecondaryClass}>
+        <button type="submit" disabled={busy} className={smallButtonClass}>
           {busy ? "Saving…" : "Save name"}
         </button>
         <button type="button" className={quietButtonClass} onClick={() => setEditing(false)}>
@@ -192,22 +185,22 @@ function TargetControl({ watch, currency }: { watch: Watch; currency: string }) 
 
   return (
     <div
-      className={`rounded-lg px-3 py-2.5 ${watch.targetHit ? "bg-green-500/10 ring-1 ring-green-500/30" : "bg-gray-50"}`}
+      className={`rounded-xl border px-3.5 py-3 ${watch.targetHit ? "border-green-500/40 bg-green-500/5" : "border-gray-200 bg-white"}`}
     >
       <form onSubmit={onSubmit} className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <label className={`${mutedLabelClass} shrink-0`} htmlFor={`target-${watch._id}`}>
+        <label className="shrink-0 text-sm font-semibold text-gray-900" htmlFor={`target-${watch._id}`}>
           Tell me at
         </label>
         <input
           id={`target-${watch._id}`}
-          className={`${inputClass} w-28 py-1.5 tabular-nums`}
+          className={`${inputClass} w-28 py-2 tabular-nums`}
           inputMode="decimal"
           placeholder="89.99"
           value={value}
           onChange={(e) => setValue(e.target.value)}
         />
         {dirty && (
-          <button type="submit" disabled={busy} className={compactSecondaryClass}>
+          <button type="submit" disabled={busy} className={smallButtonClass}>
             {busy ? "Saving…" : value.trim() === "" ? "Clear target" : "Save target"}
           </button>
         )}
@@ -218,9 +211,9 @@ function TargetControl({ watch, currency }: { watch: Watch; currency: string }) 
         )}
         <span className="min-w-0 text-sm text-gray-500">
           {watch.targetHit ? (
-            <span className="font-medium text-green-700">↓ At or below your target</span>
+            <span className="font-semibold text-green-700">At or below your target</span>
           ) : watch.targetCents !== null && watch.lastCents !== null ? (
-            <>{fmt(watch.lastCents - watch.targetCents, currency)} to go</>
+            <><span className="font-semibold tabular-nums text-gray-900">{fmt(watch.lastCents - watch.targetCents, currency)}</span> to go</>
           ) : watch.targetCents === null ? (
             "Set a price and Recoup emails you when it gets there."
           ) : null}
@@ -264,8 +257,8 @@ function BoughtForm({ watch, onDone }: { watch: Watch; onDone: () => void }) {
   }
 
   return (
-    <form onSubmit={onSubmit} className="space-y-3 rounded-lg bg-gray-50 p-3">
-      <p className="text-sm text-gray-600">
+    <form onSubmit={onSubmit} className="space-y-4 rounded-xl border border-gray-200 p-4">
+      <p className="text-sm text-gray-500">
         Recoup will keep watching after you buy and tell you if the store owes you the difference.
       </p>
       <div className="grid gap-3 sm:grid-cols-2">
@@ -310,8 +303,8 @@ function BoughtForm({ watch, onDone }: { watch: Watch; onDone: () => void }) {
 function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="min-w-0">
-      <dt className={mutedLabelClass}>{label}</dt>
-      <dd className="mt-0.5 truncate text-sm font-semibold tabular-nums text-gray-800">{value}</dd>
+      <dt className={smallLabelClass}>{label}</dt>
+      <dd className="mt-1 truncate text-sm font-semibold tabular-nums text-gray-900">{value}</dd>
       {hint && <dd className="truncate text-xs text-gray-400">{hint}</dd>}
     </div>
   );
@@ -357,11 +350,11 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
 
   return (
     <li className={`col-span-full flex flex-col xl:col-span-6 ${cardClass}`}>
-      <header className="flex items-start gap-3 border-b border-gray-100 px-5 py-4">
-        <StoreAvatar domain={watch.merchantDomain} size={40} />
+      <header className="flex items-start gap-4 px-5 pt-5">
+        <ProductTile watch={watch} />
         <div className="min-w-0 flex-1">
           <Name watch={watch} />
-          <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-gray-500">
+          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-gray-500">
             <a
               href={watch.productUrl}
               target="_blank"
@@ -371,7 +364,7 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
               {store.name}
               <span className="sr-only"> (opens the product page in a new tab)</span>
             </a>
-            {store.kind === "marketplace" && <span className={pillMutedClass}>Marketplace</span>}
+            {store.kind === "marketplace" && <Chip>Marketplace</Chip>}
           </p>
           {store.kind === "marketplace" && store.note && <p className="mt-1 text-xs text-gray-400">{store.note}</p>}
         </div>
@@ -380,21 +373,12 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
         </div>
       </header>
 
-      <div className="space-y-4 px-5 py-4">
-        <div>
-          <p className={mutedLabelClass}>Now</p>
+      <div className="space-y-5 px-5 pb-5 pt-4">
+        <div className="border-t border-dashed border-gray-200 pt-4">
+          <p className={smallLabelClass}>Price now</p>
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className={`${bigNumberClass} tabular-nums`}>{watch.lastCents === null ? "—" : money(watch.lastCents)}</span>
-            {change !== null &&
-              (change === 0 ? (
-                <span className={pillMutedClass}>No change</span>
-              ) : (
-                <span className={change < 0 ? pillGoodClass : pillBadClass}>
-                  <span aria-hidden="true">{change < 0 ? "↓" : "↑"}</span>
-                  <span className="sr-only">{change < 0 ? "Down" : "Up"}</span>
-                  {percent(Math.abs(change))}
-                </span>
-              ))}
+            {change !== null && <DeltaChip ratio={change} />}
             {watch.listCents !== null && watch.lastCents !== null && watch.listCents > watch.lastCents && (
               <span className="text-sm text-gray-400">
                 <span className="sr-only">The store says it was </span>
@@ -403,7 +387,7 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
             )}
           </div>
           {change !== null && first !== undefined && (
-            <p className="mt-0.5 text-xs text-gray-400">
+            <p className="mt-1 text-xs text-gray-400">
               {change === 0 ? "Same as" : "Compared with"} the first price read, {money(first)}
               {capped && " (oldest of the latest 30 reads)"}
             </p>
@@ -417,12 +401,12 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
             height={160}
             showAxes
             curve="step"
-            tone="violet"
+            tone="sky"
             format={money}
             ariaLabel={`Price of ${watch.name} at ${store.name} since ${day(series[0].at)}`}
           />
         ) : (
-          <div className="flex h-[160px] items-center justify-center rounded-lg border border-dashed border-gray-200 px-4 text-center text-sm text-gray-400">
+          <div className="flex h-[160px] items-center justify-center rounded-xl border border-dashed border-gray-200 px-4 text-center text-sm text-gray-400">
             {watch.checking
               ? "Reading the page for the first price…"
               : series.length === 1
@@ -431,7 +415,7 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
           </div>
         )}
 
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 border-t border-gray-100 pt-3 sm:grid-cols-3">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-4 rounded-xl bg-gray-50 p-4 sm:grid-cols-3">
           <Stat label="Lowest" value={low === null ? "—" : money(low)} />
           <Stat label="Highest" value={high === null ? "—" : money(high)} />
           <Stat label="Average" value={average === null ? "—" : money(Math.round(average))} />
@@ -441,8 +425,8 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
         </dl>
 
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className={verdict.className}>{verdict.text}</span>
-          <span className="min-w-0 text-sm text-gray-600">{watch.verdict.reason}</span>
+          <Chip tone={verdict.tone}>{verdict.text}</Chip>
+          <span className="min-w-0 text-sm text-gray-500">{watch.verdict.reason}</span>
         </div>
 
         {live && <TargetControl watch={watch} currency={currency} />}
@@ -450,8 +434,8 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
         <p className="flex flex-wrap items-center gap-x-1.5 text-xs text-gray-400" aria-live="polite">
           {watch.checking ? (
             <>
-              <PulseDot />
-              <span className="text-violet-700">Checking the page now…</span>
+              <span className="size-1.5 animate-pulse rounded-full bg-harbor motion-reduce:animate-none" aria-hidden="true" />
+              <span className="font-medium text-gray-900">Checking the page now…</span>
             </>
           ) : (
             <span>
@@ -466,11 +450,11 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
         </p>
 
         {live ? (
-          <div className="flex flex-wrap items-center gap-1">
+          <div className="flex flex-wrap items-center gap-2 border-t border-dashed border-gray-200 pt-4">
             <button
               type="button"
               disabled={busy || watch.checking}
-              className={compactSecondaryClass}
+              className={smallButtonClass}
               onClick={() => void run(() => checkNow({ watchId: watch._id }))}
             >
               {watch.checking ? "Checking…" : "Check now"}
@@ -485,7 +469,7 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
             >
               {watch.status === "paused" ? "Resume" : "Pause"}
             </button>
-            <button type="button" aria-expanded={buying} className={quietButtonClass} onClick={() => setBuying((v) => !v)}>
+            <button type="button" aria-expanded={buying} className={smallButtonClass} onClick={() => setBuying((v) => !v)}>
               I bought it
             </button>
             <button
@@ -498,9 +482,9 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
             </button>
           </div>
         ) : (
-          <div className="flex flex-wrap items-center gap-1">
+          <div className="flex flex-wrap items-center gap-2 border-t border-dashed border-gray-200 pt-4">
             {watch.purchaseId !== null && (
-              <Link to={`/purchases/${watch.purchaseId}`} className={compactSecondaryClass}>
+              <Link to={`/purchases/${watch.purchaseId}`} className={smallButtonClass}>
                 Open the purchase
               </Link>
             )}

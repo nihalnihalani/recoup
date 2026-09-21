@@ -1,7 +1,6 @@
 import type { FunctionReturnType } from "convex/server";
 import type { api } from "../../../convex/_generated/api";
 import { boughtVerdict, type BoughtVerdict } from "../../lib/priceStats";
-import { storeInfo } from "../../lib/stores";
 import { shortDay } from "../../lib/ui";
 
 export type Overview = FunctionReturnType<typeof api.tracking.overview>;
@@ -10,86 +9,30 @@ export type Watch = FunctionReturnType<typeof api.watches.list>[number];
 export type ActivityEvent = FunctionReturnType<typeof api.insights.activity>[number];
 export type SourceRow = FunctionReturnType<typeof api.insights.sources>[number];
 export type BoardData = FunctionReturnType<typeof api.purchases.board>;
+export type PriceHistory = NonNullable<FunctionReturnType<typeof api.insights.priceHistory>>;
+export type HistoryStore = PriceHistory["stores"][number];
+export type TrackedRow = FunctionReturnType<typeof api.insights.trackedTable>[number];
 
 export type SeriesPoint = { at: number; value: number };
 
-/** One row of the dashboard: something watched before buying, or something bought and tracked. */
-export type Product = {
-  key: string;
-  kind: "watch" | "bought";
-  name: string;
-  domain: string;
-  storeName: string;
-  currency: string;
-  qty: number;
-  /** Where the card and the row link to. */
-  to: string;
-  nowCents?: number;
-  /** What "now" is compared with: the paid price, or the first price seen. */
-  basisCents?: number;
-  basisLabel: "paid" | "first seen";
-  /** The dashed level on the chart: the paid price, or the target when one is set. */
-  reference?: { value: number; label: string };
-  series: SeriesPoint[];
-  lowCents?: number;
-  highCents?: number;
-  isExample: boolean;
-  watch?: Watch;
-  item?: Item;
-};
+const DAY = 86_400_000;
 
-export function watchProduct(watch: Watch): Product {
-  const series = watch.spark.map((p) => ({ at: p.observedAt, value: p.observedCents }));
-  const seen = series.map((p) => p.value);
-  return {
-    key: watch._id,
-    kind: "watch",
-    name: watch.name,
-    domain: watch.merchantDomain,
-    storeName: storeInfo(watch.merchantDomain).name,
-    currency: watch.currency ?? "USD",
-    qty: 1,
-    to: "/watching",
-    nowCents: watch.lastCents ?? undefined,
-    basisCents: series[0]?.value,
-    basisLabel: "first seen",
-    reference: watch.targetCents === null ? undefined : { value: watch.targetCents, label: "Target" },
-    series,
-    lowCents: seen.length > 0 ? Math.min(...seen) : undefined,
-    highCents: seen.length > 0 ? Math.max(...seen) : undefined,
-    isExample: false,
-    watch,
-  };
-}
+/**
+ * Line colours for stores, in fixed order: a store keeps its slot whatever else is
+ * filtered. Steps picked with the dataviz palette validator; `dot` is the matching
+ * utility, which also makes Tailwind emit the variable `color` reads.
+ */
+export const SERIES_COLORS = [
+  { color: "var(--color-blue-600)", dot: "bg-blue-600" },
+  { color: "var(--color-purple-400)", dot: "bg-purple-400" },
+  { color: "var(--color-green-600)", dot: "bg-green-600" },
+  { color: "var(--color-amber-600)", dot: "bg-amber-600" },
+  { color: "var(--color-rose-600)", dot: "bg-rose-600" },
+  { color: "var(--color-cyan-600)", dot: "bg-cyan-600" },
+] as const;
 
-export function boughtProduct(item: Item): Product {
-  const series = item.points.map((p) => ({ at: p.at, value: p.cents }));
-  const seen = series.map((p) => p.value);
-  return {
-    key: item.itemId,
-    kind: "bought",
-    name: item.name,
-    domain: item.merchantDomain,
-    storeName: item.merchant || storeInfo(item.merchantDomain).name,
-    currency: item.currency,
-    qty: item.qty,
-    to: `/purchases/${item.purchaseId}`,
-    nowCents: item.latestCents,
-    basisCents: item.paidCents,
-    basisLabel: "paid",
-    reference: { value: item.paidCents, label: "Paid" },
-    series,
-    lowCents: seen.length > 0 ? Math.min(...seen) : undefined,
-    highCents: seen.length > 0 ? Math.max(...seen) : undefined,
-    isExample: item.isExample,
-    item,
-  };
-}
-
-/** What a bought product's price means right now; undefined for a product that is only watched. */
-export function productVerdict(product: Product, now: number): BoughtVerdict | undefined {
-  const { item } = product;
-  if (!item) return undefined;
+/** What a bought item's price means right now. */
+export function itemVerdict(item: Item, now: number): BoughtVerdict {
   return boughtVerdict({
     paidCents: item.paidCents,
     latestCents: item.latestCents,
@@ -98,12 +41,6 @@ export function productVerdict(product: Product, now: number): BoughtVerdict | u
     now,
     currency: item.currency,
   });
-}
-
-/** Products with money to claim right now lead; everything else keeps the order it came in. */
-export function claimNowFirst(products: Product[], now: number): Product[] {
-  const claimable = (product: Product) => productVerdict(product, now)?.kind === "claim_now";
-  return [...products.filter(claimable), ...products.filter((product) => !claimable(product))];
 }
 
 /** A drop that can still be claimed: price is below paid, the window has not shut, the money is not back yet. */
@@ -125,32 +62,70 @@ export function byUrgency(now: number) {
   };
 }
 
+function knownAt(points: SeriesPoint[], at: number): number | undefined {
+  let known: number | undefined;
+  for (const p of points) {
+    if (p.at > at) break;
+    known = p.value;
+  }
+  return known;
+}
+
 /**
- * The sum of every product's price at each observation time. A product's last known
- * price is carried forward, and its first price is carried back, so the line moves
- * only when a price moved, never because a product joined the list.
+ * The sum of every watched price at each observation time. A last known price is
+ * carried forward and a first price carried back, so the line moves only when a
+ * price moved, never because a product joined the list.
  */
-export function aggregateSeries(products: Product[]): SeriesPoint[] {
-  const priced = products.filter((p) => p.series.length > 0);
-  const times = [...new Set(priced.flatMap((p) => p.series.map((s) => s.at)))].sort((a, b) => a - b);
+export function watchedTotalSeries(watches: Watch[]): SeriesPoint[] {
+  const priced = watches
+    .map((watch) => watch.spark.map((p) => ({ at: p.observedAt, value: p.observedCents })))
+    .filter((series) => series.length > 0);
+  const times = [...new Set(priced.flatMap((series) => series.map((p) => p.at)))].sort((a, b) => a - b);
   return times.map((at) => ({
     at,
-    value: priced.reduce((sum, product) => {
-      let known = product.series[0].value;
-      for (const s of product.series) {
-        if (s.at > at) break;
-        known = s.value;
-      }
-      return sum + known * product.qty;
+    value: priced.reduce((sum, series) => sum + (knownAt(series, at) ?? series[0].value), 0),
+  }));
+}
+
+/**
+ * How much sat below the paid price over time, across items whose drop could still
+ * be claimed today. An item counts from its first reading on, never before it.
+ */
+export function claimableGapSeries(items: Item[], now: number): SeriesPoint[] {
+  const live = items.filter(
+    (item) => item.points.length > 0 && item.claim?.status !== "confirmed" && (item.windowEndsAt === undefined || item.windowEndsAt > now),
+  );
+  const times = [...new Set(live.flatMap((item) => item.points.map((p) => p.at)))].sort((a, b) => a - b);
+  return times.map((at) => ({
+    at,
+    value: live.reduce((sum, item) => {
+      const known = knownAt(item.points.map((p) => ({ at: p.at, value: p.cents })), at);
+      return known === undefined ? sum : sum + Math.max(item.paidCents - known, 0) * item.qty;
     }, 0),
   }));
 }
 
-/** The flat comparison level under an aggregate: what the same products cost at first sight, or what was paid. */
-export function baselineCents(products: Product[]): number {
-  return products
-    .filter((p) => p.series.length > 0)
-    .reduce((sum, p) => sum + (p.basisCents ?? p.series[0].value) * p.qty, 0);
+/** Local midnight at the start of the day `at` falls in. */
+export function startOfDay(at: number): number {
+  const d = new Date(at);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/**
+ * Events per local day for the last `days` days, today last. `since` trims days the
+ * source cannot vouch for (a capped feed knows nothing older than its oldest event).
+ */
+export function perDay(times: number[], now: number, days: number, since?: number): SeriesPoint[] {
+  const today = startOfDay(now);
+  const out: SeriesPoint[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const from = startOfDay(today - i * DAY + DAY / 2);
+    if (since !== undefined && from < startOfDay(since)) continue;
+    const to = startOfDay(from + DAY + DAY / 2);
+    out.push({ at: from, value: times.filter((t) => t >= from && t < to).length });
+  }
+  return out;
 }
 
 /** "now", "12m", "3h", "2d", then a short date. */
@@ -172,9 +147,9 @@ export function agoLong(at: number, now: number): string {
   return /^\d+[mhd]$/.test(short) ? `${short} ago` : `on ${short}`;
 }
 
-/** The currency most products use; mixed-currency sums are labelled with it. */
-export function mainCurrency(products: Product[]): string {
+/** The currency most rows use; mixed-currency sums are labelled with it. */
+export function mainCurrency(currencies: string[]): string {
   const counts = new Map<string, number>();
-  for (const p of products) counts.set(p.currency, (counts.get(p.currency) ?? 0) + 1);
+  for (const c of currencies) counts.set(c, (counts.get(c) ?? 0) + 1);
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "USD";
 }

@@ -1,11 +1,19 @@
+import { useId } from "react";
 import { useMeasuredWidth } from "../../lib/ui";
 
 type Point = { at: number; cents: number };
 
+/** Direction against the paid price picks the tone. Tokens only, defined once. */
+const TONES = {
+  down: { color: "var(--color-moss)", stroke: "stroke-moss", fill: "fill-moss" },
+  up: { color: "var(--color-rust)", stroke: "stroke-rust", fill: "fill-rust" },
+  flat: { color: "var(--color-gray-400)", stroke: "stroke-gray-400", fill: "fill-gray-400" },
+} as const;
+
 /**
- * A price history at a glance: a step line (a price holds until the next
- * observation), a dashed reference at the paid price, the gap below it washed in,
- * and the latest point emphasised. Tone follows direction against the paid price:
+ * A price history at a glance: a thin step line (a price holds until the next
+ * observation) over a soft gradient, a dashed reference at the paid price, and
+ * only the latest point marked. Tone follows direction against the paid price:
  * green below, red above, gray when equal. Fills its container unless `width`
  * is given.
  */
@@ -21,6 +29,7 @@ export function Sparkline({
   height?: number;
 }) {
   const { ref, width: measuredWidth } = useMeasuredWidth<HTMLDivElement>(width ?? 160);
+  const gradientId = `spark-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
   const w = width ?? measuredWidth;
   const pad = 5;
 
@@ -38,23 +47,21 @@ export function Sparkline({
 
   const paidY = y(paidCents);
   let line = "";
-  const washes: { x: number; w: number; y: number; h: number }[] = [];
+  let startX = pad;
+  let endX = w - pad;
   if (points.length === 1 && last) {
     line = `M${pad},${y(last.cents)}H${w - pad}`;
-    if (last.cents < paidCents) washes.push({ x: pad, w: w - 2 * pad, y: paidY, h: y(last.cents) - paidY });
-  } else {
+  } else if (last) {
     points.forEach((p, i) => {
       line += i === 0 ? `M${x(p.at)},${y(p.cents)}` : `H${x(p.at)}V${y(p.cents)}`;
-      const next = points[i + 1];
-      if (next && p.cents < paidCents) {
-        washes.push({ x: x(p.at), w: x(next.at) - x(p.at), y: paidY, h: y(p.cents) - paidY });
-      }
     });
+    startX = x(points[0].at);
+    endX = x(last.at);
   }
+  const area = line ? `${line}V${height}H${startX}Z` : "";
 
   const direction = last === undefined || last.cents === paidCents ? "flat" : last.cents < paidCents ? "down" : "up";
-  const stroke = direction === "down" ? "stroke-green-500" : direction === "up" ? "stroke-red-500" : "stroke-gray-400";
-  const fill = direction === "down" ? "fill-green-500" : direction === "up" ? "fill-red-500" : "fill-gray-400";
+  const tone = TONES[direction];
   const summary =
     last === undefined
       ? "No price observed yet"
@@ -65,15 +72,19 @@ export function Sparkline({
   return (
     <div ref={ref} style={width === undefined ? undefined : { width }}>
       <svg width={w} height={height} viewBox={`0 0 ${w} ${height}`} role="img" aria-label={summary} className="block">
-        {washes.map((r, i) => (
-          <rect key={i} x={r.x} y={r.y} width={Math.max(r.w, 0)} height={Math.max(r.h, 0)} className="fill-green-500/15" />
-        ))}
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={tone.color} stopOpacity={0.16} />
+            <stop offset="100%" stopColor={tone.color} stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        {area && endX > startX && <path d={area} fill={`url(#${gradientId})`} />}
         <line x1={0} x2={w} y1={paidY} y2={paidY} className="stroke-gray-300" strokeWidth={1} strokeDasharray="3 3" />
         {line && (
-          <path d={line} fill="none" className={stroke} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+          <path d={line} fill="none" className={tone.stroke} strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
         )}
         {last && (
-          <circle cx={x(last.at)} cy={y(last.cents)} r={4} className={`${fill} stroke-surface`} strokeWidth={2} />
+          <circle cx={x(last.at)} cy={y(last.cents)} r={3} className={`${tone.fill} stroke-surface`} strokeWidth={1.5} />
         )}
       </svg>
     </div>

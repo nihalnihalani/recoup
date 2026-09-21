@@ -6,15 +6,16 @@ const STEPS = [
   { label: "Back on card", statuses: ["confirmed"] },
 ] as const;
 
-const TERMINAL: Record<string, { label: string; className: string }> = {
-  reopened: { label: "Charged again", className: "bg-red-500 text-on-accent" },
-  dismissed: { label: "Dismissed", className: "bg-gray-100 text-gray-400 line-through" },
+const TERMINAL: Record<string, { label: string; dot: string; text: string }> = {
+  reopened: { label: "Charged again", dot: "bg-rust", text: "text-gray-900" },
+  dismissed: { label: "Dismissed", dot: "bg-gray-300", text: "text-gray-400 line-through" },
 };
 
 /**
  * A claim's path as a horizontal stepper: Found, Drafted, Asked, Promised, Back on
- * card. Reached steps are filled, the current one is ringed; reopened and dismissed
- * sit outside the path as a terminal chip.
+ * card. Small ringed dots on a hairline: finished steps are green, the current one
+ * is near-black with a halo, the ones ahead are gray. Reopened and dismissed sit
+ * outside the path as a dot-and-label chip.
  */
 export function StatusSteps({ status }: { status: string }) {
   const terminal = TERMINAL[status];
@@ -28,27 +29,28 @@ export function StatusSteps({ status }: { status: string }) {
       <ol className="flex min-w-64 flex-1" aria-label="Claim progress">
         {STEPS.map((step, i) => {
           const isReached = i <= reached;
+          // The last step, once reached, is finished too: the money is back.
           const isCurrent = i === current && !terminal;
-          const fill = !isReached ? "border-gray-300 bg-white" : done ? "border-green-500 bg-green-500" : "border-violet-500 bg-violet-500";
-          const rail = i <= reached ? (done ? "bg-green-500" : "bg-violet-500") : "bg-gray-200";
+          const isComplete = isReached && (!isCurrent || done);
+          const dot = isComplete
+            ? "border-moss bg-moss"
+            : isCurrent
+              ? "border-gray-900 bg-gray-900 ring-4 ring-gray-900/10"
+              : "border-gray-300 bg-white";
+          const rail = isReached ? "bg-moss" : "bg-gray-200";
           return (
             <li
               key={step.label}
-              className="relative flex flex-1 flex-col items-center gap-1.5"
+              className="relative flex flex-1 flex-col items-center gap-2"
               aria-current={isCurrent ? "step" : undefined}
             >
               {i > 0 && (
-                <span aria-hidden="true" className={`absolute right-1/2 top-[7px] h-0.5 w-full -translate-y-1/2 ${rail}`} />
+                <span aria-hidden="true" className={`absolute right-1/2 top-[5px] h-px w-full -translate-y-1/2 ${rail}`} />
               )}
-              <span
-                aria-hidden="true"
-                className={`relative z-10 size-3.5 rounded-full border-2 ${fill} ${
-                  isCurrent ? (done ? "ring-4 ring-green-500/20" : "ring-4 ring-violet-500/20") : ""
-                }`}
-              />
+              <span aria-hidden="true" className={`relative z-10 size-2.5 rounded-full border-2 ${dot}`} />
               <span
                 className={`text-center text-xs leading-tight ${
-                  isCurrent ? "font-semibold text-gray-800" : isReached ? "text-gray-600" : "text-gray-400"
+                  isCurrent ? "font-semibold text-gray-900" : "text-gray-500"
                 }`}
               >
                 {step.label}
@@ -59,7 +61,10 @@ export function StatusSteps({ status }: { status: string }) {
         })}
       </ol>
       {terminal && (
-        <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${terminal.className}`}>
+        <span
+          className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-2 py-0.5 text-xs font-medium ${terminal.text}`}
+        >
+          <span aria-hidden="true" className={`size-1.5 rounded-full ${terminal.dot}`} />
           {terminal.label}
         </span>
       )}

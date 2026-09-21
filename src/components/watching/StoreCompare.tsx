@@ -6,45 +6,15 @@ import { fmt } from "../Money";
 import { ErrorBox } from "../States";
 import { StoreAvatar } from "../StoreAvatar";
 import { storeInfo } from "../../lib/stores";
+import { Chip, ChevronIcon, ExternalIcon, IconTile, StoresIcon, smallButtonClass, smallLabelClass } from "./parts";
 import { ago } from "./time";
-import { errorText, mutedLabelClass, percent, pillGoodClass, pillMutedClass, remainingLabel } from "../../lib/ui";
+import { errorText, percent, remainingLabel } from "../../lib/ui";
 
 type Watch = FunctionReturnType<typeof api.watches.list>[number];
 type Offer = FunctionReturnType<typeof api.offers.listForWatch>["offers"][number];
 
 const textButtonClass =
-  "rounded-md px-1.5 py-0.5 text-sm font-medium text-gray-500 transition hover:text-gray-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500 disabled:opacity-60";
-const smallButtonClass =
-  "inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-sm font-medium text-gray-800 transition hover:border-gray-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500 disabled:opacity-60";
-
-function ExternalIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="shrink-0">
-      <path
-        d="M6.5 3.5H4A1.5 1.5 0 0 0 2.5 5v7A1.5 1.5 0 0 0 4 13.5h7a1.5 1.5 0 0 0 1.5-1.5V9.5M9.5 2.5h4v4M13.5 2.5 7.5 8.5"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function Chevron({ open }: { open: boolean }) {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 16 16"
-      fill="none"
-      aria-hidden="true"
-      className={`shrink-0 text-gray-400 transition-transform motion-reduce:transition-none ${open ? "rotate-180" : ""}`}
-    >
-      <path d="m4 6 4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
+  "rounded-lg px-1.5 py-0.5 text-sm font-medium text-gray-500 transition hover:text-gray-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500 disabled:opacity-60";
 
 type Row = {
   key: string;
@@ -78,7 +48,7 @@ function StoreBar({
   const info = storeInfo(row.domain);
   const ratio = comparable && row.cents !== null && maxCents > 0 ? Math.max(0.02, row.cents / maxCents) : 0;
   return (
-    <li className="py-2.5">
+    <li className="py-3">
       <div className="flex items-center gap-3">
         <StoreAvatar domain={row.domain} size={28} />
         <div className="min-w-0 flex-1">
@@ -87,21 +57,19 @@ function StoreBar({
               href={row.url}
               target="_blank"
               rel="noreferrer noopener"
-              className="inline-flex min-w-0 items-center gap-1 text-sm font-medium text-gray-800 underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500"
+              className="inline-flex min-w-0 items-center gap-1 text-sm font-semibold text-gray-900 underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500"
             >
               <span className="truncate">{info.name}</span>
-              <span className="text-gray-400">
-                <ExternalIcon />
-              </span>
+              <ExternalIcon className="size-3.5 text-gray-400" />
               <span className="sr-only">(opens the store page in a new tab)</span>
             </a>
-            {row.own && <span className={pillMutedClass}>Watched here</span>}
-            {info.kind === "marketplace" && <span className={pillMutedClass}>Marketplace</span>}
-            {cheapest && <span className={pillGoodClass}>Cheapest</span>}
+            {row.own && <Chip>Watched here</Chip>}
+            {info.kind === "marketplace" && <Chip>Marketplace</Chip>}
+            {cheapest && <Chip tone="good">Cheapest</Chip>}
           </div>
         </div>
         <div className="shrink-0 text-right">
-          <p className="text-sm font-semibold tabular-nums text-gray-800">
+          <p className={`text-sm font-semibold tabular-nums ${cheapest ? "text-green-700" : "text-gray-900"}`}>
             {row.cents === null ? "No price read" : fmt(row.cents, row.currency)}
           </p>
         </div>
@@ -109,12 +77,12 @@ function StoreBar({
       <div className="mt-1.5 pl-10">
         {ratio > 0 ? (
           <div
-            className="h-2"
+            className="h-1.5 rounded-full bg-gray-100"
             title={`${info.name}: ${row.cents === null ? "" : fmt(row.cents, row.currency)}`}
             aria-hidden="true"
           >
             <div
-              className={`h-2 rounded-full ${cheapest ? "bg-green-500" : row.own ? "bg-violet-500" : "bg-violet-300"}`}
+              className={`h-1.5 rounded-full ${cheapest ? "bg-moss" : row.own ? "bg-gray-900" : "bg-gray-300"}`}
               style={{ width: `${ratio * 100}%` }}
             />
           </div>
@@ -218,33 +186,38 @@ export function StoreCompare({ watch, now, defaultOpen }: { watch: Watch; now: n
             : "Search again";
 
   return (
-    <section className="border-t border-gray-100">
+    <section className="border-t border-gray-200">
       <h3>
         <button
           type="button"
           aria-expanded={open}
           aria-controls={panelId}
           onClick={() => setOpen((v) => !v)}
-          className="flex w-full items-center justify-between gap-3 px-5 py-3 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-violet-500"
+          className={`flex w-full items-center justify-between gap-3 px-5 py-4 text-left transition hover:bg-gray-50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-violet-500 ${open ? "" : "rounded-b-2xl"}`}
         >
-          <span className="flex min-w-0 flex-wrap items-center gap-x-2">
-            <span className="text-sm font-semibold text-gray-800">Same item at other stores</span>
-            {data?.best && (
-              <span className="text-sm text-green-700">
-                {storeInfo(data.best.storeDomain).name} has it for {fmt(data.best.cents, data.best.currency)}
-              </span>
-            )}
+          <span className="flex min-w-0 items-center gap-3">
+            <IconTile>
+              <StoresIcon />
+            </IconTile>
+            <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+              <span className="text-sm font-semibold text-gray-900">Same item at other stores</span>
+              {data?.best && (
+                <span className="text-sm font-medium text-green-700">
+                  {storeInfo(data.best.storeDomain).name} has it for {fmt(data.best.cents, data.best.currency)}
+                </span>
+              )}
+            </span>
           </span>
-          <Chevron open={open} />
+          <ChevronIcon open={open} />
         </button>
       </h3>
 
       {open && (
-        <div id={panelId} className="space-y-3 px-5 pb-5">
+        <div id={panelId} className="space-y-4 border-t border-dashed border-gray-200 px-5 pb-5 pt-2">
           {data === undefined ? (
-            <div className="space-y-2" role="status" aria-label="Loading stores">
-              <div className="h-9 animate-pulse rounded-lg bg-gray-100" />
-              <div className="h-9 animate-pulse rounded-lg bg-gray-100" />
+            <div className="space-y-2 pt-2" role="status" aria-label="Loading stores">
+              <div className="h-9 animate-pulse rounded-xl bg-gray-100 motion-reduce:animate-none" />
+              <div className="h-9 animate-pulse rounded-xl bg-gray-100 motion-reduce:animate-none" />
             </div>
           ) : (
             <>
@@ -286,25 +259,23 @@ export function StoreCompare({ watch, now, defaultOpen }: { watch: Watch; now: n
 
               {candidates.length > 0 && (
                 <div>
-                  <p className={mutedLabelClass}>Possible matches</p>
-                  <ul className="mt-1 divide-y divide-gray-100">
+                  <p className={`${smallLabelClass} rounded-lg bg-gray-50 px-3 py-2`}>Possible matches</p>
+                  <ul className="divide-y divide-gray-100">
                     {candidates.map((offer) => {
                       const info = storeInfo(offer.storeDomain);
                       return (
-                        <li key={offer._id} className="flex flex-wrap items-center gap-x-3 gap-y-2 py-2">
-                          <span className="flex min-w-0 flex-1 basis-48 items-center gap-2 opacity-70">
+                        <li key={offer._id} className="flex flex-wrap items-center gap-x-3 gap-y-2 py-3">
+                          <span className="flex min-w-0 flex-1 basis-48 items-center gap-3">
                             <StoreAvatar domain={offer.storeDomain} size={24} />
                             <span className="min-w-0">
                               <a
                                 href={offer.productUrl}
                                 target="_blank"
                                 rel="noreferrer noopener"
-                                className="inline-flex max-w-full items-center gap-1 text-sm font-medium text-gray-800 underline-offset-2 hover:underline"
+                                className="inline-flex max-w-full items-center gap-1 text-sm font-medium text-gray-500 underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500"
                               >
                                 <span className="truncate">{info.name}</span>
-                                <span className="text-gray-400">
-                                  <ExternalIcon />
-                                </span>
+                                <ExternalIcon className="size-3.5 text-gray-400" />
                               </a>
                               <span className="block truncate text-xs text-gray-400">
                                 {offer.variantMatch === "exact" ? "Looks like the same item" : "May be a different version"}
@@ -314,7 +285,7 @@ export function StoreCompare({ watch, now, defaultOpen }: { watch: Watch; now: n
                             </span>
                           </span>
                           <span className="flex items-center gap-2">
-                            <span className="text-sm font-semibold tabular-nums text-gray-800">
+                            <span className="text-sm font-semibold tabular-nums text-gray-900">
                               {offer.lastCents === null ? "—" : fmt(offer.lastCents, offer.currency ?? currency)}
                             </span>
                             <button

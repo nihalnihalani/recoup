@@ -1,5 +1,5 @@
 import { useAction, useMutation, useQuery } from "convex/react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
@@ -11,11 +11,11 @@ import { WindowMeter } from "../components/charts/WindowMeter";
 import { Card, StatLabel } from "../components/claim/Card";
 import { Composer, PacketRow } from "../components/claim/Composer";
 import { MoneyForm } from "../components/claim/MoneyForm";
-import { LedgerTimeline, ReplyTimeline } from "../components/claim/Timelines";
+import { ClaimTimeline } from "../components/claim/Timelines";
 import { DeltaBadge } from "../components/DeltaBadge";
-import { fmt, Money } from "../components/Money";
+import { fmt } from "../components/Money";
 import { Empty, ErrorBox, Loading } from "../components/States";
-import { day, errorText, secondaryButtonClass, when } from "../lib/ui";
+import { bigNumberClass, day, errorText, pageTitleClass, secondaryButtonClass, when } from "../lib/ui";
 
 type ClaimData = FunctionReturnType<typeof api.claims.get>;
 type Overview = FunctionReturnType<typeof api.tracking.overview>;
@@ -27,20 +27,20 @@ function headline(
   balance: ClaimData["balance"],
 ): { label: string; cents: number; tone: string } {
   if (status === "confirmed") {
-    return { label: "Back on your card", cents: balance.confirmed - balance.debited, tone: "text-moss" };
+    return { label: "Back on your card", cents: balance.confirmed - balance.debited, tone: "text-green-700!" };
   }
   if (status === "dismissed") {
-    return { label: "Dismissed", cents: balance.unresolved, tone: "text-ink/40 line-through" };
+    return { label: "Dismissed", cents: balance.unresolved, tone: "text-gray-400! line-through" };
   }
-  return { label: "Owed to you", cents: balance.unresolved, tone: "text-ink" };
+  return { label: "Owed to you", cents: balance.unresolved, tone: "" };
 }
 
 function Figure({ label, cents, currency }: { label: string; cents?: number; currency: string }) {
   return (
-    <div>
-      <dt className="text-xs font-semibold uppercase text-ink/40">{label}</dt>
-      <dd className="mt-0.5 text-sm font-semibold tabular-nums text-ink">
-        {cents === undefined ? <span className="text-ink/30">—</span> : fmt(cents, currency)}
+    <div className="min-w-0">
+      <dt className="text-xs text-gray-500">{label}</dt>
+      <dd className="mt-0.5 text-sm font-semibold tabular-nums text-gray-900">
+        {cents === undefined ? <span className="text-gray-400">—</span> : fmt(cents, currency)}
       </dd>
     </div>
   );
@@ -48,10 +48,20 @@ function Figure({ label, cents, currency }: { label: string; cents?: number; cur
 
 function DateFigure({ label, at }: { label: string; at?: number }) {
   return (
-    <div>
-      <dt className="text-xs font-semibold uppercase text-ink/40">{label}</dt>
-      <dd className="mt-0.5 text-sm font-semibold text-ink">{day(at)}</dd>
+    <div className="min-w-0">
+      <dt className="text-xs text-gray-500">{label}</dt>
+      <dd className="mt-0.5 text-sm font-semibold tabular-nums text-gray-900">{day(at)}</dd>
     </div>
+  );
+}
+
+/** Status chip: a coloured dot and a word, in a bordered rounded-lg box. */
+function Chip({ dot, children }: { dot: string; children: ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-2 py-0.5 text-xs font-medium text-gray-900">
+      <span className={`size-1.5 shrink-0 rounded-full ${dot}`} aria-hidden="true" />
+      {children}
+    </span>
   );
 }
 
@@ -73,7 +83,7 @@ export default function Claim() {
   if (!claimId) return <Empty title="No claim selected" />;
   if (data === undefined) return <Loading rows={4} />;
 
-  const { claim, item, purchase, balance, drafts, replies, followUps, policy, events } = data;
+  const { claim, item, purchase, balance, drafts, replies, followUps, notes, policy, events } = data;
   const currency = purchase?.currency ?? "USD";
   const latestDraft = drafts[0];
   const pendingFollowUp = followUps.find((followUp) => followUp.status === "pending");
@@ -107,48 +117,43 @@ export default function Claim() {
   }
 
   return (
-    <div className="space-y-8">
-      <div className="sm:flex sm:items-start sm:justify-between sm:gap-6">
-        <div className="mb-4 min-w-0 sm:mb-0">
-          <h1 className="text-2xl font-bold text-ink md:text-3xl">{item?.name ?? "Item"}</h1>
-          <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-ink/60">
+    <div className="space-y-6">
+      <div className="lg:flex lg:items-start lg:justify-between lg:gap-8">
+        <div className="mb-5 min-w-0 lg:mb-0">
+          <h1 className={`${pageTitleClass} break-words`}>{item?.name ?? "Item"}</h1>
+          <p className="mt-2 flex flex-wrap items-center gap-2 text-sm text-gray-500">
             {purchase ? (
-              <Link to={`/purchases/${purchase._id}`} className="font-medium text-harbor hover:underline">
+              <Link
+                to={`/purchases/${purchase._id}`}
+                className="rounded font-medium text-gray-900 underline decoration-gray-300 underline-offset-4 hover:decoration-gray-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500"
+              >
                 {purchase.merchant || purchase.merchantDomain}
               </Link>
             ) : (
               "Purchase missing"
             )}
-            {qty > 1 && <span className="tabular-nums text-ink/40">×{qty}</span>}
+            {qty > 1 && <span className="tabular-nums text-gray-400">×{qty}</span>}
             {claim.attentionAt !== undefined && (
-              <span className="rounded-full bg-gold/20 px-1.5 font-medium text-gold">
-                Needs you since {when(claim.attentionAt)}
-              </span>
+              <Chip dot="bg-yellow-500">Needs you since {when(claim.attentionAt)}</Chip>
             )}
-            {pendingFollowUp && (
-              <span className="rounded-full bg-ink/10 px-1.5 font-medium text-ink/60">
-                Reminder {when(pendingFollowUp.fireAt)}
-              </span>
-            )}
+            {pendingFollowUp && <Chip dot="bg-sky-500">Reminder {when(pendingFollowUp.fireAt)}</Chip>}
           </p>
         </div>
-        <div className="w-full shrink-0 sm:w-96">
+        <div className="w-full min-w-0 shrink-0 lg:w-96">
           <StatusSteps status={claim.status} />
         </div>
       </div>
 
-      <div className="grid grid-cols-12 gap-6">
+      <div className="grid grid-cols-12 gap-5">
         {/* Row 1: the evidence. What is owed, how far the price fell, and the history. */}
         <Card className="col-span-full xl:col-span-8" bodyClassName="">
           <div className="flex flex-wrap items-end justify-between gap-x-8 gap-y-4 px-5 pt-5">
-            <div>
+            <div className="min-w-0">
               <StatLabel>{hero.label}</StatLabel>
-              <div className="mt-1 flex items-center gap-2">
-                <Money
-                  cents={hero.cents}
-                  currency={currency}
-                  className={`font-sans! text-3xl font-bold ${hero.tone}`}
-                />
+              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className={`${bigNumberClass} text-4xl! ${hero.tone}`}>
+                  {fmt(hero.cents, currency)}
+                </span>
                 {paidCents !== undefined && (
                   <DeltaBadge
                     paidCents={paidCents}
@@ -158,16 +163,17 @@ export default function Claim() {
                 )}
               </div>
             </div>
-            <dl className="flex gap-6">
+            <dl className="flex flex-wrap gap-x-6 gap-y-2">
               <Figure label="Paid" cents={paidCents} currency={currency} />
               <Figure label="Now" cents={tracked?.latestCents} currency={currency} />
               <Figure label="Lowest" cents={tracked?.lowestCents} currency={currency} />
             </dl>
           </div>
+          <div className="mx-5 mt-5 border-t border-dashed border-gray-200" aria-hidden="true" />
           <div className="min-w-0 px-2 pb-3 pt-4">
             {overview === undefined ? (
               <div
-                className="mx-3 h-[300px] animate-pulse rounded-lg bg-ink/5"
+                className="mx-3 h-[300px] animate-pulse rounded-xl bg-gray-100 motion-reduce:animate-none"
                 role="status"
                 aria-label="Loading price history"
               />
@@ -181,29 +187,29 @@ export default function Claim() {
                 height={300}
               />
             ) : (
-              <div className="mx-3 flex h-40 items-center justify-center rounded-lg border border-dashed border-line text-sm text-ink/40">
+              <div className="mx-3 flex h-40 items-center justify-center rounded-xl border border-dashed border-gray-200 text-sm text-gray-400">
                 No price history yet
               </div>
             )}
           </div>
         </Card>
 
-        <div className="col-span-full grid grid-cols-1 gap-6 sm:grid-cols-2 xl:col-span-4 xl:grid-cols-1">
-          <Card title="Window">
+        <div className="col-span-full grid grid-cols-1 gap-5 sm:grid-cols-2 xl:col-span-4 xl:grid-cols-1">
+          <Card title="Claim window" icon="window">
             <WindowMeter purchasedAt={purchasedAt} endsAt={claim.windowEndsAt} />
-            <dl className="mt-4 flex gap-6">
+            <dl className="mt-4 grid grid-cols-2 gap-4 border-t border-dashed border-gray-200 pt-4">
               <DateFigure label="Bought" at={purchasedAt} />
               <DateFigure label="Closes" at={claim.windowEndsAt} />
             </dl>
           </Card>
-          <Card title="Ledger">
+          <Card title="Ledger" icon="ledger">
             <LedgerBar
               expected={balance.expected}
               promised={balance.promised}
               confirmed={balance.confirmed}
               currency={currency}
             />
-            <dl className="mt-4 flex gap-6 border-t border-line/60 pt-4">
+            <dl className="mt-4 grid grid-cols-3 gap-3 border-t border-dashed border-gray-200 pt-4">
               <Figure label="Unresolved" cents={balance.unresolved} currency={currency} />
               <Figure label="Confirmed" cents={balance.confirmed} currency={currency} />
               <Figure label="Charged again" cents={balance.debited} currency={currency} />
@@ -211,108 +217,104 @@ export default function Claim() {
           </Card>
         </div>
 
-        {/* Row 2: the ask and what came back. */}
-        <Card
-          title="The ask"
-          className="col-span-full xl:col-span-7"
-          actions={
-            !isClosed && (
-              <button
-                type="button"
-                disabled={busy}
-                className={secondaryButtonClass}
-                onClick={() => void run(() => generate({ claimId: claim._id }))}
-              >
-                {busy ? "Writing…" : latestDraft ? "Write a new draft" : "Write the message"}
-              </button>
-            )
-          }
-        >
-          <div className="space-y-4">
-            {latestDraft ? (
-              <Composer
-                key={latestDraft._id}
-                draft={latestDraft}
-                claim={claim}
-                merchantDomain={purchase?.merchantDomain ?? ""}
-                packetChannel={packetChannel}
-                closed={isClosed}
-              />
-            ) : (
-              <>
-                <div className="rounded-lg border border-dashed border-line px-4 py-10 text-center text-sm text-ink/40">
-                  No draft yet
-                </div>
-                {packetChannel !== undefined && !isClosed && (
-                  <PacketRow claim={claim} channel={packetChannel} />
-                )}
-              </>
-            )}
-            {actionError && <ErrorBox error={actionError} />}
-          </div>
-        </Card>
-
-        <Card title="Replies" ruled className="col-span-full xl:col-span-5">
-          {replies.length === 0 ? (
-            <p className="py-6 text-center text-sm text-ink/40">None yet</p>
-          ) : (
-            <ReplyTimeline replies={replies} currency={currency} />
-          )}
-        </Card>
-
-        {/* Row 3: money in and out. */}
-        <Card title="Record money" className="col-span-full xl:col-span-5">
-          <div className="space-y-3">
-            <MoneyForm
-              title="Credit landed"
-              submitLabel="Confirm credit"
-              tone="credit"
-              currency={currency}
-              onSubmit={(cents, evidence, idempotencyKey) =>
-                confirmCredit({
-                  claimId: claim._id,
-                  cents,
-                  evidence: evidence || "Confirmed by the customer",
-                  idempotencyKey,
-                })
-              }
-            />
-            <MoneyForm
-              title="Charged again"
-              submitLabel="Record charge"
-              tone="debit"
-              currency={currency}
-              onSubmit={(cents, evidence, idempotencyKey) =>
-                recordLaterDebit({
-                  claimId: claim._id,
-                  cents,
-                  evidence: evidence || "Recorded by the customer",
-                  idempotencyKey,
-                })
-              }
-            />
-            {!isClosed && (
-              <div className="space-y-3 border-t border-line/60 pt-3">
-                {dismissError && <ErrorBox error={dismissError} />}
+        {/* Row 2: the ask and the money on the left, the claim's whole story on the right. */}
+        <div className="col-span-full flex min-w-0 flex-col gap-5 xl:col-span-7">
+          <Card
+            title="Message to the store"
+            icon="mail"
+            actions={
+              !isClosed && (
                 <button
                   type="button"
                   disabled={busy}
-                  className="text-sm font-medium text-rust hover:underline disabled:opacity-60"
-                  onClick={() => void run(() => dismiss({ claimId: claim._id }), setDismissError)}
+                  className={secondaryButtonClass}
+                  onClick={() => void run(() => generate({ claimId: claim._id }))}
                 >
-                  Dismiss this claim
+                  {busy ? "Writing…" : latestDraft ? "Write a new draft" : "Write the message"}
                 </button>
-              </div>
-            )}
-          </div>
-        </Card>
+              )
+            }
+          >
+            <div className="space-y-4">
+              {latestDraft ? (
+                <Composer
+                  key={latestDraft._id}
+                  draft={latestDraft}
+                  claim={claim}
+                  merchantDomain={purchase?.merchantDomain ?? ""}
+                  packetChannel={packetChannel}
+                  closed={isClosed}
+                />
+              ) : (
+                <>
+                  <div className="rounded-xl border border-dashed border-gray-200 px-4 py-10 text-center text-sm text-gray-400">
+                    {isClosed ? "No message was written for this claim" : "No draft yet. Write the message to start."}
+                  </div>
+                  {packetChannel !== undefined && !isClosed && (
+                    <PacketRow claim={claim} channel={packetChannel} />
+                  )}
+                </>
+              )}
+              {actionError && <ErrorBox error={actionError} />}
+            </div>
+          </Card>
 
-        <Card title="Ledger events" ruled className="col-span-full xl:col-span-7">
-          {events.length === 0 ? (
-            <p className="py-6 text-center text-sm text-ink/40">No money recorded yet</p>
-          ) : (
-            <LedgerTimeline events={events} currency={currency} />
-          )}
+          <Card title="Record money" icon="card">
+            <div className="space-y-3">
+              <MoneyForm
+                title="Credit landed"
+                submitLabel="Confirm credit"
+                tone="credit"
+                currency={currency}
+                onSubmit={(cents, evidence, idempotencyKey) =>
+                  confirmCredit({
+                    claimId: claim._id,
+                    cents,
+                    evidence: evidence || "Confirmed by the customer",
+                    idempotencyKey,
+                  })
+                }
+              />
+              <MoneyForm
+                title="Charged again"
+                submitLabel="Record charge"
+                tone="debit"
+                currency={currency}
+                onSubmit={(cents, evidence, idempotencyKey) =>
+                  recordLaterDebit({
+                    claimId: claim._id,
+                    cents,
+                    evidence: evidence || "Recorded by the customer",
+                    idempotencyKey,
+                  })
+                }
+              />
+              {!isClosed && (
+                <div className="space-y-3 border-t border-dashed border-gray-200 pt-3">
+                  {dismissError && <ErrorBox error={dismissError} />}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    className="rounded-lg px-1 py-1 text-sm font-medium text-red-700 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500 disabled:opacity-60"
+                    onClick={() => void run(() => dismiss({ claimId: claim._id }), setDismissError)}
+                  >
+                    Dismiss this claim
+                  </button>
+                </div>
+              )}
+            </div>
+          </Card>
+        </div>
+
+        <Card title="Claim timeline" icon="story" ruled className="col-span-full self-start xl:col-span-5">
+          <ClaimTimeline
+            claim={claim}
+            drafts={drafts}
+            replies={replies}
+            events={events}
+            notes={notes}
+            currency={currency}
+          />
         </Card>
       </div>
     </div>

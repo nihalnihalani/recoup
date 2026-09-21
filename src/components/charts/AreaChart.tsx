@@ -17,11 +17,15 @@ export type AreaChartProps = {
   ariaLabel: string;
 };
 
-const TONES: Record<AreaTone, { color: string; stroke: string; fill: string; bg: string }> = {
-  violet: { color: "var(--color-violet-500)", stroke: "stroke-violet-500", fill: "fill-violet-500", bg: "bg-violet-500" },
-  green: { color: "var(--color-green-500)", stroke: "stroke-green-500", fill: "fill-green-500", bg: "bg-green-500" },
-  red: { color: "var(--color-red-500)", stroke: "stroke-red-500", fill: "fill-red-500", bg: "bg-red-500" },
-  sky: { color: "var(--color-sky-500)", stroke: "stroke-sky-500", fill: "fill-sky-500", bg: "bg-sky-500" },
+/**
+ * The series palette, once, from the theme tokens. `sky` is the blue default; green and
+ * red are the semantic cheaper/dearer tones; violet stays available for a second series.
+ */
+const TONES: Record<AreaTone, { color: string; stroke: string; fill: string }> = {
+  violet: { color: "var(--color-harbor)", stroke: "stroke-harbor", fill: "fill-harbor" },
+  green: { color: "var(--color-moss)", stroke: "stroke-moss", fill: "fill-moss" },
+  red: { color: "var(--color-rust)", stroke: "stroke-rust", fill: "fill-rust" },
+  sky: { color: "var(--color-teal)", stroke: "stroke-teal", fill: "fill-teal" },
 };
 
 type XY = { x: number; y: number };
@@ -99,8 +103,8 @@ function niceTicks(lo: number, hi: number, count: number): number[] {
 }
 
 /**
- * A responsive area chart of one series over time: 2px line in the tone colour, a
- * gradient wash under it, an optional gray comparison line behind and an optional
+ * A responsive area chart of one series over time: 2px line in the tone colour (blue
+ * unless told otherwise), a very soft gradient under it, an optional gray comparison line behind and an optional
  * dashed reference level. Hover or focus a point for the crosshair and tooltip;
  * arrow keys move between points. One y-axis, always.
  */
@@ -109,7 +113,7 @@ export function AreaChart({
   compare,
   reference,
   height = 160,
-  tone = "violet",
+  tone = "sky",
   format = (value) => String(value),
   showAxes = false,
   curve = "smooth",
@@ -208,7 +212,7 @@ export function AreaChart({
   }
 
   const hovered = active !== null && active <= last ? { ...data[active], ...marks[active] } : undefined;
-  const tipHalf = 88;
+  const tipHalf = 80;
   const tipLeft = hovered ? Math.min(Math.max(hovered.x, Math.min(tipHalf, width / 2)), Math.max(width - tipHalf, width / 2)) : 0;
   const tipBelow = hovered ? hovered.y < 64 && height - hovered.y > 72 : false;
   const refY = reference ? y(reference.value) : 0;
@@ -218,7 +222,7 @@ export function AreaChart({
       <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="block overflow-visible">
         <defs>
           <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={palette.color} stopOpacity={0.2} />
+            <stop offset="0%" stopColor={palette.color} stopOpacity={0.12} />
             <stop offset="100%" stopColor={palette.color} stopOpacity={0} />
           </linearGradient>
         </defs>
@@ -226,7 +230,7 @@ export function AreaChart({
         <g role="img" aria-label={`${ariaLabel}. Latest ${format(data[last].value)}, ${shortDay(data[last].at)}.`}>
           {ticks.map((t) => (
             <g key={t}>
-              <line x1={M.left} x2={right} y1={y(t)} y2={y(t)} className="stroke-chart-grid" strokeWidth={1} />
+              <line x1={M.left} x2={right} y1={y(t)} y2={y(t)} className="stroke-gray-200" strokeWidth={1} strokeDasharray="3 4" />
               <text x={M.left - 8} y={y(t)} dy="0.32em" textAnchor="end" className="fill-gray-400 text-xs tabular-nums">
                 {format(t)}
               </text>
@@ -255,7 +259,7 @@ export function AreaChart({
               d={compareLine}
               fill="none"
               className="chart-morph stroke-gray-300"
-              strokeWidth={2}
+              strokeWidth={1.5}
               strokeLinejoin="round"
               strokeLinecap="round"
             />
@@ -293,7 +297,19 @@ export function AreaChart({
         </g>
 
         {hovered && (
-          <line x1={hovered.x} x2={hovered.x} y1={M.top} y2={bottom} className="stroke-gray-300" strokeWidth={1} aria-hidden="true" />
+          <>
+            <line
+              x1={hovered.x}
+              x2={hovered.x}
+              y1={M.top}
+              y2={bottom}
+              className="stroke-gray-300"
+              strokeWidth={1}
+              strokeDasharray="3 3"
+              aria-hidden="true"
+            />
+            <circle cx={hovered.x} cy={hovered.y} r={10} className={palette.fill} opacity={0.16} aria-hidden="true" />
+          </>
         )}
 
         <rect
@@ -319,7 +335,7 @@ export function AreaChart({
                 }}
                 cx={m.x}
                 cy={m.y}
-                r={i === active ? 5 : 4}
+                r={i === active ? 5 : 3.5}
                 strokeWidth={2}
                 opacity={shown ? 1 : 0}
                 className={`${palette.fill} pointer-events-none stroke-surface outline-none focus-visible:stroke-gray-900 ${
@@ -340,18 +356,16 @@ export function AreaChart({
       {hovered && (
         <div
           role="status"
-          className="pointer-events-none absolute z-20 w-44 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-lg"
+          className="pointer-events-none absolute z-20 w-40 -translate-x-1/2 rounded-lg bg-gray-900 px-3 py-2 text-white"
           style={{
             left: tipLeft,
-            top: tipBelow ? hovered.y + 12 : undefined,
-            bottom: tipBelow ? undefined : height - hovered.y + 12,
+            top: tipBelow ? hovered.y + 14 : undefined,
+            bottom: tipBelow ? undefined : height - hovered.y + 14,
           }}
         >
-          <p className="truncate text-xs font-medium text-gray-400">{when(hovered.at)}</p>
-          <p className="mt-0.5 flex items-center gap-2 text-sm font-semibold tabular-nums text-gray-800">
-            <span aria-hidden="true" className={`h-0.5 w-3 rounded-full ${palette.bg}`} />
-            {format(hovered.value)}
-          </p>
+          <p className="truncate text-xs text-gray-400">{ariaLabel}</p>
+          <p className="mt-0.5 text-sm font-bold tabular-nums">{format(hovered.value)}</p>
+          <p className="mt-0.5 truncate text-xs text-gray-400">{when(hovered.at)}</p>
         </div>
       )}
     </div>

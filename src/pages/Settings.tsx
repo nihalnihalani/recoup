@@ -1,15 +1,16 @@
 import { useAction, useMutation, useQuery } from "convex/react";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import { Card } from "../components/claim/Card";
-import { Empty, ErrorBox, Loading } from "../components/States";
+import { ErrorBox, Loading } from "../components/States";
 import {
   errorText,
   inputClass,
+  pageTitleClass,
   primaryButtonClass,
   secondaryButtonClass,
+  tableHeadClass,
   when,
 } from "../lib/ui";
 
@@ -76,58 +77,61 @@ export default function Settings() {
   }
 
   return (
-    <div className="space-y-8">
-      <div className="sm:flex sm:items-center sm:justify-between">
-        <h1 className="mb-4 text-2xl font-bold text-ink sm:mb-0 md:text-3xl">Settings</h1>
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className={pageTitleClass}>Settings</h1>
+          <p className="mt-1 text-sm text-gray-500">Forward an order confirmation, or paste one here.</p>
+        </div>
         <Link to="/" className={secondaryButtonClass}>
           Back to the board
         </Link>
       </div>
 
-      <div className="grid grid-cols-12 gap-6">
-        <Card title="Your inbox" className="col-span-full xl:col-span-5">
-          <div className="space-y-3">
-            {profile === undefined ? (
-              <Loading rows={1} />
-            ) : profile?.inboxEmail ? (
-              <>
-                <div className="flex flex-wrap items-center gap-2">
-                  <code className="min-w-0 break-all rounded-full bg-ink/5 px-3 py-1.5 font-mono text-sm text-ink">
-                    {profile.inboxEmail}
-                  </code>
-                  <button
-                    type="button"
-                    className={secondaryButtonClass}
-                    onClick={() => void handleCopy(profile.inboxEmail ?? "")}
-                  >
-                    {copied ? "Copied" : "Copy"}
-                  </button>
-                </div>
-                <p className="text-sm text-ink/60">
-                  Forward order confirmations and merchant replies here.
-                </p>
-              </>
-            ) : (
-              <Empty
-                title="No inbox yet"
-                hint="Recoup needs its own address so merchants can reply somewhere it can read."
-                action={
-                  <button
-                    type="button"
-                    onClick={() => void handleEnsureInbox()}
-                    disabled={busy}
-                    className={primaryButtonClass}
-                  >
-                    {busy ? "Creating…" : "Create my inbox"}
-                  </button>
-                }
-              />
-            )}
-            {inboxError && <ErrorBox error={inboxError} />}
-          </div>
-        </Card>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <SettingsCard title="Your Recoup inbox" icon={<InboxIcon />}>
+          {profile === undefined ? (
+            <Loading rows={1} />
+          ) : profile?.inboxEmail ? (
+            <div className="space-y-3">
+              <div className="flex items-stretch gap-2">
+                <code
+                  aria-label="Your Recoup inbox address"
+                  className="flex min-w-0 flex-1 items-center break-all rounded-xl border border-gray-200 bg-gray-50 px-3.5 py-2.5 font-mono text-sm text-gray-900"
+                >
+                  {profile.inboxEmail}
+                </code>
+                <button
+                  type="button"
+                  className={`${secondaryButtonClass} min-w-24 shrink-0 ${copied ? "text-green-700" : ""}`}
+                  onClick={() => void handleCopy(profile.inboxEmail ?? "")}
+                >
+                  {copied ? <CheckIcon /> : <CopyIcon />}
+                  <span aria-live="polite">{copied ? "Copied" : "Copy"}</span>
+                </button>
+              </div>
+              <p className="text-sm text-gray-500">Forward order confirmations and merchant replies here.</p>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-gray-300 px-5 py-8 text-center">
+              <p className="text-base font-semibold text-gray-900">No inbox yet</p>
+              <p className="mx-auto mt-1.5 max-w-sm text-sm text-gray-500">
+                Recoup needs its own address so merchants can reply somewhere it can read.
+              </p>
+              <button
+                type="button"
+                onClick={() => void handleEnsureInbox()}
+                disabled={busy}
+                className={`mt-4 ${primaryButtonClass}`}
+              >
+                {busy ? "Creating…" : "Create my inbox"}
+              </button>
+            </div>
+          )}
+          {inboxError && <ErrorBox error={inboxError} className="mt-3" />}
+        </SettingsCard>
 
-        <Card title="Add a purchase" className="col-span-full xl:col-span-7">
+        <SettingsCard title="Add a purchase" icon={<ReceiptIcon />}>
           <div className="space-y-3">
             <label htmlFor="paste-order" className="sr-only">
               Order confirmation text
@@ -138,7 +142,7 @@ export default function Settings() {
               onChange={(event) => setPasted(event.target.value)}
               rows={8}
               placeholder="Paste the order confirmation email text here…"
-              className={inputClass}
+              className={`${inputClass} block resize-y`}
             />
             <div className="flex flex-wrap items-center gap-3">
               <button
@@ -150,62 +154,78 @@ export default function Settings() {
                 {busy ? "Reading…" : "Add purchase"}
               </button>
               {pasteResult && (
-                <p role="status" className="text-sm font-medium text-moss">
+                <p role="status" className="flex min-w-0 flex-1 items-start gap-2 text-sm font-medium text-green-700">
+                  <span aria-hidden="true" className="mt-1.5 size-2 shrink-0 rounded-full bg-green-500" />
                   {pasteResult}
                 </p>
               )}
             </div>
             {pasteError && <ErrorBox error={pasteError} />}
           </div>
-        </Card>
+        </SettingsCard>
 
-        <Card title="Needs attention" ruled className="col-span-full" bodyClassName="p-3">
+        <SettingsCard
+          title="Needs attention"
+          icon={<AlertIcon />}
+          className="lg:col-span-2"
+          aside={
+            attention !== undefined && attention.length > 0 ? (
+              <span className="rounded-lg border border-gray-200 px-2 py-0.5 text-xs font-semibold text-gray-500 tabular-nums">
+                {attention.length}
+              </span>
+            ) : undefined
+          }
+        >
           {attention === undefined ? (
-            <Loading rows={2} className="p-2" />
+            <Loading rows={2} />
           ) : attention.length === 0 ? (
-            <p className="py-6 text-center text-sm text-ink/40">Nothing stuck</p>
+            <p className="flex items-center justify-center gap-2 py-6 text-sm text-gray-500">
+              <span aria-hidden="true" className="size-2 rounded-full bg-green-500" />
+              Nothing stuck
+            </p>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="relative -mx-1 overflow-x-auto px-1">
+              {/* relative: keeps the sr-only header inside the scroller instead of widening the page. */}
               <table className="w-full table-auto text-sm">
-                <thead className="rounded-xs bg-ink/5 text-xs font-semibold uppercase text-ink/40">
+                <thead className={tableHeadClass}>
                   <tr>
-                    <th className="p-2 text-left">Status</th>
-                    <th className="p-2 text-left">Detail</th>
-                    <th className="p-2 text-left">Kind</th>
-                    <th className="p-2 text-right">Attempts</th>
-                    <th className="p-2 text-left">Received</th>
-                    <th className="p-2">
+                    <th scope="col" className="rounded-l-lg px-3 py-2.5 text-left font-medium">Status</th>
+                    <th scope="col" className="px-3 py-2.5 text-left font-medium">Detail</th>
+                    <th scope="col" className="px-3 py-2.5 text-left font-medium">Kind</th>
+                    <th scope="col" className="px-3 py-2.5 text-right font-medium">Attempts</th>
+                    <th scope="col" className="px-3 py-2.5 text-left font-medium">Received</th>
+                    <th scope="col" className="rounded-r-lg px-3 py-2.5">
                       <span className="sr-only">Actions</span>
                     </th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-line/60">
+                <tbody className="divide-y divide-gray-100">
                   {attention.map((event) => (
                     <tr key={event._id}>
-                      <td className="whitespace-nowrap p-2">
-                        <span
-                          className={`rounded-full px-1.5 text-sm font-medium ${
-                            event.status === "failed" ? "bg-rust/20 text-rust" : "bg-gold/20 text-gold"
-                          }`}
-                        >
+                      <td className="whitespace-nowrap px-3 py-3">
+                        <span className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900">
+                          <span
+                            aria-hidden="true"
+                            className={`size-2 rounded-full ${event.status === "failed" ? "bg-red-500" : "bg-yellow-500"}`}
+                          />
                           {event.status === "failed" ? "Failed" : "Needs review"}
                         </span>
                       </td>
-                      <td className="min-w-64 p-2 text-ink">
+                      <td className="min-w-64 px-3 py-3 text-gray-900">
                         {event.summary ?? event.lastError ?? "No detail recorded."}
                       </td>
-                      <td className="whitespace-nowrap p-2 text-ink/60">
+                      <td className="whitespace-nowrap px-3 py-3 text-gray-500">
                         {event.kind}
                         {event.route ? ` / ${event.route}` : ""}
                       </td>
-                      <td className="p-2 text-right tabular-nums text-ink/60">{event.attempts}</td>
-                      <td className="whitespace-nowrap p-2 text-ink/60">{when(event._creationTime)}</td>
-                      <td className="p-2 text-right">
+                      <td className="px-3 py-3 text-right tabular-nums text-gray-500">{event.attempts}</td>
+                      <td className="whitespace-nowrap px-3 py-3 text-gray-500">{when(event._creationTime)}</td>
+                      <td className="px-3 py-3 text-right">
                         {event.status === "failed" && (
                           <button
                             type="button"
                             onClick={() => void handleRetry(event._id)}
-                            className={secondaryButtonClass}
+                            className={`${secondaryButtonClass} whitespace-nowrap px-3 py-1.5 text-xs`}
                           >
                             Try again
                           </button>
@@ -217,9 +237,101 @@ export default function Settings() {
               </table>
             </div>
           )}
-          {retryError && <ErrorBox error={retryError} className="m-2" />}
-        </Card>
+          {retryError && <ErrorBox error={retryError} className="mt-3" />}
+        </SettingsCard>
       </div>
     </div>
+  );
+}
+
+/** The bordered card: icon tile and title over a dashed hairline, then the body. */
+function SettingsCard({
+  title,
+  icon,
+  aside,
+  className = "",
+  children,
+}: {
+  title: string;
+  icon: ReactNode;
+  aside?: ReactNode;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className={`min-w-0 rounded-2xl border border-gray-200 bg-white ${className}`}>
+      <header className="mx-5 flex items-center gap-3 border-b border-dashed border-gray-200 py-4">
+        <span
+          aria-hidden="true"
+          className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-gray-200 text-gray-900"
+        >
+          {icon}
+        </span>
+        <h2 className="min-w-0 flex-1 truncate text-base font-semibold text-gray-900">{title}</h2>
+        {aside}
+      </header>
+      <div className="p-5">{children}</div>
+    </section>
+  );
+}
+
+function Line({ children, className = "size-5" }: { children: ReactNode; className?: string }) {
+  return (
+    <svg
+      className={`shrink-0 ${className}`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {children}
+    </svg>
+  );
+}
+
+function InboxIcon() {
+  return (
+    <Line>
+      <path d="M4 13.5 6.5 5h11L20 13.5V19H4z" />
+      <path d="M4 13.5h4.5a3.5 3.5 0 0 0 7 0H20" />
+    </Line>
+  );
+}
+
+function ReceiptIcon() {
+  return (
+    <Line>
+      <path d="M6 3.5h12v17l-3-1.750-3 1.750-3-1.750-3 1.750z" />
+      <path d="M9.500 8.500h5M9.500 12h5" />
+    </Line>
+  );
+}
+
+function AlertIcon() {
+  return (
+    <Line>
+      <path d="M12 4 3.500 19h17z" />
+      <path d="M12 10v4M12 16.750v.010" />
+    </Line>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <Line className="size-4">
+      <rect x="8.500" y="8.500" width="11" height="11" rx="2.500" />
+      <path d="M15.500 8.500V6.500a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2" />
+    </Line>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <Line className="size-4">
+      <path d="M5 12.500l4.500 4.500L19 7.500" />
+    </Line>
   );
 }

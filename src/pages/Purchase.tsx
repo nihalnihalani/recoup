@@ -8,8 +8,11 @@ import { WindowMeter } from "../components/charts/WindowMeter";
 import { ItemTracker } from "../components/purchase/ItemTracker";
 import { RuleCard } from "../components/purchase/RuleCard";
 import { UntrackedTable } from "../components/purchase/UntrackedTable";
+import { CardHeading, DotChip, ReviewIcon } from "../components/purchase/parts";
 import { Empty, Loading } from "../components/States";
 import {
+  cardClass,
+  cardTitleClass,
   centsToDollars,
   day,
   dollarsToCents,
@@ -17,7 +20,9 @@ import {
   fromDateInput,
   inputClass,
   labelClass,
+  pageTitleClass,
   primaryButtonClass,
+  tableHeadClass,
   toDateInput,
 } from "../lib/ui";
 
@@ -114,13 +119,16 @@ function ReviewForm({ data }: { data: PurchaseData }) {
   const cellInput = `${inputClass} min-w-0`;
 
   return (
-    <section aria-label="Review this purchase" className="col-span-full rounded-xl bg-white shadow-xs">
-      <header className="border-b border-gray-100 px-5 py-4">
-        <h2 className="font-semibold text-gray-800">Check the details</h2>
-        <p className="mt-0.5 text-sm text-gray-500">Read from the order email. Fix anything wrong, then confirm.</p>
-      </header>
+    <section aria-label="Review this purchase" className={`${cardClass} col-span-full overflow-hidden`}>
+      <div className="px-5 pt-5">
+        <CardHeading
+          icon={<ReviewIcon />}
+          title="Check the details"
+          hint="Read from the order email. Fix anything wrong, then confirm."
+        />
+      </div>
 
-      <div className="grid gap-4 px-5 py-5 sm:grid-cols-2">
+      <div className="mx-5 mt-4 grid gap-4 border-t border-dashed border-gray-200 py-5 sm:grid-cols-2">
         <div>
           <label className={labelClass} htmlFor="merchant">
             Merchant
@@ -168,30 +176,30 @@ function ReviewForm({ data }: { data: PurchaseData }) {
         </div>
       </div>
 
-      <div className="border-t border-gray-100 px-5 py-4">
-        <h3 className="font-semibold text-gray-800">Items</h3>
+      <div className="border-t border-gray-200 px-5 py-5">
+        <h3 className={cardTitleClass}>Items</h3>
         {items.length === 0 ? (
           <p className="mt-2 text-sm text-gray-500">No items were extracted.</p>
         ) : (
-          <div className="mt-3 overflow-x-auto">
+          <div className="mt-3 overflow-x-auto rounded-xl border border-gray-200">
             <table className="w-full min-w-[40rem] table-auto text-sm">
-              <thead className="bg-gray-50 text-xs font-semibold uppercase text-gray-400">
+              <thead className={tableHeadClass}>
                 <tr>
-                  <th scope="col" className="p-2 text-left">
+                  <th scope="col" className="px-3 py-2.5 text-left font-medium">
                     Item
                   </th>
-                  <th scope="col" className="w-28 p-2 text-left">
+                  <th scope="col" className="w-28 px-3 py-2.5 text-left font-medium">
                     Unit price
                   </th>
-                  <th scope="col" className="w-20 p-2 text-left">
+                  <th scope="col" className="w-20 px-3 py-2.5 text-left font-medium">
                     Qty
                   </th>
-                  <th scope="col" className="p-2 text-left">
+                  <th scope="col" className="px-3 py-2.5 text-left font-medium">
                     Product page
                   </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100">
+              <tbody className="divide-y divide-gray-200">
                 {items.map((item, index) => (
                   <tr key={item.itemId}>
                     <td className="p-2">
@@ -237,9 +245,9 @@ function ReviewForm({ data }: { data: PurchaseData }) {
         )}
       </div>
 
-      <footer className="flex flex-wrap items-center justify-end gap-3 border-t border-gray-100 px-5 py-4">
+      <footer className="flex flex-wrap items-center justify-end gap-3 border-t border-gray-200 px-5 py-4">
         {error && (
-          <p role="alert" className="mr-auto text-sm text-rust">
+          <p role="alert" className="mr-auto text-sm text-red-700">
             {error}
           </p>
         )}
@@ -278,7 +286,7 @@ function CheckAllButton({ itemIds }: { itemIds: Id<"items">[] }) {
         {busy ? "Checking…" : "Check all prices"}
       </button>
       {error && (
-        <p role="alert" className="max-w-xs text-right text-xs text-rust">
+        <p role="alert" className="max-w-xs text-right text-xs text-red-700">
           {error}
         </p>
       )}
@@ -322,23 +330,26 @@ export default function Purchase() {
     <div>
       <div className="mb-8 sm:flex sm:items-center sm:justify-between sm:gap-6">
         <div className="mb-4 min-w-0 sm:mb-0">
-          <Link to="/" className="text-sm font-medium text-gray-500 hover:text-gray-800">
+          <Link
+            to="/"
+            className="rounded text-sm font-medium text-gray-500 transition hover:text-gray-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500"
+          >
             Back to the board
           </Link>
-          <h1 className="mt-1 truncate text-2xl font-bold text-gray-800 md:text-3xl">
+          <h1 className={`mt-1 truncate ${pageTitleClass}`}>
             {purchase.merchant || purchase.merchantDomain || "Purchase"}
           </h1>
           <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-500">
             {purchase.orderRef && <span>Order {purchase.orderRef}</span>}
             <span>Bought {day(purchase.purchasedAt)}</span>
             {needsReview && (
-              <span className="rounded-full bg-gold/15 px-2.5 py-1 text-xs font-medium text-gold">Needs your review</span>
+              <DotChip dot="bg-gold">Needs your review</DotChip>
             )}
           </p>
         </div>
         {!needsReview && (
           <div className="flex flex-wrap items-center gap-4 sm:justify-end">
-            <div className="w-56">
+            <div className="w-full min-w-0 sm:w-56">
               <WindowMeter purchasedAt={purchase.purchasedAt} endsAt={windowEndsAt} />
             </div>
             {tracked.length > 1 && <CheckAllButton itemIds={tracked.map((item) => item._id)} />}

@@ -1,160 +1,99 @@
-import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { fmt } from "../Money";
 import { StatusPill } from "../StatusPill";
-import { cardHeaderClass, cardTitleClass, percent, pillBadClass, pillGoodClass, pillMutedClass } from "../../lib/ui";
 import type { VerdictTone } from "../../lib/priceStats";
-import { productVerdict, type Product, type Watch } from "./model";
+import { itemVerdict, type Item } from "./model";
+
+/** The dashboard's card: white, hairline border, generous radius, no shadow. */
+export const panelClass = "rounded-2xl border border-gray-200 bg-white";
+export const panelTitleClass = "text-base font-semibold text-gray-900";
+export const focusRing = "outline-none focus-visible:ring-2 focus-visible:ring-gray-900/30 focus-visible:ring-offset-2 focus-visible:ring-offset-white";
+
+/** A bordered, quiet control: the "View all", "Filter" and select-like buttons. */
+export const controlClass = `inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 motion-reduce:transition-none ${focusRing}`;
+
+export function Bone({ className }: { className: string }) {
+  return <div className={`animate-pulse rounded-md bg-gray-100 motion-reduce:animate-none ${className}`} />;
+}
 
 export function ExampleChip() {
   return <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Example</span>;
 }
 
-export function CardHeader({ id, title, count, aside }: { id: string; title: string; count?: number; aside?: ReactNode }) {
-  return (
-    <header className={`flex flex-wrap items-center justify-between gap-2 ${cardHeaderClass}`}>
-      <h2 id={id} className={cardTitleClass}>
-        {title}
-        {count !== undefined && <span className="ml-2 font-medium text-gray-400">{count}</span>}
-      </h2>
-      {aside}
-    </header>
-  );
-}
-
 /**
- * Now against a basis: "▼ $5.00 · 9.1%" green when cheaper, "▲" red when dearer,
- * a gray dash when unknown or level. The arrow carries direction, not the colour.
+ * A price's move in percent: "▼ 4.2%" green when it fell, "▲" red when it rose, a
+ * muted dash when unknown or flat. The arrow carries direction, not the colour.
  */
-export function ChangePill({
-  nowCents,
-  basisCents,
-  currency,
-  versus,
-}: {
-  nowCents?: number;
-  basisCents?: number;
-  currency: string;
-  versus: string;
-}) {
-  if (nowCents === undefined || basisCents === undefined || nowCents === basisCents) {
+export function PctChange({ pct, versus = "the first price read" }: { pct: number | null | undefined; versus?: string }) {
+  if (pct === null || pct === undefined || !Number.isFinite(pct) || Math.abs(pct) < 0.05) {
     return (
-      <span
-        className={`${pillMutedClass} tabular-nums`}
-        aria-label={nowCents === undefined || basisCents === undefined ? "No change known yet" : `Same as ${versus}`}
-      >
+      <span className="text-xs font-medium text-gray-400" aria-label={pct === null || pct === undefined ? "No change known yet" : `Same as ${versus}`}>
         —
       </span>
     );
   }
-  const lower = nowCents < basisCents;
-  const diff = Math.abs(basisCents - nowCents);
+  const lower = pct < 0;
+  const size = Math.abs(pct);
+  const text = `${size >= 10 ? Math.round(size) : size.toFixed(1)}%`;
   return (
     <span
-      className={`${lower ? pillGoodClass : pillBadClass} whitespace-nowrap tabular-nums`}
-      aria-label={`${fmt(diff, currency)} ${lower ? "lower" : "higher"} than ${versus}`}
+      className={`inline-flex items-center gap-0.5 whitespace-nowrap text-xs font-semibold tabular-nums ${lower ? "text-green-700" : "text-red-700"}`}
+      aria-label={`${text} ${lower ? "lower" : "higher"} than ${versus}`}
       title={`vs ${versus}`}
     >
       <span aria-hidden="true" className="text-[0.7em]">
         {lower ? "▼" : "▲"}
       </span>
-      <span aria-hidden="true">
-        {fmt(diff, currency)}
-        {basisCents > 0 && ` · ${percent(diff / basisCents)}`}
-      </span>
+      <span aria-hidden="true">{text}</span>
     </span>
   );
 }
 
 const chipBase = "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium";
 
-const VERDICTS: Record<Watch["verdict"]["label"], { label: string; className: string }> = {
-  good_price: { label: "Good price", className: "bg-green-500/20 text-green-700" },
-  fair: { label: "Fair", className: "bg-gray-100 text-gray-600" },
-  wait: { label: "Wait", className: "bg-yellow-500/20 text-yellow-700" },
-  inflated_discount: { label: "Inflated discount", className: "bg-red-500/20 text-red-700" },
-  not_enough_history: { label: "Little history", className: "bg-gray-100 text-gray-500" },
-  unknown: { label: "No price", className: "bg-gray-100 text-gray-500" },
-};
-
 const TONES: Record<VerdictTone, string> = {
-  green: "bg-green-500/20 text-green-700",
+  green: "bg-green-500/15 text-green-700",
   violet: "bg-violet-500/15 text-violet-700",
   yellow: "bg-yellow-500/20 text-yellow-700",
   gray: "bg-gray-100 text-gray-600",
-  red: "bg-red-500/20 text-red-700",
+  red: "bg-red-500/15 text-red-700",
 };
 
 /** The claim statuses the claim's own pill already says best: the store has been asked, or money moved. */
 const CLAIM_SPEAKS = new Set(["queued", "sent", "packet", "promised", "confirmed", "reopened"]);
 
 /**
- * A watch's verdict (or its paused / checking state). A bought item shows its claim's
- * status once the store has been asked, and otherwise what its price means: claim now,
- * holding, went up, window closed.
+ * A bought item shows its claim's status once the store has been asked, and otherwise
+ * what its price means: claim now, holding, went up, window closed. A chip with a
+ * claim behind it leads straight to that claim.
  */
-export function ProductStatus({ product, now, linked = false }: { product: Product; now: number; linked?: boolean }) {
-  const { watch, item } = product;
-  if (watch) {
-    if (watch.checking) {
-      return (
-        <span className={`${chipBase} bg-violet-500/15 text-violet-700`}>
-          <span className="size-1.5 animate-pulse rounded-full bg-current motion-reduce:animate-none" aria-hidden="true" />
-          Checking
-        </span>
-      );
-    }
-    if (watch.status === "paused") return <span className={`${chipBase} bg-gray-100 text-gray-500`}>Paused</span>;
-    const verdict = VERDICTS[watch.verdict.label];
+export function VerdictChip({ item, now }: { item: Item; now: number }) {
+  const verdict = itemVerdict(item, now);
+  const toClaim = item.claim ? `/claims/${item.claim.claimId}` : undefined;
+  const linkClass = `inline-flex rounded-full ${focusRing}`;
+
+  if (item.claim && CLAIM_SPEAKS.has(item.claim.status) && toClaim) {
     return (
-      <span className={`${chipBase} ${verdict.className}`} title={watch.verdict.reason}>
-        {verdict.label}
-      </span>
-    );
-  }
-  const verdict = productVerdict(product, now);
-  if (item?.claim && (CLAIM_SPEAKS.has(item.claim.status) || verdict === undefined)) {
-    const pill = <StatusPill status={item.claim.status} />;
-    return linked ? (
-      <Link
-        to={`/claims/${item.claim.claimId}`}
-        onClick={(event) => event.stopPropagation()}
-        aria-label={`Claim for ${product.name}`}
-        className="inline-flex rounded-full outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
-      >
-        {pill}
+      <Link to={toClaim} aria-label={`Claim for ${item.name}`} className={linkClass}>
+        <StatusPill status={item.claim.status} />
       </Link>
-    ) : (
-      pill
     );
   }
-  if (verdict === undefined || (verdict.kind === "no_price" && !item?.productUrl)) {
-    return (
-      <span className={`${chipBase} bg-gray-100 text-gray-600`}>
-        <span aria-hidden="true" className="size-1.5 rounded-full bg-gray-300" />
-        No product link
-      </span>
-    );
+  if (verdict.kind === "no_price" && !item.productUrl) {
+    return <span className={`${chipBase} bg-gray-100 text-gray-600`}>No product link</span>;
   }
   const chip = (
     <span className={`${chipBase} ${TONES[verdict.tone]}`} title={verdict.reason}>
       {verdict.kind === "claim_now" && (
         <span className="relative flex size-1.5" aria-hidden="true">
-          <span className="absolute inline-flex size-full animate-ping rounded-full bg-violet-500 opacity-60 motion-reduce:animate-none" />
-          <span className="relative inline-flex size-1.5 rounded-full bg-violet-500" />
+          <span className="absolute inline-flex size-full animate-ping rounded-full bg-green-500 opacity-60 motion-reduce:animate-none" />
+          <span className="relative inline-flex size-1.5 rounded-full bg-green-500" />
         </span>
       )}
       {verdict.shortLabel}
     </span>
   );
-  // A drop the backend already opened a claim for: the chip leads straight to it.
-  return linked && item?.claim ? (
-    <Link
-      to={`/claims/${item.claim.claimId}`}
-      onClick={(event) => event.stopPropagation()}
-      aria-label={`${verdict.label}: claim for ${product.name}`}
-      className="inline-flex rounded-full outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
-    >
+  return toClaim ? (
+    <Link to={toClaim} aria-label={`${verdict.label}: claim for ${item.name}`} className={linkClass}>
       {chip}
     </Link>
   ) : (

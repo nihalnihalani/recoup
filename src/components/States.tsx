@@ -8,7 +8,7 @@ export function Loading({ rows = 3, className = "" }: { rows?: number; className
       {Array.from({ length: rows }).map((_, i) => (
         <div
           key={i}
-          className="h-14 animate-pulse rounded-xl bg-white shadow-xs"
+          className="h-14 animate-pulse rounded-2xl border border-gray-200 bg-gray-50 motion-reduce:animate-none"
           style={{ animationDelay: `${i * 100}ms` }}
         />
       ))}
@@ -30,9 +30,9 @@ export function Empty({
 }) {
   return (
     <div
-      className={`rounded-xl border border-dashed border-gray-300 bg-white px-6 py-12 text-center shadow-xs ${className}`}
+      className={`rounded-2xl border border-dashed border-gray-300 bg-white px-6 py-12 text-center ${className}`}
     >
-      <p className="text-lg font-semibold text-gray-800">{title}</p>
+      <p className="text-base font-semibold text-gray-900">{title}</p>
       {hint && <p className="mx-auto mt-2 max-w-sm text-sm text-gray-500">{hint}</p>}
       {action && <div className="mt-4">{action}</div>}
     </div>
@@ -53,15 +53,15 @@ export function ErrorBox({
   return (
     <div
       role="alert"
-      className={`rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-700 ${className}`}
+      className={`rounded-2xl border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-700 ${className}`}
     >
-      <p className="font-medium">Something didn't work.</p>
+      <p className="font-semibold">Something didn't work.</p>
       <p className="mt-1 text-red-700/90">{message}</p>
       {retry && (
         <button
           type="button"
           onClick={retry}
-          className="mt-3 rounded-lg border border-red-500/40 bg-white px-3 py-1.5 text-sm font-medium text-red-700 transition hover:border-red-500/70"
+          className="mt-3 rounded-xl border border-red-500/40 bg-white px-3 py-1.5 text-sm font-semibold text-red-700 transition hover:border-red-500/70 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
         >
           Try again
         </button>

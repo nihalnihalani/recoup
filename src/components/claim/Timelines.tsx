@@ -1,145 +1,211 @@
-import type { ReactNode } from "react";
 import type { Doc } from "../../../convex/_generated/dataModel";
-import { Money } from "../Money";
+import { fmt } from "../Money";
 import { when } from "../../lib/ui";
+import { ClaimIcon, type ClaimGlyph } from "./icons";
 
 type ReplyClass = Doc<"replies">["classification"];
 type EventKind = Doc<"ledgerEvents">["kind"];
 
-type Glyph = "check" | "clock" | "cross" | "question" | "dot" | "minus";
+/** Colour is semantic: good, waiting, bad, information, everything else. */
+type Tone = "good" | "waiting" | "bad" | "info" | "plain";
 
-const PATHS: Record<Glyph, string> = {
-  check: "M3.5 8.5l3 3 6-6.5",
-  clock: "M8 4.5V8l2.5 1.5",
-  cross: "M4.5 4.5l7 7m0-7l-7 7",
-  question: "M6 6.2a2 2 0 113 1.7c-.7.4-1 .8-1 1.6M8 11.8v.2",
-  dot: "M8 8h.01",
-  minus: "M4 8h8",
+const TILE: Record<Tone, string> = {
+  good: "bg-green-500/10 text-green-700",
+  waiting: "bg-yellow-500/15 text-yellow-700",
+  bad: "bg-red-500/10 text-red-700",
+  info: "bg-sky-500/10 text-sky-700",
+  plain: "bg-gray-100 text-gray-500",
 };
 
-const REPLY: Record<ReplyClass, { label: string; pill: string; bullet: string; glyph: Glyph }> = {
-  promise: { label: "Promise", pill: "bg-gold/20 text-gold", bullet: "bg-gold", glyph: "clock" },
-  credit_issued: { label: "Credit issued", pill: "bg-moss/20 text-moss", bullet: "bg-moss", glyph: "check" },
-  refusal: { label: "Refusal", pill: "bg-rust/20 text-rust", bullet: "bg-rust", glyph: "cross" },
-  question: { label: "Question", pill: "bg-harbor/20 text-harbor", bullet: "bg-harbor", glyph: "question" },
-  other: { label: "Other", pill: "bg-ink/10 text-ink/60", bullet: "bg-ink/40", glyph: "dot" },
+const REPLY: Record<ReplyClass, { title: string; tone: Tone; glyph: ClaimGlyph }> = {
+  promise: { title: "Store promised a credit", tone: "waiting", glyph: "clock" },
+  credit_issued: { title: "Store says credit issued", tone: "good", glyph: "check" },
+  refusal: { title: "Store refused", tone: "bad", glyph: "cross" },
+  question: { title: "Store asked a question", tone: "info", glyph: "question" },
+  other: { title: "Reply received", tone: "plain", glyph: "mail" },
 };
 
-const EVENT: Record<EventKind, { label: string; bullet: string; glyph: Glyph; sign: string }> = {
-  promised_credit: { label: "Promised", bullet: "bg-gold", glyph: "clock", sign: "" },
-  confirmed_credit: { label: "Credit landed", bullet: "bg-moss", glyph: "check", sign: "+" },
-  later_debit: { label: "Charged again", bullet: "bg-rust", glyph: "minus", sign: "−" },
+const EVENT: Record<EventKind, { title: string; tone: Tone; glyph: ClaimGlyph; sign: string }> = {
+  promised_credit: { title: "Credit promised", tone: "waiting", glyph: "clock", sign: "" },
+  confirmed_credit: { title: "Back on your card", tone: "good", glyph: "card", sign: "+" },
+  later_debit: { title: "Charged again", tone: "bad", glyph: "repeat", sign: "−" },
 };
 
-/** An activity feed: round icon bullets threaded on a vertical rule. */
-function Feed({ children }: { children: ReactNode }) {
-  return <ul className="space-y-5">{children}</ul>;
+type Entry = {
+  key: string;
+  at: number;
+  tone: Tone;
+  glyph: ClaimGlyph;
+  title: string;
+  /** A signed amount set against the title, right-aligned. */
+  amount?: string;
+  detail?: string;
+  /** A second muted line: who it came from or went to. */
+  party?: string;
+  warning?: string;
+};
+
+function draftEntry(draft: Doc<"drafts">, at: number): Entry {
+  const base = {
+    key: draft._id,
+    at,
+    detail: draft.subject,
+    party: draft.to.length > 0 ? `To ${draft.to}` : undefined,
+  };
+  if (draft.sendError !== undefined) {
+    return { ...base, tone: "bad", glyph: "alert", title: "Message failed to send", detail: draft.sendError };
+  }
+  if (draft.agentmailMessageId !== undefined) {
+    return { ...base, tone: "info", glyph: "send", title: "Message sent to the store" };
+  }
+  return { ...base, tone: "info", glyph: "send", title: "Message approved" };
 }
 
-function FeedItem({
-  bullet,
-  glyph,
-  last,
-  children,
-}: {
-  bullet: string;
-  glyph: Glyph;
-  last: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <li className="relative flex gap-3">
-      {!last && (
-        <span className="absolute left-3.5 top-8 -bottom-5 w-px -translate-x-1/2 bg-line" aria-hidden="true" />
-      )}
-      <span
-        className={`flex size-7 shrink-0 items-center justify-center rounded-full text-white ${bullet}`}
-        aria-hidden="true"
-      >
-        <svg viewBox="0 0 16 16" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <path d={PATHS[glyph]} />
-        </svg>
-      </span>
-      <div className="min-w-0 grow pt-0.5">{children}</div>
-    </li>
-  );
+function noteEntry(note: Doc<"claimNotes">, currency: string): Entry {
+  const base = { key: note._id, at: note._creationTime };
+  if (note.kind === "expected_change") {
+    const change =
+      note.oldCents !== undefined && note.newCents !== undefined
+        ? `${fmt(note.oldCents, currency)} to ${fmt(note.newCents, currency)}`
+        : undefined;
+    return {
+      ...base,
+      tone: "plain",
+      glyph: "pen",
+      title: "Expected amount changed",
+      amount: note.newCents !== undefined ? fmt(note.newCents, currency) : undefined,
+      detail: change ? `${note.text} (${change})` : note.text,
+    };
+  }
+  if (note.kind === "status") {
+    // Status notes read "What happened: the user's words"; the first half is the title.
+    const cut = note.text.indexOf(": ");
+    const title = cut === -1 ? note.text : note.text.slice(0, cut);
+    const detail = cut === -1 ? undefined : note.text.slice(cut + 2);
+    const sent = title.startsWith("Sent");
+    return { ...base, tone: sent ? "info" : "plain", glyph: sent ? "send" : "flag", title, detail };
+  }
+  return { ...base, tone: "plain", glyph: "note", title: "Note", detail: note.text };
 }
 
-export function ReplyTimeline({
+/**
+ * The claim's whole story on one thread, oldest first: opened, messages out, replies
+ * in, money promised and landed. Each entry is a tinted icon tile joined to the next
+ * by a hairline. Only timestamps the data carries are used.
+ */
+export function ClaimTimeline({
+  claim,
+  drafts,
   replies,
-  currency,
-}: {
-  replies: Doc<"replies">[];
-  currency: string;
-}) {
-  const ordered = [...replies].sort((a, b) => b.receivedAt - a.receivedAt);
-  return (
-    <Feed>
-      {ordered.map((reply, index) => {
-        const config = REPLY[reply.classification];
-        return (
-          <FeedItem
-            key={reply._id}
-            bullet={config.bullet}
-            glyph={config.glyph}
-            last={index === ordered.length - 1}
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <span className={`rounded-full px-1.5 text-sm font-medium ${config.pill}`}>
-                {config.label}
-              </span>
-              {reply.promisedCents !== undefined && (
-                <Money cents={reply.promisedCents} currency={currency} className="text-sm font-semibold text-ink" />
-              )}
-              <time className="ml-auto text-xs text-ink/40">{when(reply.receivedAt)}</time>
-            </div>
-            <p className="mt-1.5 text-sm text-ink">{reply.summary}</p>
-            <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink/50">
-              <span className="break-all">{reply.from}</span>
-              {reply.senderMismatch && (
-                <span role="note" className="rounded-full bg-rust/20 px-1.5 font-medium text-rust">
-                  Different sender domain
-                </span>
-              )}
-            </p>
-          </FeedItem>
-        );
-      })}
-    </Feed>
-  );
-}
-
-export function LedgerTimeline({
   events,
+  notes,
   currency,
 }: {
+  claim: Doc<"claims">;
+  drafts: Doc<"drafts">[];
+  replies: Doc<"replies">[];
   events: Doc<"ledgerEvents">[];
+  notes: Doc<"claimNotes">[];
   currency: string;
 }) {
-  const ordered = [...events].sort((a, b) => b._creationTime - a._creationTime);
+  const entries: Entry[] = [
+    {
+      key: claim._id,
+      at: claim._creationTime,
+      tone: "plain",
+      glyph: "flag",
+      title: "Claim opened",
+      detail: `Expecting ${fmt(claim.expectedCents, currency)} back`,
+    },
+  ];
+
+  for (const draft of drafts) {
+    // A draft only joins the story once it was approved; unsent drafts live in the composer.
+    if (draft.approvedAt !== undefined) entries.push(draftEntry(draft, draft.approvedAt));
+  }
+  for (const reply of replies) {
+    const config = REPLY[reply.classification];
+    entries.push({
+      key: reply._id,
+      at: reply.receivedAt,
+      tone: config.tone,
+      glyph: config.glyph,
+      title: config.title,
+      amount: reply.promisedCents !== undefined ? fmt(reply.promisedCents, currency) : undefined,
+      detail: reply.summary,
+      party: `From ${reply.from}`,
+      warning: reply.senderMismatch ? "Different sender domain" : undefined,
+    });
+  }
+  for (const event of events) {
+    const config = EVENT[event.kind];
+    entries.push({
+      key: event._id,
+      at: event._creationTime,
+      tone: config.tone,
+      glyph: config.glyph,
+      title: config.title,
+      amount: `${config.sign}${fmt(event.cents, currency)}`,
+      detail: event.evidence.length > 0 ? event.evidence : undefined,
+    });
+  }
+  for (const note of notes) entries.push(noteEntry(note, currency));
+
+  entries.sort((a, b) => a.at - b.at);
+
   return (
-    <Feed>
-      {ordered.map((event, index) => {
-        const config = EVENT[event.kind];
+    <ol>
+      {entries.map((entry, index) => {
+        const last = index === entries.length - 1;
         return (
-          <FeedItem
-            key={event._id}
-            bullet={config.bullet}
-            glyph={config.glyph}
-            last={index === ordered.length - 1}
-          >
-            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-              <span className="text-sm font-medium text-ink">{config.label}</span>
-              <span className="text-sm font-semibold tabular-nums text-ink">
-                {config.sign}
-                <Money cents={event.cents} currency={currency} />
-              </span>
-              <time className="ml-auto text-xs text-ink/40">{when(event._creationTime)}</time>
+          <li key={entry.key} className={`relative flex gap-3.5 ${last ? "" : "pb-6"}`}>
+            {!last && (
+              <span
+                className="absolute bottom-1 left-[1.125rem] top-10 w-px -translate-x-1/2 bg-gray-200"
+                aria-hidden="true"
+              />
+            )}
+            <span
+              className={`flex size-9 shrink-0 items-center justify-center rounded-full ${TILE[entry.tone]}`}
+            >
+              <ClaimIcon glyph={entry.glyph} className="size-[1.125rem]" />
+            </span>
+            <div className="min-w-0 grow">
+              <div className="flex items-baseline justify-between gap-3">
+                <p className="text-sm font-semibold text-gray-900">{entry.title}</p>
+                {entry.amount !== undefined && (
+                  <span className="shrink-0 text-sm font-semibold tabular-nums text-gray-900">
+                    {entry.amount}
+                  </span>
+                )}
+              </div>
+              <time
+                dateTime={new Date(entry.at).toISOString()}
+                className="mt-0.5 block text-xs text-gray-400"
+              >
+                {when(entry.at)}
+              </time>
+              {entry.detail !== undefined && (
+                <p className="mt-1.5 break-words text-sm text-gray-500">{entry.detail}</p>
+              )}
+              {(entry.party !== undefined || entry.warning !== undefined) && (
+                <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-400">
+                  {entry.party !== undefined && <span className="break-all">{entry.party}</span>}
+                  {entry.warning !== undefined && (
+                    <span
+                      role="note"
+                      className="inline-flex items-center gap-1 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-1.5 py-0.5 font-medium text-yellow-700"
+                    >
+                      <ClaimIcon glyph="alert" className="size-3.5" />
+                      {entry.warning}
+                    </span>
+                  )}
+                </p>
+              )}
             </div>
-            {event.evidence && <p className="text-xs text-ink/50">{event.evidence}</p>}
-          </FeedItem>
+          </li>
         );
       })}
-    </Feed>
+    </ol>
   );
 }

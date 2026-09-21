@@ -1,7 +1,7 @@
 import { useId, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
 import { fmt } from "../Money";
-import { pillBadClass, pillGoodClass, shortDay, useMeasuredWidth, useNow, when } from "../../lib/ui";
+import { shortDay, useMeasuredWidth, useNow, when } from "../../lib/ui";
 
 type Point = { at: number; cents: number };
 /** A plotted mark: an observation, or the purchase itself (the price you paid, on the day you paid it). */
@@ -9,6 +9,23 @@ type Mark = Point & { bought: boolean };
 
 const DAY = 86_400_000;
 const M = { top: 22, right: 72, bottom: 26, left: 56 };
+
+/**
+ * The chart's palette, once, from the theme tokens: the series is the blue `teal`
+ * token, the saving is `moss`, the window marker is `gold`, everything else is gray.
+ */
+const C = {
+  series: "var(--color-teal)",
+  seriesStroke: "stroke-teal",
+  seriesFill: "fill-teal",
+  seriesBg: "bg-teal",
+  grid: "stroke-gray-200",
+  axisText: "fill-gray-400 text-xs tabular-nums",
+  paidLine: "stroke-gray-400",
+  saving: "fill-moss/10",
+  windowLine: "stroke-gold",
+  windowText: "fill-gray-500 text-[11px] font-medium",
+} as const;
 
 /** Round tick values covering [lo, hi] in cents. */
 function niceTicks(lo: number, hi: number, target = 4): number[] {
@@ -43,8 +60,8 @@ function versusPaid(cents: number, paidCents: number, currency: string): string 
 /**
  * The hero price chart. Time runs left to right, price bottom to top. The line is
  * stepped because a price holds until the next observation; the dashed line is what
- * you paid; the green wash between the two is money on the table; the yellow marker
- * is where the store's price-adjustment window ends. Hover, or focus a point and use
+ * you paid; the green wash between the two is money on the table; the amber dashed
+ * marker is where the store's price-adjustment window ends. Hover, or focus a point and use
  * the arrow keys, for date, price and the difference against the paid price.
  */
 export function PriceChart({
@@ -131,9 +148,7 @@ export function PriceChart({
   const endLabelY = latest ? y(latest.cents) : paidY;
   // The paid label takes two lines at the right edge; the latest price is labelled only when clear of it.
   const showEndLabel = latest !== undefined && (endLabelY < paidY - 16 || endLabelY > paidY + 30);
-  // Dense histories get smaller dots with a thinner surface ring so the line stays readable.
-  const dense = marks.length > 30;
-  const dotR = dense ? 2.5 : 4;
+  const dotR = 3.5;
 
   const summary =
     latest === undefined
@@ -178,6 +193,18 @@ export function PriceChart({
   }
 
   const hovered = active !== null ? marks[active] : undefined;
+  const tipLabel =
+    hovered === undefined
+      ? ""
+      : hovered.bought
+        ? "You paid"
+        : hovered.cents === vLo && hovered.cents < paidCents
+          ? "Lowest price"
+          : hovered === marks[marks.length - 1]
+            ? "Latest price"
+            : hovered.cents === paidCents
+              ? "Same as you paid"
+              : "Price";
   const tipLeft = hovered ? Math.min(Math.max(x(hovered.at), 84), width - 84) : 0;
   const tipBelow = hovered ? y(hovered.cents) < 96 : false;
 
@@ -186,15 +213,15 @@ export function PriceChart({
       <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="block overflow-visible">
         <defs>
           <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--color-violet-500)" stopOpacity={0.2} />
-            <stop offset="100%" stopColor="var(--color-violet-500)" stopOpacity={0} />
+            <stop offset="0%" stopColor={C.series} stopOpacity={0.12} />
+            <stop offset="100%" stopColor={C.series} stopOpacity={0} />
           </linearGradient>
         </defs>
         <g role="img" aria-label={summary}>
           {ticks.map((t) => (
             <g key={t}>
-              <line x1={M.left} x2={right} y1={y(t)} y2={y(t)} className="stroke-chart-grid" strokeWidth={1} />
-              <text x={M.left - 8} y={y(t)} dy="0.32em" textAnchor="end" className="fill-gray-400 text-xs tabular-nums">
+              <line x1={M.left} x2={right} y1={y(t)} y2={y(t)} className={C.grid} strokeWidth={1} strokeDasharray="3 4" />
+              <text x={M.left - 8} y={y(t)} dy="0.32em" textAnchor="end" className={C.axisText}>
                 {axisMoney(t, currency, whole)}
               </text>
             </g>
@@ -206,7 +233,7 @@ export function PriceChart({
               x={x(t)}
               y={bottom + 17}
               textAnchor={i === 0 ? "start" : "middle"}
-              className="fill-gray-400 text-xs tabular-nums"
+              className={C.axisText}
             >
               {shortDay(t)}
             </text>
@@ -215,17 +242,25 @@ export function PriceChart({
           {windowX !== undefined && (
             <g>
               {right - windowX > 0 && (
-                <rect x={windowX} y={M.top} width={right - windowX} height={plotH} className="fill-gray-50" />
+                <rect x={windowX} y={M.top} width={right - windowX} height={plotH} className="fill-gray-50/70" />
               )}
-              <line x1={windowX} x2={windowX} y1={M.top - 6} y2={bottom} className="stroke-yellow-500" strokeWidth={1.5} />
-              <text x={windowX - 6} y={M.top - 9} textAnchor="end" className="fill-gray-500 text-xs font-medium">
+              <line
+                x1={windowX}
+                x2={windowX}
+                y1={M.top - 6}
+                y2={bottom}
+                className={C.windowLine}
+                strokeWidth={1}
+                strokeDasharray="3 3"
+              />
+              <text x={windowX - 6} y={M.top - 9} textAnchor="end" className={C.windowText}>
                 {windowClosed ? "Window ended" : "Window ends"} {shortDay(windowEndsAt as number)}
               </text>
             </g>
           )}
 
           {washes.map((r, i) => (
-            <rect key={i} x={r.x} y={r.y} width={Math.max(r.w, 0)} height={Math.max(r.h, 0)} className="fill-green-500/15" />
+            <rect key={i} x={r.x} y={r.y} width={Math.max(r.w, 0)} height={Math.max(r.h, 0)} className={C.saving} />
           ))}
 
           <line
@@ -233,15 +268,15 @@ export function PriceChart({
             x2={right}
             y1={paidY}
             y2={paidY}
-            className="stroke-gray-400"
-            strokeWidth={1.25}
+            className={C.paidLine}
+            strokeWidth={1}
             strokeDasharray="5 4"
           />
           <text
             x={right + 8}
             y={paidY}
             dy="0.32em"
-            className="fill-gray-500 text-xs font-medium"
+            className="fill-gray-500 text-[11px] font-medium"
           >
             You paid
           </text>
@@ -251,7 +286,7 @@ export function PriceChart({
 
           {area && <path d={area} fill={`url(#${gradientId})`} />}
           {line && (
-            <path d={line} fill="none" className="stroke-violet-500" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+            <path d={line} fill="none" className={C.seriesStroke} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
           )}
 
           {showEndLabel && latest && (
@@ -259,7 +294,7 @@ export function PriceChart({
               x={Math.min(x(lineEnd) + 8, right + 8)}
               y={endLabelY}
               dy="0.32em"
-              className="fill-gray-800 text-xs font-semibold tabular-nums"
+              className="fill-gray-900 text-xs font-semibold tabular-nums"
             >
               {fmt(latest.cents, currency)}
             </text>
@@ -285,8 +320,12 @@ export function PriceChart({
             y2={bottom}
             className="stroke-gray-300"
             strokeWidth={1}
+            strokeDasharray="3 3"
             aria-hidden="true"
           />
+        )}
+        {hovered && (
+          <circle cx={x(hovered.at)} cy={y(hovered.cents)} r={10} className={C.seriesFill} opacity={0.16} aria-hidden="true" />
         )}
 
         <rect
@@ -304,7 +343,9 @@ export function PriceChart({
         <g role="group" aria-label="Price observations. Use the arrow keys to move between them.">
           {marks.map((m, i) => {
             const isLast = i === marks.length - 1;
-            const tone = m.bought ? "fill-surface stroke-violet-500" : "fill-violet-500 stroke-surface";
+            const tone = m.bought ? `fill-surface ${C.seriesStroke}` : `${C.seriesFill} stroke-surface`;
+            // Only the purchase, the latest read and the point in hand are marked; the step line carries the rest.
+            const shown = m.bought || isLast || active === i;
             return (
               <circle
                 key={`${m.at}-${i}`}
@@ -313,8 +354,9 @@ export function PriceChart({
                 }}
                 cx={x(m.at)}
                 cy={y(m.cents)}
-                r={active === i ? 6 : isLast ? 5 : dotR}
-                strokeWidth={dense && active !== i && !isLast ? 1 : 2}
+                r={active === i ? 5 : isLast ? 4 : dotR}
+                strokeWidth={2}
+                opacity={shown ? 1 : 0}
                 className={`${tone} pointer-events-none outline-none focus-visible:stroke-gray-900`}
                 tabIndex={(active ?? marks.length - 1) === i ? 0 : -1}
                 role="img"
@@ -333,30 +375,24 @@ export function PriceChart({
       {hovered && (
         <div
           role="status"
-          className="pointer-events-none absolute z-10 w-44 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-lg"
+          className="pointer-events-none absolute z-10 w-44 -translate-x-1/2 rounded-lg bg-gray-900 px-3 py-2 text-white"
           style={{
             left: tipLeft,
-            top: tipBelow ? y(hovered.cents) + 14 : undefined,
-            bottom: tipBelow ? undefined : height - y(hovered.cents) + 14,
+            top: tipBelow ? y(hovered.cents) + 16 : undefined,
+            bottom: tipBelow ? undefined : height - y(hovered.cents) + 16,
           }}
         >
-          <p className="text-xs font-medium text-gray-400">{when(hovered.at)}</p>
-          <p className="mt-0.5 flex items-center gap-2 text-base font-semibold leading-tight tabular-nums text-gray-800">
-            <span aria-hidden="true" className="h-0.5 w-3 rounded-full bg-violet-500" />
-            {fmt(hovered.cents, currency)}
-          </p>
-          <p className="mt-1 text-xs">
-            {hovered.bought || hovered.cents === paidCents ? (
-              <span className="text-gray-500">{hovered.bought ? "the price you paid" : "same as you paid"}</span>
-            ) : (
-              <span className={`${hovered.cents < paidCents ? pillGoodClass : pillBadClass} text-xs tabular-nums`}>
-                <span aria-hidden="true" className="text-[0.7em]">
-                  {hovered.cents < paidCents ? "▼" : "▲"}
-                </span>
-                {fmt(Math.abs(paidCents - hovered.cents), currency)} vs paid
+          <p className="text-xs text-gray-400">{tipLabel}</p>
+          <p className="mt-0.5 text-base font-bold leading-tight tabular-nums">{fmt(hovered.cents, currency)}</p>
+          {!hovered.bought && hovered.cents !== paidCents && (
+            <p className="mt-0.5 text-xs tabular-nums text-gray-300">
+              <span aria-hidden="true" className={`mr-1 text-[0.7em] ${hovered.cents < paidCents ? "text-green-400" : "text-red-400"}`}>
+                {hovered.cents < paidCents ? "▼" : "▲"}
               </span>
-            )}
-          </p>
+              {fmt(Math.abs(paidCents - hovered.cents), currency)} {hovered.cents < paidCents ? "below" : "above"} paid
+            </p>
+          )}
+          <p className="mt-1 text-xs text-gray-400">{when(hovered.at)}</p>
         </div>
       )}
     </div>

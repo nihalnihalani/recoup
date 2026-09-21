@@ -10,30 +10,35 @@ export type ClaimStatus =
   | "dismissed";
 
 /**
- * One tone per claim status, as a soft tinted pill. The finish carries meaning too:
- * a dashed edge = not yet real money (promised), a solid fill = money actually moved
- * (confirmed / reopened), a pulsing dot = a send in flight (queued), and dismissed
- * reads muted with a strike, since it is no longer live.
+ * A claim status as a coloured dot in a bordered chip; the label stays in ink.
+ * The finish carries meaning too: a dashed edge = not yet real money (promised),
+ * a pulsing dot = a send in flight (queued), a hollow dot = nothing asked yet, and
+ * dismissed reads muted with a strike, since it is no longer live.
  */
-const CONFIG: Record<ClaimStatus, { label: string; className: string; dot?: boolean }> = {
-  detected: { label: "Found", className: "bg-gray-100 text-gray-600 border border-transparent" },
-  drafted: { label: "Draft ready", className: "bg-violet-500/15 text-violet-700 border border-transparent" },
-  queued: { label: "Sending…", className: "bg-yellow-500/20 text-yellow-700 border border-transparent", dot: true },
-  sent: { label: "Asked", className: "bg-violet-500 text-white border border-transparent" },
-  packet: { label: "Sent via merchant", className: "bg-sky-500/20 text-sky-700 border border-transparent" },
-  promised: { label: "Promised", className: "bg-yellow-500/20 text-yellow-700 border border-dashed border-yellow-500" },
-  confirmed: { label: "Back on card", className: "bg-green-700 text-white border border-transparent" },
-  reopened: { label: "Charged again", className: "bg-red-500 text-white border border-transparent" },
-  dismissed: { label: "Dismissed", className: "bg-gray-100 text-gray-400 border border-transparent line-through" },
+const CONFIG: Record<ClaimStatus, { label: string; dot: string; chip?: string; pulse?: boolean }> = {
+  detected: { label: "Found", dot: "border border-gray-400 bg-white" },
+  drafted: { label: "Draft ready", dot: "bg-gray-400" },
+  queued: { label: "Sending…", dot: "bg-gold", pulse: true },
+  sent: { label: "Asked", dot: "bg-teal" },
+  packet: { label: "Sent via merchant", dot: "bg-teal" },
+  promised: { label: "Promised", dot: "bg-gold", chip: "border-dashed border-gold/70" },
+  confirmed: { label: "Back on card", dot: "bg-moss" },
+  reopened: { label: "Charged again", dot: "bg-rust" },
+  dismissed: { label: "Dismissed", dot: "bg-gray-300", chip: "border-gray-200 text-gray-400 line-through" },
 };
 
 export function StatusPill({ status, className = "" }: { status: ClaimStatus; className?: string }) {
   const config = CONFIG[status];
   return (
     <span
-      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium ${config.className} ${className}`}
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border bg-white px-2 py-0.5 text-xs font-medium ${
+        config.chip ?? "border-gray-200"
+      } ${status === "dismissed" ? "" : "text-gray-900"} ${className}`}
     >
-      {config.dot && <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden="true" />}
+      <span
+        aria-hidden="true"
+        className={`size-1.5 shrink-0 rounded-full ${config.dot} ${config.pulse ? "animate-pulse motion-reduce:animate-none" : ""}`}
+      />
       {config.label}
     </span>
   );

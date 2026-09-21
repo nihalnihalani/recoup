@@ -58,33 +58,33 @@ export function day(ms: number | undefined): string {
 }
 
 export const inputClass =
-  "w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 placeholder-gray-400 outline-none transition hover:border-gray-300 focus:border-gray-300 focus:ring-2 focus:ring-violet-500/20";
+  "w-full rounded-xl border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder-gray-400 outline-none transition hover:border-gray-300 focus:border-gray-300 focus:ring-2 focus:ring-violet-500/25";
 
-export const labelClass = "mb-1 block text-sm font-medium text-gray-800";
+export const labelClass = "mb-1.5 block text-sm font-medium text-gray-900";
 
 export const primaryButtonClass =
-  "inline-flex items-center justify-center gap-2 rounded-lg bg-gray-900 px-3 py-2 text-sm font-medium text-gray-100 transition hover:bg-gray-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500 disabled:opacity-60";
+  "inline-flex items-center justify-center gap-2 rounded-xl bg-gray-900 px-4 py-2.5 text-sm font-semibold text-gray-100 transition hover:bg-gray-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500 disabled:opacity-60";
 
 export const secondaryButtonClass =
-  "inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-800 transition hover:border-gray-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500 disabled:opacity-60";
+  "inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-900 transition hover:bg-gray-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500 disabled:opacity-60";
 
-/** The dashboard card: white, soft shadow, generous radius. */
-export const sectionClass = "rounded-xl bg-white p-5 shadow-xs";
+/** The dashboard card: white on white, held by a hairline border and a generous radius. */
+export const sectionClass = "rounded-2xl border border-gray-200 bg-white p-5";
 
 /** A card with its own header and body padding (use with cardHeaderClass / cardTitleClass). */
-export const cardClass = "rounded-xl bg-white shadow-xs";
-export const cardHeaderClass = "border-b border-gray-100 px-5 py-4";
-export const cardTitleClass = "text-lg font-semibold text-gray-800";
+export const cardClass = "rounded-2xl border border-gray-200 bg-white";
+export const cardHeaderClass = "border-b border-gray-200 px-5 py-4";
+export const cardTitleClass = "text-base font-semibold text-gray-900";
 
-export const pageTitleClass = "text-2xl font-bold text-gray-800 md:text-3xl";
-export const mutedLabelClass = "text-xs font-semibold uppercase text-gray-400";
-export const bigNumberClass = "text-3xl font-bold text-gray-800";
-export const tableHeadClass = "bg-gray-50 text-xs font-semibold uppercase text-gray-400";
+export const pageTitleClass = "text-2xl font-semibold tracking-tight text-gray-900 md:text-[1.75rem]";
+export const mutedLabelClass = "text-xs font-medium uppercase tracking-wide text-gray-400";
+export const bigNumberClass = "text-3xl font-semibold tracking-tight text-gray-900 tabular-nums";
+export const tableHeadClass = "bg-gray-50 text-xs font-medium uppercase tracking-wide text-gray-400";
 
 /** Up/down/warning pills. Pair with an arrow or label: tone is never the only signal. */
-const pillBase = "inline-flex items-center gap-1 rounded-full px-1.5 text-sm font-medium";
-export const pillGoodClass = `${pillBase} bg-green-500/20 text-green-700`;
-export const pillBadClass = `${pillBase} bg-red-500/20 text-red-700`;
+const pillBase = "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold";
+export const pillGoodClass = `${pillBase} bg-green-500/15 text-green-700`;
+export const pillBadClass = `${pillBase} bg-red-500/15 text-red-700`;
 export const pillWarnClass = `${pillBase} bg-yellow-500/20 text-yellow-700`;
 export const pillMutedClass = `${pillBase} bg-gray-100 text-gray-500`;
 

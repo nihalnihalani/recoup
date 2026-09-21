@@ -4,9 +4,11 @@ import type { FunctionReturnType } from "convex/server";
 import { api } from "../../../convex/_generated/api";
 import type { Doc } from "../../../convex/_generated/dataModel";
 import { ErrorBox } from "../States";
+import { ClaimIcon } from "./icons";
 import {
   errorText,
   inputClass,
+  labelClass,
   primaryButtonClass,
   secondaryButtonClass,
   when,
@@ -46,18 +48,28 @@ function SendProgress({
   approvedAt?: number;
 }) {
   const delivery = deliveryOf(sendStatus, sendUnknown);
-  const headTone =
+  const headDot =
     delivery.tone === "done"
-      ? "bg-moss border-moss"
+      ? "border-green-600 bg-green-600"
       : delivery.tone === "failed"
-        ? "bg-rust border-rust"
+        ? "border-red-500 bg-red-500"
         : delivery.tone === "unknown"
-          ? "bg-ink/40 border-ink/40"
-          : "bg-gold border-gold motion-safe:animate-pulse";
+          ? "border-gray-400 bg-gray-400"
+          : "border-yellow-500 bg-yellow-500 motion-safe:animate-pulse";
+  const noteTone =
+    delivery.tone === "done"
+      ? "text-green-700"
+      : delivery.tone === "failed"
+        ? "text-red-700"
+        : "text-gray-500";
 
   return (
-    <div className="space-y-1.5" role="status" aria-live="polite">
-      <ol className="flex items-center" aria-label={`Delivery: ${delivery.note}`}>
+    <div
+      className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 rounded-xl border border-gray-200 px-3.5 py-3"
+      role="status"
+      aria-live="polite"
+    >
+      <ol className="flex min-w-0 flex-1 items-center" aria-label={`Delivery: ${delivery.note}`}>
         {STEPS.map((step, index) => {
           const position = index + 1;
           const isHead = position === delivery.reached;
@@ -66,18 +78,20 @@ function SendProgress({
             <li key={step} className={`flex items-center ${index > 0 ? "flex-1" : ""}`}>
               {index > 0 && (
                 <span
-                  className={`h-0.5 flex-1 ${isPast || isHead ? "bg-harbor/60" : "bg-line"}`}
+                  className={`mx-2 h-px min-w-3 flex-1 ${isPast || isHead ? "bg-gray-900" : "bg-gray-200"}`}
                   aria-hidden="true"
                 />
               )}
-              <span className="flex items-center gap-1.5 px-1.5">
+              <span className="flex items-center gap-1.5">
                 <span
-                  className={`size-2.5 rounded-full border-2 ${
-                    isHead ? headTone : isPast ? "border-harbor bg-harbor" : "border-line bg-paper"
+                  className={`size-2 rounded-full border ${
+                    isHead ? headDot : isPast ? "border-gray-900 bg-gray-900" : "border-gray-300 bg-white"
                   }`}
                   aria-hidden="true"
                 />
-                <span className={`text-xs ${isHead || isPast ? "text-ink" : "text-ink/40"}`}>
+                <span
+                  className={`text-xs font-medium ${isHead || isPast ? "text-gray-900" : "text-gray-400"}`}
+                >
                   {step}
                 </span>
               </span>
@@ -85,9 +99,7 @@ function SendProgress({
           );
         })}
       </ol>
-      <p
-        className={`text-xs ${delivery.tone === "failed" ? "text-rust" : "text-ink/50"}`}
-      >
+      <p className={`min-w-0 break-words text-xs ${noteTone}`}>
         {delivery.tone === "done" && approvedAt !== undefined ? when(approvedAt) : delivery.note}
       </p>
     </div>
@@ -140,32 +152,41 @@ export function PacketRow({
   }
 
   return (
-    <div className="space-y-3 rounded-lg bg-teal/10 p-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="rounded-full bg-teal/20 px-1.5 text-sm font-medium text-teal">
-          Merchant channel: {channel}
-        </span>
+    <div className="space-y-3 rounded-xl border border-gray-200 p-3.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+            <span className="size-1.5 shrink-0 rounded-full bg-sky-500" aria-hidden="true" />
+            This store takes claims by {channel}
+          </p>
+          <p className="mt-0.5 text-xs text-gray-500">
+            Send the message there yourself, then record it here.
+          </p>
+        </div>
         {copyText !== undefined && (
           <button type="button" className={secondaryButtonClass} onClick={() => void copy()}>
-            {copied ? "Copied" : "Copy message"}
+            <ClaimIcon glyph={copied ? "check" : "copy"} className="size-4" />
+            <span aria-live="polite">{copied ? "Copied" : "Copy message"}</span>
           </button>
         )}
       </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <label htmlFor={noteId} className="sr-only">
-          What you sent and where
-        </label>
-        <input
-          id={noteId}
-          className={`${inputClass} min-w-0 flex-1`}
-          placeholder="What you sent and where"
-          value={note}
-          onChange={(event) => setNote(event.target.value)}
-        />
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="min-w-0 flex-1 basis-56">
+          <label htmlFor={noteId} className={labelClass}>
+            What you sent and where
+          </label>
+          <input
+            id={noteId}
+            className={inputClass}
+            placeholder="Chat with support, ticket 4821"
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+          />
+        </div>
         <button
           type="button"
           disabled={busy || note.trim().length === 0}
-          className={primaryButtonClass}
+          className={`${primaryButtonClass} w-full sm:w-auto`}
           onClick={() => void record()}
         >
           {busy ? "Recording…" : "Record as sent"}
@@ -204,6 +225,7 @@ export function Composer({
   const toId = useId();
   const subjectId = useId();
   const bodyId = useId();
+  const mismatchId = useId();
 
   const [to, setTo] = useState(draft.to);
   const [subject, setSubject] = useState(draft.subject);
@@ -231,59 +253,80 @@ export function Composer({
     }
   }
 
-  const fieldRow = "flex items-baseline gap-3 border-b border-line px-4 py-2";
-  const fieldLabel = "w-16 shrink-0 text-xs font-semibold uppercase text-ink/40";
-  const bareInput =
-    "min-w-0 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-ink/30 disabled:text-ink/60";
+  // Label on the left at sm and up, stacked above the field on a phone.
+  const row = "grid grid-cols-1 gap-1.5 sm:grid-cols-[5rem_minmax(0,1fr)] sm:gap-3";
+  const rowLabel = "text-sm font-medium text-gray-500 sm:pt-2.5";
+  const field = `${inputClass} disabled:bg-gray-50 disabled:text-gray-500 disabled:hover:border-gray-200`;
 
   return (
-    <div className="space-y-3">
-      <div className="overflow-hidden rounded-lg border border-line bg-white focus-within:border-harbor/60">
-        <div className={fieldRow}>
-          <label htmlFor={toId} className={fieldLabel}>
+    <div className="space-y-4">
+      <div className="space-y-3">
+        <div className={row}>
+          <label htmlFor={toId} className={rowLabel}>
             To
           </label>
-          <input
-            id={toId}
-            className={bareInput}
-            value={to}
-            disabled={locked}
-            placeholder="merchant contact address"
-            onChange={(event) => setTo(event.target.value)}
-          />
-          {mismatch && !locked && (
-            <span className="shrink-0 rounded-full bg-rust/20 px-1.5 text-sm font-medium text-rust">
-              not on {merchantDomain}
-            </span>
-          )}
+          <div className="min-w-0">
+            <input
+              id={toId}
+              inputMode="email"
+              autoComplete="off"
+              className={field}
+              value={to}
+              disabled={locked}
+              placeholder="Store support address"
+              aria-describedby={mismatch && !locked ? mismatchId : undefined}
+              onChange={(event) => setTo(event.target.value)}
+            />
+            {mismatch && !locked && (
+              <p
+                id={mismatchId}
+                className="mt-1.5 inline-flex items-center gap-1.5 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-2 py-1 text-xs font-medium text-yellow-700"
+              >
+                <ClaimIcon glyph="alert" className="size-3.5" />
+                <span className="break-all">Not an address on {merchantDomain}</span>
+              </p>
+            )}
+          </div>
         </div>
-        <div className={fieldRow}>
-          <label htmlFor={subjectId} className={fieldLabel}>
+        <div className={row}>
+          <label htmlFor={subjectId} className={rowLabel}>
             Subject
           </label>
           <input
             id={subjectId}
-            className={`${bareInput} font-medium`}
+            className={`${field} font-medium`}
             value={subject}
             disabled={locked}
             onChange={(event) => setSubject(event.target.value)}
           />
         </div>
-        <label htmlFor={bodyId} className="sr-only">
-          Message
-        </label>
-        <textarea
-          id={bodyId}
-          rows={11}
-          className="block w-full resize-y bg-transparent px-4 py-3 text-sm leading-relaxed text-ink outline-none disabled:text-ink/60"
-          value={body}
-          disabled={locked}
-          onChange={(event) => setBody(event.target.value)}
-        />
+        <div className={row}>
+          <label htmlFor={bodyId} className={rowLabel}>
+            Message
+          </label>
+          <textarea
+            id={bodyId}
+            rows={11}
+            className={`${field} block resize-y leading-relaxed`}
+            value={body}
+            disabled={locked}
+            onChange={(event) => setBody(event.target.value)}
+          />
+        </div>
       </div>
 
       {error && <ErrorBox error={error} />}
-      {draft.sendError && <ErrorBox error={`Send failed: ${draft.sendError}`} />}
+      {draft.sendError && (
+        <div
+          role="alert"
+          className="flex items-start gap-2.5 rounded-xl border border-red-500/30 bg-red-500/5 px-3.5 py-3 text-sm text-red-700"
+        >
+          <ClaimIcon glyph="alert" className="mt-0.5 size-4" />
+          <p className="min-w-0 break-words">
+            <span className="font-semibold">The message did not send.</span> {draft.sendError}
+          </p>
+        </div>
+      )}
 
       {sent ? (
         <SendProgress
@@ -293,13 +336,13 @@ export function Composer({
         />
       ) : (
         !closed && (
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <label className="flex items-center gap-2 text-sm font-medium text-ink">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-dashed border-gray-200 pt-4">
+            <label className="flex items-center gap-2.5 text-sm font-medium text-gray-900">
               <input
                 type="checkbox"
                 checked={recipientConfirmed}
                 onChange={(event) => setRecipientConfirmed(event.target.checked)}
-                className="size-4 rounded accent-harbor"
+                className="size-4 rounded accent-gray-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500"
               />
               This is the right recipient
             </label>

@@ -4,6 +4,7 @@ import { api } from "../../convex/_generated/api";
 import { Money } from "../components/Money";
 import { ErrorBox } from "../components/States";
 import { WatchCard } from "../components/watching/WatchCard";
+import { BellIcon, Chip, IconTile, LinkIcon, TagDownIcon } from "../components/watching/parts";
 import {
   cardClass,
   cardTitleClass,
@@ -11,9 +12,6 @@ import {
   errorText,
   inputClass,
   pageTitleClass,
-  pillGoodClass,
-  pillMutedClass,
-  pillWarnClass,
   primaryButtonClass,
   secondaryButtonClass,
   sectionClass,
@@ -52,30 +50,22 @@ function AddWatch() {
   }
 
   return (
-    <form onSubmit={onSubmit} className={`${sectionClass} space-y-3`} aria-label="Watch a product">
+    <form onSubmit={onSubmit} className={`${sectionClass} space-y-4`} aria-label="Watch a product">
+      <div className="flex items-center gap-3">
+        <IconTile>
+          <BellIcon />
+        </IconTile>
+        <h2 className={cardTitleClass}>Watch a product</h2>
+      </div>
       <div className="flex flex-col gap-3 md:flex-row md:items-center">
         <div className="relative min-w-0 flex-1">
           <label className="sr-only" htmlFor="watch-url">
             Product link
           </label>
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 16 16"
-            fill="none"
-            aria-hidden="true"
-            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
-          >
-            <path
-              d="M6.8 9.2a2.8 2.8 0 0 0 4 0l2.4-2.4a2.8 2.8 0 0 0-4-4l-.9.9M9.2 6.8a2.8 2.8 0 0 0-4 0L2.8 9.2a2.8 2.8 0 0 0 4 4l.9-.9"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-            />
-          </svg>
+          <LinkIcon className="pointer-events-none absolute left-3.5 top-1/2 size-[18px] -translate-y-1/2 text-gray-400" />
           <input
             id="watch-url"
-            className={`${inputClass} py-2.5 pl-9`}
+            className={`${inputClass} pl-10`}
             type="url"
             required
             placeholder="Paste a product link from any store"
@@ -84,20 +74,20 @@ function AddWatch() {
           />
         </div>
         <div className="flex gap-3">
-          <div className="min-w-0 flex-1 md:w-40 md:flex-none">
+          <div className="min-w-0 flex-1 md:w-48 md:flex-none">
             <label className="sr-only" htmlFor="watch-target">
               Target price, optional
             </label>
             <input
               id="watch-target"
-              className={`${inputClass} py-2.5 tabular-nums`}
+              className={`${inputClass} tabular-nums`}
               inputMode="decimal"
               placeholder="Tell me at $ (optional)"
               value={target}
               onChange={(e) => setTarget(e.target.value)}
             />
           </div>
-          <button type="submit" disabled={busy} className={`${primaryButtonClass} shrink-0 px-5 py-2.5`}>
+          <button type="submit" disabled={busy} className={`${primaryButtonClass} shrink-0 px-5`}>
             {busy ? "Adding…" : "Watch"}
           </button>
         </div>
@@ -115,31 +105,40 @@ function Drops() {
   const drops = useQuery(api.notify.drops);
   if (drops === undefined || drops.length === 0) return null;
   return (
-    <section className={`${sectionClass} space-y-2`}>
-      <h2 className={cardTitleClass}>Price drops</h2>
-      <ul className="divide-y divide-gray-100">
+    <section className={sectionClass} aria-labelledby="drops-title">
+      <div className="flex items-center gap-3">
+        <IconTile>
+          <TagDownIcon />
+        </IconTile>
+        <h2 id="drops-title" className={cardTitleClass}>
+          Price drops
+        </h2>
+      </div>
+      <ul className="mt-4 divide-y divide-gray-100 border-t border-dashed border-gray-200">
         {drops.map((drop) => (
-          <li key={drop._id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
-            <span className="text-gray-800">
-              {drop.watchName ?? "Item"}
+          <li key={drop._id} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3 text-sm">
+            <span className="min-w-0 text-gray-500">
+              <span className="font-semibold text-gray-900">{drop.watchName ?? "Item"}</span>
               {drop.cents !== null && (
                 <>
                   {" is now "}
-                  <Money cents={drop.cents} currency="USD" />
+                  <span className="font-semibold tabular-nums text-green-700">
+                    <Money cents={drop.cents} currency="USD" />
+                  </span>
                 </>
               )}
               {drop.previousCents !== null && (
-                <span className="text-gray-400">
+                <span className="tabular-nums text-gray-400">
                   {" (was "}
                   <Money cents={drop.previousCents} currency="USD" />)
                 </span>
               )}
             </span>
-            <span className="flex items-center gap-2 text-xs text-gray-400">
+            <span className="flex flex-wrap items-center gap-2 text-xs text-gray-400">
               {when(drop._creationTime)}
-              <span className={drop.status === "sent" ? pillGoodClass : drop.status === "failed" ? pillWarnClass : pillMutedClass}>
+              <Chip tone={drop.status === "sent" ? "good" : drop.status === "failed" ? "wait" : "muted"}>
                 {drop.status === "sent" ? "Emailed" : drop.status === "failed" ? (drop.error ?? "Not emailed") : "Sending"}
-              </span>
+              </Chip>
             </span>
           </li>
         ))}
@@ -150,23 +149,23 @@ function Drops() {
 
 function CardSkeleton() {
   return (
-    <div className={`col-span-full xl:col-span-6 ${cardClass} animate-pulse`}>
-      <div className="flex items-center gap-3 border-b border-gray-100 px-5 py-4">
-        <div className="h-10 w-10 rounded-full bg-gray-100" />
+    <div className={`col-span-full xl:col-span-6 ${cardClass} animate-pulse motion-reduce:animate-none`}>
+      <div className="flex items-center gap-4 px-5 pt-5">
+        <div className="size-14 rounded-xl bg-gray-100" />
         <div className="flex-1 space-y-2">
           <div className="h-4 w-2/3 rounded bg-gray-100" />
           <div className="h-3 w-1/3 rounded bg-gray-100" />
         </div>
       </div>
-      <div className="space-y-4 px-5 py-4">
+      <div className="space-y-5 px-5 pb-5 pt-4">
         <div className="h-9 w-36 rounded bg-gray-100" />
-        <div className="h-40 rounded-lg bg-gray-100" />
+        <div className="h-40 rounded-xl bg-gray-100" />
         <div className="grid grid-cols-3 gap-4">
           <div className="h-8 rounded bg-gray-100" />
           <div className="h-8 rounded bg-gray-100" />
           <div className="h-8 rounded bg-gray-100" />
         </div>
-        <div className="h-10 rounded-lg bg-gray-100" />
+        <div className="h-12 rounded-xl bg-gray-100" />
       </div>
     </div>
   );
@@ -177,14 +176,14 @@ function EmptyWatching() {
   return (
     <div className={`${cardClass} overflow-hidden text-center`}>
       <div className="px-6 pt-10">
-        <p className="text-lg font-semibold text-gray-800">Nothing watched yet</p>
+        <p className="text-lg font-semibold text-gray-900">Nothing watched yet</p>
         <p className="mx-auto mt-2 max-w-md text-sm text-gray-500">
           Paste a product link and Recoup starts reading its price. Each check adds a point, and the chart of its ups and
           downs builds from there.
         </p>
         <button
           type="button"
-          className={`${secondaryButtonClass} mt-4`}
+          className={`${secondaryButtonClass} mt-5`}
           onClick={() => document.getElementById("watch-url")?.focus()}
         >
           Paste your first link
@@ -193,16 +192,16 @@ function EmptyWatching() {
       <svg viewBox="0 0 600 120" preserveAspectRatio="none" className="mt-6 block h-28 w-full" aria-hidden="true">
         <defs>
           <linearGradient id="empty-watch-fill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--color-violet-500)" stopOpacity={0.12} />
-            <stop offset="100%" stopColor="var(--color-violet-500)" stopOpacity={0} />
+            <stop offset="0%" stopColor="var(--color-teal)" stopOpacity={0.08} />
+            <stop offset="100%" stopColor="var(--color-teal)" stopOpacity={0} />
           </linearGradient>
         </defs>
         <path d="M0,40 H90 V52 H170 V34 H260 V70 H340 V62 H420 V88 H510 V76 H600 V120 H0 Z" fill="url(#empty-watch-fill)" />
         <path
           d="M0,40 H90 V52 H170 V34 H260 V70 H340 V62 H420 V88 H510 V76 H600"
           fill="none"
-          stroke="var(--color-violet-500)"
-          strokeOpacity={0.25}
+          stroke="var(--color-teal)"
+          strokeOpacity={0.35}
           strokeWidth={2}
           strokeDasharray="4 6"
           vectorEffect="non-scaling-stroke"
@@ -234,10 +233,10 @@ export default function Watching() {
         </div>
         {watches !== undefined && watches.length > 0 && (
           <p className="flex flex-wrap items-center gap-2 text-sm text-gray-500">
-            <span className={pillMutedClass}>
-              {active} of {watches.length} active
-            </span>
-            {atTarget > 0 && <span className={pillGoodClass}>↓ {atTarget} at target</span>}
+            <Chip tone={active > 0 ? "good" : "muted"}>
+              {active} of {watches.length} watching
+            </Chip>
+            {atTarget > 0 && <Chip tone="good">{atTarget} at target</Chip>}
           </p>
         )}
       </div>

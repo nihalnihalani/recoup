@@ -1,45 +1,48 @@
 @import "tailwindcss";
 
 /*
-  Recoup token system, dashboard edition.
-  The token names are unchanged so every page keeps compiling; the values now follow
-  a light analytics-dashboard palette:
-  - paper/ink/line: gray page, dark gray headings, hairline gray borders.
-  - harbor: violet, the primary and in-flight tone.
+  Recoup token system, light bordered edition.
+  The token names are unchanged so every page keeps compiling. The look is a white
+  app on a white page: structure comes from 1px gray-200 hairlines and a generous
+  radius, not from shadows or a gray backdrop. The chrome is black, white and gray;
+  colour is semantic only.
+  - paper/ink/line: white page, near-black text, hairline gray borders.
+  - harbor: violet, the focus and selection accent (and the violet series).
   - moss: green, good (lower price, settled). rust: red, bad (higher price, owed).
-  - gold: yellow, promised or warning. teal: sky, the secondary series.
+  - gold: amber, promised or warning. teal: blue, the primary series.
 */
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif,
+    "Apple Color Emoji", "Segoe UI Emoji";
 
-  --color-paper: #f3f4f6;
-  --color-ink: #1f2937;
+  --color-paper: #ffffff;
+  --color-ink: #111827;
   --color-line: #e5e7eb;
-  --color-rust: #e5484d;
-  --color-harbor: #8470ff;
-  --color-moss: #239f52;
-  --color-gold: #f0bb33;
-  --color-teal: #67bfff;
+  --color-rust: #ef4444;
+  --color-harbor: #8b5cf6;
+  --color-moss: #16a34a;
+  --color-gold: #f59e0b;
+  --color-teal: #2563eb;
 
-  --color-violet-50: #f1eeff;
-  --color-violet-100: #e6e1ff;
-  --color-violet-200: #d2cbff;
-  --color-violet-300: #b7acff;
-  --color-violet-400: #9c8cff;
-  --color-violet-500: #8470ff;
-  --color-violet-600: #755ff8;
-  --color-violet-700: #5d47de;
-  --color-violet-800: #4634b1;
-  --color-violet-900: #2f227c;
+  --color-violet-50: #f5f3ff;
+  --color-violet-100: #ede9fe;
+  --color-violet-200: #ddd6fe;
+  --color-violet-300: #c4b5fd;
+  --color-violet-400: #a78bfa;
+  --color-violet-500: #8b5cf6;
+  --color-violet-600: #7c3aed;
+  --color-violet-700: #6d28d9;
+  --color-violet-800: #5b21b6;
+  --color-violet-900: #4c1d95;
 
-  --color-sky-500: #67bfff;
-  --color-sky-700: #0b7fd1;
-  --color-green-500: #3ec972;
-  --color-green-700: #239f52;
-  --color-red-500: #ff5656;
-  --color-red-700: #e41414;
-  --color-yellow-500: #f0bb33;
-  --color-yellow-700: #ca8a04;
+  --color-sky-500: #2563eb;
+  --color-sky-700: #1d4ed8;
+  --color-green-500: #10b981;
+  --color-green-700: #15803d;
+  --color-red-500: #ef4444;
+  --color-red-700: #b91c1c;
+  --color-yellow-500: #f59e0b;
+  --color-yellow-700: #b45309;
 
   /* Semantic aliases for the few places where "white" means two different things. */
   --color-surface: #ffffff;
@@ -47,72 +50,19 @@
   --color-chart-grid: #f3f4f6;
   --color-tile: #f3f4f6;
 
-  --shadow-xs: 0 1px 1px 0 rgb(0 0 0 / 0.05), 0 1px 2px 0 rgb(0 0 0 / 0.02);
+  /*
+    `shadow-xs` was the old card edge. It is now a 1px hairline ring, so any card still
+    written as `bg-white shadow-xs` reads as a bordered card on the white page.
+  */
+  --shadow-xs: 0 0 0 1px #e5e7eb;
 }
 
 :root {
   color-scheme: light;
 }
 
-/*
-  Dark theme. Every colour utility reads a CSS variable, so the theme is a remap of
-  those variables under `.dark` on <html> (set by src/lib/theme.ts and, before first
-  paint, by the inline script in index.html). The gray scale inverts: `white` is the
-  card surface, gray-100 the page, gray-800 the heading ink. The -700 tints used as
-  pill text lighten so they read on a dark surface.
-*/
-.dark {
-  color-scheme: dark;
-
-  --color-white: #1f2937;
-  --color-gray-50: #1b2431;
-  --color-gray-100: #111827;
-  --color-gray-200: #374151;
-  --color-gray-300: #4b5563;
-  --color-gray-400: #9ca3af;
-  --color-gray-500: #9ca3af;
-  --color-gray-600: #d1d5db;
-  --color-gray-700: #e5e7eb;
-  --color-gray-800: #f3f4f6;
-  --color-gray-900: #f9fafb;
-
-  --color-paper: #111827;
-  --color-ink: #f3f4f6;
-  --color-line: #374151;
-  --color-rust: #f0666a;
-  --color-harbor: #9c8cff;
-  --color-moss: #34b868;
-  --color-gold: #f5c84f;
-  --color-teal: #7cc8ff;
-
-  --color-violet-600: #a596ff;
-  --color-violet-700: #b7acff;
-  --color-sky-700: #7cc8ff;
-  --color-green-700: #5fdc8f;
-  --color-red-700: #ff8a8a;
-  --color-yellow-700: #f5c84f;
-
-  --color-surface: #1f2937;
-  --color-chart-grid: #2b3646;
-  --color-tile: #e5e7eb;
-
-  --shadow-xs: 0 1px 1px 0 rgb(0 0 0 / 0.25), 0 1px 2px 0 rgb(0 0 0 / 0.2);
-}
-
-/*
-  Where `white` is text on a saturated fill (avatar initial, solid status pills,
-  timeline bullets) it must stay white, and the one solid green fill keeps its
-  deep value so that white text still reads on it.
-*/
-.dark .text-white {
-  color: var(--color-on-accent);
-}
-.dark .bg-green-700 {
-  background-color: #239f52;
-}
-
 body {
-  @apply bg-gray-100 font-sans text-gray-600 antialiased;
+  @apply bg-paper font-sans text-gray-600 antialiased;
 }
 
 /*
@@ -143,10 +93,19 @@ body {
 .feed-in {
   animation: feed-in 400ms ease-out both;
 }
+
+/* The command palette answers a keypress, so it arrives quickly and from just above rest. */
+@keyframes palette-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.985); }
+}
+.palette-in {
+  animation: palette-in 140ms cubic-bezier(0.2, 0, 0, 1) both;
+}
 @media (prefers-reduced-motion: reduce) {
   .chart-draw,
   .chart-fade,
-  .feed-in {
+  .feed-in,
+  .palette-in {
     animation: none;
   }
   .chart-morph {

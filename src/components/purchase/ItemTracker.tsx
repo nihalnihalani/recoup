@@ -8,44 +8,34 @@ import { PriceChart } from "../charts/PriceChart";
 import { StatusSteps } from "../charts/StatusSteps";
 import { DeltaBadge } from "../DeltaBadge";
 import { fmt } from "../Money";
+import { ProductThumb } from "../ProductThumb";
 import { boughtVerdict, priceStats, type VerdictTone } from "../../lib/priceStats";
 import {
+  bigNumberClass,
+  cardClass,
   day,
   errorText,
   mutedLabelClass,
   percent,
-  pillBadClass,
-  pillGoodClass,
-  pillMutedClass,
-  pillWarnClass,
   primaryButtonClass,
   secondaryButtonClass,
   useNow,
 } from "../../lib/ui";
+import { CardHeading, ClaimIcon, DotChip, ExternalIcon } from "./parts";
 
 type PurchaseData = FunctionReturnType<typeof api.purchases.get>;
 export type TrackedItem = PurchaseData["items"][number];
 
-function ExternalIcon() {
-  return (
-    <svg viewBox="0 0 16 16" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-      <path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M11.5 9.5v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-const cardClass = "rounded-xl bg-white shadow-xs";
-const eyebrowClass = "text-xs font-semibold uppercase text-gray-400";
-
 /** `purchases.get` returns at most this many price checks per item. */
 const CHECK_CAP = 30;
 
-const TONE_PILL: Record<VerdictTone, string> = {
-  green: pillGoodClass,
-  red: pillBadClass,
-  yellow: pillWarnClass,
-  gray: pillMutedClass,
-  violet: "inline-flex items-center gap-1 rounded-full bg-violet-500/20 px-1.5 text-sm font-medium text-violet-700",
+/** The verdict's tone as the dot of its chip. Violet verdicts (a claim in motion) read as near-black. */
+const TONE_DOT: Record<VerdictTone, string> = {
+  green: "bg-moss",
+  red: "bg-rust",
+  yellow: "bg-gold",
+  gray: "bg-gray-300",
+  violet: "bg-gray-900",
 };
 
 /** One figure of the compact strip under the chart; the same strip a watched product shows. */
@@ -53,7 +43,7 @@ function StripStat({ label, value, hint }: { label: string; value: string; hint?
   return (
     <div className="min-w-0">
       <dt className={mutedLabelClass}>{label}</dt>
-      <dd className="mt-0.5 truncate text-sm font-semibold tabular-nums text-gray-800">{value}</dd>
+      <dd className="mt-0.5 truncate text-sm font-semibold tabular-nums text-gray-900">{value}</dd>
       {hint && <dd className="truncate text-xs text-gray-400">{hint}</dd>}
     </div>
   );
@@ -61,9 +51,9 @@ function StripStat({ label, value, hint }: { label: string; value: string; hint?
 
 function Stat({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="px-4 py-4 first:pl-5 last:pr-5">
-      <dt className={eyebrowClass}>{label}</dt>
-      <dd className="mt-1 text-xl font-bold tabular-nums text-gray-800">{children}</dd>
+    <div className="min-w-0 px-3 py-4 first:pl-5 last:pr-5 sm:px-4 xl:flex xl:items-baseline xl:justify-between xl:gap-3 xl:px-5 xl:py-3 2xl:block 2xl:px-4 2xl:py-4 2xl:first:pl-5 2xl:last:pr-5">
+      <dt className={mutedLabelClass}>{label}</dt>
+      <dd className="mt-1 truncate text-lg font-semibold tabular-nums text-gray-900 sm:text-xl xl:mt-0 xl:text-lg 2xl:mt-1 2xl:text-xl">{children}</dd>
     </div>
   );
 }
@@ -148,55 +138,54 @@ export function ItemTracker({
 
   return (
     <>
-      <section aria-label={item.name} className={`${cardClass} col-span-full flex flex-col xl:col-span-8`}>
-        <header className="flex flex-wrap items-start justify-between gap-3 px-5 pt-5">
-          <div className="flex min-w-0 items-center gap-2">
-            <h2 className="truncate text-lg font-semibold text-gray-800">{item.name}</h2>
-            {item.qty > 1 && (
-              <span className="shrink-0 rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">
-                × {item.qty}
-              </span>
-            )}
-            {item.productUrl && (
-              <a
-                href={item.productUrl}
-                target="_blank"
-                rel="noreferrer"
-                aria-label={`Open the product page for ${item.name}`}
-                title="Open the product page"
-                className="shrink-0 rounded-lg p-1 text-gray-400 transition hover:text-harbor focus-visible:outline-2 focus-visible:outline-harbor"
-              >
-                <ExternalIcon />
-              </a>
-            )}
+      <section aria-label={item.name} className={`${cardClass} col-span-full flex flex-col overflow-hidden xl:col-span-8`}>
+        <header className="flex flex-wrap items-center justify-between gap-3 px-5 pt-5">
+          <div className="flex min-w-0 flex-[1_1_16rem] items-center gap-3">
+            <ProductThumb imageUrl={item.imageUrl} name={item.name} size={56} />
+            <div className="min-w-0">
+              <h2 className="truncate text-base font-semibold text-gray-900">{item.name}</h2>
+              <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-gray-500">
+                <span className="tabular-nums">Paid {fmt(item.unitCents, currency)}</span>
+                {item.qty > 1 && (
+                  <span className="rounded-full border border-gray-200 px-2 py-0.5 text-xs font-medium tabular-nums text-gray-500">
+                    × {item.qty}
+                  </span>
+                )}
+                {item.productUrl && (
+                  <a
+                    href={item.productUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={`Open the product page for ${item.name}`}
+                    title="Open the product page"
+                    className="-m-1 rounded-lg p-1 text-gray-400 transition hover:text-gray-900 focus-visible:outline-2 focus-visible:outline-violet-500"
+                  >
+                    <ExternalIcon />
+                  </a>
+                )}
+              </p>
+            </div>
           </div>
-          <button
-            type="button"
-            disabled={checking}
-            onClick={() => void handleCheck()}
-            className={`${secondaryButtonClass} inline-flex items-center gap-2`}
-          >
-            {checking && <span className="size-1.5 animate-pulse rounded-full bg-harbor" aria-hidden="true" />}
+          <button type="button" disabled={checking} onClick={() => void handleCheck()} className={secondaryButtonClass}>
+            {checking && <span className="size-1.5 animate-pulse rounded-full bg-gold motion-reduce:animate-none" aria-hidden="true" />}
             {checking ? "Checking…" : "Check price now"}
           </button>
         </header>
 
-        <div className="px-5 pt-3">
-          <p className={eyebrowClass}>Current price</p>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
-            <p className="text-3xl font-bold tabular-nums text-gray-800">
-              {latest ? fmt(latest.cents, currency) : dash}
-            </p>
+        <div className="px-5 pt-5">
+          <p className={mutedLabelClass}>Current price</p>
+          <div className="mt-1 flex flex-wrap items-center gap-2.5">
+            <p className={bigNumberClass}>{latest ? fmt(latest.cents, currency) : dash}</p>
             <DeltaBadge paidCents={item.unitCents} latestCents={latest?.cents} currency={currency} />
           </div>
           {held !== null && stats.count >= 2 && (
-            <p className="mt-0.5 text-xs text-gray-400">
+            <p className="mt-1 text-xs text-gray-400">
               {held === 0 ? "At this price for less than a day" : `At this price for ${held} ${held === 1 ? "day" : "days"}`}
             </p>
           )}
-          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5">
-            <span className={`${TONE_PILL[verdict.tone]} whitespace-nowrap`}>{verdict.label}</span>
-            <span className="min-w-0 text-sm text-gray-600">{verdict.reason}</span>
+          <div className="mt-3 flex flex-wrap items-center gap-x-2.5 gap-y-2">
+            <DotChip dot={TONE_DOT[verdict.tone]}>{verdict.label}</DotChip>
+            <span className="min-w-0 text-sm text-gray-500">{verdict.reason}</span>
             {verdict.kind === "claim_now" &&
               (liveClaim ? (
                 <Link to={`/claims/${liveClaim._id}`} className={primaryButtonClass}>
@@ -213,7 +202,9 @@ export function ItemTracker({
           </div>
         </div>
 
-        <div className="min-w-0 grow px-5 pb-5 pt-4">
+        <div className="mx-5 mt-5 border-t border-dashed border-gray-200" aria-hidden="true" />
+
+        <div className="min-w-0 grow px-5 pb-5 pt-5">
           {points.length > 0 ? (
             <PriceChart
               points={points}
@@ -224,11 +215,11 @@ export function ItemTracker({
               height={280}
             />
           ) : (
-            <div className="flex h-48 items-center justify-center rounded-lg border border-dashed border-gray-200 text-sm text-gray-500">
+            <div className="flex h-48 items-center justify-center rounded-xl border border-dashed border-gray-200 text-sm text-gray-500">
               {checking ? "Reading the product page…" : "No price seen yet"}
             </div>
           )}
-          <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-gray-100 pt-3 sm:grid-cols-3">
+          <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-4 border-t border-dashed border-gray-200 pt-4 sm:grid-cols-3">
             <StripStat label="Lowest" value={money(stats.lowest)} />
             <StripStat label="Highest" value={money(stats.highest)} />
             <StripStat label="Average" value={money(stats.average)} />
@@ -245,7 +236,7 @@ export function ItemTracker({
             <StripStat label="Tracking since" value={day(stats.trackingSince ?? undefined)} hint="no history before this" />
           </dl>
           {unplotted.length > 0 && lastUnplotted && (
-            <p className="mt-3 text-xs text-gray-400">
+            <p className="mt-4 text-xs text-gray-400">
               {unplotted.length} {unplotted.length === 1 ? "check" : "checks"} not plotted. Last on{" "}
               {day(lastUnplotted.observedAt)}:{" "}
               {lastUnplotted.observedCents !== undefined
@@ -256,14 +247,14 @@ export function ItemTracker({
         </div>
 
         {error && (
-          <p role="alert" className="rounded-b-xl border-t border-rust/20 bg-rust/10 px-5 py-2.5 text-sm text-rust">
+          <p role="alert" className="border-t border-rust/20 bg-rust/5 px-5 py-2.5 text-sm text-red-700">
             {error}
           </p>
         )}
       </section>
 
       <div className="col-span-full flex flex-col gap-6 xl:col-span-4">
-        <dl className={`${cardClass} grid grid-cols-3 divide-x divide-gray-100`}>
+        <dl className={`${cardClass} grid grid-cols-3 divide-x divide-dashed divide-gray-200 xl:grid-cols-1 xl:divide-x-0 xl:divide-y 2xl:grid-cols-3 2xl:divide-x 2xl:divide-y-0`}>
           <Stat label="Paid">{fmt(item.unitCents, currency)}</Stat>
           <Stat label="Now">{latest ? fmt(latest.cents, currency) : dash}</Stat>
           <Stat label="Lowest">{lowest !== undefined ? fmt(lowest, currency) : dash}</Stat>
@@ -271,18 +262,23 @@ export function ItemTracker({
 
         {claims.map((claim) => (
           <section key={claim._id} aria-label="Price-drop claim" className={`${cardClass} p-5`}>
-            <header className="flex items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold text-gray-800">Price-drop claim</h2>
-              <Link
-                to={`/claims/${claim._id}`}
-                className="text-sm font-medium text-harbor hover:underline focus-visible:outline-2 focus-visible:outline-harbor"
-              >
-                View claim
-              </Link>
-            </header>
-            <p className={`mt-3 ${eyebrowClass}`}>Asking for</p>
-            <p className="mt-1 text-3xl font-bold tabular-nums text-gray-800">{fmt(claim.expectedCents, currency)}</p>
-            <div className="mt-4">
+            <CardHeading
+              icon={<ClaimIcon />}
+              title="Price-drop claim"
+              action={
+                <Link
+                  to={`/claims/${claim._id}`}
+                  className="rounded-lg text-sm font-semibold text-gray-900 underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500"
+                >
+                  View claim
+                </Link>
+              }
+            />
+            <div className="mt-4 border-t border-dashed border-gray-200 pt-4">
+              <p className={mutedLabelClass}>Asking for</p>
+              <p className={`mt-1 ${bigNumberClass}`}>{fmt(claim.expectedCents, currency)}</p>
+            </div>
+            <div className="mt-5">
               <StatusSteps status={claim.status} />
             </div>
           </section>

@@ -24,11 +24,11 @@ export function Countdown({ endsAt, className = "" }: { endsAt: number; classNam
   const remaining = endsAt - now;
 
   if (remaining <= 0) {
-    return <span className={`font-mono text-sm text-ink/50 ${className}`}>window closed</span>;
+    return <span className={`text-sm text-gray-400 ${className}`}>window closed</span>;
   }
 
   return (
-    <span className={`font-mono text-sm tabular-nums text-ink ${className}`}>
+    <span className={`text-sm font-semibold tabular-nums text-gray-900 ${className}`}>
       {formatRemaining(remaining)}
     </span>
   );
