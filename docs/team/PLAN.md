@@ -319,6 +319,18 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 
 **Risks:** Fixture sizes; keep under harness limits.
 
+### T12.2 — Phase 2 acceptance blockers (D107 C1, C3, C5, C6)
+**Owner:** sonnet-backend-2 · **Phase:** 2 (fix) · **Blocks on:** D107 · **High-risk:** True · **Status:** in_progress
+**Files:** convex/tracking.ts, convex/priceWatch.ts, convex/policies.ts, convex/market.ts, convex/lib/schedule.ts (+tests); purchases.ts call sites only after T16 commits (else handoff note under docs/team/handoffs/).
+
+**Contract:** see D107 rows C1, C3, C5, C6 (verbatim routing). Acceptance: 6×1 → 6 purchases, `truncated:false`; 60×50×12 `< 4096` ranges and `< 32,000` docs; resurrection paths scheduled within 2 ticks behind 500 rotating items; needs_review no-link items get a transient stamp; retries charge global only; manual refresh from terminal resets attempts.
+
+### T14.2 — Frontend adoption of D103/D107 shapes (C4)
+**Owner:** sonnet-frontend · **Phase:** 2 (fix) · **Blocks on:** T12.2 landing · **High-risk:** False · **Status:** pending
+**Files:** src/components/dashboard/StatCards.tsx, src/pages/Purchase.tsx (+ any src/lib helper), tests under src/lib.
+
+**Contract:** `StatCards` renders `totals.byCurrency` (one line per currency, `primaryCurrency` first) instead of formatting the scoped `recoveredCents` with a guessed currency; `Purchase.tsx` passes `useCoarseNow()` as `now` to `purchases.get` so verdict staleness is real. Typecheck/lint clean; a `src/lib` unit test for the byCurrency formatter.
+
 ### T16 — P07 retention (bounded, resumable, audit-preserving) plus P08 backend fixes: returns validators and string bounds on cla
 **Owner:** sonnet-backend · **Phase:** 2 · **Blocks on:** T12 · **High-risk:** True
 **Files:** convex/retention.ts, convex/retention.test.ts, convex/claims.ts, convex/claims.test.ts, convex/purchases.ts, convex/purchases.test.ts, convex/intake.ts, convex/intake.test.ts, convex/replies.ts, convex/replies.test.ts, convex/profiles.ts, convex/profiles.test.ts, convex/crons.ts, convex/lib/errors.ts
