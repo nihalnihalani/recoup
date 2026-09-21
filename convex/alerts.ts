@@ -93,8 +93,17 @@ export const setAlerts = mutation({
     if (enabled) {
       // Explicit re-enable clears suppression from any of the three reasons
       // (D69 overrides the earlier user_unsubscribed-only rule): the user is
-      // asking for alerts back, whatever suppressed them before.
-      await ctx.db.patch(row._id, { alertsEnabled: true, suppressedAt: undefined, suppressedReason: undefined, updatedAt: now });
+      // asking for alerts back, whatever suppressed them before. F11a: also
+      // rotate the unsubscribe token, so a stale token -- already used for a
+      // one-click unsubscribe, or leaked from an old email -- cannot silently
+      // re-disable alerts the user just turned back on.
+      await ctx.db.patch(row._id, {
+        alertsEnabled: true,
+        suppressedAt: undefined,
+        suppressedReason: undefined,
+        unsubscribeToken: newUnsubscribeToken(),
+        updatedAt: now,
+      });
     } else {
       await ctx.db.patch(row._id, { alertsEnabled: false, updatedAt: now });
     }

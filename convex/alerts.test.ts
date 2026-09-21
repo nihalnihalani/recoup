@@ -57,6 +57,27 @@ describe("alerts.setAlerts", () => {
     }
   });
 
+  it("F11a: re-enabling after a bounce/unsubscribe rotates the token, so the old one cannot re-disable alerts", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const oldToken = await t.run(async (ctx) => await tokenFor(ctx, userId));
+    const unsub = await t.mutation(internal.alerts.unsubscribeByToken, { token: oldToken });
+    expect(unsub).toBe(true);
+    expect((await as.query(api.alerts.settings, {})).alertsEnabled).toBe(false);
+
+    await as.mutation(api.alerts.setAlerts, { enabled: true });
+    const after = await as.query(api.alerts.settings, {});
+    expect(after).toMatchObject({ alertsEnabled: true, suppressedReason: null });
+
+    const newToken = await t.run(async (ctx) => await tokenFor(ctx, userId));
+    expect(newToken).not.toBe(oldToken);
+
+    // The stale token is now a dead link: it cannot re-disable alerts.
+    const replay = await t.mutation(internal.alerts.unsubscribeByToken, { token: oldToken });
+    expect(replay).toBe(false);
+    expect((await as.query(api.alerts.settings, {})).alertsEnabled).toBe(true);
+  });
+
   it("creates the row on first call and generates a stable 64-char hex unsubscribe token", async () => {
     const t = setup();
     const { userId, as } = await signedIn(t);
