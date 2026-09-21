@@ -4,6 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../../convex/_generated/api";
 import { AreaChart } from "../charts/AreaChart";
+import { MarketHistory } from "./MarketHistory";
 import { fmt } from "../Money";
 import { ProductThumb } from "../ProductThumb";
 import { ErrorBox } from "../States";
@@ -414,6 +415,8 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
                 : "No price read yet. The chart starts with the first one."}
           </div>
         )}
+
+        <MarketHistory watch={watch} />
 
         <dl className="grid grid-cols-2 gap-x-4 gap-y-4 rounded-xl bg-gray-50 p-4 sm:grid-cols-3">
           <Stat label="Lowest" value={low === null ? "—" : money(low)} />
