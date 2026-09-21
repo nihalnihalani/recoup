@@ -97,6 +97,103 @@ describe("confirm", () => {
     expect(row?.confirmedByUser).toBe(true);
   });
 
+  // D116 (checkpoint-6b inventory bound gap, T18.2 addendum): passage,
+  // sourceUrl and contactEmail all gain bounds mirroring the auto-extracted
+  // path's own caps.
+  describe("bounds (D116)", () => {
+    it("accepts a passage at exactly the 600-char cap (matching the auto-extracted path)", async () => {
+      const t = setup();
+      const { userId, as } = await signedIn(t, "Owner");
+      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const passage = "a".repeat(600);
+
+      await as.mutation(api.policies.confirm, { policyId, channel: "email", passage });
+      const row = await t.run((ctx) => ctx.db.get(policyId));
+      expect(row?.passage).toBe(passage);
+    });
+
+    it("rejects a passage over the 600-char cap", async () => {
+      const t = setup();
+      const { userId, as } = await signedIn(t, "Owner");
+      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const passage = "a".repeat(601);
+
+      await expect(as.mutation(api.policies.confirm, { policyId, channel: "email", passage })).rejects.toThrow(
+        ConvexError,
+      );
+    });
+
+    it("accepts a sourceUrl at exactly the 2,048-char cap", async () => {
+      const t = setup();
+      const { userId, as } = await signedIn(t, "Owner");
+      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const prefix = "https://n.example/";
+      const sourceUrl = `${prefix}${"a".repeat(2_048 - prefix.length)}`;
+      expect(sourceUrl.length).toBe(2_048);
+
+      await as.mutation(api.policies.confirm, { policyId, channel: "email", sourceUrl });
+      const row = await t.run((ctx) => ctx.db.get(policyId));
+      expect(row?.sourceUrl).toBe(sourceUrl);
+    });
+
+    it("rejects a sourceUrl over the 2,048-char cap", async () => {
+      const t = setup();
+      const { userId, as } = await signedIn(t, "Owner");
+      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const prefix = "https://n.example/";
+      const sourceUrl = `${prefix}${"a".repeat(2_049 - prefix.length)}`;
+
+      await expect(as.mutation(api.policies.confirm, { policyId, channel: "email", sourceUrl })).rejects.toThrow(
+        ConvexError,
+      );
+    });
+
+    it("rejects a non-http(s) sourceUrl", async () => {
+      const t = setup();
+      const { userId, as } = await signedIn(t, "Owner");
+      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+
+      await expect(
+        as.mutation(api.policies.confirm, { policyId, channel: "email", sourceUrl: "javascript:alert(1)" }),
+      ).rejects.toThrow(ConvexError);
+    });
+
+    it("accepts a contactEmail at exactly the 320-char cap", async () => {
+      const t = setup();
+      const { userId, as } = await signedIn(t, "Owner");
+      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const local = "a".repeat(320 - "@n.example".length);
+      const contactEmail = `${local}@n.example`;
+      expect(contactEmail.length).toBe(320);
+
+      await as.mutation(api.policies.confirm, { policyId, channel: "email", contactEmail });
+      const row = await t.run((ctx) => ctx.db.get(policyId));
+      expect(row?.contactEmail).toBe(contactEmail);
+    });
+
+    it("rejects a contactEmail over the 320-char cap", async () => {
+      const t = setup();
+      const { userId, as } = await signedIn(t, "Owner");
+      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+      const local = "a".repeat(321 - "@n.example".length);
+      const contactEmail = `${local}@n.example`;
+
+      await expect(as.mutation(api.policies.confirm, { policyId, channel: "email", contactEmail })).rejects.toThrow(
+        ConvexError,
+      );
+    });
+
+    it("rejects a contactEmail that parses as more than one address", async () => {
+      const t = setup();
+      const { userId, as } = await signedIn(t, "Owner");
+      const policyId = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+
+      await expect(
+        as.mutation(api.policies.confirm, { policyId, channel: "email", contactEmail: "a@n.example, b@n.example" }),
+      ).rejects.toThrow(ConvexError);
+    });
+  });
+
   it("throws when a different user tries to confirm someone else's snapshot", async () => {
     const t = setup();
     const { userId } = await signedIn(t, "Owner");

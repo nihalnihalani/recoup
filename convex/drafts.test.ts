@@ -843,6 +843,55 @@ describe("drafts.update", () => {
       as.mutation(api.drafts.update, { draftId, to: CONTACT, subject: "s", body: "b" }),
     ).rejects.toThrow(/already sent/i);
   });
+
+  // D116 (checkpoint-6b inventory bound gap, T18.2 addendum): `to` must
+  // parse as exactly one address within a 320-char cap, reusing
+  // `lib/email.ts`'s `parseSingleEmail`.
+  describe("to bound (D116)", () => {
+    it("accepts a to address at exactly the 320-char cap", async () => {
+      const t = setup();
+      const { userId, as } = await signedIn(t);
+      const { claimId } = await seed(t, userId);
+      const draftId = await newDraft(t, claimId, userId);
+      const local = "a".repeat(320 - "@acme.example".length);
+      const to = `${local}@acme.example`;
+      expect(to.length).toBe(320);
+
+      await as.mutation(api.drafts.update, { draftId, to, subject: "s", body: "b" });
+      const draft = await t.run((ctx) => ctx.db.get(draftId));
+      expect(draft?.to).toBe(to);
+    });
+
+    it("rejects a to address over the 320-char cap", async () => {
+      const t = setup();
+      const { userId, as } = await signedIn(t);
+      const { claimId } = await seed(t, userId);
+      const draftId = await newDraft(t, claimId, userId);
+      const local = "a".repeat(321 - "@acme.example".length);
+      const to = `${local}@acme.example`;
+      expect(to.length).toBe(321);
+
+      await expect(
+        as.mutation(api.drafts.update, { draftId, to, subject: "s", body: "b" }),
+      ).rejects.toThrow(ConvexError);
+    });
+
+    it("rejects a to value that parses as more than one address", async () => {
+      const t = setup();
+      const { userId, as } = await signedIn(t);
+      const { claimId } = await seed(t, userId);
+      const draftId = await newDraft(t, claimId, userId);
+
+      await expect(
+        as.mutation(api.drafts.update, {
+          draftId,
+          to: "one@acme.example, two@acme.example",
+          subject: "s",
+          body: "b",
+        }),
+      ).rejects.toThrow(ConvexError);
+    });
+  });
 });
 
 describe("drafts.markPacketSent (D24)", () => {

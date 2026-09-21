@@ -21,6 +21,7 @@ import { scheduleClaimReminder } from "./followUps";
 import { charge } from "./lib/budget";
 import { stripControl } from "./lib/text";
 import { isTombstoned } from "./lib/accountState";
+import { parseSingleEmail } from "./lib/email";
 import { clearPendingMailEvent, getPendingMailEvent } from "./mailEvents";
 import { MAIL_RECONCILE_STALL_MS, MAX_SENDS_PER_CLAIM } from "./limits";
 
@@ -48,6 +49,8 @@ export const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000] as const;
 export const TERMINAL_FAILURES = ["failed", "bounced", "rejected"] as const;
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+/** D116: `drafts.update`'s `to` bound -- generous past any real address, but a fixed cap on an otherwise-unbounded string field. */
+const MAX_TO_CHARS = 320;
 /** Draft versions one claim may hold; `insert` refuses past it, so a read of this many is always the whole set. */
 const MAX_DRAFTS_PER_CLAIM = 200;
 /** B1: example claims carry invented stores and contacts; nothing about them may ever leave as mail. */
@@ -344,8 +347,14 @@ export const update = mutation({
     if (claim.version !== draft.claimVersion) {
       throw new ConvexError("The claim changed since this draft was written. Generate a new draft.");
     }
+    // D116 (checkpoint-6b inventory bound gap): `to` must parse as exactly
+    // one address within a fixed length, the same shape `approveAndSend`
+    // already re-checks before it will send -- `update` is the one place
+    // that used to let an unbounded, unvalidated string reach the stored
+    // draft at all.
+    const to = parseSingleEmail(args.to, MAX_TO_CHARS);
     await ctx.db.patch(draft._id, {
-      to: args.to.trim(),
+      to,
       subject: args.subject.slice(0, 200),
       body: args.body.slice(0, MAX_BODY_CHARS),
       approvedAt: undefined,

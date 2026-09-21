@@ -34,3 +34,31 @@ export function normalizeEmail(raw: unknown): string {
   }
   return trimmed;
 }
+
+/**
+ * Validates `raw` as exactly one email address within `maxChars` (D116):
+ * shared by `drafts.update`'s `to` field and `policies.confirm`'s
+ * `contactEmail`. Unlike `normalizeEmail` (the auth path, a fixed 254-char
+ * RFC cap and silent lowercasing of an account identifier) this keeps the
+ * caller's original casing and takes its own caller-supplied cap -- an
+ * address a user types into a draft or a policy's contact field is not an
+ * account identifier, so forcing it to lowercase would only make a typo
+ * harder to see if they need to fix it. A comma or semicolon is rejected
+ * outright (on top of `EMAIL_RE`'s own single-address shape) so
+ * "one@x.com, two@x.com" can never pass as a single recipient.
+ */
+export function parseSingleEmail(raw: unknown, maxChars: number): string {
+  if (typeof raw !== "string") {
+    throw new ConvexError("Enter a single valid email address");
+  }
+  const trimmed = raw.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed.length > maxChars ||
+    /[,;]/.test(trimmed) ||
+    !EMAIL_RE.test(trimmed)
+  ) {
+    throw new ConvexError("Enter a single valid email address");
+  }
+  return trimmed;
+}

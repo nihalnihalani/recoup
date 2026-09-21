@@ -17,11 +17,47 @@ import { MAX_WATCHES_PER_USER, POLICY_REFETCH_MIN_AGE_MS } from "./limits";
 import { normalizeDomain } from "./lib/policyText";
 import { charge, tryCharge } from "./lib/budget";
 import { clearMerchantItemSchedule } from "./lib/schedule";
+import { parseSingleEmail } from "./lib/email";
 
 
 const firecrawl = new FirecrawlClient(components.firecrawl);
 
 type PolicyKind = "price_adjustment" | "returns";
+
+// ---------------------------------------------------------------------------
+// D116 (checkpoint-6b inventory bound gap, T18.2 addendum): `policies.confirm`
+// had no length/shape bounds on the fields a user can type in by hand, unlike
+// the auto-extracted path a snapshot otherwise only ever comes from.
+// ---------------------------------------------------------------------------
+
+/** Same cap `researchPolicy` already applies to the model's own passage (`p.passage.slice(0, 600)` below, and `lib/schemas.ts`'s `Policy.passage` description). */
+const MAX_CONFIRM_PASSAGE_CHARS = 600;
+/** Generous past any real URL, but a fixed cap on an otherwise-unbounded string field. */
+const MAX_CONFIRM_SOURCE_URL_CHARS = 2_048;
+/** Same cap `drafts.update`'s `to` field uses (D116). */
+const MAX_CONFIRM_CONTACT_EMAIL_CHARS = 320;
+
+function assertConfirmPassage(passage: string): void {
+  if (passage.length > MAX_CONFIRM_PASSAGE_CHARS) {
+    throw new ConvexError(`Passage is too long (at most ${MAX_CONFIRM_PASSAGE_CHARS} characters)`);
+  }
+}
+
+/** `sourceUrl` must be a well-formed, absolute http(s) URL within the length cap -- never a leaked parse-error detail. */
+function assertConfirmSourceUrl(url: string): void {
+  if (url.length === 0 || url.length > MAX_CONFIRM_SOURCE_URL_CHARS) {
+    throw new ConvexError("Enter a valid source URL");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new ConvexError("Enter a valid source URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new ConvexError("Enter a valid source URL");
+  }
+}
 
 const QUERIES: Record<PolicyKind, (d: string) => string> = {
   price_adjustment: (d) => `${d} price adjustment policy price match after purchase`,
@@ -367,6 +403,15 @@ export const confirm = mutation({
     const userId = await requireUserId(ctx);
     const policy = await ownedPolicy(ctx, policyId, userId);
     if (edits.windowDays !== undefined) assertWindowDays(edits.windowDays);
+    // D116: the same bounds the auto-extracted path is already held to
+    // (`researchPolicy`'s own passage cap, a well-formed http(s) source, an
+    // address `confirmedContactFor` will actually match) -- this is the only
+    // mutation that lets a human type these fields in free-hand.
+    if (edits.passage !== undefined) assertConfirmPassage(edits.passage);
+    if (edits.sourceUrl !== undefined) assertConfirmSourceUrl(edits.sourceUrl);
+    if (edits.contactEmail !== undefined) {
+      edits.contactEmail = parseSingleEmail(edits.contactEmail, MAX_CONFIRM_CONTACT_EMAIL_CHARS);
+    }
     // D45: a passage or source the user typed is no longer the verified
     // scrape, so the evidence markers are cleared.
     const edited =
