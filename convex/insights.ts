@@ -142,6 +142,55 @@ async function userPurchases(ctx: QueryCtx, userId: Id<"users">): Promise<Paged<
 }
 
 /**
+ * Reads each purchase's items, in order, against ONE shared budget of
+ * `MAX_ITEMS_TOTAL` across every purchase combined (see its doc comment).
+ *
+ * C2/D107: this used to hand out a FIXED per-purchase share up front (an
+ * equal split of the budget across every purchase, sized to the worst
+ * case of `MAX_ITEMS_PER_PURCHASE` each) so the reads below could run in
+ * parallel with no shared counter. That meant a purchase with only 1 item
+ * still reserved and burned a full 50-item share -- with `MAX_ITEMS_TOTAL
+ * = 150`, only the 3 newest purchases ever got read at all, however small
+ * they actually were (10 purchases x 1 item each silently produced 0
+ * `bought`/price events for 7 of them). Sequential and budgeted by ROWS
+ * ACTUALLY READ instead: a purchase that holds fewer items than its cap
+ * only spends what it holds, leaving the rest of the shared budget for
+ * later purchases. `truncated` is set only on a REAL cut -- a purchase
+ * that itself held more than its allotted cap, or one skipped outright
+ * because the shared budget was already spent -- never merely because a
+ * purchase's cap came in under `MAX_ITEMS_PER_PURCHASE` (that no longer
+ * implies a cut once the cap can legitimately be sized to a purchase that
+ * turned out smaller). The checks-per-item fan-out callers run afterward
+ * can still be fully parallel: it only needs the item lists resolved here.
+ */
+async function itemsWithinBudget(
+  ctx: QueryCtx,
+  purchases: Doc<"purchases">[],
+): Promise<{ perPurchase: Doc<"items">[][]; truncated: boolean }> {
+  let room = MAX_ITEMS_TOTAL;
+  let truncated = false;
+  const perPurchase: Doc<"items">[][] = [];
+  for (const purchase of purchases) {
+    if (room <= 0) {
+      perPurchase.push([]);
+      truncated = true;
+      continue;
+    }
+    const cap = Math.min(MAX_ITEMS_PER_PURCHASE, room);
+    const page = await ctx.db
+      .query("items")
+      .withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id))
+      .take(cap + 1);
+    const cut = page.length > cap;
+    const kept = cut ? page.slice(0, cap) : page;
+    room -= kept.length;
+    if (cut) truncated = true;
+    perPurchase.push(kept);
+  }
+  return { perPurchase, truncated };
+}
+
+/**
  * The newest things that happened on the caller's account, newest first, with
  * `truncated` set when any bounded page below came back full (D72: a sampled
  * window, never presented as the full history). `{ events: [], truncated:
@@ -177,23 +226,14 @@ export const activity = query({
     );
     events.push(...watchEventLists.flat());
 
-    // D93: the purchase/item fan-out is also parallelized per purchase, and
-    // MAX_ITEMS_TOTAL bounds the grand total of items whose price history is
-    // actually read, across every purchase combined (see its doc comment) --
-    // not just per purchase, which cannot bound the purchases x items
-    // product. The per-purchase share of that budget is decided up front, in
-    // one synchronous (no I/O) pass over `purchases.rows` in its existing
-    // order (newest first) -- fixing each purchase's `take()` size before any
-    // read starts, so the parallel reads below never race on a shared
-    // counter. This means an earlier, small purchase can leave some of its
-    // reserved share unused rather than it flowing to a later one; a
-    // reasonable trade for reads that can safely run in parallel.
-    let itemsRoom = MAX_ITEMS_TOTAL;
-    const perPurchaseCap = purchases.rows.map(() => {
-      const cap = Math.min(MAX_ITEMS_PER_PURCHASE, itemsRoom);
-      itemsRoom -= cap;
-      return cap;
-    });
+    // D93/C2 (D107): MAX_ITEMS_TOTAL bounds the grand total of items whose
+    // price history is actually read, across every purchase combined (see
+    // its doc comment) -- not just per purchase, which cannot bound the
+    // purchases x items product. `itemsWithinBudget` reads the item lists
+    // sequentially, budgeted by rows actually read; the checks-per-item fan
+    // -out below is still fully parallel, since it only needs those lists.
+    const { perPurchase: purchaseItems, truncated: itemsCut } = await itemsWithinBudget(ctx, purchases.rows);
+    if (itemsCut) truncated = true;
 
     const purchaseEventLists = await Promise.all(
       purchases.rows.map(async (purchase, i) => {
@@ -208,16 +248,8 @@ export const activity = query({
             note: purchase.isExample ? "Example" : undefined,
           },
         ];
-        const cap = perPurchaseCap[i];
-        if (cap < MAX_ITEMS_PER_PURCHASE) truncated = true; // the shared budget, not this purchase's own size, capped the ask
-        if (cap === 0) return purchaseEvents;
-        const items = await ctx.db
-          .query("items")
-          .withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id))
-          .take(cap);
-        if (items.length >= cap) truncated = true;
         const itemEventLists = await Promise.all(
-          items.map(async (item) => {
+          purchaseItems[i].map(async (item) => {
             const checks = await ctx.db
               .query("priceChecks")
               .withIndex("by_item", (q) => q.eq("itemId", item._id))
@@ -456,29 +488,17 @@ export const sources = query({
         }),
     );
 
-    // D93: same MAX_ITEMS_TOTAL discipline as `activity` (see its doc
-    // comment) -- the per-purchase share is fixed up front, in order, before
-    // any of the parallel reads below start.
+    // D93/C2 (D107): same MAX_ITEMS_TOTAL discipline as `activity` (see its
+    // doc comment and `itemsWithinBudget`'s) -- budgeted by rows actually
+    // read, not a fixed per-purchase up-front reservation.
     const nonExample = purchases.rows.filter((p) => !p.isExample);
-    let itemsRoom = MAX_ITEMS_TOTAL;
-    const perPurchaseCap = nonExample.map(() => {
-      const cap = Math.min(MAX_ITEMS_PER_PURCHASE, itemsRoom);
-      itemsRoom -= cap;
-      return cap;
-    });
+    const { perPurchase: sourceItems, truncated: itemsCut } = await itemsWithinBudget(ctx, nonExample);
+    if (itemsCut) truncated = true;
     await Promise.all(
       nonExample.map(async (purchase, i) => {
         const target = row(purchase.merchantDomain);
-        const cap = perPurchaseCap[i];
-        if (cap < MAX_ITEMS_PER_PURCHASE) truncated = true;
-        if (cap === 0) return;
-        const items = await ctx.db
-          .query("items")
-          .withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id))
-          .take(cap);
-        if (items.length >= cap) truncated = true;
         await Promise.all(
-          items.map(async (item) => {
+          sourceItems[i].map(async (item) => {
             target.bought += 1;
             const checks = await ctx.db
               .query("priceChecks")

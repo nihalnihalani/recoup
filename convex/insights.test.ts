@@ -289,6 +289,39 @@ describe("insights P05 accounting", () => {
       expect(result.truncated).toBe(true);
     }
   });
+
+  it("C2 (D107): 10 small purchases (1 item each) are not starved by a fixed per-purchase budget split", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    // Before the fix, MAX_ITEMS_TOTAL=150 was allotted as an equal
+    // MAX_ITEMS_PER_PURCHASE=50-sized up-front share per purchase, so only
+    // the 3 newest of these 10 purchases (150/50) were ever read at all --
+    // the other 7, each holding just 1 item, contributed nothing to either
+    // `sources` or `activity` despite the real total (10 items) being far
+    // under the shared budget.
+    for (let i = 0; i < 10; i++) {
+      await t.run(async (ctx) => {
+        const purchaseId = await ctx.db.insert("purchases", {
+          userId, merchant: `Store ${i}`, merchantDomain: `shop${i}.example`, currency: "USD", status: "active",
+        });
+        const itemId = await ctx.db.insert("items", {
+          purchaseId, userId, name: `Item ${i}`, unitCents: 1_000, qty: 1, returned: false,
+        });
+        await ctx.db.insert("priceChecks", {
+          itemId, userId, observedCents: 900, currency: "USD", observedAt: 1_700_000_000_000, sourceUrl: "https://shopx.example/p",
+        });
+      });
+    }
+
+    const sources = await as.query(api.insights.sources, {});
+    expect(sources.truncated).toBe(false);
+    expect(sources.rows.reduce((sum, r) => sum + r.bought, 0)).toBe(10);
+
+    const activity = await as.query(api.insights.activity, {});
+    expect(activity.truncated).toBe(false);
+    const priceEvents = activity.events.filter((e) => e.kind !== "purchase_added");
+    expect(priceEvents).toHaveLength(10);
+  });
 });
 
 // ---------------------------------------------------------------------------
