@@ -10,6 +10,7 @@
  * only the casing is "legacy".
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { exportPKCS8, generateKeyPair } from "jose";
 import { api, internal } from "../_generated/api";
 import { setup } from "../test.setup";
@@ -145,6 +146,66 @@ describe("normalizeLegacyAccounts (T05.1 F4, D94)", () => {
     // The colliding row is left exactly as it was — still unnormalized, still unreachable.
     const untouched = await t.run(async (ctx) => ctx.db.get(accountId));
     expect(untouched?.providerAccountId).toBe("Dup@Example.com");
+  });
+
+  it("F-AUD-10: a collision is still detected and left untouched when logged through logEvent instead of a bare console.error", async () => {
+    // Functional half of the regression: the switch from `console.error(...)`
+    // to `logEvent("migration_progress", {...})` must not change the
+    // collision-detection behavior itself -- both collisions (authAccounts
+    // AND users) are still found and both rows are still left untouched.
+    const t = setup();
+    const sendA = vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
+    await signIn(t, { flow: "signUp", email: "structured@example.com", password: PASSWORD });
+    await signIn(t, { flow: "signUp", email: "structured-temp@example.com", password: PASSWORD });
+    sendA.mockRestore();
+
+    const accountId = await t.run(async (ctx) => {
+      const account = await ctx.db
+        .query("authAccounts")
+        .withIndex("providerAndAccountId", (q) =>
+          q.eq("provider", "password").eq("providerAccountId", "structured-temp@example.com"),
+        )
+        .unique();
+      if (!account) throw new Error("missing seeded account");
+      await ctx.db.patch(account._id, { providerAccountId: "Structured@Example.com" });
+      await ctx.db.patch(account.userId, { email: "Structured@Example.com" });
+      return account._id;
+    });
+
+    const result = await t.mutation(internal.lib.authMigrate.normalizeLegacyAccounts, {});
+    // One collision at the authAccounts level, one at the users level (same
+    // patched row triggers both -- D94's docstring: two independent checks).
+    expect(result.collisions).toBe(2);
+    const untouched = await t.run((ctx) => ctx.db.get(accountId));
+    expect(untouched?.providerAccountId).toBe("Structured@Example.com");
+  });
+
+  it("F-AUD-10: both collision branches call the shared `logEvent` primitive (kind migration_progress, ids only), not a bare console.error", () => {
+    // `console.error` cannot be reliably spied on through `t.mutation`'s
+    // dispatch in this harness (convex-test's PATCHABLE_GLOBALS rewraps
+    // `console` per handler invocation, the same isolation every other
+    // `console.error`-through-`t.mutation` spy attempt in this codebase runs
+    // into -- every existing "logEvent, not console.error" regression test
+    // here instead dispatches through `t.action` or calls a plain
+    // `*Impl` function directly, neither of which applies to an
+    // `internalMutation` with no separated impl). A source-level check is
+    // this codebase's own established substitute for exactly this situation
+    // (`purchases.test.ts`'s "no Date.now() in a query body" test,
+    // `watches.test.ts`'s "grep: list/get's query bodies ... never call
+    // Date.now() directly" test): it fails against the OLD code (two bare
+    // `console.error(...)` calls, RUNBOOK §5's "all sites were swept" claim
+    // was wrong -- register: F-AUD-10) and passes after this fix (verified
+    // by running this test against the pre-fix authMigrate.ts before
+    // landing it).
+    const src = readFileSync(new URL("../lib/authMigrate.ts", import.meta.url), "utf8");
+    expect(src).not.toMatch(/console\.error\s*\(/);
+    const collisionCalls = src.match(/logEvent\("migration_progress",\s*\{[^}]*reason:\s*"collision"[^}]*\}\)/gs) ?? [];
+    expect(collisionCalls).toHaveLength(2);
+    for (const call of collisionCalls) {
+      // ids only, per the module docstring: no `providerAccountId`/`email` field name.
+      expect(call).not.toMatch(/providerAccountId|email/);
+      expect(call).toMatch(/Id\b|AccountId|UserId/);
+    }
   });
 
   it("N8 (D99): restart: true rescans from the start after an operator resolves a recorded collision by hand", async () => {

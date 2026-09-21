@@ -47,6 +47,7 @@ import { v } from "convex/values";
 import { internalMutation } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { normalizeEmail } from "./email";
+import { logEvent } from "./log";
 
 /** `opsState.key` for this migration's resumable cursor. */
 export const AUTH_MIGRATE_OPS_KEY = "authMigrate";
@@ -113,10 +114,16 @@ export const normalizeLegacyAccounts = internalMutation({
           .unique();
         if (collidingAccount !== null && collidingAccount._id !== account._id) {
           collisions++;
-          console.error(
-            `authMigrate: refusing to merge authAccounts ${account._id} into ${collidingAccount._id} ` +
-              `(both normalize to the same providerAccountId)`,
-          );
+          // F-AUD-10: structured, redacted line (ids only, no email/secret
+          // values) through the shared logging primitive, not a bare
+          // `console.error` -- RUNBOOK §5 claims every site was swept; these
+          // two (this one and the `users` case below) were missed.
+          logEvent("migration_progress", {
+            table: "authAccounts",
+            reason: "collision",
+            accountId: account._id,
+            collidingAccountId: collidingAccount._id,
+          });
         } else {
           await ctx.db.patch(account._id, { providerAccountId: normalizedAccountId });
           accountsNormalized++;
@@ -134,10 +141,13 @@ export const normalizeLegacyAccounts = internalMutation({
         .unique();
       if (collidingUser !== null && collidingUser._id !== user._id) {
         collisions++;
-        console.error(
-          `authMigrate: refusing to merge users ${user._id} into ${collidingUser._id} ` +
-            `(both normalize to the same email)`,
-        );
+        // F-AUD-10: same as the authAccounts branch above.
+        logEvent("migration_progress", {
+          table: "users",
+          reason: "collision",
+          userId: user._id,
+          collidingUserId: collidingUser._id,
+        });
       } else {
         await ctx.db.patch(user._id, { email: normalizedUserEmail });
         usersNormalized++;
