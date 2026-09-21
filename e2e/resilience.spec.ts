@@ -156,43 +156,53 @@ test.describe("resilience", () => {
     //     bg-paper, 3.4:1 -- now text-ink/70, 6.60:1 (its own test below --
     //     distinct markup/component from the four above).
     // Settings/a Purchase/a Claim/AuthLoading had no other color-contrast
-    // violation once F-T20-1's own markup was fixed, so those four are real
-    // passing tests below. Board and Watching turned up NEW findings once
-    // F-T20-1's violations stopped masking them (axe only reports what it
-    // can currently see) -- these are in files outside T24a's ownership
+    // violation once F-T20-1's own markup was fixed, so those four were real
+    // passing tests below already. Board and Watching had turned up NEW
+    // findings once F-T20-1's violations stopped masking them (axe only
+    // reports what it can currently see) -- outside T24a's own ownership
     // (Sidebar.tsx/TopBar.tsx/UserCard.tsx/NotificationBell.tsx/App.tsx's
-    // AuthLoading splash only), so they stay `test.fixme`:
-    //   - `src/components/dashboard/ActivityTimeline.tsx`'s per-event
-    //     timestamp (`<p class="mt-0.5 text-xs tabular-nums text-gray-400">`,
-    //     rendered on Board's "Recent activity" card): #99a1af on #ffffff,
-    //     2.6:1.
+    // AuthLoading splash only) -- and were flagged `test.fixme` for the
+    // frontend owner. F-T24-1/D114 (T19), both re-verified (desktop-chromium
+    // AND mobile) against the live adorable-lion-138 deployment:
     //   - `src/pages/Watching.tsx`'s "Watch a product" form helper text
     //     (`<p class="text-xs text-gray-400">Works with retailers and
-    //     marketplaces alike...</p>`): #99a1af on #ffffff, 2.6:1.
-    const NEW_CONTRAST_FIXME_BASE =
-      "NEW finding once F-T20-1 was fixed (axe only reports what it can see; this was previously masked): " +
-      "#99a1af (text-gray-400) on #ffffff, 2.6:1 vs required 4.5:1 (axe color-contrast/serious); " +
-      "not T24a's files to fix (Sidebar.tsx/TopBar.tsx/UserCard.tsx/NotificationBell.tsx/App.tsx only), flagged for the frontend owner";
+    //     marketplaces alike...</p>`): was #99a1af on #ffffff, 2.6:1 -- now
+    //     text-gray-600 (#4a5565), 7.56:1. Passes cleanly, both projects --
+    //     flipped to a real test below.
+    //   - `src/components/dashboard/ActivityTimeline.tsx`'s per-event
+    //     timestamp (`<p class="mt-0.5 text-xs tabular-nums text-gray-400">`,
+    //     rendered on Board's "Recent activity" card): was #99a1af on
+    //     #ffffff, 2.6:1 -- now text-gray-600 (#4a5565), 7.56:1, and no
+    //     longer the reported violation -- BUT fixing it unmasked a THIRD,
+    //     different one on the same page (same masking pattern as F-T20-1's
+    //     own fix did for these two), so Board stays `test.fixme`:
+    //     `RecentNote` in `src/components/dashboard/parts.tsx:29` (the
+    //     "Recent" pill next to "Recent activity", title="recent activity
+    //     (up to 40 watches, 40 purchases, last 12 checks per item)"):
+    //     `text-gray-500` on `bg-gray-100`, #6a7282 on #f3f4f6, 4.39:1 vs
+    //     4.5:1 required -- reproduces on both desktop-chromium and mobile.
+    //     Not ActivityTimeline.tsx/Watching.tsx (T19's own contrast-line
+    //     scope) and not parts.tsx (outside T19's file ownership), so left
+    //     for the next frontend owner rather than fixed here.
+    const BOARD_CONTRAST_FIXME =
+      "NEW finding once ActivityTimeline.tsx's own timestamp was fixed (F-T24-1/D114/T19) unmasked a THIRD " +
+      "violation on the same page (axe only reports what it can see): src/components/dashboard/parts.tsx:29's " +
+      "RecentNote pill, #6a7282 (text-gray-500) on #f3f4f6 (bg-gray-100), 4.39:1 vs required 4.5:1 (axe " +
+      "color-contrast/serious, reproduces on desktop-chromium and mobile); not T19's files to fix " +
+      "(ActivityTimeline.tsx/Watching.tsx contrast lines only), flagged for the next frontend owner";
 
     test.fixme(
-      `Board has no serious/critical accessibility violations -- ` +
-        `src/components/dashboard/ActivityTimeline.tsx's per-event timestamp ` +
-        `(<p class="mt-0.5 text-xs tabular-nums text-gray-400">, Board's "Recent activity" card). ${NEW_CONTRAST_FIXME_BASE}`,
+      `Board has no serious/critical accessibility violations -- ${BOARD_CONTRAST_FIXME}`,
       async ({ leadPage: page }) => {
         const serious = await gotoAndScan(page, "/");
         expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
       },
     );
 
-    test.fixme(
-      `Watching has no serious/critical accessibility violations -- ` +
-        `src/pages/Watching.tsx's "Watch a product" form helper text ` +
-        `(<p class="text-xs text-gray-400">Works with retailers and marketplaces alike...</p>). ${NEW_CONTRAST_FIXME_BASE}`,
-      async ({ leadPage: page }) => {
-        const serious = await gotoAndScan(page, "/watching");
-        expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
-      },
-    );
+    test("Watching has no serious/critical accessibility violations", async ({ leadPage: page }) => {
+      const serious = await gotoAndScan(page, "/watching");
+      expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
+    });
 
     test("Settings has no serious/critical accessibility violations", async ({ leadPage: page }) => {
       const serious = await gotoAndScan(page, "/settings");
