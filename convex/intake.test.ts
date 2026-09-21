@@ -186,6 +186,30 @@ describe("intake.applyExtraction — orders", () => {
     expect(row.summary).toContain("Phantom hat");
   });
 
+  it("F4: drops a productUrl that does not parse as a real product link, but keeps the item", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-bad-url");
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: id,
+      parsed: orderEmail({
+        items: [
+          { name: "Wool scarf", unitPrice: 79.99, qty: 1, productUrl: "javascript:alert(1)" },
+          { name: "Wool hat", unitPrice: 19.99, qty: 1, productUrl: "https://nordstrom.com/s/2" },
+        ],
+      }),
+    });
+
+    const board = await as.query(api.purchases.board, {});
+    expect(board.purchases).toHaveLength(1);
+    const items = board.purchases[0].items;
+    expect(items.find((i) => i.name === "Wool scarf")?.productUrl).toBeUndefined();
+    expect(items.find((i) => i.name === "Wool hat")?.productUrl).toBe("https://nordstrom.com/s/2");
+
+    const row = await eventRow(t, id);
+    expect(row.status).toBe("needs_review");
+  });
+
   it("drops a hallucinated purchase date rather than storing it", async () => {
     const t = setup();
     const { as, userId } = await signedIn(t);

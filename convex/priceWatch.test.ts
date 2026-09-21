@@ -457,6 +457,28 @@ describe("priceWatch.eligibleItems", () => {
   });
 });
 
+describe("priceWatch.itemForCheck (F4)", () => {
+  it("returns null when the stored productUrl no longer parses as a real product link", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { itemId } = await world(t, userId);
+    // Not reachable through `purchases.create`/`confirm` any more (both now
+    // validate), but a legacy row or a direct DB write could still carry one.
+    await t.run((ctx) => ctx.db.patch(itemId, { productUrl: "javascript:alert(1)" }));
+
+    expect(await t.query(internal.priceWatch.itemForCheck, { itemId })).toBeNull();
+  });
+
+  it("returns the item for a real product link", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { itemId } = await world(t, userId);
+
+    const result = await t.query(internal.priceWatch.itemForCheck, { itemId });
+    expect(result).toMatchObject({ productUrl: URL, currency: "USD" });
+  });
+});
+
 describe("priceWatch.checkNow", () => {
   it("schedules a check for an item the caller owns", async () => {
     const t = setup();
