@@ -13,6 +13,7 @@ import { latestPolicy } from "./lib/latestPolicy";
 import { assertWindowDays } from "./lib/money";
 import { channel, policyKind } from "./schema";
 import { requireUserId, ownedPolicy } from "./lib/access";
+import { isTombstoned } from "./lib/accountState";
 import { MAX_WATCHES_PER_USER, POLICY_REFETCH_MIN_AGE_MS } from "./limits";
 import { normalizeDomain } from "./lib/policyText";
 import { charge, tryCharge } from "./lib/budget";
@@ -210,6 +211,26 @@ export const hasFreshSnapshot = internalQuery({
 type FetchBothCtx = { runMutation: ActionCtx["runMutation"]; runQuery: ActionCtx["runQuery"] };
 
 /**
+ * T18.5 (D124 B2): `fetchBoth` is scheduler-driven with a captured `userId`
+ * and no live `ctx.auth` (unlike `refresh`, which resolves its caller
+ * through the tombstone-gated `requireActiveUserId` before ever reaching
+ * `researchPolicy`) -- a purchase's scheduled research landing after the
+ * owner's account has since been deleted previously still spent a Firecrawl
+ * search/extract and wrote a `policies` row nothing would ever purge
+ * (`purgeStep` only drains a still-live `accountState`'s own tables; once
+ * `deleted`, that row is gone and no further purge ever runs for this user).
+ * Checked once, before the loop, rather than inside `researchPolicy`/
+ * `insertSnapshot` themselves: both of THEIR other callers (`refresh`) are
+ * already gated upstream, so this one check closes the entire gap without
+ * threading a query context through every `insertSnapshot` call site.
+ */
+export const isDeletedUser = internalQuery({
+  args: { userId: v.id("users") },
+  returns: v.boolean(),
+  handler: async (ctx, { userId }) => isTombstoned(ctx, userId),
+});
+
+/**
  * Scheduler-driven: research both policy kinds for a merchant. Never throws (D17).
  * A kind researched in the last 24h is skipped (review M1): confirming a
  * purchase must not bury the policy the user just confirmed under a failed
@@ -238,6 +259,9 @@ export async function fetchBothImpl(
   args: { userId: Id<"users">; merchantDomain: string },
   deps: ResearchDeps = defaultDeps,
 ): Promise<void> {
+  // D124 B2: a deleted (or mid-deletion) owner never spends on, or writes
+  // for, a scheduled fetch that outlived their account.
+  if (await ctx.runQuery(internal.policies.isDeletedUser, { userId: args.userId })) return;
   for (const kind of ["price_adjustment", "returns"] as const) {
     try {
       if (await ctx.runQuery(internal.policies.hasFreshSnapshot, { ...args, kind })) continue;

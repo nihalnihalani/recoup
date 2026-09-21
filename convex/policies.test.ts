@@ -676,3 +676,54 @@ describe("fetchBoth skips a kind researched in the last 24h (review M1)", () => 
     expect(returns.find((r) => r._id === stale)?.passage).toBe(baseSnapshot.passage);
   });
 });
+
+describe("T18.5 (D124 B2): fetchBoth refuses to spend or write for a deleted user", () => {
+  it("before/after: a scheduled fetchBoth landing after the owner's account is deleted makes no search call and inserts nothing [FAILS pre-T18.5]", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const merchantDomain = "acme-deleted.example";
+
+    let searchCalls = 0;
+    const deps: ResearchDeps = {
+      search: async () => {
+        searchCalls++;
+        return { web: [{ url: `https://${merchantDomain}/policy`, markdown: "irrelevant" }] };
+      },
+      extract: async () => ({ found: true, channel: "email", passage: "n/a", confidence: 0.9 }),
+    };
+
+    await as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+
+    await fetchBothImpl(
+      { runMutation: (ref: any, a: any) => t.mutation(ref, a), runQuery: (ref: any, a: any) => t.query(ref, a) },
+      { userId, merchantDomain },
+      deps,
+    );
+
+    expect(searchCalls).toBe(0);
+    const rows = await t.run((ctx) =>
+      ctx.db.query("policies").withIndex("by_user_domain_kind", (q) => q.eq("userId", userId).eq("merchantDomain", merchantDomain)).collect(),
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it("an active (non-deleted) user's fetchBoth is unaffected by the new gate", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const merchantDomain = "acme-active.example";
+    let searchCalls = 0;
+    const deps: ResearchDeps = {
+      search: async () => {
+        searchCalls++;
+        return { web: [] };
+      },
+      extract: async () => ({ found: false, channel: "unknown", passage: "", confidence: 0 }),
+    };
+    await fetchBothImpl(
+      { runMutation: (ref: any, a: any) => t.mutation(ref, a), runQuery: (ref: any, a: any) => t.query(ref, a) },
+      { userId, merchantDomain },
+      deps,
+    );
+    expect(searchCalls).toBe(2); // both kinds researched
+  });
+});
