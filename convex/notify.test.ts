@@ -3,17 +3,22 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { agentmail } from "./mail";
-import { applyDropOutcome, DAILY_LIMIT_ERROR, DROP_SUBJECT, GLOBAL_LIMIT_ERROR, isAlertableDrop } from "./notify";
+import { applyDropOutcome, claimDrop, DROP_SUBJECT, isAlertableDrop } from "./notify";
 import { GLOBAL_DAILY_BUDGETS, MAX_DROP_EMAILS_PER_DAY } from "./limits";
 
 /**
- * Drop emails (W2). No network: the AgentMail component cannot dispatch under
- * convex-test (see the note in drafts.test.ts), so the two seams, the shared
- * `agentmail.sendMessage` and `agentmail.status` handles, are replaced with
- * spies. `status` defaults to a definitive "sent" outcome on the first
- * `reconcileDrop` attempt, so a plain `flush(t)` still carries a row all the
- * way from `claimed` through `queued` to `sent` (F3); tests of the queued
- * state or of a slower/failed reconcile override it per-call.
+ * Drop emails (W2), rewritten for T06/D68/D85: `sendDrop` is one
+ * `internalMutation` (no action, no `dropContext`/`markQueued`/`finishDrop`),
+ * gated by `lib/accountState.alertGate` at both claim time and send time, and
+ * every refusal is stored as `suppressed` with a `reason` rather than
+ * `failed` with a free-text error. No network: the AgentMail component
+ * cannot dispatch under convex-test (see the note in drafts.test.ts), so the
+ * two seams, the shared `agentmail.sendMessage` and `agentmail.status`
+ * handles, are replaced with spies. `status` defaults to a definitive "sent"
+ * outcome on the first `reconcileDrop` attempt, so a plain `flush(t)` still
+ * carries a row all the way from `claimed` through `queued` to `sent` (F3);
+ * tests of the queued/unknown state or of a slower/failed reconcile override
+ * it per-call.
  */
 const T0 = Date.UTC(2026, 8, 20, 12);
 const URL = "https://www.acme.example/p/down-jacket";
@@ -40,10 +45,19 @@ afterEach(() => {
 
 type T = ReturnType<typeof setup>;
 
-async function account(t: T, o: { email?: string | null; inbox?: boolean; name?: string } = {}) {
+/** A signed-in account with a verified email (the default `alertGate` needs to pass) and, by default, an AgentMail profile inbox. */
+async function account(
+  t: T,
+  o: { email?: string | null; verified?: boolean; inbox?: boolean; name?: string } = {},
+) {
   const user = await signedIn(t, o.name ?? "Tester");
   await t.run(async (ctx) => {
-    if (o.email !== null) await ctx.db.patch(user.userId, { email: o.email ?? "sam@home.example" });
+    if (o.email !== null) {
+      await ctx.db.patch(user.userId, {
+        email: o.email ?? "sam@home.example",
+        emailVerificationTime: o.verified === false ? undefined : T0,
+      });
+    }
     if (o.inbox !== false) {
       await ctx.db.insert("profiles", {
         userId: user.userId,
@@ -87,6 +101,15 @@ async function observe(t: T, watchId: Id<"watches">, cents: number) {
 
 async function mailRows(t: T) {
   return await t.run((ctx) => ctx.db.query("mailLog").collect());
+}
+
+async function alertSettingsRow(t: T, userId: Id<"users">) {
+  return await t.run((ctx) =>
+    ctx.db
+      .query("alertSettings")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .first(),
+  );
 }
 
 async function flush(t: T) {
@@ -142,12 +165,17 @@ describe("claiming a drop inside recordWatchCheck", () => {
       subject: "Recoup price alert: an item you are watching dropped",
     });
     expect(row.previousCents).toBeUndefined();
+    expect(row.claimedAt).toBe(T0);
     expect(send).not.toHaveBeenCalled();
 
     await flush(t);
 
     expect(send).toHaveBeenCalledTimes(1);
-    const [, inboxId, message] = send.mock.calls[0] as [unknown, string, { to: string; subject: string; text: string; html?: string }];
+    const [, inboxId, message] = send.mock.calls[0] as [
+      unknown,
+      string,
+      { to: string; subject: string; text: string; html?: string; headers?: Record<string, string> },
+    ];
     expect(inboxId).toBe(`inbox-${userId}`);
     expect(message.to).toBe("sam@home.example");
     expect(message.subject).toBe("Recoup price alert: an item you are watching dropped");
@@ -167,11 +195,17 @@ describe("claiming a drop inside recordWatchCheck", () => {
     // carry an arbitrary, user-supplied link.
     expect(message.text).not.toContain(URL);
     expect(message.text).not.toContain("Link:");
+    // T06: one-click unsubscribe headers (RFC 8058), not a body footer line
+    // (the body-content assertions above stay exactly as before).
+    expect(message.headers?.["List-Unsubscribe"]).toMatch(/^<.*\/alerts\/unsubscribe\?token=.+>$/);
+    expect(message.headers?.["List-Unsubscribe-Post"]).toBe("List-Unsubscribe=One-Click");
+
     const [sent] = await mailRows(t);
     expect(sent.status).toBe("sent");
     expect(sent.outboundId).toBe("outbound-1");
     expect(sent.sentAt).toBe(Date.now());
     expect(sent.error).toBeUndefined();
+    expect(sent.reason).toBeUndefined();
   });
 
   it("fires on a qualifying drop without a target and states both prices", async () => {
@@ -244,22 +278,57 @@ describe("claiming a drop inside recordWatchCheck", () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
-  it("running sendDrop again for a finished row sends nothing", async () => {
+  it("running sendDrop again on an already-resolved row (concurrent duplicate) is a no-op", async () => {
     const t = setup();
     const { userId } = await account(t);
     const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
     await observe(t, watchId, 4_000);
     await flush(t);
     const [row] = await mailRows(t);
+    expect(row.status).toBe("sent");
 
-    await t.action(internal.notify.sendDrop, { mailLogId: row._id });
+    await t.mutation(internal.notify.sendDrop, { mailLogId: row._id });
 
     expect(send).toHaveBeenCalledTimes(1);
+    expect((await mailRows(t))[0].status).toBe("sent");
+  });
+
+  it("concurrent duplicate sendDrop while still claimed: the second call sees status != claimed and no-ops", async () => {
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await observe(t, watchId, 4_000);
+    const [claimedRow] = await mailRows(t);
+    expect(claimedRow.status).toBe("claimed");
+
+    // Both "copies" race for the same row; Convex serialises mutations, so
+    // the second one always observes the first's committed transition.
+    await Promise.all([
+      t.mutation(internal.notify.sendDrop, { mailLogId: claimedRow._id }),
+      t.mutation(internal.notify.sendDrop, { mailLogId: claimedRow._id }),
+    ]);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect((await mailRows(t))[0].status).toBe("queued");
   });
 });
 
-describe("a drop that cannot be mailed is still recorded", () => {
-  it("no account email: failed row with the reason, no throw, nothing sent", async () => {
+describe("a drop that cannot be mailed is still recorded as suppressed with a reason", () => {
+  it("unverified user: suppressed/unverified, no enqueue, no send", async () => {
+    const t = setup();
+    const { userId } = await account(t, { verified: false });
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await observe(t, watchId, 4_000);
+    await flush(t);
+
+    const [row] = await mailRows(t);
+    expect(row.status).toBe("suppressed");
+    expect(row.reason).toBe("unverified");
+    expect(row.sentAt).toBeUndefined();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("no account email: suppressed/no_email, no send", async () => {
     const t = setup();
     const { userId } = await account(t, { email: null });
     const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
@@ -267,9 +336,9 @@ describe("a drop that cannot be mailed is still recorded", () => {
     await flush(t);
 
     const [row] = await mailRows(t);
-    expect(row.status).toBe("failed");
-    expect(row.error).toMatch(/no email address/);
-    expect(row.sentAt).toBeUndefined();
+    expect(row.status).toBe("suppressed");
+    expect(row.reason).toBe("no_email");
+    expect(row.error).toMatch(/email address/);
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -291,7 +360,7 @@ describe("a drop that cannot be mailed is still recorded", () => {
     }
   });
 
-  it("no inbox of any kind: failed row with the reason", async () => {
+  it("no inbox of any kind: claimed then suppressed/not_configured at send time", async () => {
     const t = setup();
     const { userId } = await account(t, { inbox: false });
     const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
@@ -299,12 +368,12 @@ describe("a drop that cannot be mailed is still recorded", () => {
     await flush(t);
 
     const [row] = await mailRows(t);
-    expect(row.status).toBe("failed");
-    expect(row.error).toMatch(/alerts are not configured/i);
+    expect(row.status).toBe("suppressed");
+    expect(row.reason).toBe("not_configured");
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("a send error ends the row as failed with a truncated message", async () => {
+  it("a send error ends the row as failed/send_failed with a truncated message", async () => {
     const t = setup();
     const { userId } = await account(t);
     const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
@@ -314,11 +383,12 @@ describe("a drop that cannot be mailed is still recorded", () => {
 
     const [row] = await mailRows(t);
     expect(row.status).toBe("failed");
+    expect(row.reason).toBe("send_failed");
     expect(row.error).toMatch(/^Send failed: x+/);
     expect(row.error?.length).toBe(1000);
   });
 
-  it("a watch bought before the send went out is not mailed", async () => {
+  it("a watch bought before the send went out is suppressed/watch_inactive at send time", async () => {
     const t = setup();
     const { userId } = await account(t);
     const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
@@ -327,7 +397,8 @@ describe("a drop that cannot be mailed is still recorded", () => {
     await flush(t);
 
     const [row] = await mailRows(t);
-    expect(row.status).toBe("failed");
+    expect(row.status).toBe("suppressed");
+    expect(row.reason).toBe("watch_inactive");
     expect(send).not.toHaveBeenCalled();
   });
 });
@@ -381,11 +452,11 @@ describe("the alert carries nothing its sender chose (pre-launch review B2)", ()
   it("control characters never reach a stored watch name", async () => {
     const t = setup();
     const { userId, as } = await account(t);
-    const created = await as.mutation(api.watches.create, { productUrl: URL, name: "Down\r\nBcc: x@evil.example\u0000 Jacket" });
+    const created = await as.mutation(api.watches.create, { productUrl: URL, name: "Down\r\nBcc: x@evil.example  Jacket" });
     const name = async (id: Id<"watches">) => (await t.run((ctx) => ctx.db.get(id)))?.name;
     expect(await name(created)).toBe("DownBcc: x@evil.example Jacket");
 
-    await as.mutation(api.watches.rename, { watchId: created, name: " Parka\n\u001b[31m " });
+    await as.mutation(api.watches.rename, { watchId: created, name: " Parka\n[31m " });
     expect(await name(created)).toBe("Parka[31m");
     await expect(as.mutation(api.watches.rename, { watchId: created, name: "\r\n" })).rejects.toThrow();
 
@@ -408,7 +479,7 @@ describe("daily cap", () => {
     expect(MAX_DROP_EMAILS_PER_DAY).toBe(5);
   });
 
-  it("a spent global switch records the drop in the app and mails nobody, until the next UTC day", async () => {
+  it("a spent global switch records the drop as suppressed/global_cap and mails nobody, until the next UTC day", async () => {
     const t = setup();
     const { userId } = await account(t);
     const watchId = await seedWatch(t, userId, { targetCents: 100_000 });
@@ -423,8 +494,8 @@ describe("daily cap", () => {
     await flush(t);
 
     const rows = await mailRows(t);
-    expect(rows.map((r) => r.status)).toEqual(["sent", "failed"]);
-    expect(rows[1].error).toBe(GLOBAL_LIMIT_ERROR);
+    expect(rows.map((r) => r.status)).toEqual(["sent", "suppressed"]);
+    expect(rows[1].reason).toBe("global_cap");
     expect(send).toHaveBeenCalledTimes(1);
     expect(await globalCount()).toBe(max);
 
@@ -434,7 +505,7 @@ describe("daily cap", () => {
     expect((await mailRows(t))[2].status).toBe("claimed");
   });
 
-  it(`mails at most ${MAX_DROP_EMAILS_PER_DAY} drops per 24h; the next is recorded as failed, and the window rolls`, async () => {
+  it(`mails at most ${MAX_DROP_EMAILS_PER_DAY} drops per 24h; the next is suppressed/daily_cap, and the window rolls`, async () => {
     const t = setup();
     const { userId, as } = await account(t);
     const watchId = await seedWatch(t, userId, { targetCents: 100_000 });
@@ -450,11 +521,11 @@ describe("daily cap", () => {
     expect(rows.filter((r) => r.status === "sent")).toHaveLength(MAX_DROP_EMAILS_PER_DAY);
     expect(send).toHaveBeenCalledTimes(MAX_DROP_EMAILS_PER_DAY);
     const over = rows[rows.length - 1];
-    expect(over).toMatchObject({ status: "failed", error: DAILY_LIMIT_ERROR });
+    expect(over).toMatchObject({ status: "suppressed", reason: "daily_cap" });
 
     // The capped alert still shows in the app.
     const listed = await as.query(api.notify.drops, {});
-    expect(listed[0]).toMatchObject({ _id: over._id, status: "failed", error: DAILY_LIMIT_ERROR });
+    expect(listed[0]).toMatchObject({ _id: over._id, status: "suppressed", reason: "daily_cap" });
 
     vi.setSystemTime(T0 + 25 * 3_600_000);
     await observe(t, watchId, 40_000);
@@ -474,6 +545,320 @@ describe("daily cap", () => {
 
     const rows = await mailRows(t);
     expect(rows.find((r) => r.userId === b.userId)?.status).toBe("claimed");
+  });
+});
+
+describe("D70: re-claiming a transient dedupe row after DROP_RECLAIM_MIN_MS", () => {
+  /**
+   * Drives `claimDrop` directly (not through `watches.recordWatchCheck`),
+   * with the SAME watch snapshot and cents on every call. This isolates the
+   * dedupe/reclaim logic in `notify.ts` from `recordWatchCheck`'s own
+   * side effect of updating `watch.lastCents` on every accepted observation
+   * (which would otherwise make the second `isAlertableDrop` check see
+   * "no change" and return false before the reclaim branch is ever reached).
+   */
+  async function claimTwice(t: T, watchId: Id<"watches">, cents: number) {
+    const watch = (await t.run((ctx) => ctx.db.get(watchId)))!;
+    return await t.run((ctx) => claimDrop(ctx, watch, cents, "USD"));
+  }
+
+  it("re-claims a send_failed row after 24h and never re-claims it sooner", async () => {
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    send.mockRejectedValueOnce(new Error("boom"));
+    await claimTwice(t, watchId, 4_000);
+    await flush(t);
+    const [failedRow] = await mailRows(t);
+    expect(failedRow.status).toBe("failed");
+    expect(failedRow.reason).toBe("send_failed");
+
+    // Too soon: same dedupe key, not yet 24h since claimedAt -> no reclaim.
+    vi.setSystemTime(T0 + 3_600_000);
+    expect(await claimTwice(t, watchId, 4_000)).toBeNull();
+    expect(await mailRows(t)).toHaveLength(1);
+    expect((await mailRows(t))[0].status).toBe("failed");
+
+    // After 24h: re-claimed in place, sent this time.
+    vi.setSystemTime(T0 + 25 * 3_600_000);
+    const reclaimedId = await claimTwice(t, watchId, 4_000);
+    expect(reclaimedId).toBe(failedRow._id);
+    await flush(t);
+    const rows = await mailRows(t);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("sent");
+    expect(send).toHaveBeenCalledTimes(2); // one failed attempt, then the reclaimed retry
+  });
+
+  it("never re-claims a row suppressed for opted_out, deleted, or address_suppressed, however old", async () => {
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await t.run((ctx) =>
+      ctx.db.insert("alertSettings", {
+        userId,
+        alertsEnabled: false,
+        unsubscribeToken: "tok-opted-out",
+        updatedAt: T0,
+      }),
+    );
+    await claimTwice(t, watchId, 4_000);
+    const [row] = await mailRows(t);
+    expect(row.status).toBe("suppressed");
+    expect(row.reason).toBe("opted_out");
+
+    vi.setSystemTime(T0 + 30 * 24 * 3_600_000); // 30 days later
+    expect(await claimTwice(t, watchId, 4_000)).toBeNull();
+    expect(await mailRows(t)).toHaveLength(1); // still the same row, never reclaimed
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("F3: claimed -> queued -> sent (never straight to sent)", () => {
+  it("sits at queued, with the component's outboundId, until reconcileDrop confirms delivery", async () => {
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+
+    await observe(t, watchId, 4_000);
+    // Run only the immediate `sendDrop` the claim scheduled, not the
+    // `reconcileDrop` it goes on to schedule itself.
+    vi.advanceTimersByTime(0);
+    await t.finishInProgressScheduledFunctions();
+
+    const [queued] = await mailRows(t);
+    expect(queued.status).toBe("queued");
+    expect(queued.outboundId).toBe("outbound-1");
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(status).not.toHaveBeenCalled();
+
+    await flush(t);
+    const [resolved] = await mailRows(t);
+    expect(resolved.status).toBe("sent");
+    expect(status).toHaveBeenCalledWith(expect.anything(), "outbound-1");
+  });
+});
+
+describe("crash-window: a row left claimed with no outbound is picked up by the sweep", () => {
+  it("sweepStalled reschedules sendDrop for a stuck claimed row, exactly one enqueue after", async () => {
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await observe(t, watchId, 4_000);
+    // Simulate a crash: the scheduled sendDrop never ran. Cancel it and put
+    // the row's nextCheckAt in the past, as if the crash happened a while ago.
+    const [row] = await mailRows(t);
+    expect(row.status).toBe("claimed");
+    const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    for (const fn of scheduled) await t.run((ctx) => ctx.scheduler.cancel(fn._id));
+    await t.run((ctx) => ctx.db.patch(row._id, { nextCheckAt: T0 - 1 }));
+
+    const swept = await t.mutation(internal.notify.sweepStalled, {});
+    expect(swept).toBe(1);
+    await flush(t);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect((await mailRows(t))[0].status).toBe("sent");
+  });
+
+  it("a queued/unknown row past nextCheckAt is also swept via reconcileDrop", async () => {
+    status.mockResolvedValue({ status: "pending", agentmailMessageId: null, threadId: null, errorMessage: null } as never);
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await observe(t, watchId, 4_000);
+    vi.advanceTimersByTime(0);
+    await t.finishInProgressScheduledFunctions(); // now queued, its own reconcile pending
+    const [queued] = await mailRows(t);
+    expect(queued.status).toBe("queued");
+    // Cancel the row's own reconcile and simulate it going stale.
+    const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    for (const fn of scheduled) await t.run((ctx) => ctx.scheduler.cancel(fn._id));
+    await t.run((ctx) => ctx.db.patch(queued._id, { nextCheckAt: T0 - 1 }));
+
+    const swept = await t.mutation(internal.notify.sweepStalled, {});
+    expect(swept).toBe(1);
+    await flush(t);
+    expect(status).toHaveBeenCalled();
+  });
+});
+
+describe("notify.applyDropOutcome (F3)", () => {
+  async function queuedMailLog(t: ReturnType<typeof setup>, userId: Id<"users">) {
+    return await t.run((ctx) =>
+      ctx.db.insert("mailLog", {
+        userId,
+        dedupeKey: `watch:seed:${Math.random()}`,
+        kind: "price_drop",
+        to: "sam@home.example",
+        subject: "Price drop: Thing is now $10.00",
+        status: "queued",
+        outboundId: "outbound-1" as never,
+        cents: 1_000,
+      }),
+    );
+  }
+
+  it("moves a queued row to sent on a real message id", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const mailLogId = await queuedMailLog(t, userId);
+
+    const outcome = await t.run((ctx) =>
+      applyDropOutcome(ctx, mailLogId, 1, { status: "sent", agentmailMessageId: "msg-1", errorMessage: null }),
+    );
+    expect(outcome).toBe("sent");
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("sent");
+    expect(row?.sentAt).toBe(Date.now());
+    expect(row?.agentmailMessageId).toBe("msg-1");
+    expect(row?.providerStatus).toBe("sent");
+  });
+
+  it("treats a bounce that still carries a message id as a failure, never as sent, and suppresses the address (review H3's rule, ported)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await t.run((ctx) => ctx.db.patch(userId, { email: "sam@home.example", emailVerificationTime: T0 }));
+    const mailLogId = await queuedMailLog(t, userId);
+
+    const outcome = await t.run((ctx) =>
+      applyDropOutcome(ctx, mailLogId, 1, {
+        status: "bounced",
+        agentmailMessageId: "msg-1",
+        errorMessage: "mailbox does not exist",
+      }),
+    );
+    expect(outcome).toBe("failed");
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("failed");
+    expect(row?.reason).toBe("send_failed");
+    expect(row?.providerStatus).toBe("bounced");
+    expect(row?.error).toBe("mailbox does not exist");
+    expect(row?.agentmailMessageId).toBe("msg-1");
+
+    const settings = await alertSettingsRow(t, userId);
+    expect(settings?.suppressedReason).toBe("bounced");
+  });
+
+  it("a complaint keeps the row sent but records providerStatus and suppresses the address", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await t.run((ctx) => ctx.db.patch(userId, { email: "sam@home.example", emailVerificationTime: T0 }));
+    const mailLogId = await queuedMailLog(t, userId);
+
+    const outcome = await t.run((ctx) =>
+      applyDropOutcome(ctx, mailLogId, 1, { status: "complained", agentmailMessageId: "msg-2", errorMessage: null }),
+    );
+    expect(outcome).toBe("sent");
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("sent");
+    expect(row?.providerStatus).toBe("complained");
+
+    const settings = await alertSettingsRow(t, userId);
+    expect(settings?.suppressedReason).toBe("complained");
+  });
+
+  it("reschedules while pending and attempts remain, leaving the row queued", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const mailLogId = await queuedMailLog(t, userId);
+
+    const outcome = await t.run((ctx) =>
+      applyDropOutcome(ctx, mailLogId, 1, { status: "pending", agentmailMessageId: null, errorMessage: null }),
+    );
+    expect(outcome).toBe("retrying");
+    const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    expect(scheduled).toHaveLength(1);
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("queued");
+    expect(row?.attempt).toBe(2);
+  });
+
+  it("moves to unknown with a nextCheckAt once every backoff attempt is spent, and a later sweep reconciles again", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const mailLogId = await queuedMailLog(t, userId);
+
+    const outcome = await t.run((ctx) =>
+      applyDropOutcome(ctx, mailLogId, 5, { status: "pending", agentmailMessageId: null, errorMessage: null }),
+    );
+    expect(outcome).toBe("unknown");
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("unknown");
+    expect(row?.nextCheckAt).toBeGreaterThan(Date.now());
+
+    // Later: the sweep picks the unknown row back up and this time delivery resolves.
+    status.mockResolvedValueOnce({ status: "sent", agentmailMessageId: "msg-late", threadId: null, errorMessage: null } as never);
+    vi.setSystemTime((row!.nextCheckAt ?? 0) + 1);
+    const swept = await t.mutation(internal.notify.sweepStalled, {});
+    expect(swept).toBe(1);
+    await flush(t);
+    const resolved = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(resolved?.status).toBe("sent");
+  });
+
+  it("is a no-op on a row that already resolved", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const mailLogId = await t.run((ctx) =>
+      ctx.db.insert("mailLog", {
+        userId,
+        dedupeKey: "watch:seed:x",
+        kind: "price_drop",
+        to: "sam@home.example",
+        subject: "s",
+        status: "sent",
+        cents: 1,
+      }),
+    );
+    const outcome = await t.run((ctx) =>
+      applyDropOutcome(ctx, mailLogId, 1, { status: "sent", agentmailMessageId: "msg-2", errorMessage: null }),
+    );
+    expect(outcome).toBe("gone");
+  });
+});
+
+describe("notify.recheckDrop (D56 pattern, contract T06(g).6: reads inline, does not schedule)", () => {
+  async function unknownRow(t: T, userId: Id<"users">) {
+    return await t.run((ctx) =>
+      ctx.db.insert("mailLog", {
+        userId,
+        dedupeKey: `watch:seed:${Math.random()}`,
+        kind: "price_drop",
+        to: "sam@home.example",
+        subject: DROP_SUBJECT,
+        status: "unknown",
+        outboundId: "outbound-1" as never,
+        cents: 1_000,
+        attempt: 5,
+      }),
+    );
+  }
+
+  it("delayed provider success after unknown resolves the row to sent, immediately (no extra scheduling)", async () => {
+    const t = setup();
+    const { userId, as } = await account(t);
+    const mailLogId = await unknownRow(t, userId);
+    status.mockResolvedValueOnce({ status: "sent", agentmailMessageId: "msg-late", threadId: null, errorMessage: null } as never);
+
+    await as.mutation(api.notify.recheckDrop, { mailLogId });
+
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("sent");
+    const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    expect(scheduled).toHaveLength(0);
+  });
+
+  it("throws for another user's row and for a row that is not queued/unknown (e.g. already sent)", async () => {
+    const t = setup();
+    const owner = await account(t, { name: "Owner" });
+    const other = await account(t, { name: "Other", email: "other@home.example" });
+    const mailLogId = await unknownRow(t, owner.userId);
+
+    await expect(other.as.mutation(api.notify.recheckDrop, { mailLogId })).rejects.toThrow(/not found/i);
+
+    await t.run((ctx) => ctx.db.patch(mailLogId, { status: "sent" }));
+    await expect(owner.as.mutation(api.notify.recheckDrop, { mailLogId })).rejects.toThrow(/cannot be rechecked/i);
   });
 });
 
@@ -507,6 +892,9 @@ describe("notify.drops", () => {
       previousCents: 8_000,
       status: "claimed",
       error: null,
+      reason: null,
+      providerStatus: null,
+      canRecheck: false,
     });
     expect(listed[1].previousCents).toBeNull();
 
@@ -537,6 +925,21 @@ describe("notify.drops", () => {
     expect(listed).toHaveLength(30);
     expect(listed[0].cents).toBe(34);
   });
+
+  it("canRecheck is true only for queued/unknown rows", async () => {
+    const t = setup();
+    const { userId, as } = await account(t);
+    await t.run(async (ctx) => {
+      for (const s of ["claimed", "queued", "sent", "failed", "unknown", "suppressed"] as const) {
+        await ctx.db.insert("mailLog", {
+          userId, dedupeKey: `watch:x:${s}`, kind: "price_drop", to: "sam@home.example", subject: "s", status: s, cents: 1,
+        });
+      }
+    });
+    const listed = await as.query(api.notify.drops, {});
+    const byStatus = Object.fromEntries(listed.map((d) => [d.status, d.canRecheck]));
+    expect(byStatus).toMatchObject({ claimed: false, queued: true, sent: false, failed: false, unknown: true, suppressed: false });
+  });
 });
 
 describe("publicAppUrl (link in alert emails)", () => {
@@ -565,124 +968,91 @@ describe("publicAppUrl (link in alert emails)", () => {
   });
 });
 
-describe("F3: claimed -> queued -> sent (never straight to sent)", () => {
-  it("sits at queued, with the component's outboundId, until reconcileDrop confirms delivery", async () => {
+describe("mailEvents.onEvent: late bounce/complaint on an already-sent drop alert", () => {
+  function event(overrides: Record<string, unknown> = {}) {
+    return {
+      type: "event" as const,
+      event_type: "message.bounced" as const,
+      event_id: "evt-1",
+      bounce: { message_id: "msg-late-1" },
+      ...overrides,
+    };
+  }
+
+  it("terminal bounce on a sent row -> failed + alertSettings.suppressedReason bounced", async () => {
     const t = setup();
     const { userId } = await account(t);
     const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
-
     await observe(t, watchId, 4_000);
-    // Run only the immediate `sendDrop` action the claim scheduled, not the
-    // `reconcileDrop` it goes on to schedule itself.
-    vi.advanceTimersByTime(0);
-    await t.finishInProgressScheduledFunctions();
-
-    const [queued] = await mailRows(t);
-    expect(queued.status).toBe("queued");
-    expect(queued.outboundId).toBe("outbound-1");
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(status).not.toHaveBeenCalled();
-
     await flush(t);
-    const [resolved] = await mailRows(t);
-    expect(resolved.status).toBe("sent");
-    expect(status).toHaveBeenCalledWith(expect.anything(), "outbound-1");
-  });
-});
+    const [sent] = await mailRows(t);
+    expect(sent.status).toBe("sent");
+    await t.run((ctx) => ctx.db.patch(sent._id, { agentmailMessageId: "msg-late-1" }));
 
-describe("notify.applyDropOutcome (F3)", () => {
-  async function queuedMailLog(t: ReturnType<typeof setup>, userId: Id<"users">) {
-    return await t.run((ctx) =>
-      ctx.db.insert("mailLog", {
-        userId,
-        dedupeKey: `watch:seed:${Math.random()}`,
-        kind: "price_drop",
-        to: "sam@home.example",
-        subject: "Price drop: Thing is now $10.00",
-        status: "queued",
-        outboundId: "outbound-1" as never,
-        cents: 1_000,
-      }),
-    );
-  }
+    await t.mutation(internal.mailEvents.onEvent, { event: event() });
 
-  it("moves a queued row to sent on a real message id", async () => {
-    const t = setup();
-    const { userId } = await signedIn(t);
-    const mailLogId = await queuedMailLog(t, userId);
-
-    const outcome = await t.run((ctx) =>
-      applyDropOutcome(ctx, mailLogId, 1, { status: "sent", agentmailMessageId: "msg-1", errorMessage: null }),
-    );
-    expect(outcome).toBe("sent");
-    const row = await t.run((ctx) => ctx.db.get(mailLogId));
-    expect(row?.status).toBe("sent");
-    expect(row?.sentAt).toBe(Date.now());
-  });
-
-  it("treats a bounce that still carries a message id as a failure, never as sent (review H3's rule, ported)", async () => {
-    const t = setup();
-    const { userId } = await signedIn(t);
-    const mailLogId = await queuedMailLog(t, userId);
-
-    const outcome = await t.run((ctx) =>
-      applyDropOutcome(ctx, mailLogId, 1, {
-        status: "bounced",
-        agentmailMessageId: "msg-1",
-        errorMessage: "mailbox does not exist",
-      }),
-    );
-    expect(outcome).toBe("failed");
-    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    const row = await t.run((ctx) => ctx.db.get(sent._id));
     expect(row?.status).toBe("failed");
-    expect(row?.error).toBe("mailbox does not exist");
+    expect(row?.providerStatus).toBe("bounced");
+    const settings = await alertSettingsRow(t, userId);
+    expect(settings?.suppressedReason).toBe("bounced");
   });
 
-  it("reschedules while pending and attempts remain, leaving the row queued", async () => {
+  it("complaint via onEvent -> stays sent, providerStatus complained, address suppressed", async () => {
     const t = setup();
-    const { userId } = await signedIn(t);
-    const mailLogId = await queuedMailLog(t, userId);
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await observe(t, watchId, 4_000);
+    await flush(t);
+    const [sent] = await mailRows(t);
+    await t.run((ctx) => ctx.db.patch(sent._id, { agentmailMessageId: "msg-complained-1" }));
 
-    const outcome = await t.run((ctx) =>
-      applyDropOutcome(ctx, mailLogId, 1, { status: "pending", agentmailMessageId: null, errorMessage: null }),
-    );
-    expect(outcome).toBe("retrying");
-    const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
-    expect(scheduled).toHaveLength(1);
-    const row = await t.run((ctx) => ctx.db.get(mailLogId));
-    expect(row?.status).toBe("queued");
+    await t.mutation(internal.mailEvents.onEvent, {
+      event: event({ event_type: "message.complained", bounce: undefined, complaint: { message_id: "msg-complained-1" } }),
+    });
+
+    const row = await t.run((ctx) => ctx.db.get(sent._id));
+    expect(row?.status).toBe("sent");
+    expect(row?.providerStatus).toBe("complained");
+    const settings = await alertSettingsRow(t, userId);
+    expect(settings?.suppressedReason).toBe("complained");
   });
 
-  it("leaves the row queued, not failed, once every backoff attempt is spent", async () => {
+  it("an event whose message id matches nothing is a no-op", async () => {
     const t = setup();
-    const { userId } = await signedIn(t);
-    const mailLogId = await queuedMailLog(t, userId);
-
-    const outcome = await t.run((ctx) =>
-      applyDropOutcome(ctx, mailLogId, 5, { status: "pending", agentmailMessageId: null, errorMessage: null }),
-    );
-    expect(outcome).toBe("unknown");
-    const row = await t.run((ctx) => ctx.db.get(mailLogId));
-    expect(row?.status).toBe("queued");
+    await expect(t.mutation(internal.mailEvents.onEvent, { event: event({ bounce: { message_id: "unknown-id" } }) })).resolves.toBeNull();
   });
 
-  it("is a no-op on a row that already resolved", async () => {
+  it("duplicate delivery of the same event is idempotent", async () => {
     const t = setup();
-    const { userId } = await signedIn(t);
-    const mailLogId = await t.run((ctx) =>
-      ctx.db.insert("mailLog", {
-        userId,
-        dedupeKey: "watch:seed:x",
-        kind: "price_drop",
-        to: "sam@home.example",
-        subject: "s",
-        status: "sent",
-        cents: 1,
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await observe(t, watchId, 4_000);
+    await flush(t);
+    const [sent] = await mailRows(t);
+    await t.run((ctx) => ctx.db.patch(sent._id, { agentmailMessageId: "msg-dup-1" }));
+
+    const e = event({ bounce: { message_id: "msg-dup-1" } });
+    await t.mutation(internal.mailEvents.onEvent, { event: e });
+    await t.mutation(internal.mailEvents.onEvent, { event: e }); // redelivered
+
+    const settingsRows = await t.run((ctx) => ctx.db.query("alertSettings").collect());
+    expect(settingsRows).toHaveLength(1); // suppressAddress patched once, not inserted twice
+    const row = await t.run((ctx) => ctx.db.get(sent._id));
+    expect(row?.status).toBe("failed");
+  });
+
+  it("message.received and domain.verified are ignored", async () => {
+    const t = setup();
+    await expect(
+      t.mutation(internal.mailEvents.onEvent, {
+        event: { type: "event", event_type: "message.received", event_id: "e1", message: { message_id: "m1" } },
       }),
-    );
-    const outcome = await t.run((ctx) =>
-      applyDropOutcome(ctx, mailLogId, 1, { status: "sent", agentmailMessageId: "msg-2", errorMessage: null }),
-    );
-    expect(outcome).toBe("gone");
+    ).resolves.toBeNull();
+    await expect(
+      t.mutation(internal.mailEvents.onEvent, {
+        event: { type: "event", event_type: "domain.verified", event_id: "e2", domain: { message_id: "m1" } },
+      }),
+    ).resolves.toBeNull();
   });
 });

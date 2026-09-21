@@ -276,38 +276,99 @@ describe("GET /agentmail/webhook", () => {
   });
 });
 
-describe("FINDING: inbound.onMessageReceived's args validator", () => {
+describe("FIXED (D86/T06): inbound.onMessageReceived's args validator", () => {
   /**
-   * FINDING (convex/inbound.ts:94): the args validator declares
+   * Was FINDING (convex/inbound.ts:94): the args validator declared
    * `thread: v.any()`, not `v.optional(v.any())`, but the component's own
    * event shape allows a "message.received" delivery with no `thread` at
    * all (node_modules/@agentmail/convex/src/component/shared.ts `vEvent`:
    * `thread: v.optional(v.any())`). `handleEvent` passes `event.thread`
    * straight through to this callback
    * (node_modules/@agentmail/convex/src/component/lib.ts ~488-495), so a
-   * delivery whose `thread` is genuinely absent fails Convex's own argument
+   * delivery whose `thread` is genuinely absent failed Convex's own argument
    * validation ("Missing required field `thread`") before
-   * `onMessageReceived`'s handler -- and its try/catch -- ever run. That
-   * silently violates the function's own contract, quoted at
+   * `onMessageReceived`'s handler -- and its try/catch -- ever ran. That
+   * silently violated the function's own contract, quoted at
    * convex/inbound.ts:82-91: "It is the one function in the app that must
    * never throw... Every failure is therefore recorded as a processedEvents
    * row." Reproduced directly against the internal mutation, bypassing the
-   * webhook route and signature entirely, so this is not a harness
-   * artefact of the component-dispatch limitation documented above; it is
-   * this function's own args shape. Fix for T16: `thread: v.optional(v.any())`.
+   * webhook route and signature entirely, so this was not a harness
+   * artefact of the component-dispatch limitation documented above; it was
+   * this function's own args shape.
+   *
+   * Fixed in convex/inbound.ts: `thread: v.optional(v.any())`. This test now
+   * asserts the fix (flipped from `it.fails` to a normal passing `it`, D86).
    */
-  it.fails(
-    "FINDING: a message.received delivery with no `thread` field should still write a processedEvents row, but instead throws before any row is written",
-    async () => {
-      const t = setup();
-      await t.mutation(internal.inbound.onMessageReceived, {
-        message: { inbox_id: "inbox_1", message_id: "m1", from: "a@b.com", subject: "s", text: "t" },
-        eventId: "evt-no-thread",
-      } as never);
-      const rows = await t.run(async (ctx) => ctx.db.query("processedEvents").collect());
-      expect(rows.length).toBe(1);
-    },
-  );
+  it("a message.received delivery with no `thread` field still writes a processedEvents row, without throwing", async () => {
+    const t = setup();
+    await t.mutation(internal.inbound.onMessageReceived, {
+      message: { inbox_id: "inbox_1", message_id: "m1", from: "a@b.com", subject: "s", text: "t" },
+      eventId: "evt-no-thread",
+    } as never);
+    const rows = await t.run(async (ctx) => ctx.db.query("processedEvents").collect());
+    expect(rows.length).toBe(1);
+  });
+});
+
+describe("GET/POST /alerts/unsubscribe (T06, contract T06(g).5)", () => {
+  async function seedAlertSettings(t: ReturnType<typeof setup>, token: string) {
+    const userId = await t.run(async (ctx) => ctx.db.insert("users", { name: "Tester" }));
+    await t.run((ctx) =>
+      ctx.db.insert("alertSettings", { userId, alertsEnabled: true, unsubscribeToken: token, updatedAt: Date.now() }),
+    );
+    return userId;
+  }
+
+  it("GET returns a 200 page with a POST form, and writes nothing", async () => {
+    const t = setup();
+    const userId = await seedAlertSettings(t, "tok-get-1");
+
+    const res = await t.fetch(`/alerts/unsubscribe?token=tok-get-1`, { method: "GET" });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("<form");
+    expect(html).toContain('method="POST"');
+    expect(html).toContain("tok-get-1");
+
+    const row = await t.run((ctx) =>
+      ctx.db.query("alertSettings").withIndex("by_user", (q) => q.eq("userId", userId)).first(),
+    );
+    expect(row?.alertsEnabled).toBe(true); // untouched by GET
+  });
+
+  it("POST with a valid token disables alerts and marks user_unsubscribed", async () => {
+    const t = setup();
+    const userId = await seedAlertSettings(t, "tok-post-1");
+
+    const res = await t.fetch(`/alerts/unsubscribe?token=tok-post-1`, { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toMatch(/no longer receive/i);
+
+    const row = await t.run((ctx) =>
+      ctx.db.query("alertSettings").withIndex("by_user", (q) => q.eq("userId", userId)).first(),
+    );
+    expect(row?.alertsEnabled).toBe(false);
+    expect(row?.suppressedReason).toBe("user_unsubscribed");
+  });
+
+  it("POST with a garbage/wrong token still returns 200 and writes nothing (never leaks validity)", async () => {
+    const t = setup();
+    const userId = await seedAlertSettings(t, "tok-real-1");
+
+    const res = await t.fetch(`/alerts/unsubscribe?token=${"x".repeat(500)}`, { method: "POST" });
+    expect(res.status).toBe(200);
+
+    const row = await t.run((ctx) =>
+      ctx.db.query("alertSettings").withIndex("by_user", (q) => q.eq("userId", userId)).first(),
+    );
+    expect(row?.alertsEnabled).toBe(true); // the real row, untouched
+  });
+
+  it("POST with no token at all still returns 200", async () => {
+    const t = setup();
+    const res = await t.fetch(`/alerts/unsubscribe`, { method: "POST" });
+    expect(res.status).toBe(200);
+  });
 });
 
 describe("auth discovery route", () => {

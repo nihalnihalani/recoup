@@ -26,4 +26,14 @@ crons.interval("watch sweep", { hours: 1 }, internal.watches.sweep, {});
  */
 crons.interval("retry failed inbound", { hours: 1 }, internal.intake.retryFailed, {});
 
+/**
+ * Durable mail delivery safety net (T06, D68). Picks up `mailLog` rows stuck
+ * `claimed` (a crash between claim and the enqueue transaction), `queued`
+ * (a reconcile that never got its scheduled follow-up), or `unknown`
+ * (reconciliation exhausted its backoff) past their `nextCheckAt`, and
+ * re-drives them via `sendDrop`/`reconcileDrop`. A tick with nothing due
+ * costs one bounded indexed read per status.
+ */
+crons.interval("mail sweep", { hours: 1 }, internal.notify.sweepStalled, {});
+
 export default crons;

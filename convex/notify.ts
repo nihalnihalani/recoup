@@ -6,44 +6,58 @@
  * same transaction that accepts the price: it inserts a `mailLog` row under
  * `watch:<watchId>:<cents>` only when no row has that key, then schedules
  * `sendDrop` with the row id. A check that records twice, or a price that
- * comes back a week later, finds the row and stops. The row is also the in-app
- * backstop (`drops`), so an alert that could not be mailed (no address, no
- * inbox, daily cap) is still stored, as `failed` with the reason.
+ * comes back a week later, finds the row and stops. The row is also the
+ * in-app backstop (`drops`), so an alert that could not be mailed (no
+ * address, no inbox, daily cap, opted out, ...) is still stored, as
+ * `suppressed` with the reason.
  *
- * `claimed` -> `queued` once the component has an outboundId for the message
- * -> `sent` once `reconcileDrop` has confirmed a real AgentMail message id
- * (F3, the same claimed/queued/sent shape `drafts.approveAndSend` uses for
- * mail to merchants). The UI shows "Sending" for `queued` and "Emailed" only
- * for `sent`. This path never goes through `drafts.approveAndSend` itself:
- * that gate is for mail to merchants, and this mail only ever goes to
+ * T06/D68/D85 durable-delivery rewrite: `sendDrop` is now ONE
+ * `internalMutation` -- read the claimed row, re-check the send-time gate,
+ * try the enqueue, and commit `queued` + the reconcile schedule all in the
+ * same transaction that leaves `claimed`. No action is involved, so a row
+ * can never be left "in flight" outside a transaction: it is either still
+ * `claimed` (nothing was ever enqueued -- safe to retry from a sweep) or it
+ * already moved to `queued`/`failed` (enqueued exactly once). `claimed` ->
+ * `queued` once the component has an outboundId for the message -> `sent`
+ * once `reconcileDrop` has confirmed a real AgentMail message id (F3, the
+ * same claimed/queued/sent shape `drafts.approveAndSend` uses for mail to
+ * merchants). `unknown` means reconciliation exhausted its attempts with no
+ * definite answer; `sweepStalled` (and the hourly cron) keeps re-checking
+ * it. The UI shows "Sending" for `queued`/`unknown` and "Emailed" only for
+ * `sent`. This path never goes through `drafts.approveAndSend` itself: that
+ * gate is for mail to merchants, and this mail only ever goes to
  * `users.email`.
  */
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { getAuthUserId } from "@convex-dev/auth/server";
-import { vOutboundId } from "@agentmail/convex";
 import {
-  internalAction,
   internalMutation,
-  internalQuery,
+  mutation,
   query,
   type MutationCtx,
   type QueryCtx,
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { mailStatus } from "./schema";
+import { mailReason as mailReasonValidator, mailStatus } from "./schema";
 import { agentmail } from "./mail";
+import { suppressAddress, tokenFor } from "./alerts";
+import { alertGate, type MailReason } from "./lib/accountState";
+import { requireUserId } from "./lib/access";
+import { rateLimiter } from "./lib/rateLimits";
 import { BACKOFF_MS, TERMINAL_FAILURES } from "./drafts";
 import {
   DROP_EMAIL_COUNT_SCAN,
   DROP_EMAIL_WINDOW_MS,
   DROP_MIN_CENTS,
   DROP_MIN_PERCENT,
+  DROP_RECLAIM_MIN_MS,
+  MAIL_RECONCILE_STALL_MS,
+  MAIL_SWEEP_PAGE,
   MAX_DROP_EMAILS_PER_DAY,
 } from "./limits";
 import { takeGlobalBudget } from "./lib/budget";
 
-/** Stored on a row that was recorded but not mailed because the user is over the daily cap. */
 /**
  * Where a recipient can open the app. APP_URL is the public site; SITE_URL is what auth uses and is
  * localhost on a dev deployment. A localhost link is useless to the reader and a spam signal (found
@@ -59,20 +73,41 @@ export function publicAppUrl(): string | null {
   return null;
 }
 
-export const DAILY_LIMIT_ERROR = "daily alert limit";
-/** Stored when the deployment-wide drop-mail switch is spent for the day (review B2). */
-export const GLOBAL_LIMIT_ERROR = "alert emails are paused for today";
 /**
- * The whole subject, always (review B2). `users.email` is unverified, so this mail can land in a stranger's inbox:
- * it carries no text the account holder (or the watched page) chose and no third-party link. The product's name
- * and link are shown in the app, behind sign-in.
+ * The unsubscribe link's origin (per this task's assignment: "List-Unsubscribe
+ * URL uses process.env.SITE_URL"). Not run through `publicAppUrl`'s
+ * https/localhost filtering: the header is emitted whatever this value is,
+ * so an unset or dev-local SITE_URL yields a relative-looking (but still
+ * well-formed) path rather than silently dropping the header. Flagged in the
+ * task report: `/alerts/unsubscribe` is served by this deployment's own
+ * Convex HTTP actions (normally reached via CONVEX_SITE_URL), which may
+ * differ from SITE_URL (the frontend's own origin) in some deployments.
  */
+function unsubscribeUrl(token: string): string {
+  const base = (process.env.SITE_URL ?? "").trim().replace(/\/+$/, "");
+  return `${base}/alerts/unsubscribe?token=${token}`;
+}
+
 export const DROP_SUBJECT = "Recoup price alert: an item you are watching dropped";
 const MAX_ERROR_CHARS = 1000;
 /** Rows `drops` returns. */
 const DROPS_LIMIT = 30;
 /** Rows `drops` may walk to find them, should another mail kind ever share the table. */
 const DROPS_SCAN = 200;
+
+/** A fixed, non-enumerating message per refusal reason, mirroring `lib/accountState.ts`'s GATE_MESSAGES for the two reasons that gate does not itself produce. */
+const REASON_MESSAGES: Record<MailReason, string> = {
+  unverified: "Verify your email address to receive price alerts.",
+  opted_out: "You have turned off price alerts.",
+  deleted: "This account is being deleted.",
+  address_suppressed: "Your email address is not accepting alerts right now.",
+  daily_cap: "Today's alert limit has been reached.",
+  global_cap: "Recoup has reached today's alert limit.",
+  no_email: "Add an email address to receive price alerts.",
+  not_configured: "Price alerts are not configured on this deployment.",
+  watch_inactive: "This item is no longer being watched.",
+  send_failed: "The last alert failed to send.",
+};
 
 // ---------------------------------------------------------------------------
 // The rule
@@ -117,16 +152,28 @@ async function overDailyCap(ctx: MutationCtx, userId: Id<"users">, now: number):
     .withIndex("by_user", (q) => q.eq("userId", userId).gt("_creationTime", now - DROP_EMAIL_WINDOW_MS))
     .order("desc")
     .take(DROP_EMAIL_COUNT_SCAN);
-  // A row that never went out (no inbox, over the cap) did not use up an email.
-  const used = recent.filter((r) => r.kind === "price_drop" && r.status !== "failed").length;
+  // A row that never went out (suppressed/failed) did not use up an email.
+  const used = recent.filter((r) => r.kind === "price_drop" && r.status !== "failed" && r.status !== "suppressed").length;
   return used >= MAX_DROP_EMAILS_PER_DAY || recent.length >= DROP_EMAIL_COUNT_SCAN;
 }
+
+/** Reasons a transient dedupe row may be re-claimed after `DROP_RECLAIM_MIN_MS` (D70). Never opted_out/deleted/address_suppressed. */
+const RECLAIMABLE_REASONS = new Set<MailReason>([
+  "send_failed",
+  "daily_cap",
+  "global_cap",
+  "no_email",
+  "not_configured",
+  "watch_inactive",
+  "unverified",
+]);
 
 /**
  * Called by `watches.recordWatchCheck` with the watch as it was BEFORE the
  * check was applied, so `watch.lastCents` is the previous accepted price.
- * Returns the claimed row, or null when there is nothing to send: not active,
- * not a qualifying drop, or this watch+price was already claimed.
+ * Returns the claimed/suppressed row id, or null when there is nothing to
+ * record at all: the watch is not active, the price is not a qualifying
+ * drop, or an existing dedupe row is not (yet) eligible for re-claim.
  */
 export async function claimDrop(
   ctx: MutationCtx,
@@ -139,20 +186,46 @@ export async function claimDrop(
   const previousCents = watch.lastCents;
   if (!isAlertableDrop({ cents, previousCents, targetCents: watch.targetCents })) return null;
 
+  const now = Date.now();
   const dedupeKey = `watch:${watch._id}:${cents}`;
-  const already = await ctx.db
+  const existing = await ctx.db
     .query("mailLog")
     .withIndex("by_dedupe", (q) => q.eq("dedupeKey", dedupeKey))
     .first();
-  if (already) return null;
 
+  if (existing) {
+    // D70: re-claim keys on `claimedAt` (last touched), not `_creationTime`,
+    // so a permanently failing row is not re-claimed on every check after
+    // day one -- only after DROP_RECLAIM_MIN_MS since it was LAST touched.
+    const eligible =
+      (existing.status === "failed" || existing.status === "suppressed") &&
+      existing.reason !== undefined &&
+      RECLAIMABLE_REASONS.has(existing.reason) &&
+      (existing.claimedAt ?? existing._creationTime) < now - DROP_RECLAIM_MIN_MS;
+    if (!eligible) return null;
+    await ctx.db.patch(existing._id, {
+      status: "claimed",
+      error: undefined,
+      reason: undefined,
+      providerStatus: undefined,
+      claimedAt: now,
+      nextCheckAt: now + MAIL_RECONCILE_STALL_MS,
+      lastCheckedAt: now,
+    });
+    await ctx.scheduler.runAfter(0, internal.notify.sendDrop, { mailLogId: existing._id });
+    return existing._id;
+  }
+
+  const gate = await alertGate(ctx, watch.userId);
   const user = await ctx.db.get(watch.userId);
-  const now = Date.now();
-  let limitError: string | undefined;
-  if (await overDailyCap(ctx, watch.userId, now)) limitError = DAILY_LIMIT_ERROR;
+
+  let reason: MailReason | undefined;
+  if (!gate.ok) reason = gate.reason;
+  else if (await overDailyCap(ctx, watch.userId, now)) reason = "daily_cap";
   // Only a mail that would really go out draws from the global switch.
-  else if ((await takeGlobalBudget(ctx, "drop_email", 1, now)) === 0) limitError = GLOBAL_LIMIT_ERROR;
-  const capped = limitError !== undefined;
+  else if ((await takeGlobalBudget(ctx, "drop_email", 1, now)) === 0) reason = "global_cap";
+
+  const suppressed = reason !== undefined;
   const mailLogId = await ctx.db.insert("mailLog", {
     userId: watch.userId,
     dedupeKey,
@@ -160,12 +233,16 @@ export async function claimDrop(
     watchId: watch._id,
     to: user?.email ?? "",
     subject: DROP_SUBJECT,
-    status: capped ? "failed" : "claimed",
-    error: limitError,
+    status: suppressed ? "suppressed" : "claimed",
+    reason,
+    error: suppressed ? REASON_MESSAGES[reason as MailReason] : undefined,
     cents,
     previousCents,
+    claimedAt: now,
+    nextCheckAt: suppressed ? undefined : now + MAIL_RECONCILE_STALL_MS,
+    lastCheckedAt: now,
   });
-  if (!capped) await ctx.scheduler.runAfter(0, internal.notify.sendDrop, { mailLogId });
+  if (!suppressed) await ctx.scheduler.runAfter(0, internal.notify.sendDrop, { mailLogId });
   return mailLogId;
 }
 
@@ -173,98 +250,12 @@ export async function claimDrop(
 // Send
 // ---------------------------------------------------------------------------
 
-const dropContextValidator = v.union(
-  v.null(),
-  v.object({
-    /** Why this row cannot be mailed; null when it can. */
-    problem: v.union(v.string(), v.null()),
-    inboxId: v.union(v.string(), v.null()),
-    to: v.union(v.string(), v.null()),
-    subject: v.string(),
-    text: v.string(),
-    watchId: v.union(v.id("watches"), v.null()),
-  }),
-);
-
-/**
- * Everything `sendDrop` needs, message text included. Null when the row is
- * gone or is no longer `claimed`, so a re-run of the action sends nothing.
- * Unauthenticated on purpose: the only caller is `sendDrop`.
- */
-export const dropContext = internalQuery({
-  args: { mailLogId: v.id("mailLog") },
-  returns: dropContextValidator,
-  handler: async (ctx, { mailLogId }) => {
-    const row = await ctx.db.get(mailLogId);
-    if (!row || row.status !== "claimed") return null;
-    const watch = row.watchId ? await ctx.db.get(row.watchId) : null;
-    const user = await ctx.db.get(row.userId);
-    const profile = await ctx.db
-      .query("profiles")
-      .withIndex("by_user", (q) => q.eq("userId", row.userId))
-      .unique();
-    const to = user?.email?.trim() || null;
-    // Alerts go out from one shared app inbox (ALERTS_INBOX_ID, not a secret), so watching works the moment
-    // someone signs up and does not spend one of the org's limited AgentMail inboxes per account. A user's
-    // own Recoup inbox is only needed for mail to a store, where replies must come back to them.
-    const inboxId = process.env.ALERTS_INBOX_ID?.trim() || profile?.inboxId || null;
-
-    let problem: string | null = null;
-    if (!watch || row.cents === undefined) problem = "The watched item no longer exists";
-    else if (watch.status !== "active") problem = "This item is no longer being watched";
-    else if (!to) problem = "Your account has no email address to send alerts to";
-    else if (!inboxId) problem = "Price alerts are not configured on this deployment";
-
-    let text = "";
-    if (watch && row.cents !== undefined) {
-      // Validated at write time (`recordWatchCheck`); re-checked here because it is printed into mail.
-      const currency = /^[A-Z]{3}$/.test(watch.currency ?? "") ? (watch.currency as string) : "USD";
-      // B2: fixed wording plus numbers, a validated store domain and our own link. Never `watch.name`, never
-      // `watch.productUrl`: both are chosen by whoever made the watch, and the recipient address is unverified.
-      const lines = [
-        "An item you are watching in Recoup dropped in price.",
-        "",
-        `Now: ${money(row.cents, currency)}`,
-        row.previousCents === undefined
-          ? "Before: this is the first price we have seen"
-          : `Before: ${money(row.previousCents, currency)}`,
-      ];
-      if (watch.targetCents !== undefined) lines.push(`Your target: ${money(watch.targetCents, currency)}`);
-      lines.push(`Store: ${watch.merchantDomain}`, `Checked: ${new Date(row._creationTime).toUTCString()}`, "");
-      const appUrl = publicAppUrl();
-      if (appUrl) lines.push(`See it in Recoup: ${appUrl}/watching`, "");
-      lines.push("Recoup uses no affiliate links.");
-      text = lines.join("\n");
-    }
-    // Rows claimed before B2 still hold a subject built from the watch name; the constant is what is sent.
-    return { problem, inboxId, to, subject: DROP_SUBJECT, text, watchId: row.watchId ?? null };
-  },
-});
-
-/** Ends a claimed row as `sent` or `failed`. A row already ended is left alone. */
-export const finishDrop = internalMutation({
-  args: {
-    mailLogId: v.id("mailLog"),
-    error: v.union(v.string(), v.null()),
-    to: v.optional(v.string()),
-  },
-  returns: v.null(),
-  handler: async (ctx, { mailLogId, error, to }) => {
-    const row = await ctx.db.get(mailLogId);
-    if (!row || row.status !== "claimed") return null;
-    const recipient = to === undefined ? {} : { to };
-    if (error === null) await ctx.db.patch(mailLogId, { ...recipient, status: "sent", sentAt: Date.now() });
-    else await ctx.db.patch(mailLogId, { ...recipient, status: "failed", error: error.slice(0, MAX_ERROR_CHARS) });
-    return null;
-  },
-});
-
 /**
  * Same accepted deviation as `drafts.sendCtx` (D12a): the component's ctx type
  * predates convex 1.46's `runMutation` overload, so a real ctx fails the
  * structural check though the runtime call is identical. One cast, here.
  */
-function sendCtx(ctx: { runMutation: unknown }): Parameters<typeof agentmail.sendMessage>[0] {
+function sendCtx(ctx: MutationCtx): Parameters<typeof agentmail.sendMessage>[0] {
   return ctx as unknown as Parameters<typeof agentmail.sendMessage>[0];
 }
 
@@ -273,71 +264,107 @@ function statusCtx(ctx: QueryCtx | MutationCtx): Parameters<typeof agentmail.sta
   return ctx as unknown as Parameters<typeof agentmail.status>[0];
 }
 
-/**
- * Moves a claimed row to `queued` once the component has an outboundId for
- * it (F3). A row already past `claimed` is left alone, so a retried action
- * cannot re-queue a row `reconcileDrop` has already resolved.
- */
-export const markQueued = internalMutation({
-  args: { mailLogId: v.id("mailLog"), outboundId: vOutboundId, to: v.optional(v.string()) },
-  returns: v.null(),
-  handler: async (ctx, { mailLogId, outboundId, to }) => {
-    const row = await ctx.db.get(mailLogId);
-    if (!row || row.status !== "claimed") return null;
-    const recipient = to === undefined ? {} : { to };
-    await ctx.db.patch(mailLogId, { ...recipient, status: "queued", outboundId });
-    return null;
-  },
-});
+/** Builds the fixed-shape message body for one claimed row (B2: never the sender's own text). */
+function buildMessage(row: Doc<"mailLog">, watch: Doc<"watches">): string {
+  const currency = /^[A-Z]{3}$/.test(watch.currency ?? "") ? (watch.currency as string) : "USD";
+  const lines = [
+    "An item you are watching in Recoup dropped in price.",
+    "",
+    `Now: ${money(row.cents ?? 0, currency)}`,
+    row.previousCents === undefined
+      ? "Before: this is the first price we have seen"
+      : `Before: ${money(row.previousCents, currency)}`,
+  ];
+  if (watch.targetCents !== undefined) lines.push(`Your target: ${money(watch.targetCents, currency)}`);
+  lines.push(`Store: ${watch.merchantDomain}`, `Checked: ${new Date(row._creationTime).toUTCString()}`, "");
+  const appUrl = publicAppUrl();
+  if (appUrl) lines.push(`See it in Recoup: ${appUrl}/watching`, "");
+  lines.push("Recoup uses no affiliate links.");
+  return lines.join("\n");
+}
 
 /**
- * Enqueues one claimed drop with the component. Never throws past the
- * scheduler: every outcome is recorded on the row.
+ * Enqueues one claimed drop with the component, in the SAME transaction that
+ * leaves `claimed` (T06/D68). A row not `claimed` (already handled by a
+ * concurrent call, or by a previous run of this same scheduled function) is
+ * left alone and this returns immediately -- Convex's OCC serialises
+ * concurrent invocations on this row, so a second `sendDrop` for the same
+ * `mailLogId` always observes the first one's committed status change and
+ * no-ops.
  *
- * F3: a successful `agentmail.sendMessage` call only means the component
- * accepted the message for delivery, not that AgentMail has assigned it a
- * real message id -- the row moves to `queued` here and only
- * `reconcileDrop`, once it has confirmed that id, moves it on to `sent`.
- * Before this fix the row (and the "Emailed" label in the UI) went straight
- * to `sent` from this one enqueue call.
+ * The gate and the watch/inbox checks are re-run here (send-time recheck):
+ * time may have passed since `claimDrop` (a sweep-triggered retry, or a
+ * 24h re-claim), and the user's alert eligibility or the watch's status may
+ * have changed since.
  */
-export const sendDrop = internalAction({
+export const sendDrop = internalMutation({
   args: { mailLogId: v.id("mailLog") },
   returns: v.null(),
   handler: async (ctx, { mailLogId }) => {
-    let error: string | null = null;
-    let to: string | undefined;
-    let outboundId: Awaited<ReturnType<typeof agentmail.sendMessage>> | undefined;
+    const row = await ctx.db.get(mailLogId);
+    if (!row || row.status !== "claimed") return null;
+    const now = Date.now();
+
+    const refuse = async (reason: MailReason) => {
+      await ctx.db.patch(mailLogId, {
+        status: "suppressed",
+        reason,
+        error: REASON_MESSAGES[reason],
+        lastCheckedAt: now,
+      });
+    };
+
+    const gate = await alertGate(ctx, row.userId);
+    if (!gate.ok) return await refuse(gate.reason);
+
+    const watch = row.watchId ? await ctx.db.get(row.watchId) : null;
+    if (!watch || watch.status !== "active") return await refuse("watch_inactive");
+
+    const profile = await ctx.db
+      .query("profiles")
+      .withIndex("by_user", (q) => q.eq("userId", row.userId))
+      .unique();
+    // Alerts go out from one shared app inbox (ALERTS_INBOX_ID, not a secret), so watching works the moment
+    // someone signs up and does not spend one of the org's limited AgentMail inboxes per account.
+    const inboxId = process.env.ALERTS_INBOX_ID?.trim() || profile?.inboxId || null;
+    if (!inboxId) return await refuse("not_configured");
+
+    const to = gate.to;
+    const text = buildMessage(row, watch);
+    const token = await tokenFor(ctx, row.userId, now);
+
     try {
-      const drop = await ctx.runQuery(internal.notify.dropContext, { mailLogId });
-      if (!drop) return null;
-      to = drop.to ?? undefined;
-      if (drop.problem !== null || drop.inboxId === null || drop.to === null) {
-        error = drop.problem ?? "The alert could not be addressed";
-      } else {
-        outboundId = await agentmail.sendMessage(sendCtx(ctx), drop.inboxId, {
-          to: drop.to,
-          subject: drop.subject,
-          text: drop.text,
-          labels: drop.watchId ? [`watch:${drop.watchId}`] : [],
-        });
-      }
+      const outboundId = await agentmail.sendMessage(sendCtx(ctx), inboxId, {
+        to,
+        subject: DROP_SUBJECT,
+        text,
+        labels: [`watch:${watch._id}`],
+        // T06(g).5: one-click unsubscribe (RFC 8058). The page/form route lives at http.ts's
+        // /alerts/unsubscribe; mail scanners that prefetch GET links never disable anything (GET
+        // writes nothing there), only a real client's POST (or the header's one-click semantics) does.
+        headers: {
+          "List-Unsubscribe": `<${unsubscribeUrl(token)}>`,
+          "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        },
+      });
+      await ctx.db.patch(mailLogId, {
+        status: "queued",
+        to,
+        outboundId,
+        attempt: 0,
+        reason: undefined,
+        error: undefined,
+        nextCheckAt: now + BACKOFF_MS[0],
+        lastCheckedAt: now,
+      });
+      await ctx.scheduler.runAfter(BACKOFF_MS[0], internal.notify.reconcileDrop, { mailLogId, attempt: 1 });
     } catch (err) {
-      console.error(`notify.sendDrop failed for ${mailLogId}`, err);
-      error = `Send failed: ${err instanceof Error ? err.message : String(err)}`;
-    }
-    try {
-      if (outboundId !== undefined) {
-        await ctx.runMutation(internal.notify.markQueued, { mailLogId, outboundId, to });
-        await ctx.scheduler.runAfter(BACKOFF_MS[0], internal.notify.reconcileDrop, {
-          mailLogId,
-          attempt: 1,
-        });
-      } else {
-        await ctx.runMutation(internal.notify.finishDrop, { mailLogId, error, to });
-      }
-    } catch (err) {
-      console.error(`notify.sendDrop could not record the outcome for ${mailLogId}`, err);
+      await ctx.db.patch(mailLogId, {
+        status: "failed",
+        reason: "send_failed",
+        error: `Send failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS),
+        lastCheckedAt: now,
+      });
     }
     return null;
   },
@@ -346,13 +373,14 @@ export const sendDrop = internalAction({
 /**
  * Applies one AgentMail delivery observation to a queued row (F3, same shape
  * as `drafts.applySendOutcome`). Exported as a plain function, not
- * registered: `reconcileDrop` is the only production caller, and tests drive
- * the transitions directly.
+ * registered: `reconcileDrop` and `recheckDrop` are the only production
+ * callers, and tests drive the transitions directly.
  *
- * - a real `agentmailMessageId` -> `sent`
- * - `failed | bounced | rejected` -> `failed`, with the reason
- * - still pending, attempts left -> reschedule on the backoff
- * - still pending, attempts spent -> left `queued`; the UI keeps showing "Sending"
+ * - `complained` -> stays `sent` (it was delivered), providerStatus recorded, address suppressed
+ * - `failed | bounced | rejected` -> `failed`, reason `send_failed`, providerStatus recorded; `bounced` also suppresses
+ * - a real `agentmailMessageId` (any other status) -> `sent`
+ * - still pending, attempts left -> reschedule on the backoff, attempt+1
+ * - still pending, attempts spent -> `unknown`, with `nextCheckAt` so the sweep keeps re-checking it
  */
 export async function applyDropOutcome(
   ctx: MutationCtx,
@@ -365,22 +393,47 @@ export async function applyDropOutcome(
   } | null,
 ): Promise<"sent" | "failed" | "retrying" | "unknown" | "gone"> {
   const row = await ctx.db.get(mailLogId);
-  if (!row || !row.outboundId || row.status !== "queued") return "gone";
+  if (!row || !row.outboundId || (row.status !== "queued" && row.status !== "unknown")) return "gone";
+  const now = Date.now();
+
+  if (status?.status === "complained") {
+    await ctx.db.patch(mailLogId, {
+      status: "sent",
+      providerStatus: "complained",
+      sentAt: row.sentAt ?? now,
+      agentmailMessageId: status.agentmailMessageId ?? row.agentmailMessageId,
+      lastCheckedAt: now,
+    });
+    await suppressAddress(ctx, row.userId, "complained");
+    return "sent";
+  }
 
   if (status && (TERMINAL_FAILURES as readonly string[]).includes(status.status)) {
     await ctx.db.patch(mailLogId, {
       status: "failed",
+      reason: "send_failed",
+      providerStatus: status.status,
       error: (status.errorMessage ?? `Delivery ${status.status}`).slice(0, MAX_ERROR_CHARS),
+      agentmailMessageId: status.agentmailMessageId ?? row.agentmailMessageId,
+      lastCheckedAt: now,
     });
+    if (status.status === "bounced") await suppressAddress(ctx, row.userId, "bounced");
     return "failed";
   }
 
-  if (status && status.agentmailMessageId) {
-    await ctx.db.patch(mailLogId, { status: "sent", sentAt: Date.now() });
+  if (status?.agentmailMessageId) {
+    await ctx.db.patch(mailLogId, {
+      status: "sent",
+      sentAt: now,
+      providerStatus: status.status,
+      agentmailMessageId: status.agentmailMessageId,
+      lastCheckedAt: now,
+    });
     return "sent";
   }
 
   if (attempt < BACKOFF_MS.length) {
+    await ctx.db.patch(mailLogId, { attempt: attempt + 1, nextCheckAt: now + BACKOFF_MS[attempt], lastCheckedAt: now });
     await ctx.scheduler.runAfter(BACKOFF_MS[attempt], internal.notify.reconcileDrop, {
       mailLogId,
       attempt: attempt + 1,
@@ -388,6 +441,7 @@ export async function applyDropOutcome(
     return "retrying";
   }
 
+  await ctx.db.patch(mailLogId, { status: "unknown", nextCheckAt: now + MAIL_RECONCILE_STALL_MS, lastCheckedAt: now });
   return "unknown";
 }
 
@@ -404,6 +458,69 @@ export const reconcileDrop = internalMutation({
   },
 });
 
+/**
+ * Lets the owner ask for one more delivery check on demand, e.g. after a
+ * drop has sat `unknown` for a while (D56 pattern, mirrors
+ * `drafts.recheckSend`). T06(g).6: reads `agentmail.status` inline (with
+ * the backoff already exhausted) rather than scheduling, so the caller sees
+ * the outcome immediately if AgentMail has since resolved it.
+ */
+export const recheckDrop = mutation({
+  args: { mailLogId: v.id("mailLog") },
+  returns: v.null(),
+  handler: async (ctx, { mailLogId }) => {
+    const userId = await requireUserId(ctx);
+    const row = await ctx.db.get(mailLogId);
+    if (!row || row.userId !== userId) throw new ConvexError("Alert not found");
+    if (row.status !== "queued" && row.status !== "unknown") {
+      throw new ConvexError("This alert cannot be rechecked");
+    }
+    await rateLimiter.limit(ctx, "dropRecheck", { key: mailLogId, throws: true });
+    if (!row.outboundId) return null;
+    const status = await agentmail.status(statusCtx(ctx), row.outboundId);
+    await applyDropOutcome(ctx, mailLogId, BACKOFF_MS.length, status);
+    return null;
+  },
+});
+
+/**
+ * Durable-delivery safety net (T06, D68): picks up `mailLog` rows stuck
+ * `claimed` (a crash between claim and the enqueue transaction -- safe to
+ * resend because enqueue and the `claimed` -> `queued` transition are
+ * atomic, so a `claimed` row was NEVER enqueued), `queued` (a reconcile
+ * whose own follow-up schedule was lost), or `unknown` (backoff exhausted)
+ * past their `nextCheckAt`. Bounded per status by `MAIL_SWEEP_PAGE` so a bad
+ * day cannot fan out unboundedly; returns the number of rows it rescheduled.
+ * Wired to the hourly `crons.ts` "mail sweep" job.
+ */
+export const sweepStalled = internalMutation({
+  args: {},
+  returns: v.number(),
+  handler: async (ctx) => {
+    const now = Date.now();
+    let count = 0;
+    for (const status of ["claimed", "queued", "unknown"] as const) {
+      const due = await ctx.db
+        .query("mailLog")
+        .withIndex("by_status_nextCheck", (q) => q.eq("status", status).lte("nextCheckAt", now))
+        .take(MAIL_SWEEP_PAGE);
+      for (const row of due) {
+        await ctx.db.patch(row._id, { nextCheckAt: now + MAIL_RECONCILE_STALL_MS, lastCheckedAt: now });
+        if (status === "claimed") {
+          await ctx.scheduler.runAfter(0, internal.notify.sendDrop, { mailLogId: row._id });
+        } else {
+          await ctx.scheduler.runAfter(0, internal.notify.reconcileDrop, {
+            mailLogId: row._id,
+            attempt: row.attempt ?? 1,
+          });
+        }
+        count++;
+      }
+    }
+    return count;
+  },
+});
+
 // ---------------------------------------------------------------------------
 // In-app backstop
 // ---------------------------------------------------------------------------
@@ -417,6 +534,9 @@ const dropView = v.object({
   previousCents: v.union(v.number(), v.null()),
   status: mailStatus,
   error: v.union(v.string(), v.null()),
+  reason: v.union(mailReasonValidator, v.null()),
+  providerStatus: v.union(v.string(), v.null()),
+  canRecheck: v.boolean(),
 });
 
 /** The caller's last 30 price-drop alerts, newest first, mailed or not. `[]` when signed out. */
@@ -448,6 +568,9 @@ export const drops = query({
           previousCents: row.previousCents ?? null,
           status: row.status,
           error: row.error ?? null,
+          reason: row.reason ?? null,
+          providerStatus: row.providerStatus ?? null,
+          canRecheck: row.status === "queued" || row.status === "unknown",
         };
       }),
     );
