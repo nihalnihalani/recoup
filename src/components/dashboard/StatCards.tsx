@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { AreaChart, type AreaTone } from "../charts/AreaChart";
+import { recoveredByCurrency } from "../../lib/currencyTotals";
 import { fmt } from "../../lib/money";
 import { cardClass, shortDay } from "../../lib/ui";
 import { Icon, type IconName } from "./icons";
@@ -26,7 +27,8 @@ function StatCard({
   /** e.g. a `RecentNote` when the figure comes from a truncated, sampled window rather than the full account. */
   badge?: ReactNode;
   value: string;
-  delta: string;
+  /** A plain string for a single figure, or a stacked list of per-currency lines (never a cross-currency sum). */
+  delta: ReactNode;
   deltaTone: "good" | "bad" | "muted";
   context: string;
   trend?: { series: SeriesPoint[]; tone: AreaTone; format: (value: number) => string; label: string };
@@ -94,9 +96,29 @@ export function StatCards({
 
   const currency = mainCurrency(scoped.map((item) => item.currency));
   const onTable = scoped.reduce((sum, item) => sum + openDropCents(item, now), 0);
-  const recovered = onlyExamples
-    ? scoped.reduce((sum, item) => sum + Math.max(item.claim?.confirmedCents ?? 0, 0), 0)
-    : overview.totals.recoveredCents;
+  // C4 (D103/D107): `overview.totals.recoveredCents` is scoped to `primaryCurrency`
+  // only (see convex/tracking.ts's doc comment on `overview`), so formatting it with
+  // `currency` above (guessed from item currencies) can print the wrong symbol
+  // outright -- e.g. 3 EUR items plus $50 USD recovered rendering "€50.00". Render
+  // the honest per-currency breakdown instead, one line per currency, never a sum
+  // across currencies.
+  const exampleRecoveredCents = scoped.reduce((sum, item) => sum + Math.max(item.claim?.confirmedCents ?? 0, 0), 0);
+  const recoveredLines = onlyExamples
+    ? [{ currency, cents: exampleRecoveredCents, label: fmt(exampleRecoveredCents, currency) }]
+    : recoveredByCurrency(overview.totals.byCurrency, overview.totals.primaryCurrency);
+  // Nothing recovered in any currency yet: fall back to the same currency the
+  // "Money on the table" figure above already shows, rather than inventing one.
+  const recoveredNode: ReactNode =
+    recoveredLines.length > 1 ? (
+      <span className="inline-flex flex-col gap-0.5">
+        {recoveredLines.map((line) => (
+          <span key={line.currency}>{line.label}</span>
+        ))}
+      </span>
+    ) : (
+      (recoveredLines[0]?.label ?? fmt(0, currency))
+    );
+  const recoveredPositive = recoveredLines.some((line) => line.cents > 0);
   const gap = claimableGapSeries(scoped, now);
 
   return (
@@ -134,8 +156,8 @@ export function StatCards({
         icon="wallet"
         title="Money on the table"
         value={fmt(onTable, currency)}
-        delta={fmt(recovered, currency)}
-        deltaTone={recovered > 0 ? "good" : "muted"}
+        delta={recoveredNode}
+        deltaTone={recoveredPositive ? "good" : "muted"}
         context="back on card"
         trend={
           gap.some((point) => point.value > 0)

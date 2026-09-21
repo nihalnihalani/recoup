@@ -10,6 +10,7 @@ import { RuleCard } from "../components/purchase/RuleCard";
 import { UntrackedTable } from "../components/purchase/UntrackedTable";
 import { CardHeading, DotChip, ReviewIcon } from "../components/purchase/parts";
 import { Empty, Loading } from "../components/States";
+import { useCoarseNow } from "../lib/time";
 import {
   cardClass,
   cardTitleClass,
@@ -297,7 +298,12 @@ function CheckAllButton({ itemIds }: { itemIds: Id<"items">[] }) {
 export default function Purchase() {
   const { id } = useParams();
   const purchaseId = id as Id<"purchases"> | undefined;
-  const data = useQuery(api.purchases.get, purchaseId ? { purchaseId } : "skip");
+  // Called unconditionally, above the early returns below, so hook order
+  // stays valid across renders (D103/D107 C4): a coarse, display-only clock
+  // (src/lib/time.ts) so the verdict's staleness math is real rather than
+  // frozen at the query's first subscribe.
+  const now = useCoarseNow();
+  const data = useQuery(api.purchases.get, purchaseId ? { purchaseId, now } : "skip");
 
   if (!purchaseId) return <Empty title="No purchase selected" />;
   if (data === undefined) return <Loading rows={4} />;
