@@ -134,6 +134,15 @@ Promised amounts are shown separately (the latest stated promise, not a sum) and
 
 Status source: `docs/team/PLAN.md`. Test counts: `docs/team/VERIFICATION.md`.
 
+### 2026-09-20, late: the price dashboard
+
+- W2, W3 and W4 passed live: a drop email went out once through AgentMail and was deduplicated per watch and price; "Find other stores" on a stand mixer returned Best Buy, Amazon, KitchenAid and Walmart listings, with Walmart flagged as possibly a different version, and confirming Amazon produced "Cheapest confirmed: amazon.com at $479.00"; "I bought it" turned a watch into a purchase with its price history and a 14-day window counting down.
+- The UI was rebuilt around prices. The dashboard shows a price chart per product, an overview with a Watching and Bought toggle, a products table with low-to-high range bars and adjustment-window meters, a stores card, a live activity feed, and a strip of every open adjustment window. The Watching page shows a large chart per product with lowest, highest, average and swing, a verdict chip, and the same item compared across stores. Charts are hand-written SVG with no chart library.
+- Two read models feed it, both derived on read from rows that already exist: `insights.activity` (price drops and rises with signed changes, unreadable pages, alerts sent, claims opened, asks sent, replies, credits promised and confirmed) and `insights.sources` (per store: what is watched there, how many checks ran, how many pages could actually be read, drops caught, last check). An unchanged price is not an event; the chart already shows it.
+- The stores card reports readability honestly: a store where pages cannot be read shows a low read rate, and marketplaces carry a note that prices belong to individual listings. Store icons are loaded from the store's own domain only, never a third-party icon service, so nobody else learns which stores a user watches.
+- Price checks now run every two hours for owned items and watches. Charts contain only prices the app actually read; history starts the day watching starts. The one seeded history belongs to the example product and is labelled as an example.
+- The other team's later commits were merged into this branch. Where both sides had written the same module, the version that had been exercised live was kept.
+
 ### 2026-09-20, evening: what passed live
 
 Source: the status log at the bottom of `docs/plans/2026-09-20-recoup-iterations.md`. "Live" means against the real providers on the dev deployment, not in tests.
