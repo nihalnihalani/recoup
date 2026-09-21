@@ -690,6 +690,41 @@ describe("intake.retryFailed (hourly safety net)", () => {
     expect((await eventRow(t, live)).status).toBe("received");
   });
 
+  it("D87 (D103): a tombstoned owner's failed row is closed, not retried, and does not block a live row behind it", async () => {
+    const t = setup();
+    const { userId: gone } = await signedIn(t, "Gone");
+    const { userId: live } = await signedIn(t, "Live");
+    // A full page of a tombstoned user's failed rows, older than the live one.
+    for (let i = 0; i < 50; i++) {
+      const id = await queueEvent(t, gone, `evt-gone-${i}`);
+      await t.run(async (ctx) => await ctx.db.patch(id, { status: "failed", attempts: 1 }));
+    }
+    await t.run((ctx) => ctx.db.insert("accountState", { userId: gone, status: "deleting", requestedAt: Date.now(), attempts: 0 }));
+    const liveId = await queueEvent(t, live, "evt-live");
+    await t.run(async (ctx) => await ctx.db.patch(liveId, { status: "failed", attempts: 1 }));
+
+    // Tick 1: the tombstoned backlog fills the page and is closed out (never
+    // scheduled a retry) -- unlike before this fix, where it would have been
+    // left untouched and re-read on every subsequent tick, the same
+    // starvation shape F1/F2 fixed for the price/watch sweeps.
+    const first = await t.mutation(internal.intake.retryFailed, {});
+    expect(first.retried).toBe(0);
+    const oneOfGone = await eventRow(t, await t.run(async (ctx) => {
+      const row = await ctx.db
+        .query("processedEvents")
+        .withIndex("by_user_status", (q) => q.eq("userId", gone).eq("status", "succeeded"))
+        .first();
+      if (!row) throw new Error("expected a closed row for the tombstoned user");
+      return row._id;
+    }));
+    expect(oneOfGone.summary).toBe("Ignored: account deleted");
+    expect((await eventRow(t, liveId)).status).toBe("failed"); // not yet reached
+
+    // Tick 2: the backlog has left the `failed` page; the live row is retried.
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 1 });
+    expect((await eventRow(t, liveId)).status).toBe("received");
+  });
+
   it("parks a failed row that has an owner but nothing to re-run", async () => {
     const t = setup();
     const { userId } = await signedIn(t);

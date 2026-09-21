@@ -21,6 +21,7 @@ import { applyEvent, openClaim } from "./claims";
 import { parseProductUrl } from "./lib/watchUrl";
 import { cleanLine } from "./lib/text";
 import { charge } from "./lib/budget";
+import { isTombstoned } from "./lib/accountState";
 import { MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER } from "./limits";
 
 /**
@@ -790,6 +791,16 @@ export const retryFailed = internalMutation({
         if (now - row._creationTime >= OWNERLESS_AFTER_MS) {
           await ctx.db.patch(row._id, { status: "succeeded", summary: "Ignored: no matching inbox" });
         }
+        continue;
+      }
+      // D87 (D103): never spend a retry (a model call) on a user whose
+      // account is being deleted, and leave the `failed` page the same way
+      // the "out of attempts"/"nothing to re-run" branches below do --
+      // otherwise a backlog of a tombstoned user's rows would occupy this
+      // same bounded page on every tick, the same starvation shape F1/F2
+      // fixed for the price/watch sweeps.
+      if (await isTombstoned(ctx, row.userId)) {
+        await ctx.db.patch(row._id, { status: "succeeded", summary: "Ignored: account deleted" });
         continue;
       }
       if (row.attempts >= MAX_ATTEMPTS) {

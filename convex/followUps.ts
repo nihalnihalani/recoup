@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { internalMutation, type MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
+import { isTombstoned } from "./lib/accountState";
 
 const DAY_MS = 86_400_000;
 /** Floor on the reminder delay: never nag a merchant sooner than a week (D26). */
@@ -87,7 +88,10 @@ export async function scheduleClaimReminder(ctx: MutationCtx, claim: Doc<"claims
  * so the board surfaces it. Acts only on pending rows that are due (D42);
  * with none, it is a no-op. Does not gate on claimVersion — a partial
  * credit bumps version on every event and would otherwise silently kill
- * reminders.
+ * reminders. D87 (D103): a tombstoned owner's claim is treated the same as
+ * `confirmed`/`dismissed` -- the pending reminders are cancelled, without
+ * setting `attentionAt` on a board nobody signed in to see (the account is
+ * being deleted).
  */
 export const fire = internalMutation({
   args: { claimId: v.id("claims") },
@@ -104,7 +108,12 @@ export const fire = internalMutation({
     ).filter((f) => f.status === "pending" && f.fireAt <= now);
     if (pending.length === 0) return null;
     const claim = await ctx.db.get(claimId);
-    if (!claim || claim.status === "confirmed" || claim.status === "dismissed") {
+    if (
+      !claim ||
+      claim.status === "confirmed" ||
+      claim.status === "dismissed" ||
+      (await isTombstoned(ctx, claim.userId))
+    ) {
       for (const f of pending) await ctx.db.patch(f._id, { status: "cancelled" });
       return null;
     }

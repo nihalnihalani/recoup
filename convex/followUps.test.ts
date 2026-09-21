@@ -141,6 +141,28 @@ describe("followUps.scheduleReminder + fire", () => {
     expect(rows.filter((r) => r.status === "cancelled")).toHaveLength(1);
   });
 
+  it("D87 (D103): cancels pending reminders without setting attentionAt when the owner is tombstoned", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const claim = await seedClaim(t, userId, "sent");
+    if (!claim) throw new Error("claim not created");
+
+    await as.run((ctx) => scheduleReminder(ctx, claim, Date.now() - 1000));
+    await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }));
+
+    await t.mutation(internal.followUps.fire, { claimId: claim._id });
+
+    const rows = await t.run((ctx) =>
+      ctx.db
+        .query("followUps")
+        .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+        .collect(),
+    );
+    expect(rows[0].status).toBe("cancelled");
+    const updatedClaim = await t.run((ctx) => ctx.db.get(claim._id));
+    expect(updatedClaim?.attentionAt).toBeUndefined();
+  });
+
   it("cancelPending is a no-op when there are no follow-ups", async () => {
     const t = setup();
     const { userId, as } = await signedIn(t);
