@@ -19,7 +19,10 @@ export function orderedCurrencies(byCurrency: ByCurrency, primaryCurrency: strin
   return primaryCurrency !== null && primaryCurrency in byCurrency ? [primaryCurrency, ...rest] : rest;
 }
 
-export type RecoveredLine = { currency: string; cents: number; label: string };
+/** One formatted per-currency figure, ready to render as its own line. */
+export type CurrencyLine = { currency: string; cents: number; label: string };
+/** @deprecated kept as an alias -- `recoveredByCurrency`'s original return type name. */
+export type RecoveredLine = CurrencyLine;
 
 /**
  * `totals.recoveredCents` formatted per currency (D103/D107 C4). The old
@@ -34,10 +37,40 @@ export type RecoveredLine = { currency: string; cents: number; label: string };
  * (nothing to report yet) returns `[]`. Formatting itself is delegated to
  * `./money`'s `fmt`, which never throws even for an unrecognised code.
  */
-export function recoveredByCurrency(byCurrency: ByCurrency, primaryCurrency: string | null): RecoveredLine[] {
+export function recoveredByCurrency(byCurrency: ByCurrency, primaryCurrency: string | null): CurrencyLine[] {
   return orderedCurrencies(byCurrency, primaryCurrency).map((currency) => ({
     currency,
     cents: byCurrency[currency].recoveredCents,
     label: fmt(byCurrency[currency].recoveredCents, currency),
   }));
+}
+
+/**
+ * Sums arbitrary `{ currency, cents }` entries into one row per currency
+ * (F-T14-1): `StatCards`'s "Money on the table" figure summed
+ * `openDropCents` across every scoped item and displayed the total under a
+ * single guessed currency (`mainCurrency`), which -- like the recovered
+ * figure above before D107 C4 -- can print the wrong symbol/amount outright
+ * once items span more than one currency. This groups by currency instead,
+ * ordered the same way as `recoveredByCurrency` (`primaryCurrency` first
+ * when it is one of the entries' currencies, the rest alphabetically after
+ * it), so the caller can render one line per currency and never sum across
+ * currencies. Never invents a currency: a currency with no entries produces
+ * no row. Entries for a currency that all sum to zero still produce a row
+ * (so "nothing open right now" in a currency the account otherwise uses
+ * still reads e.g. "$0.00" rather than silently vanishing); callers that
+ * want to hide all-zero currencies should filter first. An empty `entries`
+ * returns `[]`.
+ */
+export function sumCentsByCurrency(entries: { currency: string; cents: number }[], primaryCurrency: string | null): CurrencyLine[] {
+  const totals = new Map<string, number>();
+  for (const { currency, cents } of entries) {
+    totals.set(currency, (totals.get(currency) ?? 0) + cents);
+  }
+  const rest = [...totals.keys()].filter((code) => code !== primaryCurrency).sort((a, b) => a.localeCompare(b));
+  const ordered = primaryCurrency !== null && totals.has(primaryCurrency) ? [primaryCurrency, ...rest] : rest;
+  return ordered.map((currency) => {
+    const cents = totals.get(currency) ?? 0;
+    return { currency, cents, label: fmt(cents, currency) };
+  });
 }

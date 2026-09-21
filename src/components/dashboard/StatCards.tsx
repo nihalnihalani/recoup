@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { AreaChart, type AreaTone } from "../charts/AreaChart";
-import { recoveredByCurrency } from "../../lib/currencyTotals";
+import { recoveredByCurrency, sumCentsByCurrency } from "../../lib/currencyTotals";
 import { fmt } from "../../lib/money";
 import { cardClass, shortDay } from "../../lib/ui";
 import { Icon, type IconName } from "./icons";
@@ -26,7 +26,8 @@ function StatCard({
   title: string;
   /** e.g. a `RecentNote` when the figure comes from a truncated, sampled window rather than the full account. */
   badge?: ReactNode;
-  value: string;
+  /** A plain string for a single figure, or a stacked list of per-currency lines (never a cross-currency sum). */
+  value: ReactNode;
   /** A plain string for a single figure, or a stacked list of per-currency lines (never a cross-currency sum). */
   delta: ReactNode;
   deltaTone: "good" | "bad" | "muted";
@@ -95,7 +96,27 @@ export function StatCards({
   const dropsPerDay = perDay(drops, now, 7, oldestKnown);
 
   const currency = mainCurrency(scoped.map((item) => item.currency));
-  const onTable = scoped.reduce((sum, item) => sum + openDropCents(item, now), 0);
+  // F-T14-1: the same class of bug C4 fixed below for "recovered" -- this used to
+  // sum `openDropCents` across every scoped item and label the total with one
+  // guessed currency (`mainCurrency`), which can print the wrong amount outright
+  // once items span more than one currency (e.g. 3 EUR items open plus 1 USD item
+  // open summing their raw cents together under a "$" label). Group by currency
+  // instead and render one line per currency, collapsing to the old single-value
+  // look when only one currency is present; never invent a currency (D103/D107).
+  const onTableLines = sumCentsByCurrency(
+    scoped.map((item) => ({ currency: item.currency, cents: openDropCents(item, now) })),
+    overview.totals.primaryCurrency,
+  );
+  const onTableNode: ReactNode =
+    onTableLines.length > 1 ? (
+      <span className="inline-flex flex-col gap-0.5">
+        {onTableLines.map((line) => (
+          <span key={line.currency}>{line.label}</span>
+        ))}
+      </span>
+    ) : (
+      (onTableLines[0]?.label ?? fmt(0, currency))
+    );
   // C4 (D103/D107): `overview.totals.recoveredCents` is scoped to `primaryCurrency`
   // only (see convex/tracking.ts's doc comment on `overview`), so formatting it with
   // `currency` above (guessed from item currencies) can print the wrong symbol
@@ -155,7 +176,7 @@ export function StatCards({
       <StatCard
         icon="wallet"
         title="Money on the table"
-        value={fmt(onTable, currency)}
+        value={onTableNode}
         delta={recoveredNode}
         deltaTone={recoveredPositive ? "good" : "muted"}
         context="back on card"
