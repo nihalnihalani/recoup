@@ -120,6 +120,80 @@ describe("tracking.overview", () => {
 });
 
 // ---------------------------------------------------------------------------
+// C1 (D107, Opus checkpoint-5 recheck): MAX_ITEMS_TOTAL is now budgeted off
+// rows actually read, purchase by purchase, instead of allotted up front per
+// purchase before any of it is spent -- see tracking.ts's MAX_ITEMS_TOTAL doc
+// comment for the bug this replaces (only the newest 5 of any account's
+// purchases ever got items rendered at all, however small each one was).
+// ---------------------------------------------------------------------------
+
+async function seedPurchaseWithItems(
+  t: ReturnType<typeof setup>,
+  userId: Id<"users">,
+  itemCount: number,
+  merchantDomain: string,
+): Promise<Id<"purchases">> {
+  return await t.run(async (ctx) => {
+    const purchaseId = await ctx.db.insert("purchases", {
+      userId,
+      merchant: merchantDomain,
+      merchantDomain,
+      purchasedAt: Date.now() - 2 * 86_400_000,
+      currency: "USD",
+      status: "active",
+    });
+    for (let i = 0; i < itemCount; i++) {
+      await ctx.db.insert("items", {
+        purchaseId,
+        userId,
+        name: `Item ${i}`,
+        unitCents: 1_000,
+        qty: 1,
+        productUrl: `https://${merchantDomain}/p/${i}`,
+        returned: false,
+      });
+    }
+    return purchaseId;
+  });
+}
+
+describe("tracking.overview: C1/D107 budgeting by rows actually read", () => {
+  it("6 purchases x 1 item each: every purchase gets its item, not just the newest 5", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const purchaseIds: Id<"purchases">[] = [];
+    for (let p = 0; p < 6; p++) {
+      purchaseIds.push(await seedPurchaseWithItems(t, userId, 1, `store${p}.example`));
+    }
+
+    const out = await as.query(api.tracking.overview, {});
+    expect(out.items).toHaveLength(6);
+    expect(new Set(out.items.map((i) => i.purchaseId))).toEqual(new Set(purchaseIds));
+    expect(out.truncated).toBe(false);
+  });
+
+  it("a purchase with exactly MAX_ITEMS_PER_PURCHASE (50) items is not truncated", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    await seedPurchaseWithItems(t, userId, 50, "exactly50.example");
+
+    const out = await as.query(api.tracking.overview, {});
+    expect(out.items).toHaveLength(50);
+    expect(out.truncated).toBe(false);
+  });
+
+  it("a purchase with 51 items (one over the per-purchase cap) is truncated", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    await seedPurchaseWithItems(t, userId, 51, "fiftyone.example");
+
+    const out = await as.query(api.tracking.overview, {});
+    expect(out.items).toHaveLength(50);
+    expect(out.truncated).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // D93/P07: 40 purchases x 50 items x 30 checks stays under the 32,000-document
 // transaction limit and reports `truncated`. This is the exact shape
 // docs/reviews/read-budgets.md measured overflowing at 62,040 documents read

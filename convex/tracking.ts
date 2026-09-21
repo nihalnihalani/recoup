@@ -34,10 +34,20 @@ const MAX_PURCHASES = 60;
  */
 const MAX_POINTS = 12;
 /**
- * F3 (D103): ceiling on the total number of items `overview` reads price
- * history and a claim for, across every purchase combined -- see MAX_POINTS'
- * doc comment. Purchases beyond this budget still count toward `truncated`
- * but contribute no `trackedItem` rows this call.
+ * C1 (D107, Opus checkpoint-5 recheck): ceiling on the total number of items
+ * `overview` reads price history and a claim for, across every purchase
+ * combined -- see MAX_POINTS' doc comment. Budgeted by ROWS ACTUALLY READ,
+ * purchase by purchase, as the loop below goes (`take(min(cap, remaining) +
+ * 1)`), not allotted up front per purchase before any of it is spent: the
+ * earlier version divided this budget into MAX_ITEMS_PER_PURCHASE-sized
+ * shares for every one of the (up to 60) purchases before reading a single
+ * item, which at MAX_ITEMS_PER_PURCHASE=50 meant only the newest 5 purchases
+ * (250/50) were ever allotted anything at all -- a purchase with, say, one
+ * item still got a full 50-item share subtracted from the shared pool, and
+ * every purchase after the 5th got a zero share and no items rendered,
+ * however small. Budgeting off what each purchase actually returns fixes
+ * this: 6 purchases with 1 item each now all render (6 <= 250), and the
+ * budget is only ever spent on rows that exist.
  */
 const MAX_ITEMS_TOTAL = 250;
 
@@ -147,15 +157,10 @@ export const overview = query({
     let truncated = purchases.length > MAX_PURCHASES;
     const validatedNow = assertCoarseNow(args.now);
 
-    // F3 (D103): the per-purchase item budget is decided up front, in
-    // purchase order (newest first), before any of it is spent -- see
-    // MAX_ITEMS_TOTAL's doc comment.
+    // C1 (D107): the shared item budget is spent as the loop below actually
+    // reads rows, not allotted per purchase up front -- see MAX_ITEMS_TOTAL's
+    // doc comment.
     let itemsRoom = MAX_ITEMS_TOTAL;
-    const perPurchaseCap = purchases.slice(0, MAX_PURCHASES).map(() => {
-      const cap = Math.min(MAX_ITEMS_PER_PURCHASE, itemsRoom);
-      itemsRoom -= cap;
-      return cap;
-    });
 
     const items = [];
     let watching = 0;
@@ -174,10 +179,15 @@ export const overview = query({
       return row;
     }
 
-    for (const [i, purchase] of purchases.slice(0, MAX_PURCHASES).entries()) {
-      const cap = perPurchaseCap[i];
-      if (cap < MAX_ITEMS_PER_PURCHASE) truncated = true; // the shared budget, not this purchase's own size, capped the ask
-      if (cap === 0) continue;
+    for (const purchase of purchases.slice(0, MAX_PURCHASES)) {
+      if (itemsRoom <= 0) {
+        // C1 (D107): the shared budget is spent; every purchase from here on
+        // is cut entirely rather than read-and-discarded (an index range read
+        // per purchase we already know will contribute nothing).
+        truncated = true;
+        break;
+      }
+      const cap = Math.min(MAX_ITEMS_PER_PURCHASE, itemsRoom);
 
       const policy = await latest(ctx, userId, purchase.merchantDomain, "price_adjustment");
       const windowDays = policy?.windowDays;
@@ -187,11 +197,17 @@ export const overview = query({
           : undefined;
       const now = validatedNow ?? purchase.purchasedAt ?? purchase._creationTime;
 
-      const rows = await ctx.db
+      // C1 (D107): read one row past the cap so `truncated` reflects a REAL
+      // cut (this purchase actually has more items than its share) rather
+      // than firing whenever the shared budget happened to be tight.
+      const probe = await ctx.db
         .query("items")
         .withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id))
-        .take(cap);
-      if (rows.length >= cap) truncated = true;
+        .take(cap + 1);
+      const overflow = probe.length > cap;
+      if (overflow) truncated = true;
+      const rows = overflow ? probe.slice(0, cap) : probe;
+      itemsRoom -= rows.length;
 
       // F3 (D103): one range read for every non-dismissed price_adjustment
       // claim on this whole purchase (`by_purchase_type`), instead of one
