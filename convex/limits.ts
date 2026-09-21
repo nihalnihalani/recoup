@@ -79,7 +79,7 @@ export type Budget = {
   global?: { kind: GlobalBudgetKind; units: number };
 };
 
-export type GlobalBudgetKind = "price_check" | "policy_fetch" | "drop_email" | "market_lookup";
+export type GlobalBudgetKind = "price_check" | "policy_fetch" | "drop_email" | "market_lookup" | "claim_email" | "inbound_extract";
 
 /**
  * Deployment-wide daily kill switches (usage rows with no userId), so the worst day is bounded in dollars whatever
@@ -95,6 +95,10 @@ export const GLOBAL_DAILY_BUDGETS: Record<GlobalBudgetKind, { max: number; label
   /** One ShopSavvy lookup bills 3 credits plus one per day of history; at MARKET_HISTORY_DAYS=14 that is 17. The trial plan holds 1,000 credits a month, so 20 a day is about a third of it and leaves room to demo. */
   /** Drop alerts leave from one shared inbox to unverified addresses (B2); 300 a day keeps the sending domain's reputation safe however many accounts exist. */
   drop_email: { max: 300, label: "price alert emails" },
+  /** Claim emails leave from one shared inbox to caller-chosen addresses (B1); bounds the deployment-wide total whatever the number of accounts (T01/D76). */
+  claim_email: { max: 100, label: "claim emails" },
+  /** One unit = one inbound-email extraction model call; a refused paste becomes needs_review and is retried hourly (T01/D76). Global-only: no per-user counterpart. */
+  inbound_extract: { max: 500, label: "reading pasted or forwarded emails" },
 };
 
 export const DAILY_BUDGETS = {
@@ -108,8 +112,8 @@ export const DAILY_BUDGETS = {
   policy_fetch: { max: 15, label: "looking up store policies", global: { kind: "policy_fetch", units: 2 } },
   /** One draft = one model call and one stored row. 30 covers rewriting every open claim several times. */
   draft_generate: { max: 30, label: "writing drafts" },
-  /** Mail to a caller-chosen address from our sending domain (B1): 10 a day is more claims than anyone files and too few to be a relay. */
-  claim_email: { max: 10, label: "sending claim emails" },
+  /** Mail to a caller-chosen address from our sending domain (B1): 10 a day is more claims than anyone files and too few to be a relay. Global claim_email cap added T01/D76: charge() enforces both. */
+  claim_email: { max: 10, label: "sending claim emails", global: { kind: "claim_email", units: 1 } },
   /** Manual "check the price now" on owned items: one scrape + one extraction each; 40 is every item on a big order, twice. */
   item_check: { max: 40, label: "checking prices on your purchases", global: { kind: "price_check", units: 1 } },
   /** Manual "check now" on watches, on top of the 10-minute per-watch cooldown (H2): 40 is most of a full watch list once a day. */
@@ -131,6 +135,59 @@ export const MARKET_MAX_STORES = 8;
 
 /** Sends per claim, ever (B1): the first ask, a corrected address and one follow-up. */
 export const MAX_SENDS_PER_CLAIM = 3;
+
+// --- Auth mail + account lifecycle (T01/T05/T06/T18) -------------------------
+
+/** Verification/reset code lifetime passed as `Email({ maxAge })` to the auth provider (D65). */
+export const VERIFICATION_CODE_TTL_S = 900;
+
+/** How long `notify`/`mailEvents` waits before treating a `claimed`/`queued`/`unknown` row as stalled and re-checking it. */
+export const MAIL_RECONCILE_STALL_MS = 1_800_000;
+
+/** mailLog rows one `sweepStalled` tick may reschedule. */
+export const MAIL_SWEEP_PAGE = 50;
+
+/** A dedupe-keyed drop row in a transient failure state can be re-claimed after this long (D70). */
+export const DROP_RECLAIM_MIN_MS = 86_400_000;
+
+// --- ShopSavvy market-history state machine (T09, D71) -----------------------
+
+/** Attempts (claim + fetch) before a market lookup gives up as `terminal_failure`. */
+export const MARKET_MAX_ATTEMPTS = 3;
+
+/** Backoff before each retry after attempts 1 and 2 (10m, 1h, 6h). */
+export const MARKET_RETRY_BACKOFF_MS = [600_000, 3_600_000, 21_600_000];
+
+/** A `success` market lookup can only be manually refreshed after this long. */
+export const MARKET_REFRESH_MIN_AGE_MS = 7 * 86_400_000;
+
+/** Beyond this age, `lastObservedAt` is "may be out of date" and `verdict()` returns `unknown` (D73). */
+export const STALE_PRICE_MS = 3 * 86_400_000;
+
+// --- Cron fairness (D74) ------------------------------------------------------
+
+/** Owned items one `priceWatch.runAll` tick advances per user, off `items.by_nextCheck`. */
+export const PRICE_CHECK_PER_USER_PER_TICK = 10;
+
+/** Watches one `watches.sweep` tick advances per user, off `watches.by_status_nextCheck`. */
+export const WATCH_SWEEP_PER_USER = 10;
+
+// --- Retention (T22, D75) -----------------------------------------------------
+
+/** `processedEvents.payload` is cleared this many days after a row reaches a terminal status. */
+export const RETENTION_PAYLOAD_DAYS = 30;
+
+/** Observational checks (priceChecks/watchChecks/offerChecks) older than this are pruned. */
+export const RETENTION_OBSERVATION_DAYS = 180;
+
+/** Newest rows per parent kept when pruning observational checks, regardless of age. */
+export const RETENTION_KEEP_NEWEST = 30;
+
+/** Terminal mailLog rows (sent/failed/suppressed) older than this are pruned. */
+export const RETENTION_MAILLOG_DAYS = 90;
+
+/** Rows one resumable retention pass reads before rescheduling itself. */
+export const RETENTION_PAGE = 200;
 
 // --- Input bounds (B4, M1) ---------------------------------------------------
 

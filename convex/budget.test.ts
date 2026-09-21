@@ -159,6 +159,28 @@ describe("charge / tryCharge (named budgets from limits.ts)", () => {
   });
 });
 
+describe("claim_email global cap (T01/D76)", () => {
+  it("throws for the 101st distinct user even though each user's own daily count is fresh", async () => {
+    const t = setup();
+    const max = GLOBAL_DAILY_BUDGETS.claim_email.max;
+    expect(max).toBe(100);
+    for (let i = 0; i < max; i++) {
+      const { userId } = await signedIn(t, `U${i}`);
+      await t.run(async (ctx) => await charge(ctx, userId, "claim_email"));
+    }
+    const { userId: user101 } = await signedIn(t, "U100");
+    await expect(t.run(async (ctx) => await charge(ctx, user101, "claim_email"))).rejects.toThrow(ConvexError);
+    // The refused user's own per-user counter was never touched.
+    const rows = await usageRows(t);
+    expect(rows.find((r) => r.userId === user101 && r.kind === "claim_email")).toBeUndefined();
+  });
+
+  it("inbound_extract is a global-only kind: no per-user DAILY_BUDGETS entry, callers use tryConsumeGlobalBudget", async () => {
+    expect(GLOBAL_DAILY_BUDGETS.inbound_extract.max).toBe(500);
+    expect((DAILY_BUDGETS as Record<string, unknown>).inbound_extract).toBeUndefined();
+  });
+});
+
 describe("internal.budget.consume (for actions)", () => {
   it("looks the cap up by kind and throws at it", async () => {
     const t = setup();

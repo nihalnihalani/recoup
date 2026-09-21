@@ -23,15 +23,44 @@ export const variantMatch = v.union(v.literal("exact"), v.literal("unsure"), v.l
 export const verdictLabel = v.union(
   v.literal("good_price"), v.literal("fair"), v.literal("wait"), v.literal("inflated_discount"), v.literal("not_enough_history"), v.literal("unknown"),
 );
-export const verdictValidator = v.object({ label: verdictLabel, reason: v.string() });
+/**
+ * `qualified`/`qualifiedReason` are only produced by `lib/verdict.ts`'s
+ * `verdictWithQualifier()` (T04); optional so `verdict()`'s older
+ * `{label, reason}` shape keeps validating unchanged.
+ */
+export const verdictValidator = v.object({
+  label: verdictLabel,
+  reason: v.string(),
+  qualified: v.optional(v.boolean()),
+  qualifiedReason: v.optional(v.union(v.string(), v.null())),
+});
 export const priceSource = v.union(v.literal("recoup"), v.literal("shopsavvy"));
 export const watchStatus = v.union(v.literal("active"), v.literal("paused"), v.literal("archived"), v.literal("bought"));
 export const mailKind = v.union(v.literal("price_drop"));
-/** `queued` sits between `claimed` and `sent`: the component has an outboundId but no confirmed message id yet (F3). */
+/**
+ * `queued` sits between `claimed` and `sent`: the component has an outboundId but no confirmed message id yet (F3).
+ * `unknown` = reconciliation exhausted its attempts with no message id; `suppressed` = the send-time gate refused (T01/T06).
+ */
 export const mailStatus = v.union(
   v.literal("claimed"), v.literal("queued"), v.literal("sent"), v.literal("failed"),
+  v.literal("unknown"), v.literal("suppressed"),
 );
+/** Why a mailLog row is `suppressed`/`failed`, or why `alertGate` refused a send (T01). */
+export const mailReason = v.union(
+  v.literal("unverified"), v.literal("opted_out"), v.literal("deleted"), v.literal("address_suppressed"),
+  v.literal("daily_cap"), v.literal("global_cap"), v.literal("no_email"), v.literal("not_configured"),
+  v.literal("watch_inactive"), v.literal("send_failed"),
+);
+/** Why an address landed in `alertSettings.suppressedReason` (T01). */
+export const suppressedReason = v.union(v.literal("bounced"), v.literal("complained"), v.literal("user_unsubscribed"));
 export const offerStatus = v.union(v.literal("candidate"), v.literal("confirmed"), v.literal("rejected"));
+/** Per-watch ShopSavvy market-history fetch lifecycle (T01/T09, D71). */
+export const marketState = v.union(
+  v.literal("not_configured"), v.literal("queued"), v.literal("running"), v.literal("success"),
+  v.literal("empty_result"), v.literal("retryable_failure"), v.literal("terminal_failure"),
+);
+/** Account-deletion tombstone lifecycle (T01/T18, D77). */
+export const accountStateStatus = v.union(v.literal("deleting"), v.literal("deleted"));
 
 export default defineSchema({
   ...authTables,
@@ -45,7 +74,8 @@ export default defineSchema({
     userId: v.id("users"), merchant: v.string(), merchantDomain: v.string(), orderRef: v.optional(v.string()),
     purchasedAt: v.optional(v.number()), currency: v.string(), sourceMessageId: v.optional(v.string()),
     status: purchaseStatus, isExample: v.optional(v.boolean()),
-  }).index("by_user", ["userId"]).index("by_user_domain_order", ["userId", "merchantDomain", "orderRef"]),
+  }).index("by_user", ["userId"]).index("by_user_domain_order", ["userId", "merchantDomain", "orderRef"])
+    .index("by_user_status", ["userId", "status"]),
 
   /**
    * Line items. `returned` is set only by the user, never by extraction (D15).
@@ -60,7 +90,9 @@ export default defineSchema({
     imageUrl: v.optional(v.string()),
     /** Stamped when a manual price check is scheduled; carries the `priceWatch.checkNow` cooldown (review H1), as on watches. */
     checkRequestedAt: v.optional(v.number()),
-  }).index("by_purchase", ["purchaseId"]).index("by_user", ["userId"]),
+    /** Denormalised so the sweep reads a bounded page off `by_nextCheck` (D74 cron fairness). */
+    nextCheckAt: v.optional(v.number()),
+  }).index("by_purchase", ["purchaseId"]).index("by_user", ["userId"]).index("by_nextCheck", ["nextCheckAt"]),
 
   /** Immutable policy snapshots; refresh inserts a new row (D17). */
   policies: defineTable({
@@ -89,6 +121,16 @@ export default defineSchema({
     marketFetchedAt: v.optional(v.number()), marketNote: v.optional(v.string()),
     /** The product page's Open Graph image (absolute https), captured by a watch check. */
     imageUrl: v.optional(v.string()),
+    /** ShopSavvy market-history fetch lifecycle for this watch (T09, D71). */
+    marketState: v.optional(marketState),
+    marketAttempts: v.optional(v.number()),
+    /** Set while a market lookup is in flight, so a crashed attempt can be reclaimed. */
+    marketClaimedAt: v.optional(v.number()),
+    marketNextRetryAt: v.optional(v.number()),
+    /** Newest provider point time; `marketFetchedAt` stays the retrieval time. */
+    marketObservedAt: v.optional(v.number()),
+    /** Time of the last ACCEPTED own-store price (T04/T12 staleness gate). */
+    lastObservedAt: v.optional(v.number()),
   }).index("by_user", ["userId"]).index("by_user_status", ["userId", "status"]).index("by_status_nextCheck", ["status", "nextCheckAt"]),
 
   /** One observation of a watched page; sibling of priceChecks. observedCents undefined = no usable price (D16). listCents is the page's claimed "was" price. */
@@ -117,7 +159,27 @@ export default defineSchema({
     userId: v.id("users"), dedupeKey: v.string(), kind: mailKind, watchId: v.optional(v.id("watches")), to: v.string(),
     subject: v.string(), status: mailStatus, error: v.optional(v.string()), cents: v.optional(v.number()),
     previousCents: v.optional(v.number()), sentAt: v.optional(v.number()), outboundId: v.optional(vOutboundId),
-  }).index("by_dedupe", ["dedupeKey"]).index("by_user", ["userId"]).index("by_watch", ["watchId"]),
+    /** Why the row is `suppressed`/`failed`/`unknown` (T01/T06). */
+    reason: v.optional(mailReason),
+    /** Reconciliation attempt count (mirrors D56's backoff schedule). */
+    attempt: v.optional(v.number()),
+    /** Next time `notify.sweepStalled` should look at this row. */
+    nextCheckAt: v.optional(v.number()),
+    lastCheckedAt: v.optional(v.number()),
+    /** Stamped by `claimDrop`; re-claim (D70) keys on this, not `_creationTime`. */
+    claimedAt: v.optional(v.number()),
+    /** Raw AgentMail delivery status string (e.g. "delivered", "bounced"). */
+    providerStatus: v.optional(v.string()),
+    /** AgentMail's own message id; `onEvent` carries no outboundId, so this is the join key (`by_message`) instead. */
+    agentmailMessageId: v.optional(v.string()),
+  }).index("by_dedupe", ["dedupeKey"]).index("by_user", ["userId"]).index("by_watch", ["watchId"])
+    .index("by_status_nextCheck", ["status", "nextCheckAt"]).index("by_message", ["agentmailMessageId"]),
+
+  /** One row per user; alert opt-in/out and unsubscribe-token state, owns suppression via `alerts.suppressAddress` (T01). */
+  alertSettings: defineTable({
+    userId: v.id("users"), alertsEnabled: v.boolean(), unsubscribeToken: v.string(),
+    suppressedAt: v.optional(v.number()), suppressedReason: v.optional(suppressedReason), updatedAt: v.number(),
+  }).index("by_user", ["userId"]).index("by_unsubscribeToken", ["unsubscribeToken"]),
 
   /**
    * The same product at another store (W3). A `candidate` came from search and is never trusted: only a
@@ -155,7 +217,8 @@ export default defineSchema({
     status: claimStatus, windowEndsAt: v.optional(v.number()), policyId: v.optional(v.id("policies")), threadId: v.optional(v.string()),
     token: v.string(), version: v.number(), attentionAt: v.optional(v.number()), openedFromPriceCheckId: v.optional(v.id("priceChecks")),
     sendUnknown: v.optional(v.boolean()), isExample: v.optional(v.boolean()),
-  }).index("by_user", ["userId"]).index("by_item", ["itemId"]).index("by_token", ["token"]).index("by_thread", ["threadId"]),
+  }).index("by_user", ["userId"]).index("by_item", ["itemId"]).index("by_token", ["token"]).index("by_thread", ["threadId"])
+    .index("by_item_type_status", ["itemId", "type", "status"]),
 
   /** Append-only facts about money. Idempotency keys are scoped per claim (D38). Only user confirmation creates confirmed_credit (Inv 3). */
   ledgerEvents: defineTable({
@@ -196,4 +259,16 @@ export default defineSchema({
     /** When the row last entered `processing`; stuck detection compares against this, not `_creationTime` (review H5). */
     processingStartedAt: v.optional(v.number()),
   }).index("by_external", ["externalId"]).index("by_status", ["status"]).index("by_user_status", ["userId", "status"]),
+
+  /** Account-deletion tombstone (D77); absence of a row means the account is active. */
+  accountState: defineTable({
+    userId: v.id("users"), status: accountStateStatus, requestedAt: v.number(), completedAt: v.optional(v.number()),
+    attempts: v.number(), lastError: v.optional(v.string()), inboxDeleted: v.optional(v.boolean()),
+    progress: v.optional(v.object({ table: v.string(), cursor: v.optional(v.string()) })),
+  }).index("by_user", ["userId"]).index("by_status", ["status"]),
+
+  /** Named cursors for resumable background jobs (e.g. retention sweeps, D75), one row per `key`. */
+  opsState: defineTable({
+    key: v.string(), cursor: v.optional(v.string()), updatedAt: v.number(),
+  }).index("by_key", ["key"]),
 });
