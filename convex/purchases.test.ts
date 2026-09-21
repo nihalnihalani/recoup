@@ -223,3 +223,79 @@ describe("purchases", () => {
     expect(board.attention.some((e) => e.lastError === "boom")).toBe(true);
   });
 });
+
+describe("Phase 1 checkpoint decisions (D39, D43, D47)", () => {
+  it("R2: board confirmed is net recovered, clamped to expected, across claims", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const id = await as.mutation(api.purchases.create, basePurchase);
+    const got = await as.query(api.purchases.get, { purchaseId: id });
+    const claimId = await t.run(async (ctx) =>
+      ctx.db.insert("claims", {
+        purchaseId: id,
+        itemId: got!.items[0]._id,
+        userId,
+        type: "return_credit",
+        expectedCents: 4000,
+        status: "sent",
+        token: "CCC333",
+        version: 1,
+      }),
+    );
+    await t.run(async (ctx) => {
+      // Over-credit (5000 confirmed on a 4000 expected claim) must clamp to 4000, not 5000.
+      await ctx.db.insert("ledgerEvents", { claimId, userId, kind: "confirmed_credit", cents: 5000, evidence: "e" });
+    });
+    const board = await as.query(api.purchases.board, {});
+    expect(board.totals.confirmed).toBe(4000);
+  });
+
+  it("R6: create and confirm reject an empty merchantDomain, empty items, or an out-of-range purchasedAt", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    await expect(
+      as.mutation(api.purchases.create, { ...basePurchase, merchantDomain: "  " }),
+    ).rejects.toThrow();
+    await expect(
+      as.mutation(api.purchases.create, { ...basePurchase, items: [] }),
+    ).rejects.toThrow();
+    await expect(
+      as.mutation(api.purchases.create, { ...basePurchase, purchasedAt: Date.now() + 5 * 86_400_000 }),
+    ).rejects.toThrow();
+  });
+
+  it("R10: remove archives a purchase; board and get skip it but its ledger history is preserved", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const id = await as.mutation(api.purchases.create, basePurchase);
+    const got = await as.query(api.purchases.get, { purchaseId: id });
+    const claimId = await t.run(async (ctx) =>
+      ctx.db.insert("claims", {
+        purchaseId: id,
+        itemId: got!.items[0]._id,
+        userId,
+        type: "return_credit",
+        expectedCents: 1000,
+        status: "confirmed",
+        token: "DDD444",
+        version: 1,
+      }),
+    );
+    await t.run(async (ctx) =>
+      ctx.db.insert("ledgerEvents", { claimId, userId, kind: "confirmed_credit", cents: 1000, evidence: "e" }),
+    );
+
+    await as.mutation(api.purchases.remove, { purchaseId: id });
+
+    await expect(as.query(api.purchases.get, { purchaseId: id })).rejects.toThrow();
+    const board = await as.query(api.purchases.board, {});
+    expect(board.purchases.find((r) => r.purchase._id === id)).toBeUndefined();
+
+    const archived = await t.run(async (ctx) => ctx.db.get(id));
+    expect(archived?.status).toBe("archived");
+    const events = await t.run(async (ctx) =>
+      ctx.db.query("ledgerEvents").withIndex("by_claim", (q) => q.eq("claimId", claimId)).collect(),
+    );
+    expect(events).toHaveLength(1);
+  });
+});

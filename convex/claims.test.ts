@@ -276,3 +276,129 @@ describe("claims", () => {
     expect(new Set(tokens).size).toBe(tokens.length);
   });
 });
+
+describe("Phase 1 checkpoint decisions (D38-D48)", () => {
+  it("R1: idempotency keys are scoped per claim, empty key rejected, and a reused key with a different amount conflicts", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const { scarf, sweater } = await purchaseWithItems(as);
+    const scarfClaim = await openReturnClaim(as, scarf);
+    const sweaterClaim = await openReturnClaim(as, sweater);
+
+    // The same key on two different claims does not collide (D38: scoped by claimId).
+    await as.mutation(api.claims.confirmCredit, { claimId: scarfClaim, cents: 1000, evidence: "a", idempotencyKey: "shared" });
+    await as.mutation(api.claims.confirmCredit, { claimId: sweaterClaim, cents: 2000, evidence: "b", idempotencyKey: "shared" });
+    const s = await as.query(api.claims.get, { claimId: scarfClaim });
+    const w = await as.query(api.claims.get, { claimId: sweaterClaim });
+    expect(s!.balance.confirmed).toBe(1000);
+    expect(w!.balance.confirmed).toBe(2000);
+
+    // Reusing "shared" on scarfClaim again with a different amount is a conflict, not a silent no-op.
+    await expect(
+      as.mutation(api.claims.confirmCredit, { claimId: scarfClaim, cents: 1500, evidence: "c", idempotencyKey: "shared" }),
+    ).rejects.toThrow(/idempotency conflict/);
+
+    // Empty key is rejected outright.
+    await expect(
+      as.mutation(api.claims.confirmCredit, { claimId: scarfClaim, cents: 1000, evidence: "d", idempotencyKey: "" }),
+    ).rejects.toThrow();
+  });
+
+  it("R3: a later debit cannot exceed net confirmed credit", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const { scarf } = await purchaseWithItems(as);
+    const claimId = await openReturnClaim(as, scarf);
+    await as.mutation(api.claims.confirmCredit, { claimId, cents: 1000, evidence: "a", idempotencyKey: "k1" });
+    await expect(
+      as.mutation(api.claims.recordLaterDebit, { claimId, cents: 1001, evidence: "too much", idempotencyKey: "d1" }),
+    ).rejects.toThrow();
+    // Exactly the confirmed amount is fine.
+    await as.mutation(api.claims.recordLaterDebit, { claimId, cents: 1000, evidence: "all of it", idempotencyKey: "d2" });
+    const c = await as.query(api.claims.get, { claimId });
+    expect(c!.balance.confirmed - c!.balance.debited).toBe(0);
+  });
+
+  it("R4: adjustExpected refuses a dismissed claim", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const { scarf } = await purchaseWithItems(as);
+    const claimId = await openReturnClaim(as, scarf);
+    await as.mutation(api.claims.dismiss, { claimId });
+    await expect(
+      as.mutation(api.claims.adjustExpected, { claimId, expectedCents: 1000, reason: "x" }),
+    ).rejects.toThrow();
+  });
+
+  it("R7: a second return_credit claim on the same item is blocked even once the first is confirmed, but allowed once the first is dismissed", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const { scarf } = await purchaseWithItems(as);
+    const claimId = await openReturnClaim(as, scarf);
+    await as.mutation(api.claims.confirmCredit, { claimId, cents: 4000, evidence: "a", idempotencyKey: "k1" });
+    const c = await as.query(api.claims.get, { claimId });
+    expect(c!.claim.status).toBe("confirmed");
+
+    await expect(as.mutation(api.claims.open, { itemId: scarf })).rejects.toThrow();
+
+    await t.run(async (ctx) => ctx.db.patch(claimId, { status: "dismissed" }));
+    // Once dismissed, a fresh claim can be opened on the same item.
+    const reopened = await as.mutation(api.claims.open, { itemId: scarf });
+    expect(reopened).toBeTruthy();
+  });
+
+  it("R9: openClaim rejects an item that does not belong to the given purchase/user", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { as: other, userId: otherUserId } = await signedIn(t, "Other");
+    const { purchaseId, scarf } = await purchaseWithItems(as);
+    const { purchaseId: otherPurchaseId } = await purchaseWithItems(other);
+
+    await expect(
+      t.run((ctx) =>
+        openClaim(ctx, {
+          userId,
+          purchaseId: otherPurchaseId, // mismatched purchase
+          itemId: scarf,
+          type: "return_credit",
+          expectedCents: 4000,
+        }),
+      ),
+    ).rejects.toThrow();
+
+    await expect(
+      t.run((ctx) =>
+        openClaim(ctx, {
+          userId: otherUserId, // mismatched user
+          purchaseId,
+          itemId: scarf,
+          type: "return_credit",
+          expectedCents: 4000,
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("R11: ledger events use assertPositiveCents (a zero-cents confirmCredit throws)", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const { scarf } = await purchaseWithItems(as);
+    const claimId = await openReturnClaim(as, scarf);
+    await expect(
+      as.mutation(api.claims.confirmCredit, { claimId, cents: 0, evidence: "x", idempotencyKey: "k" }),
+    ).rejects.toThrow();
+  });
+
+  it("R12: dismiss refuses a confirmed claim; board skips a claim marked isExample even on a real purchase", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const { scarf } = await purchaseWithItems(as);
+    const claimId = await openReturnClaim(as, scarf);
+    await as.mutation(api.claims.confirmCredit, { claimId, cents: 4000, evidence: "a", idempotencyKey: "k1" });
+    await expect(as.mutation(api.claims.dismiss, { claimId })).rejects.toThrow();
+
+    await t.run(async (ctx) => ctx.db.patch(claimId, { isExample: true }));
+    const board = await as.query(api.purchases.board, {});
+    expect(board.totals.confirmed).toBe(0);
+  });
+});

@@ -104,6 +104,25 @@ export function statusAfterEvent(
   return current === "confirmed" ? current : "promised";
 }
 
+/** Net money actually recovered so far, clamped to [0, expected] (D39). */
+export function netConfirmed(b: Balance): number {
+  return Math.min(Math.max(b.confirmed - b.debited, 0), b.expected);
+}
+
+/**
+ * Re-derives a claim's status purely from its current balance, for
+ * non-event-driven transitions like `adjustExpected` (D41). Settled ->
+ * `confirmed`; a previously-confirmed claim that a re-derived balance no
+ * longer counts as settled -> `reopened`; otherwise unchanged. Callers must
+ * refuse to touch a `dismissed` claim before calling this (dismissed is
+ * terminal and has no balance-derived transition).
+ */
+export function deriveStatus(current: ClaimStatus, b: Balance): ClaimStatus {
+  if (isSettled(b)) return "confirmed";
+  if (current === "confirmed") return "reopened";
+  return current;
+}
+
 const TOKEN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /** A short, human-readable, collision-resistant claim token for email subjects. */

@@ -5,6 +5,8 @@ import {
   assertCurrency,
   assertPositiveCents,
   assertQty,
+  assertTimestamp,
+  assertWindowDays,
   toCents,
 } from "./money";
 
@@ -87,5 +89,49 @@ describe("assertCurrency", () => {
 
   test('assertCurrency("XXX") ok (valid ISO code)', () => {
     expect(assertCurrency("XXX")).toBe("XXX");
+  });
+});
+
+describe("assertTimestamp (D43/R6)", () => {
+  test("a recent past timestamp is ok", () => {
+    expect(assertTimestamp(Date.now() - 1000)).toBeGreaterThan(0);
+  });
+
+  test("0 is ok", () => {
+    expect(assertTimestamp(0)).toBe(0);
+  });
+
+  test("negative throws", () => {
+    expect(() => assertTimestamp(-1)).toThrow(ConvexError);
+  });
+
+  test("more than a day in the future throws", () => {
+    expect(() => assertTimestamp(Date.now() + 2 * 86_400_000)).toThrow(ConvexError);
+  });
+
+  test("NaN throws", () => {
+    expect(() => assertTimestamp(NaN)).toThrow(ConvexError);
+  });
+});
+
+describe("assertWindowDays (D43/R6)", () => {
+  test("0 is ok", () => {
+    expect(assertWindowDays(0)).toBe(0);
+  });
+
+  test("3650 is ok", () => {
+    expect(assertWindowDays(3650)).toBe(3650);
+  });
+
+  test("3651 throws", () => {
+    expect(() => assertWindowDays(3651)).toThrow(ConvexError);
+  });
+
+  test("negative throws", () => {
+    expect(() => assertWindowDays(-1)).toThrow(ConvexError);
+  });
+
+  test("non-integer throws", () => {
+    expect(() => assertWindowDays(1.5)).toThrow(ConvexError);
   });
 });

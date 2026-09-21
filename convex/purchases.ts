@@ -1,11 +1,10 @@
 import { ConvexError, v } from "convex/values";
-import { mutation, query, type QueryCtx } from "./_generated/server";
+import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { ownedItem, ownedPurchase, requireUserId } from "./lib/access";
-import { balance } from "./lib/ledger";
-import { assertCents, assertCurrency, assertQty } from "./lib/money";
-import { cancelPending } from "./followUps";
+import { balance, netConfirmed } from "./lib/ledger";
+import { assertCents, assertCurrency, assertQty, assertTimestamp } from "./lib/money";
 
 const itemInput = v.object({
   name: v.string(),
@@ -34,6 +33,9 @@ export const create = mutation({
       throw new ConvexError("purchasedAt is required for an active purchase");
     }
     assertCurrency(args.currency);
+    if (!args.merchantDomain.trim()) throw new ConvexError("merchantDomain must not be empty"); // D43
+    if (items.length === 0) throw new ConvexError("items must not be empty"); // D43
+    if (purchasedAt !== undefined) assertTimestamp(purchasedAt, "purchasedAt"); // D43
     for (const it of items) {
       assertCents(it.unitCents, "unitCents");
       assertQty(it.qty);
@@ -78,6 +80,9 @@ export const confirm = mutation({
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     await ownedPurchase(ctx, args.purchaseId, userId);
+    if (!args.merchantDomain.trim()) throw new ConvexError("merchantDomain must not be empty"); // D43
+    if (args.items.length === 0) throw new ConvexError("items must not be empty"); // D43
+    assertTimestamp(args.purchasedAt, "purchasedAt"); // D43
     for (const it of args.items) {
       const item = await ownedItem(ctx, it.itemId, userId);
       if (item.purchaseId !== args.purchaseId) {
@@ -120,57 +125,25 @@ export const setReturned = mutation({
   },
 });
 
+/**
+ * "Removes" a purchase by archiving it (D47/R10): `status` becomes
+ * `"archived"` rather than the row (and everything hanging off it) being
+ * deleted. `board` and `get` both skip archived purchases, but every item,
+ * claim, ledger event, draft, reply, note, and follow-up is left untouched
+ * so the money history is preserved. Does not check ownership itself —
+ * callers (`remove` here, `examples.remove` in T12) must verify the caller
+ * owns the purchase before calling this.
+ */
+export async function removePurchase(ctx: MutationCtx, purchaseId: Id<"purchases">) {
+  await ctx.db.patch(purchaseId, { status: "archived" });
+}
+
 export const remove = mutation({
   args: { purchaseId: v.id("purchases") },
   handler: async (ctx, { purchaseId }) => {
     const userId = await requireUserId(ctx);
     await ownedPurchase(ctx, purchaseId, userId);
-    const items = await ctx.db
-      .query("items")
-      .withIndex("by_purchase", (q) => q.eq("purchaseId", purchaseId))
-      .collect();
-    for (const it of items) {
-      const claims = await ctx.db
-        .query("claims")
-        .withIndex("by_item", (q) => q.eq("itemId", it._id))
-        .collect();
-      for (const c of claims) {
-        await cancelPending(ctx, c._id);
-        for (const e of await ctx.db
-          .query("ledgerEvents")
-          .withIndex("by_claim", (q) => q.eq("claimId", c._id))
-          .collect())
-          await ctx.db.delete(e._id);
-        for (const d of await ctx.db
-          .query("drafts")
-          .withIndex("by_claim", (q) => q.eq("claimId", c._id))
-          .collect())
-          await ctx.db.delete(d._id);
-        for (const r of await ctx.db
-          .query("replies")
-          .withIndex("by_claim", (q) => q.eq("claimId", c._id))
-          .collect())
-          await ctx.db.delete(r._id);
-        for (const n of await ctx.db
-          .query("claimNotes")
-          .withIndex("by_claim", (q) => q.eq("claimId", c._id))
-          .collect())
-          await ctx.db.delete(n._id);
-        for (const f of await ctx.db
-          .query("followUps")
-          .withIndex("by_claim", (q) => q.eq("claimId", c._id))
-          .collect())
-          await ctx.db.delete(f._id);
-        await ctx.db.delete(c._id);
-      }
-      for (const pc of await ctx.db
-        .query("priceChecks")
-        .withIndex("by_item", (q) => q.eq("itemId", it._id))
-        .collect())
-        await ctx.db.delete(pc._id);
-      await ctx.db.delete(it._id);
-    }
-    await ctx.db.delete(purchaseId);
+    await removePurchase(ctx, purchaseId);
   },
 });
 
@@ -197,6 +170,7 @@ export const get = query({
   handler: async (ctx, { purchaseId }) => {
     const userId = await requireUserId(ctx);
     const purchase = await ownedPurchase(ctx, purchaseId, userId);
+    if (purchase.status === "archived") throw new ConvexError("Purchase not found"); // D47
     const rawItems = await ctx.db
       .query("items")
       .withIndex("by_purchase", (q) => q.eq("purchaseId", purchaseId))
@@ -233,11 +207,12 @@ export const board = query({
   args: {},
   handler: async (ctx) => {
     const userId = await requireUserId(ctx);
-    const purchases = await ctx.db
+    const allPurchases = await ctx.db
       .query("purchases")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .order("desc")
       .collect();
+    const purchases = allPurchases.filter((p) => p.status !== "archived"); // D47
     let owed = 0,
       asked = 0,
       confirmed = 0;
@@ -248,15 +223,16 @@ export const board = query({
           .withIndex("by_purchase", (q) => q.eq("purchaseId", p._id))
           .collect();
         const claims = (await Promise.all(items.map((it) => claimsWithBalance(ctx, it._id)))).flat();
-        // Example purchases never contribute to real money totals (D27).
-        if (!p.isExample) {
-          for (const c of claims) {
-            if (c.status === "dismissed") continue;
-            confirmed += c.balance.confirmed;
-            const unresolvedPositive = Math.max(0, c.balance.unresolved);
-            owed += unresolvedPositive;
-            if (["sent", "packet", "promised"].includes(c.status)) asked += unresolvedPositive;
-          }
+        for (const c of claims) {
+          // Dismissed and example claims never contribute to real money
+          // totals -- checked per-claim (D48), not just per-purchase (D27),
+          // since a claim can carry its own isExample independent of its
+          // purchase's flag.
+          if (c.status === "dismissed" || c.isExample) continue;
+          confirmed += netConfirmed(c.balance); // D39: net recovered, clamped to [0, expected].
+          const unresolvedPositive = Math.max(0, c.balance.unresolved);
+          owed += unresolvedPositive;
+          if (["sent", "packet", "promised"].includes(c.status)) asked += unresolvedPositive;
         }
         return {
           purchase: p,

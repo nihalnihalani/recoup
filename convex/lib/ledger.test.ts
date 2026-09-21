@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import { ConvexError } from "convex/values";
 import {
   balance,
+  deriveStatus,
   isSettled,
+  netConfirmed,
   priceDropCents,
   windowEndsAt,
   statusAfterEvent,
@@ -163,6 +165,42 @@ describe("statusAfterEvent", () => {
     expect(statusAfterEvent("detected", "promised_credit", b)).toBe(
       "promised",
     );
+  });
+});
+
+describe("netConfirmed (D39/R2)", () => {
+  it("clamps confirmed-debited to [0, expected]", () => {
+    expect(netConfirmed(balance(4000, [{ kind: "confirmed_credit", cents: 4000 }]))).toBe(4000);
+    // Over-credit is clamped down to expected, not left at the raw 5000.
+    expect(netConfirmed(balance(4000, [{ kind: "confirmed_credit", cents: 5000 }]))).toBe(4000);
+    // A later debit reduces net confirmed, never below 0.
+    expect(
+      netConfirmed(
+        balance(4000, [
+          { kind: "confirmed_credit", cents: 1000 },
+          { kind: "later_debit", cents: 1500 },
+        ]),
+      ),
+    ).toBe(0);
+    expect(netConfirmed(balance(4000, []))).toBe(0);
+  });
+});
+
+describe("deriveStatus (D41/R4)", () => {
+  it("moves a non-confirmed claim to confirmed once its balance settles", () => {
+    const b = balance(4000, [{ kind: "confirmed_credit", cents: 4000 }]);
+    expect(deriveStatus("detected", b)).toBe("confirmed");
+  });
+
+  it("reopens a confirmed claim whose re-derived balance is no longer settled", () => {
+    const b = balance(3300, []); // expectedCents lowered but no credit posted yet
+    expect(deriveStatus("confirmed", b)).toBe("reopened");
+  });
+
+  it("leaves a non-confirmed, non-settled claim's status unchanged", () => {
+    const b = balance(3300, []);
+    expect(deriveStatus("detected", b)).toBe("detected");
+    expect(deriveStatus("promised", b)).toBe("promised");
   });
 });
 

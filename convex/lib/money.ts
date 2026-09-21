@@ -18,6 +18,20 @@ export function assertQty(n: number): number {
   return n;
 }
 
+/** A plausible timestamp (ms epoch): finite, not negative, not more than a day in the future (D43). */
+export function assertTimestamp(n: number, label = "timestamp"): number {
+  if (!Number.isFinite(n) || n < 0 || n > Date.now() + 86_400_000)
+    throw new ConvexError(`${label} must be a timestamp between 0 and one day from now`);
+  return n;
+}
+
+/** A plausible policy window in days: a safe integer from 0 to 3650 (D43). */
+export function assertWindowDays(n: number, label = "windowDays"): number {
+  if (!Number.isSafeInteger(n) || n < 0 || n > 3650)
+    throw new ConvexError(`${label} must be a safe integer between 0 and 3650`);
+  return n;
+}
+
 export function assertCurrency(s: string): string {
   if (!/^[A-Z]{3}$/.test(s))
     throw new ConvexError("currency must be a 3-letter ISO 4217 code");

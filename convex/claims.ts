@@ -3,7 +3,7 @@ import { components } from "./_generated/api";
 import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { ownedClaim, ownedItem, requireUserId } from "./lib/access";
-import { balance, newToken, statusAfterEvent, type EventKind } from "./lib/ledger";
+import { balance, deriveStatus, newToken, statusAfterEvent, type EventKind } from "./lib/ledger";
 import { assertCents, assertPositiveCents } from "./lib/money";
 import { eventKind } from "./schema";
 import { cancelPending } from "./followUps";
@@ -13,7 +13,7 @@ const MAX_TOKEN_ATTEMPTS = 10;
 /**
  * Shared claim-creation path used by the public `open` mutation (always
  * return_credit, D20) and by price-watch / examples callers (T09, T12).
- * Validates related-id ownership (D19) and generates a globally unique
+ * Validates related-id ownership (D19, D46) and generates a globally unique
  * token (D23) before inserting.
  */
 export async function openClaim(
@@ -32,11 +32,28 @@ export async function openClaim(
 ): Promise<Id<"claims">> {
   assertPositiveCents(args.expectedCents, "expectedCents");
 
+  // D46: re-check the item really belongs to this purchase/user; a caller
+  // (price-watch, examples, `open`) could otherwise pass a mismatched id.
+  const item = await ctx.db.get(args.itemId);
+  if (!item || item.purchaseId !== args.purchaseId || item.userId !== args.userId) {
+    throw new ConvexError("Item does not match this purchase/user");
+  }
+
   const existing = await ctx.db
     .query("claims")
     .withIndex("by_item", (q) => q.eq("itemId", args.itemId))
     .collect();
-  if (existing.some((c) => c.type === args.type && !["confirmed", "dismissed"].includes(c.status))) {
+  // D44: a return_credit claim on an item blocks another return_credit claim
+  // on the same item unless the earlier one was dismissed -- even a
+  // confirmed one, since cross-claim allocation is out of scope (D24).
+  // price_adjustment keeps the original rule (blocked unless confirmed or
+  // dismissed) so a settled price claim doesn't prevent a later, separate
+  // price drop on the same item from ever being detected.
+  const blocked =
+    args.type === "return_credit"
+      ? (status: string) => status !== "dismissed"
+      : (status: string) => !["confirmed", "dismissed"].includes(status);
+  if (existing.some((c) => c.type === args.type && blocked(c.status))) {
     throw new ConvexError("An open claim of this type already exists for this item");
   }
 
@@ -51,7 +68,7 @@ export async function openClaim(
 
   if (args.openedFromPriceCheckId) {
     const priceCheck = await ctx.db.get(args.openedFromPriceCheckId);
-    if (!priceCheck || priceCheck.itemId !== args.itemId) {
+    if (!priceCheck || priceCheck.itemId !== args.itemId || priceCheck.userId !== args.userId) {
       throw new ConvexError("Price check does not match this item");
     }
   }
@@ -123,6 +140,7 @@ export const open = mutation({
       type: "return_credit",
       expectedCents,
       policyId: policy?._id,
+      isExample: purchase.isExample,
     });
 
     if (fee > 0) {
@@ -142,9 +160,12 @@ export const open = mutation({
 
 /**
  * Appends one ledger event and recomputes claim status from the full
- * ledger (ARCHITECTURE_PATTERNS: derived sums are never stored). Dedupes
- * by idempotencyKey (D10) and refuses to touch a dismissed claim, which is
- * terminal.
+ * ledger (ARCHITECTURE_PATTERNS: derived sums are never stored). Dedupes by
+ * `(claimId, idempotencyKey)` (D10, D38 -- keys are scoped per claim, not
+ * global) and refuses to touch a dismissed claim, which is terminal. An
+ * empty key is rejected outright; a key that collides with a stored event
+ * of a *different* kind or amount is an idempotency conflict, never a
+ * silent no-op (D38). Asserts run before the dedupe lookup.
  */
 export async function applyEvent(
   ctx: MutationCtx,
@@ -155,14 +176,20 @@ export async function applyEvent(
   idempotencyKey?: string,
 ) {
   if (claim.status === "dismissed") throw new ConvexError("Claim is dismissed");
-  if (idempotencyKey) {
+  assertPositiveCents(cents, "cents"); // D48
+  if (idempotencyKey !== undefined) {
+    if (idempotencyKey === "") throw new ConvexError("idempotencyKey must not be empty");
     const dup = await ctx.db
       .query("ledgerEvents")
-      .withIndex("by_key", (q) => q.eq("idempotencyKey", idempotencyKey))
+      .withIndex("by_claim_key", (q) => q.eq("claimId", claim._id).eq("idempotencyKey", idempotencyKey))
       .first();
-    if (dup) return { deduped: true as const, status: claim.status };
+    if (dup) {
+      if (dup.kind !== kind || dup.cents !== cents) {
+        throw new ConvexError("idempotency conflict");
+      }
+      return { deduped: true as const, status: claim.status };
+    }
   }
-  assertCents(cents, "cents");
 
   await ctx.db.insert("ledgerEvents", { claimId: claim._id, userId: claim.userId, kind, cents, evidence, idempotencyKey });
   const events = await ctx.db
@@ -210,25 +237,44 @@ export const recordLaterDebit = mutation({
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, args.claimId, userId);
+    // D40: a later debit can only claw back money already confirmed and not
+    // already clawed back -- it can never exceed net confirmed credit.
+    const events = await ctx.db
+      .query("ledgerEvents")
+      .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+      .collect();
+    const b = balance(claim.expectedCents, events);
+    if (args.cents > b.confirmed - b.debited) {
+      throw new ConvexError("A later debit cannot exceed the net confirmed credit for this claim");
+    }
     return applyEvent(ctx, claim, "later_debit", args.cents, args.evidence, args.idempotencyKey);
   },
 });
 
 /**
  * Corrects the expected amount without touching the ledger (D24): no
- * ledger event, just a note. Unapproves any not-yet-sent draft (no
- * outboundId) since its body may cite the old amount, and cancels any
- * pending reminder since the claim's terms just changed.
+ * ledger event, just a note. Re-derives status from the new balance via the
+ * shared `deriveStatus` (D41) rather than leaving a stale status behind.
+ * Unapproves any not-yet-sent draft (no outboundId) since its body may cite
+ * the old amount, and cancels any pending reminder since the claim's terms
+ * just changed. Refuses a dismissed claim, which is terminal (D41).
  */
 export const adjustExpected = mutation({
   args: { claimId: v.id("claims"), expectedCents: v.number(), reason: v.string() },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, args.claimId, userId);
+    if (claim.status === "dismissed") throw new ConvexError("Claim is dismissed");
     assertPositiveCents(args.expectedCents, "expectedCents");
     const oldCents = claim.expectedCents;
 
-    await ctx.db.patch(claim._id, { expectedCents: args.expectedCents, version: claim.version + 1 });
+    const events = await ctx.db
+      .query("ledgerEvents")
+      .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+      .collect();
+    const status = deriveStatus(claim.status, balance(args.expectedCents, events));
+
+    await ctx.db.patch(claim._id, { expectedCents: args.expectedCents, status, version: claim.version + 1 });
 
     const drafts = await ctx.db
       .query("drafts")
@@ -256,6 +302,7 @@ export const dismiss = mutation({
   handler: async (ctx, { claimId }) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, claimId, userId);
+    if (claim.status === "confirmed") throw new ConvexError("Cannot dismiss a confirmed claim"); // D48
     await cancelPending(ctx, claim._id);
     await ctx.db.patch(claim._id, { status: "dismissed", version: claim.version + 1, attentionAt: undefined });
     await ctx.db.insert("claimNotes", { claimId: claim._id, userId, kind: "status", text: "Dismissed by user" });

@@ -46,7 +46,7 @@ describe("followUps.scheduleReminder + fire", () => {
     const claim = await seedClaim(t, userId, "sent");
     if (!claim) throw new Error("claim not created");
 
-    const fireAt = Date.now() + 1000;
+    const fireAt = Date.now() - 1000;
     await as.run((ctx) => scheduleReminder(ctx, claim, fireAt));
 
     const rows = await as.run((ctx) =>
@@ -78,7 +78,7 @@ describe("followUps.scheduleReminder + fire", () => {
     const claim = await seedClaim(t, userId, "confirmed");
     if (!claim) throw new Error("claim not created");
 
-    await as.run((ctx) => scheduleReminder(ctx, claim, Date.now() + 1000));
+    await as.run((ctx) => scheduleReminder(ctx, claim, Date.now() - 1000));
     await t.mutation(internal.followUps.fire, { claimId: claim._id });
 
     const rows = await as.run((ctx) =>
@@ -88,6 +88,26 @@ describe("followUps.scheduleReminder + fire", () => {
         .collect(),
     );
     expect(rows[0].status).toBe("cancelled");
+    const updatedClaim = await as.run((ctx) => ctx.db.get(claim._id));
+    expect(updatedClaim?.attentionAt).toBeUndefined();
+  });
+
+  it("R5: fire is a no-op when the pending reminder is not due yet", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const claim = await seedClaim(t, userId, "sent");
+    if (!claim) throw new Error("claim not created");
+
+    await as.run((ctx) => scheduleReminder(ctx, claim, Date.now() + 100_000));
+    await t.mutation(internal.followUps.fire, { claimId: claim._id });
+
+    const rows = await as.run((ctx) =>
+      ctx.db
+        .query("followUps")
+        .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+        .collect(),
+    );
+    expect(rows[0].status).toBe("pending");
     const updatedClaim = await as.run((ctx) => ctx.db.get(claim._id));
     expect(updatedClaim?.attentionAt).toBeUndefined();
   });

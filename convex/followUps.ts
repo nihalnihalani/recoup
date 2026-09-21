@@ -41,28 +41,33 @@ export async function scheduleReminder(
 }
 
 /**
- * Fires a scheduled reminder. Acts on the claim's current status only
- * (D28): `confirmed` and `dismissed` claims cancel their pending reminders
- * without touching `attentionAt`; every other status gets `attentionAt` set
- * so the board surfaces it. Does not gate on claimVersion — a partial
- * credit bumps version on every event and would otherwise silently kill
- * reminders.
+ * Fires a scheduled reminder. Acts only on pending rows whose `fireAt` has
+ * actually arrived (D42/R5) -- if none are due yet, this is a no-op and the
+ * claim is left untouched. Among the due rows, acts on the claim's current
+ * status (D28): `confirmed` and `dismissed` claims cancel their due
+ * reminders without touching `attentionAt`; every other status gets
+ * `attentionAt` set so the board surfaces it. Does not gate on
+ * claimVersion — a partial credit bumps version on every event and would
+ * otherwise silently kill reminders.
  */
 export const fire = internalMutation({
   args: { claimId: v.id("claims") },
   handler: async (ctx, { claimId }) => {
-    const claim = await ctx.db.get(claimId);
-    const pending = (
+    const now = Date.now();
+    const due = (
       await ctx.db
         .query("followUps")
         .withIndex("by_claim", (q) => q.eq("claimId", claimId))
         .collect()
-    ).filter((f) => f.status === "pending");
+    ).filter((f) => f.status === "pending" && f.fireAt <= now);
+    if (due.length === 0) return;
+
+    const claim = await ctx.db.get(claimId);
     if (!claim || claim.status === "confirmed" || claim.status === "dismissed") {
-      for (const f of pending) await ctx.db.patch(f._id, { status: "cancelled" });
+      for (const f of due) await ctx.db.patch(f._id, { status: "cancelled" });
       return;
     }
-    for (const f of pending) await ctx.db.patch(f._id, { status: "fired" });
-    await ctx.db.patch(claimId, { attentionAt: Date.now() });
+    for (const f of due) await ctx.db.patch(f._id, { status: "fired" });
+    await ctx.db.patch(claimId, { attentionAt: now });
   },
 });
