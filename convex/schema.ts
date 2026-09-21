@@ -43,7 +43,12 @@ export default defineSchema({
     status: purchaseStatus, isExample: v.optional(v.boolean()),
   }).index("by_user", ["userId"]).index("by_user_domain_order", ["userId", "merchantDomain", "orderRef"]),
 
-  /** Line items. `returned` is set only by the user, never by extraction (D15). */
+  /**
+   * Line items. `returned` is set only by the user, never by extraction (D15).
+   * `checkRequestedAt` is stamped when `priceWatch.checkNow` schedules a manual
+   * check, so it carries that check's cooldown the same way a watch's own
+   * `checkRequestedAt` does (F2).
+   */
   items: defineTable({
     purchaseId: v.id("purchases"), userId: v.id("users"), name: v.string(), unitCents: v.number(), qty: v.number(),
     productUrl: v.optional(v.string()), returned: v.boolean(), returnedAt: v.optional(v.number()),

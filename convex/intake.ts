@@ -15,7 +15,7 @@ import { requireUserId } from "./lib/access";
 import { extract } from "./lib/ai";
 import { InboundEmail, type InboundEmailT } from "./lib/schemas";
 import { normalizeDomain } from "./lib/policyText";
-import { assertCents, assertPositiveCents, assertQty, toCents } from "./lib/money";
+import { assertPositiveCents, toCents } from "./lib/money";
 import { sanitizeError } from "./lib/errors";
 import { applyEvent, openClaim } from "./claims";
 import { parseProductUrl } from "./lib/watchUrl";
@@ -54,6 +54,18 @@ const OWNERLESS_AFTER_MS = 86_400_000;
 // (ARCHITECTURE_PATTERNS §Actions): every number is re-derived here and a
 // violation downgrades the event to needs_review instead of writing money.
 // ---------------------------------------------------------------------------
+
+function safeCents(amount: number): number | null {
+  if (!Number.isFinite(amount)) return null;
+  const cents = Math.round(Math.abs(amount) * 100);
+  if (!Number.isSafeInteger(cents) || cents > MAX_CENTS) return null;
+  return cents;
+}
+
+function safeQty(qty: number): number | null {
+  if (!Number.isSafeInteger(qty) || qty < 1 || qty > MAX_QTY) return null;
+  return qty;
+}
 
 function safeCurrency(code: string): string | null {
   const upper = code.trim().toUpperCase();

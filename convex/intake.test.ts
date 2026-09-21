@@ -3,6 +3,7 @@ import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
+import { DAILY_BUDGETS } from "./limits";
 
 // `createPasteEvent` and `retryEvent` schedule `processEvent`, which would
 // call OpenAI. Fake timers keep convex-test from running it (D31).
@@ -170,7 +171,7 @@ describe("intake.applyExtraction — orders", () => {
       parsed: orderEmail({
         items: [
           { name: "Wool scarf", unitPrice: 79.99, qty: 1, productUrl: null },
-          { name: "Phantom hat", unitPrice: -5, qty: 1, productUrl: null },
+          { name: "Phantom hat", unitPrice: Infinity, qty: 1, productUrl: null },
         ],
       }),
     });
@@ -511,9 +512,11 @@ describe("intake — paste, retry and the attention list", () => {
 
     const rowA = await eventRow(t, idA);
     const rowB = await eventRow(t, idB);
+    // The digest hashes `${userId}\n${body}`, so two different users pasting the
+    // identical text get different externalIds and are never handed each other's row.
     expect(rowA.externalId).not.toBe(rowB.externalId);
-    expect(rowA.externalId).toContain(a.userId);
-    expect(rowB.externalId).toContain(b.userId);
+    expect(rowA.userId).toBe(a.userId);
+    expect(rowB.userId).toBe(b.userId);
   });
 
   it("refuses to hand one user the row another user's identical paste created", async () => {
@@ -538,6 +541,19 @@ describe("intake — paste, retry and the attention list", () => {
     await expect(
       t.action(api.intake.paste, { text: "x".repeat(200) }),
     ).rejects.toThrow(ConvexError);
+  });
+
+  it(`F2: caps a user at ${DAILY_BUDGETS.paste.max} NEW pastes a day; a repeat of one on file is still free`, async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const paste = (i: number | string) => `Order confirmation email body padding text ${i}`;
+    for (let i = 0; i < DAILY_BUDGETS.paste.max; i++) {
+      await expect(as.action(api.intake.paste, { text: paste(i) })).resolves.toBeTruthy();
+    }
+    // A repeat of an already-processed paste is served from cache, not a new spend.
+    await expect(as.action(api.intake.paste, { text: paste(0) })).resolves.toBeTruthy();
+
+    await expect(as.action(api.intake.paste, { text: paste("brand new") })).rejects.toThrow(ConvexError);
   });
 
   it("lists only the caller's unfinished events and re-queues one on retry", async () => {
