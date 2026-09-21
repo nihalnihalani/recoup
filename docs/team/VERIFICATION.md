@@ -40,3 +40,5 @@ Each entry: date · env · revision · command/scenario · result · counts · l
 
 ## Required scenarios — status update
 All 15 rows in the table above: **VERIFIED_LOCAL** via `convex/scenarios.test.ts` (plus per-module tests). Live parts remain BLOCKED_EXTERNAL: real OpenAI extraction, real AgentMail send/receive/webhook, real two-tab double-approve under OCC, real scheduler delays.
+- 2026-09-21 · dev deployment · 2ad14bf+ · lead: `npx convex run profiles:ensureInbox --identity …` · FAILED `Couldn't resolve agentmail.lib.createInbox`; `npx convex run --component agentmail lib:createInbox` reaches the function (fails on missing key) → parent→component reference resolution broken; dispatched to integrations lane as blocker
+- 2026-09-21 · dev deployment · T11b-2 browser rehearsal · examples load (pill, totals unchanged), countdown, checkNow (DNS failure note surfaced), paste → failed event in Needs attention → retry bumps attempts · OpenAI/AgentMail calls fail with generic user-visible text (raw `Error`, not `ConvexError`)
