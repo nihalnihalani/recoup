@@ -45,6 +45,15 @@ the candidate is re-issued as **`rc-2026-09-21.2`** on commit **`357dc37`**.
 §1–§14 stay as the historical record for `rc-2026-09-21`/`3f5f739`; the tag
 `rc-2026-09-21` itself is untouched ("tags never move").
 
+**Opus checkpoint 6e (`docs/team/DECISIONS.md` D133, read-only at
+`357dc37`) verdict: T18 ACCEPT — `357dc37` is releasable as
+`rc-2026-09-21.2` with a LOW-only remaining list.** All ten T18.6 items
+closed with fail-before/pass-after tests (217/217 in the touched regression
+files). Four LOW items remain open (§15.8): F-T18.6-1 (wording corrected
+here per checkpoint 6e's N3), F-T18.6-2, and two new ones checkpoint 6e
+itself found — N1 and N2 — plus N4. None block the release; D133's own
+words: "T18 ACCEPT."
+
 ## 1. Candidate identity
 
 | | |
@@ -549,8 +558,11 @@ unchanged since `3f5f739` (confirmed by diff). §8's migration list and §9's
 | **F-T25-1** (smoke.mjs bundle-host false positive) | LOW, open | **CLOSED** — fixed in `scripts/smoke.mjs` (commit `2d3b816`); confirmed live, 15.4 |
 | **B-9** (D129, MEDIUM — alert webhook events surviving 7-day purge) | MEDIUM, open | **CLOSED** — `purgeOutbound` widened, `cleanupFinalizedOutbound` deletes events too (D131) |
 | **B-1, B-2, B-3, B-4, B-5, B-6, B-7** (D129 LOWs) | LOW, open | **CLOSED** — all landed in T18.6 per D131 |
-| **F-T18.6-1** (new, D131) | — | **OPEN, LOW.** A `mailLog` row whose message has > 1,000 events cannot be cleared in one page and stays un-purged; noted in RUNBOOK. Bounded-but-incomplete cleanup, not a correctness bug (no data leaks past `deleted`, just slower to fully drain for a message with an unusually large event count) |
-| **F-T18.6-2** (new, D131) | — | **OPEN, LOW.** The `inboxProvision` rate-limiter unit is not released with the placeholder after a failed provisioning POST — a deliberate secondary throttle (fails safe toward "provision less often" after an error), not a defect |
+| **F-T18.6-1** (D131; wording corrected per checkpoint 6e N3, D133) | — | **OPEN, LOW.** Corrected description — the original "slower to fully drain" framing understated it: a `mailLog` row whose message carries **≥ 1,000 component events is *skipped* by the purge, never drains**, and **retains** the user's email address, subject and cents fields, plus the shared-inbox `outboundMessages` row and the overflow `events` themselves. **Nothing currently reports it** — `ops.backlog.deletions` shows 0 regardless. Manual detection/re-drive documented in `docs/ops/RUNBOOK.md` §12. |
+| **F-T18.6-2** (D131) | — | **OPEN, LOW.** The `inboxProvision` rate-limiter unit is not released with the placeholder after a failed provisioning POST — a deliberate secondary throttle (fails safe toward "provision less often" after an error), not a defect |
+| **N1** (checkpoint 6e, D133) | — | **OPEN, LOW.** `mailPurge.cleanupFinalizedOutbound` is **non-resumable within a sweep** — it has no per-sweep delete budget, so a day with roughly ≥ 100 finalized rows at ~26 events/row (the practical ceiling before a single sweep's work exceeds what one function execution can do) can wedge the daily cron run for that inbox instead of making partial, resumed progress the way `mailPurge.purgeInboxData`/`retention.sweep` do |
+| **N2** (checkpoint 6e, D133) | — | **OPEN, LOW.** Component rows in the **shared alerts inbox** (`ALERTS_INBOX_ID`) with no `mailLog`/`drafts` row behind them at all — auth-mail events (verification/reset codes) and a user's own replies sent *to* the alerts inbox — are never swept by anything; nothing walks `by_inbox` for that inbox on an age basis the way account-deletion purge walks a user's own inbox. Suggested fix (D133): a bounded daily sweep of `ALERTS_INBOX_ID` by `by_inbox` + age, independent of `mailLog` |
+| **N4** (checkpoint 6e, D133) | — | **OPEN, LOW.** `profiles.ts`'s `releaseProvisioning` is not compare-and-clear (a concurrent/late caller can clear a different attempt's claim than the one it thinks it's releasing), and `createInboxRemote`'s `fetch` to the AgentMail API has no timeout (a hung provider request blocks the action indefinitely rather than failing closed on a bound) |
 | Every other §11 LOW (F-T18.4-1, F-T18.1-1, F-D74-1, F-T24d-1, F-T23-1, F-T18.5-1) | LOW, open | **Still open, unchanged** — T18.6 did not touch any of these areas |
 
 **Zero open HIGH or CRITICAL findings.** Every open item is LOW.

@@ -411,3 +411,57 @@ row itself) for any row in a terminal status older than
 that sweep's own cursor if it looks stalled. Deleting the remote inbox by
 hand (previous item) stops any FURTHER mail from arriving at all; it does
 not retroactively clear rows already written.
+
+**A `mailLog` row that never drains (F-T18.6-1, T18.6/D129/D131/D133 B-7).**
+`deleteMailLogPage` (`convex/account.ts`) purges a `mailLog` row's component
+data (`mailPurge.purgeOutbound`, by `outboundId`/`agentmailMessageId`)
+before deleting the row itself, retrying up to
+`MAILLOG_OUTBOUND_PURGE_ATTEMPTS` (5) times. A message with an extreme
+volume of component `events` (roughly ≥ 1,000 on one message — far beyond
+any real alert or claim email) can still come back `remaining: true` after
+all 5 attempts; when that happens the row is deliberately **skipped, not
+deleted** (B-7's fix: losing the join key would make the underlying
+`events` unreachable forever, which is worse). Convex's `.paginate()` gives
+no mid-page cursor to retry just that one row, so once this table's purge
+step reaches `isDone` for that user, the skipped row is **permanently
+stuck** in `mailLog` — carrying the user's email address (`to`), `subject`,
+and `cents` fields — even though the account's own `accountState.status` is
+truthfully `"deleted"`. **Nothing currently reports this** —
+`ops.backlog.deletions` only counts `accountState` rows, not stray `mailLog`
+rows, so a stuck row does not show up as `stuck`/`deletingTotal` there.
+
+*Find one by hand.* List recently deleted accounts, then check each for a
+`mailLog` row that should not still exist:
+
+```sh
+npx convex run --inline-query 'await ctx.db.query("accountState").withIndex("by_status", q => q.eq("status","deleted")).take(50)' --deployment adorable-lion-138
+# for each row's userId:
+npx convex run --inline-query 'await ctx.db.query("mailLog").withIndex("by_user", q => q.eq("userId","<userId>")).collect()' --deployment adorable-lion-138
+# any result here for a "deleted" account is a stuck row (purgeStep's mailLog
+# step should have emptied this table for that user entirely)
+```
+
+*Re-drive the component purge by hand* (this alone does not delete the
+`mailLog` row — see below): take the stuck row's `agentmailMessageId` from
+the query above and call `mailPurge:purgeOutbound` directly, repeating
+while it reports `remaining: true` (bounded per call the same way
+`purgeInbox` is, so a message with a very large event count may need
+several calls):
+
+```sh
+npx convex run mailPurge:purgeOutbound '{"messageId":"<agentmailMessageId>"}' --deployment adorable-lion-138
+# {"remaining": true}  -> call again with the same messageId
+# {"remaining": false} -> that message's component `outboundMessages` row and
+#                         all its `events` are now gone; the `mailLog` row
+#                         itself is untouched (see below)
+```
+
+Draining the component side this way removes the PII-bearing provider
+payload and the overflow `events`, but `deleteMailLogPage` itself is not
+re-entered by this manual call, so the `mailLog` row (with `to`/`subject`/
+`cents`) is **not** deleted by it — there is no `--inline-mutation` in this
+project's pinned Convex CLI (F-T23-3, §11 above) to delete the row directly
+either. Deleting the stray row itself needs a small dedicated internal
+mutation (the same pattern `ops.resetRetentionCursor` used for F-T23-3) —
+not added here, tracked as open (F-T18.6-1, LOW; `docs/reviews/
+release-candidate.md` §15.8).
