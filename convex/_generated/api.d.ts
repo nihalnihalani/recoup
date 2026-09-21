@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as account from "../account.js";
 import type * as alerts from "../alerts.js";
 import type * as auth from "../auth.js";
 import type * as budget from "../budget.js";
@@ -29,6 +30,7 @@ import type * as lib_balance from "../lib/balance.js";
 import type * as lib_budget from "../lib/budget.js";
 import type * as lib_email from "../lib/email.js";
 import type * as lib_errors from "../lib/errors.js";
+import type * as lib_idempotency from "../lib/idempotency.js";
 import type * as lib_imageUrl from "../lib/imageUrl.js";
 import type * as lib_latestPolicy from "../lib/latestPolicy.js";
 import type * as lib_ledger from "../lib/ledger.js";
@@ -68,6 +70,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  account: typeof account;
   alerts: typeof alerts;
   auth: typeof auth;
   budget: typeof budget;
@@ -89,6 +92,7 @@ declare const fullApi: ApiFromModules<{
   "lib/budget": typeof lib_budget;
   "lib/email": typeof lib_email;
   "lib/errors": typeof lib_errors;
+  "lib/idempotency": typeof lib_idempotency;
   "lib/imageUrl": typeof lib_imageUrl;
   "lib/latestPolicy": typeof lib_latestPolicy;
   "lib/ledger": typeof lib_ledger;
