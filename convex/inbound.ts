@@ -91,7 +91,14 @@ async function findReplyClaim(
  * Nothing expensive happens inline (ARCHITECTURE_PATTERNS §Webhooks).
  */
 export const onMessageReceived = internalMutation({
-  args: { message: v.any(), thread: v.any(), eventId: v.string() },
+  // `thread` is optional (D86/T06 fix): the component's own event shape
+  // (`vEvent` in @agentmail/convex/src/component/shared.ts) allows a
+  // "message.received" delivery with no `thread` at all, and this callback's
+  // own args validator must accept that or Convex's argument validation
+  // rejects the call before this function's try/catch -- and its
+  // "must never throw" contract -- ever runs (see http.test.ts's former
+  // it.fails case, now flipped to passing).
+  args: { message: v.any(), thread: v.optional(v.any()), eventId: v.string() },
   returns: v.null(),
   handler: async (ctx, args) => {
     let eventId: Id<"processedEvents"> | null = null;
