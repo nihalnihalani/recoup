@@ -8,6 +8,8 @@ import { requireUserId } from "./lib/access";
 import { isTombstoned } from "./lib/accountState";
 import { inboxTransport } from "./account";
 import { rateLimiter } from "./lib/rateLimits";
+import { logEvent } from "./lib/log";
+import { sanitizeError } from "./lib/errors";
 
 /** Shown in the UI as "forward your order emails here". */
 const DISPLAY_NAME = "Recoup";
@@ -183,11 +185,22 @@ type ClaimResult = Infer<typeof claimResult>;
  * there is no external lock to manage here, only this read-then-write
  * shape. Unauthenticated on purpose: the only caller is `ensureInbox`, which
  * has already resolved and owns `userId`.
+ *
+ * B-2 (D129, checkpoint 6d): `ensureInbox`'s own tombstone check
+ * (`requireActiveUserId`) runs before this is ever called, but -- same shape
+ * as B-3's race -- a `requestDeletion` landing between that check and this
+ * mutation (including one whose purge has already fully run, past this
+ * user's own `profiles` step) previously still let this insert a placeholder
+ * row nothing would ever purge again. Gated here, at the write, the same way
+ * `save`'s own write-time check already is.
  */
 export const claimProvisioning = internalMutation({
   args: { userId: v.id("users") },
   returns: claimResult,
   handler: async (ctx, { userId }): Promise<ClaimResult> => {
+    if (await isTombstoned(ctx, userId)) {
+      throw new ConvexError("This account is being deleted.");
+    }
     const existing = await ctx.db
       .query("profiles")
       .withIndex("by_user", (q) => q.eq("userId", userId))
@@ -208,6 +221,35 @@ export const claimProvisioning = internalMutation({
     }
     await ctx.db.insert("profiles", { userId, provisioningAt: now });
     return { kind: "claimed" };
+  },
+});
+
+/**
+ * B-3 (D129, checkpoint 6d): releases a claim `ensureInbox` is abandoning
+ * because the provider POST (or the `inboxProvision` rate limiter) itself
+ * failed -- so the NEXT caller can retry immediately instead of waiting out
+ * the full `PROVISIONING_STALE_MS` window behind what would otherwise still
+ * look like a live in-flight claim (every OTHER concurrent caller sees
+ * `"pending"` and polls for up to `PROVISIONING_POLL_MAX_ATTEMPTS *
+ * PROVISIONING_POLL_INTERVAL_MS` before giving up on a row nothing is ever
+ * going to finish). Only clears `provisioningAt` -- never deletes the row or
+ * touches `inboxId`/`inboxEmail` (by construction this call's own claim
+ * never reached `save`, so there is nothing else on the row to protect); a
+ * row a CONCURRENT winner has since finished (`inboxId`/`inboxEmail` now
+ * set) is left alone rather than regressed.
+ */
+export const releaseProvisioning = internalMutation({
+  args: { userId: v.id("users") },
+  returns: v.null(),
+  handler: async (ctx, { userId }) => {
+    const existing = await ctx.db
+      .query("profiles")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .unique();
+    if (existing && existing.provisioningAt !== undefined && !existing.inboxId) {
+      await ctx.db.patch(existing._id, { provisioningAt: undefined });
+    }
+    return null;
   },
 });
 
@@ -311,6 +353,35 @@ export const requireActiveUserId = internalQuery({
  * so no future purge could ever find it to delete it): deleted right here,
  * synchronously, via the same `inboxTransport` the account-deletion purge
  * itself uses (`convex/account.ts`), before returning.
+ *
+ * B-3 (D129, checkpoint 6d): the provider POST (`createInboxRemote`) and the
+ * `inboxProvision` rate limiter are both wrapped so a failure releases this
+ * call's claim (`releaseProvisioning`) before rethrowing a sanitized error --
+ * previously a failed POST left the placeholder looking claimed for the
+ * full `PROVISIONING_STALE_MS` window, and every OTHER caller (this user's
+ * own retry included) either saw `"pending"` and polled `waitForProvisioning`
+ * to a timeout, or a fresh `claimProvisioning` call saw the same still-fresh
+ * `provisioningAt` and also had to wait.
+ *
+ * B-5 (D129, checkpoint 6d): `save` returning `created: false` is not only
+ * the tombstoned case (`saved === null`) -- a stale-reclaim race can also
+ * leave THIS call as the loser: another concurrent claimant (that reclaimed
+ * the SAME stale placeholder, or is racing it some other way) already saved
+ * ITS OWN inbox first, so `save` here reports the WINNER's address with
+ * `created: false` rather than inserting. Previously only `saved === null`
+ * triggered the compensating delete, so a stale-reclaim loser's own
+ * just-created inbox was left permanently orphaned (no `profiles` row would
+ * ever point at it) even though the row itself was never tombstoned. Both
+ * cases now delete THIS call's own `inboxId` (never the winner's) and return
+ * the winner's real address instead of `null`.
+ *
+ * B-4 (D129, checkpoint 6d): if that compensating delete ITSELF fails (the
+ * provider is down for both the create and the cleanup), the orphaned
+ * `inboxId` is recorded in a structured `logEvent` line before the error is
+ * rethrown -- previously the raw transport error propagated with no trace
+ * of which inbox was left behind for an operator to clean up by hand (see
+ * RUNBOOK's "Account deletion" section for the equivalent manual-DELETE
+ * path this mirrors).
  */
 export const ensureInbox = action({
   args: {},
@@ -323,12 +394,31 @@ export const ensureInbox = action({
     if (claim.kind === "pending") return await waitForProvisioning(ctx, userId);
 
     // claim.kind === "claimed": this call, and only this call, provisions.
-    await rateLimiter.limit(ctx, "inboxProvision", { key: userId, throws: true });
-    const { inboxId, inboxEmail } = await createInboxRemote();
+    let inboxId: string;
+    let inboxEmail: string;
+    try {
+      await rateLimiter.limit(ctx, "inboxProvision", { key: userId, throws: true });
+      ({ inboxId, inboxEmail } = await createInboxRemote());
+    } catch (err) {
+      // B-3: release the claim so the next call can retry immediately
+      // instead of finding this placeholder still "claimed".
+      await ctx.runMutation(internal.profiles.releaseProvisioning, { userId });
+      throw err;
+    }
+
     const saved = await ctx.runMutation(internal.profiles.save, { userId, inboxId, inboxEmail });
-    if (saved === null) {
-      await inboxTransport.deleteInbox(inboxId);
-      return null;
+    if (saved === null || !saved.created) {
+      // saved === null: B-3/B-4's original race -- tombstoned mid-POST.
+      // !saved.created: B-5 -- a concurrent stale-reclaim winner already
+      // saved ITS OWN inbox first; THIS call's own just-created inbox
+      // (`inboxId`, never `saved.inboxId`) is the one now orphaned.
+      try {
+        await inboxTransport.deleteInbox(inboxId);
+      } catch (err) {
+        logEvent("notification_failed", { inboxId, error: sanitizeError(err instanceof Error ? err.message : String(err)) });
+        throw err;
+      }
+      return saved === null ? null : saved.inboxEmail;
     }
     return saved.inboxEmail;
   },

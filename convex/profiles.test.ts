@@ -336,3 +336,114 @@ describe("T18.5 addendum (F-AUD-2): ensureInbox provisioning is single-flight", 
     expect(posts).toHaveLength(0);
   }, 15_000);
 });
+
+describe("T18.6 (D129 B-3): a failed provider POST releases the provisioning claim instead of leaving it looking in-flight for the full 10-minute window", () => {
+  it("POST 502 -> a direct claimProvisioning call right after sees 'claimed', not 'pending' (the placeholder was released, not left looking in-flight)", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const failing = vi.fn(async () => new Response("{}", { status: 502 }));
+    vi.stubGlobal("fetch", failing);
+
+    await expect(as.action(api.profiles.ensureInbox, {})).rejects.toThrow();
+    expect(failing).toHaveBeenCalledTimes(1);
+
+    // The inboxProvision rate-limit unit spent by THIS failed attempt is a
+    // separate, deliberate guard (unaffected by releasing the claim -- see
+    // ensureInbox's own docstring); what B-3 fixes is that the PLACEHOLDER
+    // itself no longer looks claimed, so a fresh caller (once the rate
+    // limit's own window allows it) is not ALSO forced through the ~8s
+    // waitForProvisioning poll behind a claim nothing will ever finish.
+    const claim = await t.mutation(internal.profiles.claimProvisioning, { userId });
+    console.log("[T18.6 B-3] claim state right after a failed POST:", JSON.stringify(claim));
+    expect(claim.kind).toBe("claimed");
+  });
+
+  it("end to end, once the rate-limit window allows a retry: the next ensureInbox call POSTs again and succeeds without waiting", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const failing = vi.fn(async () => new Response("{}", { status: 502 }));
+    vi.stubGlobal("fetch", failing);
+    await expect(as.action(api.profiles.ensureInbox, {})).rejects.toThrow();
+
+    // Simulate the inboxProvision window having passed (a real retry minutes
+    // later), isolating THIS test to exactly what B-3 changed: the
+    // placeholder's own claim state, not the separate rate limiter.
+    vi.useFakeTimers();
+    try {
+      vi.advanceTimersByTime(6 * 60_000);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ inbox_id: "inbox-ok", email: "ok@agentmail.to" }), { status: 200, headers: { "content-type": "application/json" } })),
+      );
+      const started = Date.now();
+      const result = await as.action(api.profiles.ensureInbox, {});
+      const waited = Date.now() - started;
+      console.log("[T18.6 B-3] second call after the rate-limit window passed returned:", result, "after", waited, "ms");
+      expect(result).toBe("ok@agentmail.to");
+      expect(waited).toBeLessThan(2000); // no ~8s waitForProvisioning poll -- it re-provisioned directly
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+});
+
+describe("T18.6 (D129 B-2): claimProvisioning refuses for a tombstoned user", () => {
+  it("throws instead of inserting a placeholder profiles row for a fully-purged user", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+    await as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    let done = false;
+    for (let i = 0; i < 100 && !done; i++) done = (await t.mutation(internal.account.purgeStep, { userId })).done;
+    expect(done).toBe(true);
+
+    await expect(t.mutation(internal.profiles.claimProvisioning, { userId })).rejects.toThrow();
+    expect(await t.run((ctx) => ctx.db.query("profiles").withIndex("by_user", (q) => q.eq("userId", userId)).collect())).toHaveLength(0);
+  });
+});
+
+describe("T18.6 (D129 B-4): a compensating deleteInbox failure is logged with the orphaned inboxId before rethrowing", () => {
+  it("deleteInbox 502 -> ensureInbox rejects, and a notification_failed log line names the orphaned inboxId", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    vi.spyOn(inboxTransport, "deleteInbox").mockRejectedValue(new Error("AgentMail could not delete the inbox (502)"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        await as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+        return new Response(JSON.stringify({ inbox_id: "inbox-orphan", email: "orphan@agentmail.to" }), { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+
+    await expect(as.action(api.profiles.ensureInbox, {})).rejects.toThrow();
+    const lines = errSpy.mock.calls.map((c) => c.map(String).join(" ")).filter((l) => l.includes("inbox-orphan"));
+    console.log("[T18.6 B-4] log lines naming the orphan:", lines.length);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.some((l) => l.includes("notification_failed"))).toBe(true);
+  });
+});
+
+describe("T18.6 (D129 B-5): a stale-reclaim loser deletes its OWN just-created inbox instead of the winner's (or nothing at all)", () => {
+  it("ensureInbox whose own save() lands after a concurrent winner already saved returns the WINNER's address and deletes only its OWN orphaned inbox", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const del = vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        // Simulates a concurrent winner (e.g. a stale-reclaim race) finishing
+        // -- claiming and saving ITS OWN inbox -- while THIS call's own POST
+        // to AgentMail is still in flight.
+        await t.mutation(internal.profiles.save, { userId, inboxId: "inbox-winner", inboxEmail: "winner@agentmail.to" });
+        return new Response(JSON.stringify({ inbox_id: "inbox-loser", email: "loser@agentmail.to" }), { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+
+    const result = await as.action(api.profiles.ensureInbox, {});
+    console.log("[T18.6 B-5] loser ensureInbox result:", result, "deleteInbox calls:", del.mock.calls.map((c) => c[0]));
+    expect(result).toBe("winner@agentmail.to");
+    expect(del).toHaveBeenCalledWith("inbox-loser");
+    expect(del).not.toHaveBeenCalledWith("inbox-winner");
+  });
+});
