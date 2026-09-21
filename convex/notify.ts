@@ -29,6 +29,7 @@
  * `users.email`.
  */
 import { ConvexError, v } from "convex/values";
+import type { OutboundId } from "@agentmail/convex";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import {
   internalMutation,
@@ -42,10 +43,12 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { mailReason as mailReasonValidator, mailStatus } from "./schema";
 import { agentmail } from "./mail";
 import { suppressAddress, tokenFor } from "./alerts";
-import { alertGate, type MailReason } from "./lib/accountState";
+import { alertGate, isTombstoned, type MailReason } from "./lib/accountState";
 import { requireUserId } from "./lib/access";
 import { rateLimiter } from "./lib/rateLimits";
+import { sanitizeError } from "./lib/errors";
 import { BACKOFF_MS, TERMINAL_FAILURES } from "./drafts";
+import { clearPendingMailEvent, getPendingMailEvent } from "./mailEvents";
 import {
   DROP_EMAIL_COUNT_SCAN,
   DROP_EMAIL_WINDOW_MS,
@@ -74,17 +77,21 @@ export function publicAppUrl(): string | null {
 }
 
 /**
- * The unsubscribe link's origin (per this task's assignment: "List-Unsubscribe
- * URL uses process.env.SITE_URL"). Not run through `publicAppUrl`'s
- * https/localhost filtering: the header is emitted whatever this value is,
- * so an unset or dev-local SITE_URL yields a relative-looking (but still
- * well-formed) path rather than silently dropping the header. Flagged in the
- * task report: `/alerts/unsubscribe` is served by this deployment's own
- * Convex HTTP actions (normally reached via CONVEX_SITE_URL), which may
- * differ from SITE_URL (the frontend's own origin) in some deployments.
+ * F7 (checkpoint 4): the unsubscribe link's origin is `CONVEX_SITE_URL` --
+ * the deployment's own HTTP-actions origin, where `http.ts` actually serves
+ * `/alerts/unsubscribe` -- not `SITE_URL` (the frontend's own origin, which
+ * may not proxy that route at all, or may be unset/localhost on a dev
+ * deployment). Returns `null` -- never a malformed or relative header value
+ * -- unless the variable is set to a real `https://` origin, so an unset or
+ * non-https deployment omits BOTH `List-Unsubscribe` headers entirely
+ * (`sendDrop` below) rather than emitting a broken/insecure one.
  */
-function unsubscribeUrl(token: string): string {
-  const base = (process.env.SITE_URL ?? "").trim().replace(/\/+$/, "");
+function unsubscribeBase(): string | null {
+  const base = (process.env.CONVEX_SITE_URL ?? "").trim().replace(/\/+$/, "");
+  return base && /^https:\/\//i.test(base) ? base : null;
+}
+
+function unsubscribeUrl(base: string, token: string): string {
   return `${base}/alerts/unsubscribe?token=${token}`;
 }
 
@@ -203,6 +210,32 @@ export async function claimDrop(
       RECLAIMABLE_REASONS.has(existing.reason) &&
       (existing.claimedAt ?? existing._creationTime) < now - DROP_RECLAIM_MIN_MS;
     if (!eligible) return null;
+
+    // F6 (checkpoint 4, D79): a re-claim must pass the SAME daily-cap and
+    // global-budget checks a fresh claim does -- without this, the 24h
+    // re-claim window was a back door around both caps, and in particular
+    // around the operator kill switch (D79: pinning the global `drop_email`
+    // usage row to max for the day), which must pause retries, not just
+    // first sends.
+    const gate = await alertGate(ctx, watch.userId);
+    let reclaimReason: MailReason | undefined;
+    if (!gate.ok) reclaimReason = gate.reason;
+    else if (await overDailyCap(ctx, watch.userId, now)) reclaimReason = "daily_cap";
+    else if ((await takeGlobalBudget(ctx, "drop_email", 1, now)) === 0) reclaimReason = "global_cap";
+
+    if (reclaimReason !== undefined) {
+      await ctx.db.patch(existing._id, {
+        status: "suppressed",
+        reason: reclaimReason,
+        error: REASON_MESSAGES[reclaimReason],
+        providerStatus: undefined,
+        claimedAt: now,
+        nextCheckAt: undefined,
+        lastCheckedAt: now,
+      });
+      return existing._id;
+    }
+
     await ctx.db.patch(existing._id, {
       status: "claimed",
       error: undefined,
@@ -331,44 +364,104 @@ export const sendDrop = internalMutation({
 
     const to = gate.to;
     const text = buildMessage(row, watch);
-    const token = await tokenFor(ctx, row.userId, now);
+    // F7 (checkpoint 4): only spend a token lookup (which can create the
+    // user's `alertSettings` row) when a header can actually be built.
+    const base = unsubscribeBase();
+    const headers =
+      base !== null
+        ? {
+            // T06(g).5: one-click unsubscribe (RFC 8058). The page/form route lives at http.ts's
+            // /alerts/unsubscribe; mail scanners that prefetch GET links never disable anything (GET
+            // writes nothing there), only a real client's POST (or the header's one-click semantics) does.
+            "List-Unsubscribe": `<${unsubscribeUrl(base, await tokenFor(ctx, row.userId, now))}>`,
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+          }
+        : undefined;
 
+    // F11b (checkpoint 4): the `try` covers ONLY the network/component call.
+    // Everything after a successful enqueue -- the `queued` patch and
+    // scheduling the reconcile -- happens unconditionally, outside the
+    // catch, so a hypothetical failure there can never be mis-recorded as
+    // `failed` after the message was already, genuinely, handed to the
+    // provider (see `queuedPatch` below, pulled out pure so the shape of
+    // this patch is unit-testable without needing to force the Convex
+    // scheduler itself to throw, which convex-test does not support).
+    let outboundId: OutboundId;
     try {
-      const outboundId = await agentmail.sendMessage(sendCtx(ctx), inboxId, {
+      outboundId = await agentmail.sendMessage(sendCtx(ctx), inboxId, {
         to,
         subject: DROP_SUBJECT,
         text,
         labels: [`watch:${watch._id}`],
-        // T06(g).5: one-click unsubscribe (RFC 8058). The page/form route lives at http.ts's
-        // /alerts/unsubscribe; mail scanners that prefetch GET links never disable anything (GET
-        // writes nothing there), only a real client's POST (or the header's one-click semantics) does.
-        headers: {
-          "List-Unsubscribe": `<${unsubscribeUrl(token)}>`,
-          "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
-        },
+        ...(headers ? { headers } : {}),
       });
-      await ctx.db.patch(mailLogId, {
-        status: "queued",
-        to,
-        outboundId,
-        attempt: 0,
-        reason: undefined,
-        error: undefined,
-        nextCheckAt: now + BACKOFF_MS[0],
-        lastCheckedAt: now,
-      });
-      await ctx.scheduler.runAfter(BACKOFF_MS[0], internal.notify.reconcileDrop, { mailLogId, attempt: 1 });
     } catch (err) {
       await ctx.db.patch(mailLogId, {
         status: "failed",
         reason: "send_failed",
-        error: `Send failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS),
+        // F12b: never let the component/provider's own error text reach
+        // `mailLog.error` (and from there, the `drops` view) verbatim.
+        error: sanitizeError(err instanceof Error ? err.message : String(err)),
         lastCheckedAt: now,
       });
+      return null;
     }
+
+    await ctx.db.patch(mailLogId, queuedPatch(to, outboundId, now));
+    await ctx.scheduler.runAfter(BACKOFF_MS[0], internal.notify.reconcileDrop, { mailLogId, attempt: 1 });
     return null;
   },
 });
+
+/**
+ * F11b: the exact patch `sendDrop` applies to `mailLogId` after a successful
+ * enqueue. Pure and exported so its shape can be unit-tested directly --
+ * convex-test offers no way to force `ctx.scheduler.runAfter` to throw, so
+ * this cannot be driven end-to-end; the structural guarantee (this patch and
+ * the following `scheduler.runAfter` both run unconditionally, never inside
+ * the `try/catch` around `sendMessage`) is enforced by `sendDrop`'s own
+ * source shape above, which this helper documents and mirrors exactly.
+ */
+export function queuedPatch(
+  to: string,
+  outboundId: OutboundId,
+  now: number,
+): {
+  status: "queued";
+  to: string;
+  outboundId: OutboundId;
+  attempt: number;
+  reason: undefined;
+  error: undefined;
+  nextCheckAt: number;
+  lastCheckedAt: number;
+} {
+  return {
+    status: "queued",
+    to,
+    outboundId,
+    attempt: 0,
+    reason: undefined,
+    error: undefined,
+    nextCheckAt: now + BACKOFF_MS[0],
+    lastCheckedAt: now,
+  };
+}
+
+/**
+ * F10 (checkpoint 4): never let a suppression side effect create a fresh
+ * `alertSettings` row (`alerts.suppressAddress` -> `getOrCreateSettings`) for
+ * a tombstoned user. The caller's own mailLog status change is applied
+ * either way -- this only guards the settings-row side effect.
+ */
+async function suppressUnlessTombstoned(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  reason: "bounced" | "complained",
+): Promise<void> {
+  if (await isTombstoned(ctx, userId)) return;
+  await suppressAddress(ctx, userId, reason);
+}
 
 /**
  * Applies one AgentMail delivery observation to a queued row (F3, same shape
@@ -378,7 +471,10 @@ export const sendDrop = internalMutation({
  *
  * - `complained` -> stays `sent` (it was delivered), providerStatus recorded, address suppressed
  * - `failed | bounced | rejected` -> `failed`, reason `send_failed`, providerStatus recorded; `bounced` also suppresses
- * - a real `agentmailMessageId` (any other status) -> `sent`
+ * - a real `agentmailMessageId` (any other status) -> `sent`, unless F8's
+ *   `mailEvents.onEvent` already recorded an early bounce/complaint for this
+ *   same message id (it can arrive before we ever learn the id ourselves) --
+ *   that pending event is applied now instead of being lost.
  * - still pending, attempts left -> reschedule on the backoff, attempt+1
  * - still pending, attempts spent -> `unknown`, with `nextCheckAt` so the sweep keeps re-checking it
  */
@@ -404,7 +500,7 @@ export async function applyDropOutcome(
       agentmailMessageId: status.agentmailMessageId ?? row.agentmailMessageId,
       lastCheckedAt: now,
     });
-    await suppressAddress(ctx, row.userId, "complained");
+    await suppressUnlessTombstoned(ctx, row.userId, "complained");
     return "sent";
   }
 
@@ -413,22 +509,47 @@ export async function applyDropOutcome(
       status: "failed",
       reason: "send_failed",
       providerStatus: status.status,
-      error: (status.errorMessage ?? `Delivery ${status.status}`).slice(0, MAX_ERROR_CHARS),
+      // F12b: the component/provider's own error text must never reach
+      // `mailLog.error` (and from there, the `drops` view) verbatim.
+      error: status.errorMessage ? sanitizeError(status.errorMessage) : `Delivery ${status.status}`,
       agentmailMessageId: status.agentmailMessageId ?? row.agentmailMessageId,
       lastCheckedAt: now,
     });
-    if (status.status === "bounced") await suppressAddress(ctx, row.userId, "bounced");
+    if (status.status === "bounced") await suppressUnlessTombstoned(ctx, row.userId, "bounced");
     return "failed";
   }
 
   if (status?.agentmailMessageId) {
+    // F8: `mailEvents.onEvent` cannot join a bounce/complaint webhook back to
+    // this row until it knows the AgentMail message id, which is only
+    // recorded here -- so an event that arrived while this row was still
+    // `queued` was stashed (`mailEvents.storePendingMailEvent`) rather than
+    // applied. Consume it now, before this settles as a plain `sent`.
+    const pending = await getPendingMailEvent(ctx, status.agentmailMessageId, now);
+    if (pending?.reason === "bounced") {
+      await ctx.db.patch(mailLogId, {
+        status: "failed",
+        reason: "send_failed",
+        providerStatus: pending.providerStatus,
+        error: `The email ${pending.providerStatus} after delivery`.slice(0, MAX_ERROR_CHARS),
+        agentmailMessageId: status.agentmailMessageId,
+        lastCheckedAt: now,
+      });
+      await suppressUnlessTombstoned(ctx, row.userId, "bounced");
+      await clearPendingMailEvent(ctx, status.agentmailMessageId);
+      return "failed";
+    }
     await ctx.db.patch(mailLogId, {
       status: "sent",
       sentAt: now,
-      providerStatus: status.status,
+      providerStatus: pending?.reason === "complained" ? "complained" : status.status,
       agentmailMessageId: status.agentmailMessageId,
       lastCheckedAt: now,
     });
+    if (pending?.reason === "complained") {
+      await suppressUnlessTombstoned(ctx, row.userId, "complained");
+      await clearPendingMailEvent(ctx, status.agentmailMessageId);
+    }
     return "sent";
   }
 

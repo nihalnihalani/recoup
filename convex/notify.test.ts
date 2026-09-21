@@ -3,7 +3,8 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { agentmail } from "./mail";
-import { applyDropOutcome, claimDrop, DROP_SUBJECT, isAlertableDrop } from "./notify";
+import { applyDropOutcome, claimDrop, DROP_SUBJECT, isAlertableDrop, queuedPatch } from "./notify";
+import { BACKOFF_MS } from "./drafts";
 import { GLOBAL_DAILY_BUDGETS, MAX_DROP_EMAILS_PER_DAY } from "./limits";
 
 /**
@@ -41,6 +42,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
   delete process.env.SITE_URL;
+  delete process.env.CONVEX_SITE_URL;
 });
 
 type T = ReturnType<typeof setup>;
@@ -147,6 +149,7 @@ describe("isAlertableDrop", () => {
 describe("claiming a drop inside recordWatchCheck", () => {
   it("fires on a target hit, even on the first observation, and mails it", async () => {
     process.env.SITE_URL = "https://recoup.example";
+    process.env.CONVEX_SITE_URL = "https://recoup-test.convex.site"; // F7: List-Unsubscribe now comes from this, not SITE_URL
     const t = setup();
     const { userId } = await account(t);
     const watchId = await seedWatch(t, userId, { targetCents: 8_000 });
@@ -373,19 +376,24 @@ describe("a drop that cannot be mailed is still recorded as suppressed with a re
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("a send error ends the row as failed/send_failed with a truncated message", async () => {
+  it("F12b: a send error ends the row as failed/send_failed, with the component's raw message sanitized before it reaches mailLog.error", async () => {
     const t = setup();
     const { userId } = await account(t);
     const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
-    send.mockRejectedValueOnce(new Error("x".repeat(5_000)));
+    const raw = "AgentMail request to https://api.agentmail.to/v1/send failed: 500 (key sk_live_abc123)";
+    send.mockRejectedValueOnce(new Error(raw));
     await observe(t, watchId, 4_000);
     await flush(t);
 
     const [row] = await mailRows(t);
     expect(row.status).toBe("failed");
     expect(row.reason).toBe("send_failed");
-    expect(row.error).toMatch(/^Send failed: x+/);
-    expect(row.error?.length).toBe(1000);
+    // Sanitized to a generic category (lib/errors.sanitizeError): the raw
+    // component/provider text -- including anything that looks like a
+    // credential or an internal host -- never reaches `mailLog.error`.
+    expect(row.error).toBe("Provider error");
+    expect(row.error).not.toContain("sk_live_abc123");
+    expect(row.error).not.toContain("api.agentmail.to");
   });
 
   it("a watch bought before the send went out is suppressed/watch_inactive at send time", async () => {
@@ -612,6 +620,33 @@ describe("D70: re-claiming a transient dedupe row after DROP_RECLAIM_MIN_MS", ()
     expect(await mailRows(t)).toHaveLength(1); // still the same row, never reclaimed
     expect(send).not.toHaveBeenCalled();
   });
+
+  it("F6/D79: a spent global switch (the operator kill switch) also pauses the 24h re-claim, not just fresh claims", async () => {
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    send.mockRejectedValueOnce(new Error("boom"));
+    await claimTwice(t, watchId, 4_000);
+    await flush(t);
+    const [failedRow] = await mailRows(t);
+    expect(failedRow.status).toBe("failed");
+    expect(failedRow.reason).toBe("send_failed");
+
+    // Past the 24h window, so the row is normally reclaimable...
+    vi.setSystemTime(T0 + 25 * 3_600_000);
+    // ...but an operator has pinned the deployment-wide switch to max for
+    // the day (D79's kill switch: a global `usage` row at max).
+    await t.run((ctx) =>
+      ctx.db.insert("usage", { day: "2026-09-21", kind: "drop_email", count: GLOBAL_DAILY_BUDGETS.drop_email.max }),
+    );
+
+    const reclaimed = await claimTwice(t, watchId, 4_000);
+    expect(reclaimed).toBe(failedRow._id);
+    const row = await t.run((ctx) => ctx.db.get(failedRow._id));
+    expect(row?.status).toBe("suppressed");
+    expect(row?.reason).toBe("global_cap");
+    expect(send).toHaveBeenCalledTimes(1); // only the original failed attempt; the reclaim never enqueued
+  });
 });
 
 describe("F3: claimed -> queued -> sent (never straight to sent)", () => {
@@ -715,7 +750,7 @@ describe("notify.applyDropOutcome (F3)", () => {
     expect(row?.providerStatus).toBe("sent");
   });
 
-  it("treats a bounce that still carries a message id as a failure, never as sent, and suppresses the address (review H3's rule, ported)", async () => {
+  it("treats a bounce that still carries a message id as a failure, never as sent, and suppresses the address (review H3's rule, ported); the raw provider message is sanitized before it reaches mailLog.error (F12b)", async () => {
     const t = setup();
     const { userId } = await signedIn(t);
     await t.run((ctx) => ctx.db.patch(userId, { email: "sam@home.example", emailVerificationTime: T0 }));
@@ -725,7 +760,7 @@ describe("notify.applyDropOutcome (F3)", () => {
       applyDropOutcome(ctx, mailLogId, 1, {
         status: "bounced",
         agentmailMessageId: "msg-1",
-        errorMessage: "mailbox does not exist",
+        errorMessage: "AgentMail 500: mailbox unavailable at inbox_abc123@agentmail.to",
       }),
     );
     expect(outcome).toBe("failed");
@@ -733,7 +768,8 @@ describe("notify.applyDropOutcome (F3)", () => {
     expect(row?.status).toBe("failed");
     expect(row?.reason).toBe("send_failed");
     expect(row?.providerStatus).toBe("bounced");
-    expect(row?.error).toBe("mailbox does not exist");
+    expect(row?.error).toBe("Provider error"); // sanitized: the raw component/provider text never reaches `drops`
+    expect(row?.error).not.toContain("inbox_abc123");
     expect(row?.agentmailMessageId).toBe("msg-1");
 
     const settings = await alertSettingsRow(t, userId);
@@ -815,6 +851,33 @@ describe("notify.applyDropOutcome (F3)", () => {
       applyDropOutcome(ctx, mailLogId, 1, { status: "sent", agentmailMessageId: "msg-2", errorMessage: null }),
     );
     expect(outcome).toBe("gone");
+  });
+
+  it("F10: a tombstoned user's bounce still updates the mailLog row, but creates no alertSettings row", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }),
+    );
+    const mailLogId = await queuedMailLog(t, userId);
+
+    const outcome = await t.run((ctx) =>
+      applyDropOutcome(ctx, mailLogId, 1, {
+        status: "bounced",
+        agentmailMessageId: "msg-tomb",
+        errorMessage: "bounced",
+      }),
+    );
+    expect(outcome).toBe("failed");
+
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("failed"); // the row's own status is still recorded
+    expect(row?.reason).toBe("send_failed");
+
+    const settings = await t.run((ctx) =>
+      ctx.db.query("alertSettings").withIndex("by_user", (q) => q.eq("userId", userId)).first(),
+    );
+    expect(settings).toBeNull(); // ...but no alertSettings row was created for the tombstoned user
   });
 });
 
@@ -1054,5 +1117,135 @@ describe("mailEvents.onEvent: late bounce/complaint on an already-sent drop aler
         event: { type: "event", event_type: "domain.verified", event_id: "e2", domain: { message_id: "m1" } },
       }),
     ).resolves.toBeNull();
+  });
+});
+
+describe("F7: List-Unsubscribe headers built from CONVEX_SITE_URL", () => {
+  const saved = process.env.CONVEX_SITE_URL;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.CONVEX_SITE_URL;
+    else process.env.CONVEX_SITE_URL = saved;
+  });
+
+  it("sends List-Unsubscribe/-Post headers built from CONVEX_SITE_URL, carrying the real unsubscribe token", async () => {
+    process.env.CONVEX_SITE_URL = "https://recoup-test.convex.site";
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await observe(t, watchId, 4_000);
+    vi.advanceTimersByTime(0);
+    await t.finishInProgressScheduledFunctions();
+
+    expect(send).toHaveBeenCalledTimes(1);
+    const args = send.mock.calls[0]![2] as { headers?: Record<string, string> };
+    const settings = await alertSettingsRow(t, userId);
+    expect(settings?.unsubscribeToken).toBeTruthy();
+    expect(args.headers).toEqual({
+      "List-Unsubscribe": `<https://recoup-test.convex.site/alerts/unsubscribe?token=${settings!.unsubscribeToken}>`,
+      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    });
+  });
+
+  it("omits both headers when CONVEX_SITE_URL is unset", async () => {
+    delete process.env.CONVEX_SITE_URL;
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await observe(t, watchId, 4_000);
+    vi.advanceTimersByTime(0);
+    await t.finishInProgressScheduledFunctions();
+
+    const args = send.mock.calls[0]![2] as { headers?: Record<string, string> };
+    expect(args.headers).toBeUndefined();
+  });
+
+  it("omits both headers when CONVEX_SITE_URL is not https", async () => {
+    process.env.CONVEX_SITE_URL = "http://recoup-test.convex.site";
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await observe(t, watchId, 4_000);
+    vi.advanceTimersByTime(0);
+    await t.finishInProgressScheduledFunctions();
+
+    const args = send.mock.calls[0]![2] as { headers?: Record<string, string> };
+    expect(args.headers).toBeUndefined();
+  });
+});
+
+describe("F8: an early complaint/bounce (arrives before the message id is known) is applied once reconcile learns it", () => {
+  it("a complaint via onEvent while the row is still queued is applied when reconcileDrop later confirms delivery", async () => {
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await observe(t, watchId, 4_000);
+    // Only run the immediate `sendDrop`, not the `reconcileDrop` it schedules:
+    // the row is `queued` with an outboundId but no `agentmailMessageId` yet.
+    vi.advanceTimersByTime(0);
+    await t.finishInProgressScheduledFunctions();
+    const [queued] = await mailRows(t);
+    expect(queued.status).toBe("queued");
+    expect(queued.agentmailMessageId).toBeUndefined();
+
+    // The complaint webhook arrives before we have ever reconciled: `onEvent`
+    // cannot find this row by `agentmailMessageId` (it is not set yet), so
+    // without F8 the complaint would be lost for good.
+    await t.mutation(internal.mailEvents.onEvent, {
+      event: {
+        type: "event",
+        event_type: "message.complained",
+        event_id: "evt-early-complaint",
+        complaint: { message_id: "msg-1" }, // matches the default `status` mock's agentmailMessageId
+      },
+    });
+    expect((await mailRows(t))[0].status).toBe("queued"); // onEvent could not map it yet; row untouched directly
+
+    // The reconcile now learns the real message id.
+    await flush(t);
+
+    const [row] = await mailRows(t);
+    expect(row.status).toBe("sent"); // it WAS delivered; a complaint is a flag, not an undelivery
+    expect(row.providerStatus).toBe("complained");
+    expect(row.agentmailMessageId).toBe("msg-1");
+    const settings = await alertSettingsRow(t, userId);
+    expect(settings?.suppressedReason).toBe("complained");
+  });
+});
+
+describe("F11b: sendDrop's try only wraps the sendMessage call", () => {
+  it("queuedPatch (the exact post-enqueue patch) is a pure function of (to, outboundId, now)", () => {
+    const now = 1_800_000_000_000;
+    expect(queuedPatch("user@example.com", "outbound-99" as never, now)).toEqual({
+      status: "queued",
+      to: "user@example.com",
+      outboundId: "outbound-99",
+      attempt: 0,
+      reason: undefined,
+      error: undefined,
+      nextCheckAt: now + BACKOFF_MS[0],
+      lastCheckedAt: now,
+    });
+  });
+
+  // Documents a limitation: convex-test gives no way to force
+  // `ctx.scheduler.runAfter` to throw (`vi.spyOn` cannot intercept it), so
+  // the exact regression -- "a failure applying the post-enqueue patch or
+  // scheduling the reconcile must not record `failed` after a successful
+  // enqueue" -- cannot be driven end-to-end here. What IS verified: a
+  // genuinely successful send never ends up `failed` (the row above), and
+  // `queuedPatch`'s shape (used unconditionally, outside sendDrop's
+  // try/catch -- see its own source and comment) matches what a successful
+  // enqueue actually writes.
+  it("a successful send is never re-labeled failed: the row ends queued, not failed", async () => {
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await observe(t, watchId, 4_000);
+    vi.advanceTimersByTime(0);
+    await t.finishInProgressScheduledFunctions();
+
+    const [row] = await mailRows(t);
+    expect(row.status).toBe("queued");
+    expect(send).toHaveBeenCalledTimes(1);
   });
 });
