@@ -9,6 +9,8 @@ import { storeInfo } from "../../lib/stores";
 import { Chip, ChevronIcon, ExternalIcon, IconTile, StoresIcon, smallButtonClass, smallLabelClass } from "./parts";
 import { ago } from "./time";
 import { errorText, percent, remainingLabel } from "../../lib/ui";
+import { canFindOtherStores, isSearching } from "../../lib/time";
+import { NEEDS_RECONFIRM_NOTE, OUT_OF_STOCK_NOTE } from "../../lib/offerNotes";
 
 type Watch = FunctionReturnType<typeof api.watches.list>[number];
 type Offer = FunctionReturnType<typeof api.offers.listForWatch>["offers"][number];
@@ -27,6 +29,16 @@ type Row = {
   offer: Offer | null;
 };
 
+/** T13/D100: never priced, so already excluded from `comparable`/"cheapest" by the `cents !== null` check; this just names it. */
+function isOutOfStock(row: Row): boolean {
+  return row.offer !== null && row.offer.note === OUT_OF_STOCK_NOTE;
+}
+
+/** T13/P04: a confirmed offer whose page later looked like a different product. Its old price is kept but no longer trusted, so it must not rank into "cheapest" even though `cents` is still set. */
+function needsReconfirm(row: Row): boolean {
+  return row.offer !== null && row.offer.note === NEEDS_RECONFIRM_NOTE;
+}
+
 /** One store as a horizontal bar. The bar is scaled to the most expensive comparable store. */
 function StoreBar({
   row,
@@ -36,6 +48,7 @@ function StoreBar({
   vsWatch,
   now,
   onRemove,
+  onConfirm,
 }: {
   row: Row;
   maxCents: number;
@@ -44,9 +57,13 @@ function StoreBar({
   vsWatch: number | null;
   now: number;
   onRemove?: () => void;
+  onConfirm?: () => void;
 }) {
   const info = storeInfo(row.domain);
+  const outOfStock = isOutOfStock(row);
+  const reconfirm = needsReconfirm(row);
   const ratio = comparable && row.cents !== null && maxCents > 0 ? Math.max(0.02, row.cents / maxCents) : 0;
+  const priceLabel = outOfStock ? "Out of stock" : row.cents === null ? "No price read" : fmt(row.cents, row.currency);
   return (
     <li className="py-3">
       <div className="flex items-center gap-3">
@@ -66,11 +83,14 @@ function StoreBar({
             {row.own && <Chip>Watched here</Chip>}
             {info.kind === "marketplace" && <Chip>Marketplace</Chip>}
             {cheapest && <Chip tone="good">Cheapest</Chip>}
+            {row.offer?.source === "shopsavvy" && <Chip>via ShopSavvy</Chip>}
+            {outOfStock && <Chip tone="wait">Out of stock</Chip>}
+            {reconfirm && <Chip tone="wait">Product changed — reconfirm</Chip>}
           </div>
         </div>
         <div className="shrink-0 text-right">
-          <p className={`text-sm font-semibold tabular-nums ${cheapest ? "text-green-700" : "text-gray-900"}`}>
-            {row.cents === null ? "No price read" : fmt(row.cents, row.currency)}
+          <p className={`text-sm font-semibold tabular-nums ${cheapest ? "text-green-700" : outOfStock ? "text-gray-400" : "text-gray-900"}`}>
+            {priceLabel}
           </p>
         </div>
       </div>
@@ -87,7 +107,13 @@ function StoreBar({
             />
           </div>
         ) : (
-          row.cents !== null && <p className="text-xs text-gray-400">Priced in {row.currency}, so it is not ranked against the others.</p>
+          row.cents !== null && (
+            <p className="text-xs text-gray-400">
+              {reconfirm
+                ? "Its price is kept from before the listing changed, but not ranked until you reconfirm."
+                : `Priced in ${row.currency}, so it is not ranked against the others.`}
+            </p>
+          )
         )}
         <div className="mt-1 flex flex-wrap items-center justify-between gap-x-3 text-xs text-gray-400">
           <span>
@@ -99,24 +125,47 @@ function StoreBar({
               </span>
             )}
             {info.kind === "marketplace" && info.note && ` · ${info.note}`}
-            {row.offer?.note && ` · ${row.offer.note}`}
+            {!outOfStock && !reconfirm && row.offer?.note && ` · ${row.offer.note}`}
           </span>
-          {onRemove && (
-            <button type="button" className={`${textButtonClass} text-xs`} onClick={onRemove}>
-              Not the same item
-            </button>
-          )}
+          <span className="flex items-center gap-2">
+            {reconfirm && onConfirm && (
+              <button type="button" className={`${textButtonClass} text-xs font-semibold text-gray-900`} onClick={onConfirm}>
+                Confirm<span className="sr-only"> {info.name} is still the same item</span>
+              </button>
+            )}
+            {onRemove && (
+              <button type="button" className={`${textButtonClass} text-xs`} onClick={onRemove}>
+                Not the same item
+              </button>
+            )}
+          </span>
         </div>
       </div>
     </li>
   );
 }
 
-/** The same item at other stores: confirmed matches ranked as bars, candidates waiting for a yes or no. */
-export function StoreCompare({ watch, now, defaultOpen }: { watch: Watch; now: number; defaultOpen: boolean }) {
+/**
+ * The same item at other stores: confirmed matches ranked as bars, candidates
+ * waiting for a yes or no. `now` is the 1-second display tick every countdown
+ * and "searching…" state is derived from; `coarseNow` is the separate
+ * 5-minute-stepped clock (P06/D73) passed to the reactive query itself, so
+ * this display tick never resubscribes the query on its own.
+ */
+export function StoreCompare({
+  watch,
+  now,
+  coarseNow,
+  defaultOpen,
+}: {
+  watch: Watch;
+  now: number;
+  coarseNow: number;
+  defaultOpen: boolean;
+}) {
   const [open, setOpen] = useState(defaultOpen);
   const panelId = `stores-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
-  const data = useQuery(api.offers.listForWatch, open ? { watchId: watch._id } : "skip");
+  const data = useQuery(api.offers.listForWatch, open ? { watchId: watch._id, now: coarseNow } : "skip");
   const find = useMutation(api.offers.find);
   const confirm = useMutation(api.offers.confirm);
   const reject = useMutation(api.offers.reject);
@@ -162,7 +211,10 @@ export function StoreCompare({ watch, now, defaultOpen }: { watch: Watch; now: n
       offer,
     })),
   ];
-  const comparable = (row: Row) => row.cents !== null && row.currency === currency;
+  // A reconfirm-flagged row keeps its OLD price (T13/P04: never silently re-trusted), so it must
+  // not rank into "cheapest" even though `cents` is still set -- same exclusion `offers.listForWatch`
+  // already applies to its own `best`. An out-of-stock row is already excluded: its `cents` is null.
+  const comparable = (row: Row) => row.cents !== null && row.currency === currency && !needsReconfirm(row);
   rows.sort((a, b) => {
     const ra = comparable(a) ? 0 : a.cents !== null ? 1 : 2;
     const rb = comparable(b) ? 0 : b.cents !== null ? 1 : 2;
@@ -173,13 +225,15 @@ export function StoreCompare({ watch, now, defaultOpen }: { watch: Watch; now: n
   const maxCents = Math.max(0, ...ranked.map((r) => r.cents ?? 0));
   const cheapestKey = ranked.length >= 2 ? ranked[0].key : null;
 
-  const canFind = watching && data !== undefined && !data.searching && data.nextFindAt === null;
+  const searching = data !== undefined && isSearching(data.searchingUntil, now);
+  const findReady = data !== undefined && canFindOtherStores(data.nextFindAt, now);
+  const canFind = watching && findReady && !searching;
   const findLabel =
     data === undefined
       ? "Find other stores"
-      : data.searching
+      : searching
         ? "Searching…"
-        : data.nextFindAt !== null
+        : !findReady && data.nextFindAt !== undefined
           ? `Search again in ${remainingLabel(data.nextFindAt - now)}`
           : confirmed.length + candidates.length === 0
             ? "Find other stores"
@@ -243,13 +297,21 @@ export function StoreCompare({ watch, now, defaultOpen }: { watch: Watch; now: n
                             if (offerId) void run(() => reject({ offerId }));
                           }
                     }
+                    onConfirm={
+                      row.offer === null
+                        ? undefined
+                        : () => {
+                            const offerId = row.offer?._id;
+                            if (offerId) void run(() => confirm({ offerId }));
+                          }
+                    }
                   />
                 ))}
               </ul>
 
               {confirmed.length === 0 && candidates.length === 0 && (
                 <p className="text-sm text-gray-500">
-                  {data.searching
+                  {searching
                     ? "Reading store pages. This takes about a minute."
                     : watching
                       ? "No other stores listed yet. Search to see who else sells it."
@@ -280,13 +342,18 @@ export function StoreCompare({ watch, now, defaultOpen }: { watch: Watch; now: n
                               <span className="block truncate text-xs text-gray-400">
                                 {offer.variantMatch === "exact" ? "Looks like the same item" : "May be a different version"}
                                 {info.kind === "marketplace" && " · marketplace"}
+                                {offer.source === "shopsavvy" && " · via ShopSavvy"}
                                 {offer.lastCheckedAt !== null && ` · read ${ago(now, offer.lastCheckedAt)}`}
                               </span>
                             </span>
                           </span>
                           <span className="flex items-center gap-2">
-                            <span className="text-sm font-semibold tabular-nums text-gray-900">
-                              {offer.lastCents === null ? "—" : fmt(offer.lastCents, offer.currency ?? currency)}
+                            <span className={`text-sm font-semibold tabular-nums ${offer.lastCents === null ? "text-gray-400" : "text-gray-900"}`}>
+                              {offer.note === OUT_OF_STOCK_NOTE
+                                ? "Out of stock"
+                                : offer.lastCents === null
+                                  ? "—"
+                                  : fmt(offer.lastCents, offer.currency ?? currency)}
                             </span>
                             <button
                               type="button"

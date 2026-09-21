@@ -13,6 +13,7 @@ import { storeInfo } from "../../lib/stores";
 import { StoreCompare } from "./StoreCompare";
 import { Chip, DeltaChip, PencilIcon, quietButtonClass, smallButtonClass, smallLabelClass, type Tone } from "./parts";
 import { ago } from "./time";
+import { isChecking } from "../../lib/time";
 import {
   bigNumberClass,
   cardClass,
@@ -43,8 +44,8 @@ const VERDICT: Record<Watch["verdict"]["label"], { text: string; tone: Tone }> =
   unknown: { text: "No price yet", tone: "muted" },
 };
 
-function StatusChip({ watch }: { watch: Watch }) {
-  if (watch.checking) {
+function StatusChip({ watch, checking }: { watch: Watch; checking: boolean }) {
+  if (checking) {
     return (
       <Chip tone="busy" pulse>
         Checking…
@@ -311,8 +312,23 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
   );
 }
 
-/** One watched product as an analytics card: price now, its history, the verdict, the target, other stores. */
-export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: number; storesOpen: boolean }) {
+/**
+ * One watched product as an analytics card: price now, its history, the
+ * verdict, the target, other stores. `now` is the 1-second display tick;
+ * `coarseNow` is the separate 5-minute clock (P06/D73) forwarded to
+ * `StoreCompare`'s own reactive query so a per-second tick never resubscribes it.
+ */
+export function WatchCard({
+  watch,
+  now,
+  coarseNow,
+  storesOpen,
+}: {
+  watch: Watch;
+  now: number;
+  coarseNow: number;
+  storesOpen: boolean;
+}) {
   const checkNow = useMutation(api.watches.checkNow);
   const setStatus = useMutation(api.watches.setStatus);
   const archive = useMutation(api.watches.archive);
@@ -325,6 +341,15 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
   const store = storeInfo(watch.merchantDomain);
   const verdict = VERDICT[watch.verdict.label];
   const live = watch.status === "active" || watch.status === "paused";
+  // P06/D73: `checking` is no longer a server field -- derived from the raw
+  // request/completion timestamps plus this card's own clock (never trusted
+  // for eligibility; "Check now" still calls the mutation and shows its error).
+  const checking = isChecking(watch.checkRequestedAt, watch.lastCheckedAt, now);
+  // A verdict computed from thin/stale/third-party evidence (lib/verdict.ts's
+  // `verdictWithQualifier`) must never read as a plain, confident claim -- so
+  // a caveat is shown whenever `qualified` is true, and "Good price" is never
+  // presented unqualified.
+  const qualifiedReason = watch.verdict.qualified === true ? watch.verdict.qualifiedReason : null;
 
   // Everything below is computed from the accepted observations `watches.list` returns.
   const series = watch.spark.map((p) => ({ at: p.observedAt, value: p.observedCents }));
@@ -370,7 +395,7 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
           {store.kind === "marketplace" && store.note && <p className="mt-1 text-xs text-gray-400">{store.note}</p>}
         </div>
         <div className="shrink-0">
-          <StatusChip watch={watch} />
+          <StatusChip watch={watch} checking={checking} />
         </div>
       </header>
 
@@ -387,6 +412,12 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
               </span>
             )}
           </div>
+          {/* The last ACCEPTED observation (P06/D73), distinct from "last checked" below,
+              which also counts failed attempts that produced no price. */}
+          <p className="mt-1 text-xs text-gray-400">
+            {watch.lastObservedAt === null ? "No price read yet" : `Price as of ${ago(now, watch.lastObservedAt)}`}
+            {watch.priceStale && <span className="text-yellow-700"> · may be out of date</span>}
+          </p>
           {change !== null && first !== undefined && (
             <p className="mt-1 text-xs text-gray-400">
               {change === 0 ? "Same as" : "Compared with"} the first price read, {money(first)}
@@ -408,7 +439,7 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
           />
         ) : (
           <div className="flex h-[160px] items-center justify-center rounded-xl border border-dashed border-gray-200 px-4 text-center text-sm text-gray-400">
-            {watch.checking
+            {checking
               ? "Reading the page for the first price…"
               : series.length === 1
                 ? "One price read so far. The chart draws itself after the next check."
@@ -431,11 +462,14 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
           <Chip tone={verdict.tone}>{verdict.text}</Chip>
           <span className="min-w-0 text-sm text-gray-500">{watch.verdict.reason}</span>
         </div>
+        {qualifiedReason !== null && qualifiedReason !== watch.verdict.reason && (
+          <p className="text-xs text-yellow-700">{qualifiedReason}</p>
+        )}
 
         {live && <TargetControl watch={watch} currency={currency} />}
 
         <p className="flex flex-wrap items-center gap-x-1.5 text-xs text-gray-400" aria-live="polite">
-          {watch.checking ? (
+          {checking ? (
             <>
               <span className="size-1.5 animate-pulse rounded-full bg-harbor motion-reduce:animate-none" aria-hidden="true" />
               <span className="font-medium text-gray-900">Checking the page now…</span>
@@ -449,18 +483,18 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
               {watch.status === "bought" && " · watching ended when you bought it"}
             </span>
           )}
-          {watch.lastNote && !watch.checking && <span className="text-yellow-700">· No price last time: {watch.lastNote}</span>}
+          {watch.lastNote && !checking && <span className="text-yellow-700">· No price last time: {watch.lastNote}</span>}
         </p>
 
         {live ? (
           <div className="flex flex-wrap items-center gap-2 border-t border-dashed border-gray-200 pt-4">
             <button
               type="button"
-              disabled={busy || watch.checking}
+              disabled={busy || checking}
               className={smallButtonClass}
               onClick={() => void run(() => checkNow({ watchId: watch._id }))}
             >
-              {watch.checking ? "Checking…" : "Check now"}
+              {checking ? "Checking…" : "Check now"}
             </button>
             <button
               type="button"
@@ -507,7 +541,7 @@ export function WatchCard({ watch, now, storesOpen }: { watch: Watch; now: numbe
       </div>
 
       <div className="mt-auto">
-        <StoreCompare watch={watch} now={now} defaultOpen={storesOpen} />
+        <StoreCompare watch={watch} now={now} coarseNow={coarseNow} defaultOpen={storesOpen} />
       </div>
     </li>
   );

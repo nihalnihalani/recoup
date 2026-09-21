@@ -2,11 +2,13 @@ import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import { BudgetBanner } from "../components/BudgetBanner";
 import { Money } from "../components/Money";
 import { ErrorBox } from "../components/States";
 import { WatchCard } from "../components/watching/WatchCard";
 import { BellIcon, Chip, IconTile, LinkIcon, TagDownIcon } from "../components/watching/parts";
 import { dropChip } from "../lib/drops";
+import { useCoarseNow } from "../lib/time";
 import {
   cardClass,
   cardTitleClass,
@@ -247,8 +249,15 @@ function EmptyWatching() {
 }
 
 export default function Watching() {
-  const watches = useQuery(api.watches.list);
-  const now = useNow();
+  // `coarseNow` (P06/D73, 5-minute steps) feeds the reactive query so it does
+  // not resubscribe on every tick; `now` is a 1-second display clock every
+  // countdown/cooldown/"checking…"/"searching…" state derives from, off the
+  // query's own RAW timestamps -- never the other way around, and never
+  // trusted for eligibility (the buttons still call the mutation and show
+  // its error).
+  const coarseNow = useCoarseNow();
+  const watches = useQuery(api.watches.list, { now: coarseNow });
+  const now = useNow(1000);
   // Live watches first, in the order the server gives them; bought ones settle at the end.
   const ordered =
     watches === undefined
@@ -276,6 +285,8 @@ export default function Watching() {
         )}
       </div>
 
+      <BudgetBanner />
+
       <AddWatch />
 
       <Drops />
@@ -294,6 +305,7 @@ export default function Watching() {
               key={watch._id}
               watch={watch}
               now={now}
+              coarseNow={coarseNow}
               storesOpen={index < STORES_OPEN_BY_DEFAULT && watch.status !== "bought"}
             />
           ))}
