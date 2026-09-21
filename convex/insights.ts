@@ -5,6 +5,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { watchStatus } from "./schema";
 import { confirmedOffers } from "./offers";
 import { MAX_ITEMS_PER_PURCHASE } from "./limits";
+import { assertCoarseNow } from "./watches";
+import { isPriceStale } from "./lib/freshness";
 
 /**
  * Read models for the dashboard: what happened lately, and how each store is
@@ -592,7 +594,17 @@ const trackedRow = v.object({
       changePct: v.union(v.number(), v.null()),
     }),
   ),
-  /** The cheapest price currently held across the row's stores, and where. */
+  /**
+   * True when the primary store's own price (`watch.lastObservedAt`) is missing or older than
+   * `STALE_PRICE_MS` (F-T15-1, D111/T24b) -- the same test `watches.get`/`list` already apply
+   * inline, computed here via `lib/freshness.ts`'s `isPriceStale` (D115: not literally shared with
+   * `watches.ts` -- that file is owned by another lane right now -- but expressing the identical
+   * rule). A stale primary price is excluded from `lowestCents`/`lowestDomain` below (a fresher
+   * confirmed offer can still win); this field is what lets a client show that exclusion instead of
+   * silent zero-signal disagreement with `stores[0].lastCents`.
+   */
+  priceStale: v.boolean(),
+  /** The cheapest price currently held across the row's stores, and where. A stale primary price is never eligible (see `priceStale`); null when nothing eligible is priced at all. */
   lowestCents: v.union(v.number(), v.null()),
   lowestDomain: v.union(v.string(), v.null()),
 });
@@ -779,13 +791,25 @@ export const priceHistory = query({
   },
 });
 
-/** Every non-archived watch of the caller's with its stores side by side, newest first. `[]` when signed out. */
+/**
+ * Every non-archived watch of the caller's with its stores side by side, newest first. `[]` when
+ * signed out.
+ *
+ * `now` (P06/D73, optional, validated by `assertCoarseNow`) is the same coarse-clock contract as
+ * `watches.get`/`list`/`tracking.overview`: a query never reads the real wall clock for a display
+ * computation. `Board.tsx` (the only caller) already computes a `coarseNow` for the two adjacent
+ * `tracking.overview`/`watches.list` calls on the same lines and now passes the same value here
+ * (T24b). When omitted, this falls back to each watch's OWN last-observed data (never
+ * `Date.now()`) -- the same "can only ever say fresh, never lie stale" fallback `watches.ts`'s
+ * `summarise()` uses -- so `priceStale` stays honest without a real clock reference.
+ */
 export const trackedTable = query({
-  args: {},
+  args: { now: v.optional(v.number()) },
   returns: v.array(trackedRow),
-  handler: async (ctx) => {
+  handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
     if (!userId) return [];
+    const validatedNow = assertCoarseNow(args.now);
     const out: Infer<typeof trackedRow>[] = [];
     for (const watch of await liveWatches(ctx, userId)) {
       const offers = await confirmedOffers(ctx, watch._id, userId);
@@ -793,10 +817,15 @@ export const trackedTable = query({
       // F5a (D103): same currency scoping as `priceHistory.lowest`.
       const currencies = storeCurrencies(watch, offers);
       const primaryCurrency = currencies[0];
+      const now = validatedNow ?? watch.lastObservedAt ?? watch._creationTime;
+      const priceStale = isPriceStale(watch.lastObservedAt, now);
       let lowest: { cents: number; domain: string } | null = null;
       for (let i = 0; i < stores.length; i++) {
         if (primaryCurrency !== null && currencies[i] !== primaryCurrency) continue;
         const store = stores[i];
+        // F-T15-1: a stale primary price is not eligible for "lowest" -- a fresher confirmed
+        // offer can still win. Offers carry no staleness signal of their own today.
+        if (store.isPrimary && priceStale) continue;
         if (store.lastCents !== null && (lowest === null || store.lastCents < lowest.cents)) {
           lowest = { cents: store.lastCents, domain: store.domain };
         }
@@ -814,6 +843,7 @@ export const trackedTable = query({
           lastCents: s.lastCents,
           changePct: s.changePct,
         })),
+        priceStale,
         lowestCents: lowest?.cents ?? null,
         lowestDomain: lowest?.domain ?? null,
       });

@@ -16,10 +16,11 @@
  * with `transactionLimits: true` (task instruction) — see readBudget.test.ts's
  * file header for why `setup()`'s positional form cannot be used here.
  *
- * No test in this file edits production code. `insights.trackedTable`'s
- * `lowest*` fields turn out NOT to hold the freshness invariant (see the
- * `it.fails` below); that gap is documented, not fixed, per this task's
- * "tester files only" scope.
+ * No test in this file edits production code (T15's own scope was "tester
+ * files only"). T15 found `insights.trackedTable`'s `lowest*` fields did NOT
+ * hold the freshness invariant and recorded it as `it.fails` (F-T15-1,
+ * D111); T24b fixed `insights.ts` (see its own doc comments) and flipped
+ * that case below to a normal passing `it`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { convexTest } from "convex-test";
@@ -214,34 +215,36 @@ describe("freshness: notify.claimDrop only fires on accepted observations", () =
 
 // ---------------------------------------------------------------------------
 // insights.trackedTable: the SAME watch/data as above, read through a
-// different query. FINDING: `lowestCents`/`lowestDomain` are drawn straight
-// from `watch.lastCents` with no staleness check and no staleness field on
-// the row at all -- unlike `watches.get`/`list`, which correctly force the
-// verdict to "unknown" via `priceStale`. Severity: MEDIUM. Repro: seed 3
-// accepted checks then enough rejected checks to push the primary store's
-// `points` window (TABLE_POINTS=20, so the newest 40 watchChecks) past every
-// accepted row; `trackedTable`'s row still reports the >5-day-old accepted
-// price as `lowestCents` with nothing on the row to say it is stale. Kept as
-// `it.fails` per this task's "tester files only" scope -- not fixed here.
+// different query. FIXED (T24b/D111 F-T15-1): `lowestCents`/`lowestDomain`
+// used to be drawn straight from `watch.lastCents` with no staleness check
+// and no staleness field on the row at all -- unlike `watches.get`/`list`,
+// which correctly force the verdict to "unknown" via `priceStale`.
+// `insights.ts`'s `trackedTable` now applies the identical rule (via
+// `lib/freshness.ts`'s `isPriceStale`, expressing the same test `watches.ts`'s
+// `summarise()` computes inline) and exposes `priceStale` on the row; a stale
+// PRIMARY price is excluded from `lowestCents`/`lowestDomain` (a fresher
+// confirmed offer can still win -- see insights.test.ts's F-T15-1 cases for
+// that half). `trackedTable` now takes the same optional coarse `now`
+// argument (P06/D73) as `watches.get`/`list`, so this test passes the same
+// `now` `seedStaleWatch` already returns.
+// Repro (unchanged): seed 3 accepted checks then enough rejected checks to
+// push the primary store's `points` window (TABLE_POINTS=20, so the newest
+// 40 watchChecks) past every accepted row.
 // ---------------------------------------------------------------------------
 
 describe("freshness: insights.trackedTable and a stale 'lowest' (F-T15-1, MEDIUM)", () => {
-  it.fails(
-    "does not surface a >5-day-stale accepted price as 'lowest' with no staleness signal on the row",
-    async () => {
-      const t = harness();
-      const { userId, as } = await signedIn(t);
-      await seedStaleWatch(t, userId);
+  it("does not surface a >5-day-stale accepted price as 'lowest', and flags the row priceStale", async () => {
+    const t = harness();
+    const { userId, as } = await signedIn(t);
+    const { now } = await seedStaleWatch(t, userId);
 
-      const rows = await as.query(api.insights.trackedTable, {});
-      const row = rows[0];
-      // Desired: either the stale price is excluded from `lowestCents`, or
-      // the row says it is stale. Today, neither holds -- `lowestCents` is
-      // `watch.lastCents` (7_000, last observed 5+ days before this read)
-      // with no companion field on `trackedRow` a client could use to tell.
-      expect(row.lowestCents).toBeNull();
-    },
-  );
+    const rows = await as.query(api.insights.trackedTable, { now });
+    const row = rows[0];
+    expect(row.priceStale).toBe(true);
+    // The only store on this watch is the (now stale) primary, so with it excluded nothing is left.
+    expect(row.lowestCents).toBeNull();
+    expect(row.lowestDomain).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

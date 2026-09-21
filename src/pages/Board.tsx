@@ -56,7 +56,7 @@ export default function Board() {
   const activity = useQuery(api.insights.activity);
   const sources = useQuery(api.insights.sources);
   const board = useQuery(api.purchases.board);
-  const tracked = useQuery(api.insights.trackedTable);
+  const tracked = useQuery(api.insights.trackedTable, { now: coarseNow });
   const loadExamples = useMutation(api.examples.load);
   const now = useNow(60_000);
   const [loadError, setLoadError] = useState<string | null>(null);

@@ -1,10 +1,11 @@
 /// <reference types="vite/client" />
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { convexTest } from "convex-test";
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import schema from "./schema";
+import { STALE_PRICE_MS } from "./limits";
 
 /**
  * A second, isolated harness with strict transaction limits enforced (the
@@ -539,11 +540,15 @@ describe("insights.trackedTable", () => {
     await seedWatch(t, userId, { name: "Gone", slug: "gone", status: "archived", checks: [[1, 1]] });
 
     const table = await as.query(api.insights.trackedTable, {});
+    // Neither watch here has `lastObservedAt` set (this file's `seedWatch` inserts rows directly,
+    // never through `recordWatchCheck`), so `priceStale` reads true for both (F-T15-1: "never
+    // observed" is stale by definition) -- it still does not block `lowestCents` from picking a
+    // fresher OFFER's price (only a stale PRIMARY price is excluded).
     expect(table).toEqual([
       {
         watchId: chair, name: "Chair", imageUrl: null, status: "paused", currency: "USD", targetCents: null,
         stores: [{ domain: "acme.example", isPrimary: true, lastCents: null, changePct: null }],
-        lowestCents: null, lowestDomain: null,
+        priceStale: true, lowestCents: null, lowestDomain: null,
       },
       {
         watchId: lamp, name: "Lamp", imageUrl: "https://cdn.acme.example/lamp.jpg", status: "active", currency: "USD", targetCents: 4_000,
@@ -551,7 +556,7 @@ describe("insights.trackedTable", () => {
           { domain: "acme.example", isPrimary: true, lastCents: 4_000, changePct: -20 },
           { domain: "rei.example", isPrimary: false, lastCents: 3_800, changePct: -5 },
         ],
-        lowestCents: 3_800, lowestDomain: "rei.example",
+        priceStale: true, lowestCents: 3_800, lowestDomain: "rei.example",
       },
     ]);
   });
@@ -568,6 +573,79 @@ describe("insights.trackedTable", () => {
     expect(row.stores.find((s) => s.domain === "jp.example")?.lastCents).toBe(300); // still shown
     expect(row.lowestCents).toBe(3_800);
     expect(row.lowestDomain).toBe("rei.example");
+  });
+
+  // These three cases pass an explicit `now` through `assertCoarseNow` (P06/D73), which refuses a
+  // `now` more than a day from the real wall clock -- unlike this file's other tests (no fake
+  // timers; BASE is a fixed past date compared only against itself), so each of these scopes real
+  // fake timers around its one query call, set to exactly `now`.
+  it("F-T15-1 (D111/T24b): a stale primary price is excluded from 'lowest' and flagged priceStale; a fresher offer still wins", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const lamp = await seedWatch(t, userId, { name: "Lamp", slug: "lamp", checks: [[1, 4_000]] });
+    // `seedWatch` never sets `lastObservedAt`; backdate it explicitly to simulate a real accepted
+    // observation from well before STALE_PRICE_MS (this is exactly what `recordWatchCheck` sets on
+    // an accepted check -- see watches.ts).
+    await t.run((ctx) => ctx.db.patch(lamp, { lastObservedAt: BASE + HOUR }));
+    await seedOffer(t, userId, lamp, { store: "rei.example", status: "confirmed", lastCents: 3_800, checks: [[1, 3_800]] });
+
+    // assertCoarseNow floors `now` to a 5-minute step, so a 1ms margin would not survive; use 10 minutes.
+    const now = BASE + HOUR + STALE_PRICE_MS + 10 * 60_000; // comfortably past the primary's own staleness threshold
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    let table;
+    try {
+      table = await as.query(api.insights.trackedTable, { now });
+    } finally {
+      vi.useRealTimers();
+    }
+    const row = table.find((r) => r.watchId === lamp)!;
+    expect(row.priceStale).toBe(true);
+    // The primary's raw 4,000 is cheaper on paper but stale, so it is excluded; the offer wins.
+    expect(row.lowestCents).toBe(3_800);
+    expect(row.lowestDomain).toBe("rei.example");
+  });
+
+  it("F-T15-1: lowest is null when the only priced store is a stale primary", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const lamp = await seedWatch(t, userId, { name: "Lamp", slug: "lamp", checks: [[1, 4_000]] });
+    await t.run((ctx) => ctx.db.patch(lamp, { lastObservedAt: BASE + HOUR }));
+
+    const now = BASE + HOUR + STALE_PRICE_MS + 10 * 60_000; // comfortably past the threshold (see 5-minute-flooring note above)
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    let table;
+    try {
+      table = await as.query(api.insights.trackedTable, { now });
+    } finally {
+      vi.useRealTimers();
+    }
+    const row = table.find((r) => r.watchId === lamp)!;
+    expect(row.priceStale).toBe(true);
+    expect(row.lowestCents).toBeNull();
+    expect(row.lowestDomain).toBeNull();
+  });
+
+  it("a fresh primary price is not priceStale and stays eligible for 'lowest'", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const lamp = await seedWatch(t, userId, { name: "Lamp", slug: "lamp", checks: [[1, 4_000]] });
+    await t.run((ctx) => ctx.db.patch(lamp, { lastObservedAt: BASE + HOUR }));
+
+    const now = BASE + HOUR + STALE_PRICE_MS - 10 * 60_000; // comfortably inside the threshold (5-minute-flooring note above): still fresh
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    let table;
+    try {
+      table = await as.query(api.insights.trackedTable, { now });
+    } finally {
+      vi.useRealTimers();
+    }
+    const row = table.find((r) => r.watchId === lamp)!;
+    expect(row.priceStale).toBe(false);
+    expect(row.lowestCents).toBe(4_000);
+    expect(row.lowestDomain).toBe("acme.example");
   });
 
   it("never shows one user's watches to another", async () => {

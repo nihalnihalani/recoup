@@ -30,6 +30,7 @@ import type * as lib_balance from "../lib/balance.js";
 import type * as lib_budget from "../lib/budget.js";
 import type * as lib_email from "../lib/email.js";
 import type * as lib_errors from "../lib/errors.js";
+import type * as lib_freshness from "../lib/freshness.js";
 import type * as lib_idempotency from "../lib/idempotency.js";
 import type * as lib_imageUrl from "../lib/imageUrl.js";
 import type * as lib_latestPolicy from "../lib/latestPolicy.js";
@@ -92,6 +93,7 @@ declare const fullApi: ApiFromModules<{
   "lib/budget": typeof lib_budget;
   "lib/email": typeof lib_email;
   "lib/errors": typeof lib_errors;
+  "lib/freshness": typeof lib_freshness;
   "lib/idempotency": typeof lib_idempotency;
   "lib/imageUrl": typeof lib_imageUrl;
   "lib/latestPolicy": typeof lib_latestPolicy;
