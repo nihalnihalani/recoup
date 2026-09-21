@@ -203,3 +203,84 @@ describe("inbound.onMessageReceived", () => {
     expect(row.route).toBe("ignored");
   });
 });
+
+describe("inbound.onMessageReceived — D112 6a-2 per-inbox rate limit", () => {
+  it("the 61st message in an hour for one inbox is ignored with a rate_limited reason", async () => {
+    const t = setup();
+    await fixture(t);
+    for (let i = 0; i < 60; i++) {
+      await t.mutation(internal.inbound.onMessageReceived, {
+        eventId: `evt-rl-${i}`,
+        thread: {},
+        message: message({ message_id: `m-rl-${i}` }),
+      });
+    }
+    const sixty = (await events(t)).filter((e) => e.externalId.startsWith("evt-rl-"));
+    expect(sixty).toHaveLength(60);
+    expect(sixty.every((e) => e.route !== "ignored")).toBe(true);
+
+    await t.mutation(internal.inbound.onMessageReceived, {
+      eventId: "evt-rl-61",
+      thread: {},
+      message: message({ message_id: "m-rl-61" }),
+    });
+    const row61 = (await events(t)).find((e) => e.externalId === "evt-rl-61")!;
+    expect(row61.route).toBe("ignored");
+    expect(row61.status).toBe("succeeded");
+    expect(row61.summary).toMatch(/rate limited/i);
+  });
+
+  it("a different inbox is unaffected by another inbox's exhausted window", async () => {
+    const t = setup();
+    await fixture(t, "inbox_a");
+    for (let i = 0; i < 60; i++) {
+      await t.mutation(internal.inbound.onMessageReceived, {
+        eventId: `evt-a-${i}`,
+        thread: {},
+        message: message({ inbox_id: "inbox_a", message_id: `m-a-${i}` }),
+      });
+    }
+    await t.mutation(internal.inbound.onMessageReceived, {
+      eventId: "evt-a-61",
+      thread: {},
+      message: message({ inbox_id: "inbox_a", message_id: "m-a-61" }),
+    });
+    expect((await events(t)).find((e) => e.externalId === "evt-a-61")!.route).toBe("ignored");
+
+    await fixture(t, "inbox_b");
+    await t.mutation(internal.inbound.onMessageReceived, {
+      eventId: "evt-b-1",
+      thread: {},
+      message: message({ inbox_id: "inbox_b", message_id: "m-b-1" }),
+    });
+    const rowB = (await events(t)).find((e) => e.externalId === "evt-b-1")!;
+    expect(rowB.route).toBe("intake");
+  });
+
+  it("the window resets after an hour", async () => {
+    const t = setup();
+    await fixture(t);
+    for (let i = 0; i < 60; i++) {
+      await t.mutation(internal.inbound.onMessageReceived, {
+        eventId: `evt-reset-${i}`,
+        thread: {},
+        message: message({ message_id: `m-reset-${i}` }),
+      });
+    }
+    await t.mutation(internal.inbound.onMessageReceived, {
+      eventId: "evt-reset-over",
+      thread: {},
+      message: message({ message_id: "m-reset-over" }),
+    });
+    expect((await events(t)).find((e) => e.externalId === "evt-reset-over")!.route).toBe("ignored");
+
+    vi.advanceTimersByTime(3_600_000 + 1);
+
+    await t.mutation(internal.inbound.onMessageReceived, {
+      eventId: "evt-reset-after",
+      thread: {},
+      message: message({ message_id: "m-reset-after" }),
+    });
+    expect((await events(t)).find((e) => e.externalId === "evt-reset-after")!.route).toBe("intake");
+  });
+});

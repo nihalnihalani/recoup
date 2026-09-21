@@ -40,4 +40,16 @@ export const rateLimiter = new RateLimiter(components.rateLimiter, {
   inboxProvision: { kind: "fixed window", rate: 1, period: 5 * MINUTE },
   /** Manual "recheck now" on one stalled mailLog row (T06). */
   dropRecheck: { kind: "fixed window", rate: 1, period: MINUTE },
+  /**
+   * Inbound messages accepted per AgentMail inbox per rolling hour (D112
+   * 6a-2): a known inbox address flooded with mail must not alone be able
+   * to exhaust the shared `inbound_extract` global switch (D76) that every
+   * other user's intake also draws from. Checked in `inbound.onMessageReceived`
+   * before any routing or scheduled work, so a burst is dropped (`ignored`,
+   * reason `rate_limited`) at the cheapest possible point. Fixed window,
+   * not token bucket: a burst SHOULD be capped hard at the hour boundary
+   * here, unlike the auth flows above where a legitimate retry burst is
+   * expected.
+   */
+  inboundPerInbox: { kind: "fixed window", rate: 60, period: HOUR },
 });

@@ -120,6 +120,21 @@ export const DAILY_BUDGETS = {
   watch_check: { max: 40, label: "checking prices on watched items", global: { kind: "price_check", units: 1 } },
   /** A paid third-party lookup; see MARKET_HISTORY_DAYS for what one costs. */
   market_lookup: { max: 5, label: "market history look-ups", global: { kind: "market_lookup", units: 1 } },
+  /**
+   * D112 6a-2: per-user half of the `inbound_extract` gate (the global
+   * counterpart above stays `GLOBAL_DAILY_BUDGETS.inbound_extract`, D76).
+   * Before this, `inbound_extract` was global-only, so one known inbox
+   * address flooding it could pause every OTHER user's intake for the day.
+   * Charged first, in `intake.beginEvent`/`replies.classify`, deliberately
+   * NOT wired to the global switch via `global: {...}` here -- the two are
+   * checked independently, in that fixed order, by the caller (an
+   * over-cap refusal here writes a distinct `needs_review` summary and no
+   * global-pause marker, so `charge()`'s auto-chaining would be wrong).
+   * 50/day is a heavy day of forwarded mail and replies -- comfortably
+   * above `intake_retry`'s own 20/day -- while still bounding one
+   * account's daily share of the shared 500/day global switch to a tenth.
+   */
+  inbound_extract: { max: 50, label: "reading pasted or forwarded emails" },
 } as const satisfies Record<string, Budget>;
 
 export type BudgetKind = keyof typeof DAILY_BUDGETS;

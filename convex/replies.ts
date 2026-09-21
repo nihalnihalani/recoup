@@ -15,6 +15,7 @@ import { ReplyClass } from "./lib/schemas";
 import { toCents } from "./lib/money";
 import { sanitizeError } from "./lib/errors";
 import { applyEvent } from "./claims";
+import { internalKey } from "./lib/idempotency";
 import { scheduleClaimReminder } from "./followUps";
 import { emailDomain } from "./drafts";
 
@@ -82,18 +83,32 @@ export const classify = internalAction({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    // D76/Invariant 10: checked before the model call, the same gate
-    // `intake.beginEvent` applies on the inbound-email path -- a day the
-    // deployment-wide `inbound_extract` switch is out is never this
-    // particular reply's fault, so it goes to `needs_review` (never
-    // `failed`) and `intake.retryFailed` retries it hourly, without
-    // spending one of this action's own backoff attempts.
-    if (!(await ctx.runMutation(internal.intake.reserveInboundExtract, {}))) {
+    // D76/Invariant 10, extended by D112 6a-2: checked before the model
+    // call, the same two-gate order `intake.beginEvent` applies on the
+    // inbound-email path -- per-user cap first, then the deployment-wide
+    // switch. Either refusal is never this particular reply's fault, so it
+    // goes to `needs_review` (never `failed`) and `intake.retryFailed`
+    // retries it, without spending one of this action's own backoff
+    // attempts. The per-user cap gets its own distinct summary and writes
+    // no global-pause marker (6a-2: one known inbox must not be able to
+    // pause every OTHER user's intake by exhausting the shared switch
+    // alone).
+    const reserved = await ctx.runMutation(internal.intake.reserveInboundExtractForReply, {
+      claimId: args.claimId,
+    });
+    if (reserved === "user_capped" || reserved === "global_capped") {
       if (args.processedEventId) {
-        await ctx.runMutation(internal.intake.pauseForBudget, { processedEventId: args.processedEventId });
+        await ctx.runMutation(
+          reserved === "user_capped" ? internal.intake.pauseForUserBudget : internal.intake.pauseForBudget,
+          { processedEventId: args.processedEventId },
+        );
       }
       return null;
     }
+    // `reserved` is "ok" (both gates cleared) or "no_claim" -- nothing to
+    // charge for a claim that no longer exists; `classifyOnce`'s own
+    // `drafts.context` lookup below already handles a missing claim by
+    // returning without writing anything, unchanged from before this gate.
     // Scheduled actions are not retried by Convex, so a model hiccup would lose the
     // merchant's reply for good (review H2): retry with backoff, then park the
     // event as `failed` where the user can see it and re-run it.
@@ -256,14 +271,17 @@ export const apply = internalMutation({
       if (promisedCents !== undefined && claim.status !== "dismissed") {
         // `promised_credit` never reduces `unresolved` (lib/ledger): it records
         // what was said, and moves the claim to `promised`.
-        await applyEvent(
-          ctx,
-          claim,
-          "promised_credit",
-          promisedCents,
-          evidence,
-          `${claim._id}:msg:${args.messageId}`,
-        );
+        //
+        // D112 6a-1: the key used to be the raw `${claimId}:msg:${messageId}`
+        // string, unbounded by `messageId` (an RFC Message-ID has no length
+        // ceiling) -- `claims.applyEvent`'s old 128-char bound made a long
+        // enough one unrecordable forever. Derived through `internalKey` now
+        // (a fixed-length hash), with the old raw string passed through as
+        // `legacyIdempotencyKey` so a reply recorded before this change is
+        // still found and deduped rather than double-applied.
+        const legacyKey = `${claim._id}:msg:${args.messageId}`;
+        const key = await internalKey(claim._id, "msg", args.messageId);
+        await applyEvent(ctx, claim, "promised_credit", promisedCents, evidence, key, legacyKey);
       } else if (claim.status !== "confirmed" && claim.status !== "dismissed") {
         await ctx.db.patch(claim._id, { status: "promised" });
       }

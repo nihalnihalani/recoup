@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
+import { internalKey } from "./lib/idempotency";
 
 /**
  * Reply classification (D21). The OpenAI call in `classify` is verified
@@ -138,7 +139,11 @@ describe("replies.apply money rules (D21)", () => {
     expect(events).toHaveLength(1);
     expect(events[0].kind).toBe("promised_credit");
     expect(events[0].cents).toBe(4000);
-    expect(events[0].idempotencyKey).toBe(`${claimId}:msg:msg-3`);
+    // D112 6a-1: no longer the raw `${claimId}:msg:${messageId}` string
+    // (unbounded by an external Message-ID) -- a fixed-length hash derived
+    // through `lib/idempotency.ts`'s `internalKey`.
+    expect(events[0].idempotencyKey).toBe(await internalKey(claimId, "msg", "msg-3"));
+    expect(events[0].idempotencyKey).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it("a promise never reduces what is still unresolved", async () => {
@@ -247,6 +252,80 @@ describe("replies.apply money rules (D21)", () => {
         .collect(),
     );
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe("replies.apply — D112 6a-1 long Message-ID idempotency keys", () => {
+  it("records and is idempotent for a reply whose messageId is 200 chars (the checkpoint repro shape)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const claimId = await seedSentClaim(t, userId);
+    const longMessageId = `<${"a".repeat(181)}@mail.example.com>`;
+    expect(longMessageId.length).toBeGreaterThanOrEqual(200);
+
+    const args = {
+      claimId,
+      messageId: longMessageId,
+      from: CONTACT,
+      classification: "promise" as const,
+      summary: "A credit of $40 is on the way.",
+      promisedAmount: 40,
+    };
+
+    const first = await t.mutation(internal.replies.apply, args);
+    expect(first.deduped).toBe(false);
+    expect(first.ledgerWritten).toBe(true);
+
+    const events = await ledger(t, claimId);
+    expect(events).toHaveLength(1);
+    expect(events[0].idempotencyKey).toMatch(/^[0-9a-f]{32}$/);
+
+    // Idempotent on replay: `replies.apply` itself dedupes on `messageId`
+    // (the `replies.by_message` index) before it ever reaches the ledger,
+    // so a second call with the same args is a no-op rather than a second
+    // credit.
+    const second = await t.mutation(internal.replies.apply, args);
+    expect(second.deduped).toBe(true);
+    expect(await ledger(t, claimId)).toHaveLength(1);
+  });
+
+  it("dedupes against a ledger row written under the OLD raw key format (pre-migration), never double-applying", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const claimId = await seedSentClaim(t, userId);
+    const messageId = "msg-legacy-format";
+
+    // Simulate a row this claim wrote before D112 6a-1, under the old raw
+    // `${claimId}:msg:${messageId}` key -- as if `replies.apply` had run
+    // pre-migration. The reply row itself is not simulated: only the
+    // ledger side of the migration hazard is under test here (D112's own
+    // wording: "a claim with an old-format key for the same message would
+    // be double-applied by the new key").
+    await t.run((ctx) =>
+      ctx.db.insert("ledgerEvents", {
+        claimId,
+        userId,
+        kind: "promised_credit",
+        cents: 4_000,
+        evidence: "legacy reply",
+        idempotencyKey: `${claimId}:msg:${messageId}`,
+      }),
+    );
+
+    await t.mutation(internal.replies.apply, {
+      claimId,
+      messageId,
+      from: CONTACT,
+      classification: "promise",
+      summary: "A credit of $40 is on the way.",
+      promisedAmount: 40,
+    });
+
+    // The dual lookup found the legacy-keyed row and deduped against it --
+    // no second, hash-keyed ledger event for the same message.
+    const events = await ledger(t, claimId);
+    expect(events).toHaveLength(1);
+    expect(events[0].idempotencyKey).toBe(`${claimId}:msg:${messageId}`);
   });
 });
 

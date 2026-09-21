@@ -4,7 +4,7 @@ import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS } from "./limits";
-import { BUDGET_PAUSED_SUMMARY } from "./intake";
+import { BUDGET_PAUSED_SUMMARY, PER_USER_BUDGET_PAUSED_SUMMARY } from "./intake";
 
 // `createPasteEvent` and `retryEvent` schedule `processEvent`, which would
 // call OpenAI. Fake timers keep convex-test from running it (D31).
@@ -683,6 +683,69 @@ describe("intake.beginEvent — D76 global inbound_extract budget (Invariant 10)
   });
 });
 
+/** Exhausts one user's own `inbound_extract` cap for "today" (D112 6a-2), without touching the global switch. */
+async function exhaustPerUserInboundExtractBudget(t: T, userId: Id<"users">) {
+  await t.run(async (ctx) => {
+    const day = new Date(Date.now()).toISOString().slice(0, 10);
+    await ctx.db.insert("usage", { userId, day, kind: "inbound_extract", count: DAILY_BUDGETS.inbound_extract.max });
+  });
+}
+
+describe("intake.beginEvent — D112 6a-2 per-user inbound_extract budget", () => {
+  it("a refused per-user budget parks the row needs_review with a distinct summary, no global marker, and spends no attempt", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-user-budget");
+    await exhaustPerUserInboundExtractBudget(t, userId);
+
+    expect(await t.mutation(internal.intake.beginEvent, { processedEventId: id })).toBeNull();
+    const row = await eventRow(t, id);
+    expect(row.status).toBe("needs_review");
+    expect(row.summary).toBe(PER_USER_BUDGET_PAUSED_SUMMARY);
+    expect(row.summary).not.toBe(BUDGET_PAUSED_SUMMARY);
+    expect(row.attempts).toBe(0);
+    expect(row.lastError).toBeUndefined();
+
+    // The global switch is untouched: a fresh usage row for it does not exist yet.
+    const globalRow = await t.run(async (ctx) => {
+      const day = new Date(Date.now()).toISOString().slice(0, 10);
+      return await ctx.db
+        .query("usage")
+        .withIndex("by_user_day_kind", (q) => q.eq("userId", undefined).eq("day", day).eq("kind", "inbound_extract"))
+        .first();
+    });
+    expect(globalRow?.count ?? 0).toBe(0);
+  });
+
+  it("one user's exhausted per-user cap does not pause another user's intake (one known inbox cannot pause everyone, D112 6a-2)", async () => {
+    const t = setup();
+    const { userId: capped } = await signedIn(t, "Capped");
+    const { userId: other } = await signedIn(t, "Other");
+    await exhaustPerUserInboundExtractBudget(t, capped);
+
+    const cappedId = await queueEvent(t, capped, "evt-capped");
+    expect(await t.mutation(internal.intake.beginEvent, { processedEventId: cappedId })).toBeNull();
+    expect((await eventRow(t, cappedId)).summary).toBe(PER_USER_BUDGET_PAUSED_SUMMARY);
+
+    const otherId = await queueEvent(t, other, "evt-other");
+    expect(await t.mutation(internal.intake.beginEvent, { processedEventId: otherId })).not.toBeNull();
+    expect((await eventRow(t, otherId)).status).toBe("processing");
+  });
+
+  it("the per-user cap is checked before the global one: a per-user refusal never touches the global switch even when it too is exhausted", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await exhaustPerUserInboundExtractBudget(t, userId);
+    await exhaustInboundExtractBudget(t);
+    const id = await queueEvent(t, userId, "evt-both-capped");
+
+    expect(await t.mutation(internal.intake.beginEvent, { processedEventId: id })).toBeNull();
+    // The per-user summary wins: it is checked first, so this row's cause is
+    // its own cap, not the (also exhausted) global one.
+    expect((await eventRow(t, id)).summary).toBe(PER_USER_BUDGET_PAUSED_SUMMARY);
+  });
+});
+
 describe("intake.retryFailed (hourly safety net)", () => {
   it("re-queues a failed intake row that has attempts left and parks an exhausted one for review (H4)", async () => {
     const t = setup();
@@ -866,6 +929,66 @@ describe("intake.retryFailed (hourly safety net)", () => {
     const closed = await eventRow(t, orphan);
     expect(closed.status).toBe("succeeded");
     expect(closed.summary).toBe("Ignored: no matching inbox");
+  });
+
+  describe("D112 6a-2: the budget-paused pass is per-user round-robin, not first-come", () => {
+    /** Seeds one `needs_review` row already paused by a budget refusal, oldest-created-first like the real writers leave them. */
+    async function pausedRow(t: T, userId: Id<"users">, externalId: string, summary: string) {
+      const id = await queueEvent(t, userId, externalId);
+      await t.run((ctx) => ctx.db.patch(id, { status: "needs_review", summary }));
+      return id;
+    }
+
+    it("DA repro: a 60-row flood from one user does not starve a single older row from a different user in the first pass", async () => {
+      const t = setup();
+      const { userId: victim } = await signedIn(t, "Victim");
+      const { userId: flooder } = await signedIn(t, "Flooder");
+
+      // The victim's row is created (and thus paused) FIRST, so it is the
+      // OLDEST row and would be the LAST one reached by a naive "newest N"
+      // page once the flooder's 60 newer rows are in front of it.
+      const victimId = await pausedRow(t, victim, "evt-victim", BUDGET_PAUSED_SUMMARY);
+      for (let i = 0; i < 60; i++) {
+        await pausedRow(t, flooder, `evt-flood-${i}`, BUDGET_PAUSED_SUMMARY);
+      }
+
+      const res = await t.mutation(internal.intake.retryFailed, {});
+      // Bounded at 50 total, but the victim's single row is still among them.
+      expect(res.retried).toBeLessThanOrEqual(50);
+      expect((await eventRow(t, victimId)).status).toBe("received");
+    });
+
+    it("caps any one user's share of the pass at 5, leaving room for other users' rows in the same pass", async () => {
+      const t = setup();
+      const { userId: hog } = await signedIn(t, "Hog");
+      const { userId: other } = await signedIn(t, "Other");
+      const hogIds = [];
+      for (let i = 0; i < 10; i++) {
+        hogIds.push(await pausedRow(t, hog, `evt-hog-${i}`, PER_USER_BUDGET_PAUSED_SUMMARY));
+      }
+      const otherId = await pausedRow(t, other, "evt-other", PER_USER_BUDGET_PAUSED_SUMMARY);
+
+      await t.mutation(internal.intake.retryFailed, {});
+
+      const hogRetried = (
+        await Promise.all(hogIds.map((id) => eventRow(t, id)))
+      ).filter((r) => r.status === "received").length;
+      expect(hogRetried).toBe(5);
+      expect((await eventRow(t, otherId)).status).toBe("received");
+    });
+
+    it("a mix of the global and per-user summaries are both retried by the same round-robin pass", async () => {
+      const t = setup();
+      const { userId: a } = await signedIn(t, "A");
+      const { userId: b } = await signedIn(t, "B");
+      const globalId = await pausedRow(t, a, "evt-global", BUDGET_PAUSED_SUMMARY);
+      const perUserId = await pausedRow(t, b, "evt-per-user", PER_USER_BUDGET_PAUSED_SUMMARY);
+
+      await t.mutation(internal.intake.retryFailed, {});
+
+      expect((await eventRow(t, globalId)).status).toBe("received");
+      expect((await eventRow(t, perUserId)).status).toBe("received");
+    });
   });
 });
 

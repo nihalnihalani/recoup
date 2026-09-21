@@ -18,11 +18,12 @@ import { normalizeDomain } from "./lib/policyText";
 import { assertPositiveCents, toCents } from "./lib/money";
 import { sanitizeError } from "./lib/errors";
 import { applyEvent, openClaim } from "./claims";
+import { internalKey } from "./lib/idempotency";
 import { parseProductUrl } from "./lib/watchUrl";
 import { cleanLine } from "./lib/text";
-import { charge, tryConsumeGlobalBudget } from "./lib/budget";
+import { charge, tryConsumeBudget, tryConsumeGlobalBudget } from "./lib/budget";
 import { isTombstoned } from "./lib/accountState";
-import { GLOBAL_DAILY_BUDGETS, MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER } from "./limits";
+import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS, MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER } from "./limits";
 
 /**
  * What the model is told. The email itself is untrusted content and goes in
@@ -60,13 +61,36 @@ const OWNERLESS_AFTER_MS = 86_400_000;
 export const BUDGET_PAUSED_SUMMARY = "Paused: daily extraction budget reached; will retry";
 
 /**
+ * D112 6a-2: distinct from `BUDGET_PAUSED_SUMMARY` on purpose -- a row
+ * paused here hit its OWN user's daily cap, not the deployment-wide switch,
+ * so it carries no global-pause marker and `retryFailed`'s bounded,
+ * per-user round-robin pass (below) is what will pick it back up, not the
+ * page that reads `BUDGET_PAUSED_SUMMARY`.
+ */
+export const PER_USER_BUDGET_PAUSED_SUMMARY = "Daily intake limit reached; will retry tomorrow";
+
+/**
  * D76: the shared `inbound_extract` global switch -- one unit per model call
  * that reads an inbound email, whether from `processEvent` (a fresh order/
- * refund) or `replies.classify` (a merchant reply). Global-only (no per-user
- * counterpart in `DAILY_BUDGETS`): `GLOBAL_DAILY_BUDGETS.inbound_extract`.
+ * refund) or `replies.classify` (a merchant reply).
+ *
+ * D112 6a-2: one known inbox address used to be able to pause every user's
+ * intake for the day by exhausting this global switch alone. A per-user
+ * `inbound_extract` cap (`DAILY_BUDGETS.inbound_extract`) is now charged
+ * FIRST, so one user's flood only ever exhausts their own share before it
+ * can touch the shared switch below.
  */
 export async function reserveInboundExtractBudget(ctx: MutationCtx, now: number = Date.now()): Promise<boolean> {
   return tryConsumeGlobalBudget(ctx, "inbound_extract", GLOBAL_DAILY_BUDGETS.inbound_extract.max, 1, now);
+}
+
+/** The per-user half of the D112 6a-2 gate, checked before the global one. */
+async function reserveInboundExtractForUser(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  now: number = Date.now(),
+): Promise<boolean> {
+  return tryConsumeBudget(ctx, userId, "inbound_extract", DAILY_BUDGETS.inbound_extract.max, now);
 }
 
 /** `replies.classify` runs in an action and has no `ctx.db` of its own; this is its way to call the helper above. */
@@ -76,7 +100,27 @@ export const reserveInboundExtract = internalMutation({
   handler: async (ctx) => reserveInboundExtractBudget(ctx),
 });
 
-/** Moves a `processing` reply-classification row back to `needs_review` after a budget refusal, for `replies.classify`. */
+/**
+ * D112 6a-2: `replies.classify`'s way to charge BOTH the per-user and the
+ * global `inbound_extract` switches (in that order) from an action, which
+ * has no `ctx.db` of its own. The claim, not the caller, is the source of
+ * truth for whose per-user budget to charge -- `classify`'s own args carry
+ * no `userId` (D21: it is unauthenticated on purpose, ownership is derived
+ * from the claim).
+ */
+export const reserveInboundExtractForReply = internalMutation({
+  args: { claimId: v.id("claims") },
+  returns: v.union(v.literal("ok"), v.literal("user_capped"), v.literal("global_capped"), v.literal("no_claim")),
+  handler: async (ctx, { claimId }) => {
+    const claim = await ctx.db.get(claimId);
+    if (!claim) return "no_claim";
+    if (!(await reserveInboundExtractForUser(ctx, claim.userId))) return "user_capped";
+    if (!(await reserveInboundExtractBudget(ctx))) return "global_capped";
+    return "ok";
+  },
+});
+
+/** Moves a `processing` reply-classification row back to `needs_review` after a GLOBAL budget refusal, for `replies.classify`. */
 export const pauseForBudget = internalMutation({
   args: { processedEventId: v.id("processedEvents") },
   returns: v.null(),
@@ -84,6 +128,18 @@ export const pauseForBudget = internalMutation({
     const row = await ctx.db.get(processedEventId);
     if (!row) return null;
     await ctx.db.patch(processedEventId, { status: "needs_review", summary: BUDGET_PAUSED_SUMMARY, lastError: undefined });
+    return null;
+  },
+});
+
+/** Same, for a PER-USER budget refusal (D112 6a-2): distinct summary, no global-pause marker. */
+export const pauseForUserBudget = internalMutation({
+  args: { processedEventId: v.id("processedEvents") },
+  returns: v.null(),
+  handler: async (ctx, { processedEventId }) => {
+    const row = await ctx.db.get(processedEventId);
+    if (!row) return null;
+    await ctx.db.patch(processedEventId, { status: "needs_review", summary: PER_USER_BUDGET_PAUSED_SUMMARY, lastError: undefined });
     return null;
   },
 });
@@ -166,10 +222,18 @@ export const beginEvent = internalMutation({
       });
       return null;
     }
-    // D76/Invariant 10: checked BEFORE `processing`/attempts, so a day the
-    // deployment-wide switch is out never counts against this row's own
-    // MAX_ATTEMPTS -- it is not this email's fault. `needs_review`, not
-    // `failed`: `retryFailed`'s dedicated pass below picks it back up hourly.
+    // D76/Invariant 10, extended by D112 6a-2: checked BEFORE
+    // `processing`/attempts, so a day either switch is out never counts
+    // against this row's own MAX_ATTEMPTS -- it is not this email's fault.
+    // `needs_review`, not `failed`: `retryFailed`'s dedicated pass below
+    // picks it back up. The per-user cap is charged FIRST (6a-2: one known
+    // inbox address must not be able to pause every OTHER user's intake by
+    // exhausting the shared switch alone) and gets its own distinct
+    // summary and no global-pause marker.
+    if (!(await reserveInboundExtractForUser(ctx, row.userId))) {
+      await ctx.db.patch(processedEventId, { status: "needs_review", summary: PER_USER_BUDGET_PAUSED_SUMMARY });
+      return null;
+    }
     if (!(await reserveInboundExtractBudget(ctx))) {
       await ctx.db.patch(processedEventId, { status: "needs_review", summary: BUDGET_PAUSED_SUMMARY });
       return null;
@@ -554,6 +618,16 @@ async function applyRefund(
     // collide with each other. A key collision with a conflicting kind or
     // amount marks only this credit needs_review; the event as a whole still
     // succeeds rather than rolling back credits already applied above.
+    //
+    // D112 6a-1: the key used to be the raw `${messageIdOrPasteHash}:
+    // ${itemId}:${i}` string, unbounded by the message id (an RFC
+    // Message-ID has no length ceiling) -- `claims.applyEvent`'s old
+    // 128-char bound made a long enough one unrecordable forever. Derived
+    // through `internalKey` now (a fixed-length hash), with the old raw
+    // string passed through as the legacy key so a credit recorded before
+    // this change is still found and deduped rather than double-applied.
+    const legacyKey = `${messageIdOrPasteHash}:${item._id}:${i}`;
+    const key = await internalKey(messageIdOrPasteHash, item._id, String(i));
     try {
       await applyEvent(
         ctx,
@@ -561,7 +635,8 @@ async function applyRefund(
         "promised_credit",
         cents,
         `Merchant email says the refund is ${credit.state} (${sourceMessageId ?? "pasted email"})`,
-        `${messageIdOrPasteHash}:${item._id}:${i}`,
+        key,
+        legacyKey,
       );
       applied++;
     } catch (err) {
@@ -795,6 +870,23 @@ export const retryEvent = mutation({
 const RETRY_PAGE = 50;
 /** A row still `processing` after this long lost its action (timeout or redeploy); review M2. */
 const STUCK_AFTER_MS = 15 * 60_000;
+/**
+ * D112 6a-2: scan window for the budget-paused round-robin below. Bounded
+ * (never an unbounded scan), but wide enough that a single flooder's
+ * backlog (the checkpoint's own DA repro: 60 rows from one user) does not
+ * stop the scan from reaching an older row belonging to somebody else in
+ * the same hourly pass.
+ */
+const BUDGET_PAUSE_SCAN_LIMIT = 300;
+/**
+ * D112 6a-2: rows the budget-paused round-robin below will retry (or close
+ * as tombstoned) for any ONE user in a single pass. Combined with the
+ * `RETRY_PAGE`-wide (50) total cap on the same loop, this is what makes the
+ * pass round-robin instead of first-come: once a user's rows fill their
+ * share, the scan moves on to the next user's rows in the same window
+ * rather than spending the rest of the pass on that one user.
+ */
+const BUDGET_RETRY_PER_USER = 5;
 
 /**
  * Hourly safety net for inbound mail (idea from origin's a2ceb98, rewritten for this pipeline).
@@ -809,9 +901,13 @@ const STUCK_AFTER_MS = 15 * 60_000;
  *     oldest 50 and rows that stay in it forever end up hiding every newer failure: a row out of attempts, or
  *     one with nothing to re-run, moves to `needs_review` (still on the owner's needs-attention list, where
  *     `retryEvent` can re-run it by hand); an ownerless row older than a day is closed as ignored.
- *  4. D76/Invariant 10: `needs_review` rows `beginEvent`/`replies.classify` paused for the day (marked with
- *     `BUDGET_PAUSED_SUMMARY`, never `failed`) are re-run the same way, but WITHOUT touching `attempts` -- a
- *     global-budget refusal is never counted as this row's own failed attempt to read the email.
+ *  4. D76/Invariant 10, extended by D112 6a-2: `needs_review` rows `beginEvent`/`replies.classify` paused for
+ *     the day (marked with `BUDGET_PAUSED_SUMMARY` or, for a per-user cap, `PER_USER_BUDGET_PAUSED_SUMMARY`;
+ *     never `failed`) are re-run the same way, but WITHOUT touching `attempts` -- a budget refusal, per-user or
+ *     global, is never counted as this row's own failed attempt to read the email. This pass is per-user
+ *     round-robin (`BUDGET_RETRY_PER_USER`, `BUDGET_PAUSE_SCAN_LIMIT`): one user flooding the paused page with
+ *     their own rows cannot crowd out another user's single paused row from the same hourly pass (checkpoint
+ *     6a-2's DA repro: a 60-row flood must not starve a 1-row victim).
  */
 export const retryFailed = internalMutation({
   args: {},
@@ -890,18 +986,32 @@ export const retryFailed = internalMutation({
       }
     }
 
-    // D76/Invariant 10, point 4 above: budget-paused rows, picked up hourly
-    // and NOT charged against `attempts`. Newest first: a refusal is a
-    // same-day event, so the rows worth unblocking first are the freshest.
-    const budgetPaused = await ctx.db
+    // D76/Invariant 10, point 4 above, extended by D112 6a-2: budget-paused
+    // rows, picked up hourly and NOT charged against `attempts`. Newest
+    // first within the scan window: a refusal is a same-day event, so the
+    // rows worth unblocking first are the freshest -- but the per-user cap
+    // below (`BUDGET_RETRY_PER_USER`) is what actually makes this pass
+    // round-robin: once one user's rows fill their share of the pass, the
+    // loop keeps scanning PAST their remaining rows to reach the next
+    // user's, instead of a plain "take the newest 50" that a single
+    // flooder's rows could fill entirely.
+    const budgetPausedCandidates = await ctx.db
       .query("processedEvents")
       .withIndex("by_status", (q) => q.eq("status", "needs_review"))
       .order("desc")
-      .take(RETRY_PAGE);
-    for (const row of budgetPaused) {
-      if (row.summary !== BUDGET_PAUSED_SUMMARY || !row.userId) continue;
+      .take(BUDGET_PAUSE_SCAN_LIMIT);
+    const budgetRetriesByUser = new Map<Id<"users">, number>();
+    let budgetRetried = 0;
+    for (const row of budgetPausedCandidates) {
+      if (budgetRetried >= RETRY_PAGE) break; // D112 6a-2: ≤ 50 total for this pass.
+      const isBudgetPause = row.summary === BUDGET_PAUSED_SUMMARY || row.summary === PER_USER_BUDGET_PAUSED_SUMMARY;
+      if (!isBudgetPause || !row.userId) continue;
+      const usedByUser = budgetRetriesByUser.get(row.userId) ?? 0;
+      if (usedByUser >= BUDGET_RETRY_PER_USER) continue; // this user's share is full; keep scanning for others.
+
       if (await isTombstoned(ctx, row.userId)) {
         await ctx.db.patch(row._id, { status: "succeeded", summary: "Ignored: account deleted" });
+        budgetRetriesByUser.set(row.userId, usedByUser + 1);
         continue;
       }
       const payload = (row.payload ?? {}) as Record<string, unknown>;
@@ -910,6 +1020,8 @@ export const retryFailed = internalMutation({
         await ctx.db.patch(row._id, { status: "received", summary: undefined });
         await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId: row._id });
         retried++;
+        budgetRetried++;
+        budgetRetriesByUser.set(row.userId, usedByUser + 1);
       } else if (row.route === "reply" && row.claimId && read("messageId")) {
         await ctx.db.patch(row._id, { status: "processing", processingStartedAt: now, summary: undefined });
         await ctx.scheduler.runAfter(0, internal.replies.classify, {
@@ -921,10 +1033,12 @@ export const retryFailed = internalMutation({
           text: read("text"),
         });
         retried++;
+        budgetRetried++;
+        budgetRetriesByUser.set(row.userId, usedByUser + 1);
       }
-      // Else: nothing to re-run. Neither writer of BUDGET_PAUSED_SUMMARY marks a
-      // row this way without a runnable route/payload, so this is unreached in
-      // practice; left as a no-op rather than an assertion.
+      // Else: nothing to re-run. Neither writer of a budget-paused summary
+      // marks a row this way without a runnable route/payload, so this is
+      // unreached in practice; left as a no-op rather than an assertion.
     }
 
     return { unstuck, retried };

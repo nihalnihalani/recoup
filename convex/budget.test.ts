@@ -175,9 +175,19 @@ describe("claim_email global cap (T01/D76)", () => {
     expect(rows.find((r) => r.userId === user101 && r.kind === "claim_email")).toBeUndefined();
   });
 
-  it("inbound_extract is a global-only kind: no per-user DAILY_BUDGETS entry, callers use tryConsumeGlobalBudget", async () => {
+  it("inbound_extract now has BOTH a global switch and a per-user cap (D112 6a-2): the global one alone can no longer let one known inbox pause every user's intake", async () => {
+    // D112 checkpoint 6a-2 overturned this kind's earlier "global-only, no
+    // per-user counterpart" design (see the GLOBAL_DAILY_BUDGETS.inbound_extract
+    // comment in limits.ts): `intake.beginEvent`/`replies.classify` now charge
+    // the per-user cap below via `tryConsumeBudget` FIRST, then the global
+    // switch via `tryConsumeGlobalBudget` -- not through `charge()`/`tryCharge()`,
+    // since an over-cap refusal on either half needs its own distinct
+    // `needs_review` summary and the per-user refusal must write no
+    // global-pause marker (so `DAILY_BUDGETS.inbound_extract` deliberately
+    // carries no `global: {...}` link).
     expect(GLOBAL_DAILY_BUDGETS.inbound_extract.max).toBe(500);
-    expect((DAILY_BUDGETS as Record<string, unknown>).inbound_extract).toBeUndefined();
+    expect(DAILY_BUDGETS.inbound_extract.max).toBe(50);
+    expect(DAILY_BUDGETS.inbound_extract).not.toHaveProperty("global");
   });
 });
 

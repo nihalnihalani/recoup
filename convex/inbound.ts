@@ -4,6 +4,7 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { tokenFromSubject } from "./lib/ledger";
 import { sanitizeError } from "./lib/errors";
+import { rateLimiter } from "./lib/rateLimits";
 
 /** How much of a message body we keep for the retry payload (D14). */
 const MAX_TEXT_CHARS = 60_000;
@@ -140,6 +141,22 @@ export const onMessageReceived = internalMutation({
           status: "succeeded",
           route: "ignored",
           summary: "Message arrived for an inbox this app does not know.",
+        });
+        return null;
+      }
+
+      // D112 6a-2: a per-inbox rate limit, independent of and ahead of any
+      // per-user or global budget -- catches a burst at ONE inbox address
+      // within the hour before it ever reaches intake/reply classification
+      // (and before any further processedEvents rows or scheduled work is
+      // created for it). `inboxId` is defined here: `profile` above was
+      // only looked up when it was truthy.
+      const inboxLimit = await rateLimiter.limit(ctx, "inboundPerInbox", { key: inboxId! });
+      if (!inboxLimit.ok) {
+        await ctx.db.patch(eventId, {
+          status: "succeeded",
+          route: "ignored",
+          summary: "Ignored: rate limited (too many messages to this inbox this hour).",
         });
         return null;
       }
