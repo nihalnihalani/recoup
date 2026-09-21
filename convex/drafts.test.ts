@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
-import { applySendOutcome } from "./drafts";
+import { applySendOutcome, subjectWithToken } from "./drafts";
 import { agentmail } from "./mail";
 import { DAILY_BUDGETS, MAX_SENDS_PER_CLAIM } from "./limits";
 
@@ -25,7 +25,9 @@ type Seeded = {
 async function seed(
   t: ReturnType<typeof setup>,
   userId: Id<"users">,
-  opts: { status?: "detected" | "drafted" | "queued" | "sent" | "confirmed" | "dismissed" } = {},
+  opts: {
+    status?: "detected" | "drafted" | "queued" | "sent" | "packet" | "confirmed" | "dismissed";
+  } = {},
 ): Promise<Seeded> {
   return await t.run(async (ctx) => {
     const purchaseId = await ctx.db.insert("purchases", {
@@ -141,7 +143,48 @@ describe("drafts.insert", () => {
   });
 });
 
+describe("subjectWithToken (D58)", () => {
+  it("appends the token when there is none", () => {
+    expect(subjectWithToken("Refund for order AC-1", "AB12CD")).toBe(
+      "Refund for order AC-1 [RC-AB12CD]",
+    );
+  });
+
+  it("strips a stale token before appending the current one", () => {
+    expect(subjectWithToken("Re: Refund for order AC-1 [RC-ZZ99ZZ]", "AB12CD")).toBe(
+      "Re: Refund for order AC-1 [RC-AB12CD]",
+    );
+  });
+
+  it("strips every stale token, however many are present", () => {
+    expect(subjectWithToken("Order [RC-111111] update [RC-222222]", "AB12CD")).toBe(
+      "Order update [RC-AB12CD]",
+    );
+  });
+});
+
 describe("drafts.approveAndSend guards", () => {
+  it("refuses when a newer draft exists for the claim (D58)", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    await withInbox(t, userId);
+    await confirmedPolicy(t, userId);
+    const { claimId } = await seed(t, userId);
+    const olderDraftId = await newDraft(t, claimId, userId);
+    await newDraft(t, claimId, userId); // a newer draft, version 2
+
+    await expect(
+      as.mutation(api.drafts.approveAndSend, {
+        draftId: olderDraftId,
+        to: CONTACT,
+        subject: "Refund for order AC-1",
+        body: "Hello",
+        claimVersion: 1,
+        draftVersion: 1,
+      }),
+    ).rejects.toThrow(/newer draft exists/i);
+  });
+
   it("refuses when the claim changed after the draft was written", async () => {
     const t = setup();
     const { userId, as } = await signedIn(t);
@@ -643,6 +686,34 @@ describe("drafts.markPacketSent (D24)", () => {
     await expect(
       other.as.mutation(api.drafts.markPacketSent, { claimId, note: "x" }),
     ).rejects.toThrow(/Claim not found/);
+  });
+
+  it("refuses a claim already queued, sent, packet, confirmed or dismissed (D52)", async () => {
+    const t = setup();
+    for (const status of ["queued", "sent", "packet", "confirmed", "dismissed"] as const) {
+      const { userId, as } = await signedIn(t, `User-${status}`);
+      const { claimId } = await seed(t, userId, { status });
+      await expect(as.mutation(api.drafts.markPacketSent, { claimId, note: "x" })).rejects.toThrow(
+        new RegExp(status),
+      );
+    }
+  });
+});
+
+describe("drafts.recheckSend (D56)", () => {
+  it("refuses a draft that has not been sent, and another user's draft", async () => {
+    const t = setup();
+    const owner = await signedIn(t, "Owner");
+    const other = await signedIn(t, "Other");
+    const { claimId } = await seed(t, owner.userId);
+    const draftId = await newDraft(t, claimId, owner.userId);
+
+    await expect(
+      owner.as.mutation(api.drafts.recheckSend, { draftId }),
+    ).rejects.toThrow(/has not been sent/);
+    await expect(other.as.mutation(api.drafts.recheckSend, { draftId })).rejects.toThrow(
+      /Draft not found/,
+    );
   });
 });
 

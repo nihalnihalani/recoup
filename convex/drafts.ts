@@ -38,11 +38,13 @@ const POLICY_SCAN = 20;
  * D13 reconcile backoff. `approveAndSend` schedules attempt 1 at BACKOFF[0];
  * attempt N (1-based) reschedules itself at BACKOFF[N]. Running out of
  * entries means five checks happened and delivery is still unknown.
+ * Exported so `notify.reconcileDrop` (F3) can reconcile a queued drop email
+ * on the same backoff, rather than inventing a second schedule.
  */
-const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000] as const;
+export const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000] as const;
 
-/** Component statuses that mean the message will never be delivered (D13). */
-const TERMINAL_FAILURES = ["failed", "bounced", "rejected"] as const;
+/** Component statuses that mean the message will never be delivered (D13). Exported for `notify.ts` (F3), same reason as `BACKOFF_MS`. */
+export const TERMINAL_FAILURES = ["failed", "bounced", "rejected"] as const;
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 /** Draft versions one claim may hold; `insert` refuses past it, so a read of this many is always the whole set. */
@@ -65,6 +67,20 @@ function money(cents: number, currency: string): string {
 function day(ms: number | undefined): string | null {
   if (ms === undefined || !Number.isFinite(ms)) return null;
   return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * D58: strips any existing `[RC-...]` token(s) from a subject -- e.g. a
+ * stale one left over from editing a copy-pasted subject -- before
+ * appending this claim's own token, so `tokenFromSubject` (lib/ledger) can
+ * never pick up the wrong claim from a leftover tag earlier in the string.
+ */
+export function subjectWithToken(subject: string, token: string): string {
+  const stripped = subject
+    .replace(/\s*\[RC-[A-Z0-9]{6}\]/g, "")
+    .trim()
+    .slice(0, 200);
+  return `${stripped} [RC-${token}]`.trim();
 }
 
 /** The domain half of an email address, lowercased. */
@@ -377,6 +393,19 @@ export const approveAndSend = mutation({
     if (draft.version !== args.draftVersion) {
       throw new ConvexError("This draft changed since you reviewed it. Reload and try again.");
     }
+
+    // D58: the draft being approved must be the newest one on the claim --
+    // an older draft can still pass every other check (its own claimVersion
+    // matches, it was never sent) yet be stale because a newer draft was
+    // generated after it.
+    const siblingDrafts = await ctx.db
+      .query("drafts")
+      .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+      .collect();
+    const newestVersion = Math.max(...siblingDrafts.map((d) => d.version));
+    if (draft.version !== newestVersion) {
+      throw new ConvexError("A newer draft exists for this claim. Use that one instead.");
+    }
     if (claim.version !== args.claimVersion || claim.version !== draft.claimVersion) {
       throw new ConvexError("The claim changed since this draft was written. Generate a new draft.");
     }
@@ -414,9 +443,7 @@ export const approveAndSend = mutation({
     // The same cap `update` applies; the client's copy of the text is never trusted to have gone through it.
     const body = args.body.trim().slice(0, MAX_BODY_CHARS);
     if (body.length === 0) throw new ConvexError("The message body is empty");
-    const token = `[RC-${claim.token}]`;
-    const stripped = stripControl(args.subject).trim().slice(0, 200);
-    const subject = stripped.includes(token) ? stripped : `${stripped} ${token}`.trim();
+    const subject = subjectWithToken(stripControl(args.subject), claim.token);
 
     // B1: `queued` only blocks a second send for the ~30s until reconcile, so sends are counted. A draft whose
     // delivery failed has its `outboundId` and `approvedAt` cleared by `applySendOutcome` and does not count.
@@ -555,6 +582,26 @@ export const reconcileSend = internalMutation({
 });
 
 /**
+ * D56: lets the owner ask for one more delivery check on demand, e.g. after
+ * a draft has sat `sendUnknown` for a while. Reuses `applySendOutcome` with
+ * the backoff exhausted so a still-pending result doesn't reschedule another
+ * automatic check; it only updates `sendUnknown` (cleared on a definite
+ * outcome, otherwise left as-is).
+ */
+export const recheckSend = mutation({
+  args: { draftId: v.id("drafts") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const draft = await ownedDraft(ctx, args.draftId, userId);
+    if (!draft.outboundId) throw new ConvexError("This draft has not been sent");
+    const status = await agentmail.status(statusCtx(ctx), draft.outboundId);
+    await applySendOutcome(ctx, draft._id, BACKOFF_MS.length, status);
+    return null;
+  },
+});
+
+/**
  * Live delivery state for one draft the caller owns (D29). Resolves the
  * outbound id from the draft rather than taking it as an argument, so no
  * caller can poll somebody else's outbound message.
@@ -579,6 +626,13 @@ export const sendStatus = query({
 });
 
 /**
+ * D52: a claim already past this point -- `confirmed`, `dismissed`,
+ * `queued`, `sent`, or already `packet` -- refuses a new packet-sent record,
+ * so it can't clobber a real send in flight or reopen a closed claim.
+ */
+const PACKET_BLOCKED_STATUSES = new Set(["confirmed", "dismissed", "queued", "sent", "packet"]);
+
+/**
  * The user chased the merchant somewhere we cannot send mail — a web form,
  * a chat widget, a phone call (D24, D18). The claim moves to `packet`, the
  * fact is recorded as a note rather than a ledger event (no money has moved),
@@ -590,8 +644,8 @@ export const markPacketSent = mutation({
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, args.claimId, userId);
-    if (claim.status === "confirmed" || claim.status === "dismissed") {
-      throw new ConvexError("This claim is closed");
+    if (PACKET_BLOCKED_STATUSES.has(claim.status)) {
+      throw new ConvexError(`This claim is ${claim.status} and cannot be marked packet-sent`);
     }
     const note = args.note.trim().slice(0, MAX_NOTE_CHARS);
     await ctx.db.patch(claim._id, {

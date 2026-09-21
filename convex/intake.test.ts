@@ -3,6 +3,7 @@ import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
+import { DAILY_BUDGETS } from "./limits";
 
 // `createPasteEvent` and `retryEvent` schedule `processEvent`, which would
 // call OpenAI. Fake timers keep convex-test from running it (D31).
@@ -71,7 +72,7 @@ async function purchaseWithItem(
     orderRef: opts.orderRef ?? "ORD-1",
     purchasedAt: Date.parse("2026-09-01"),
     currency: "USD",
-    status: "needs_review",
+    status: "active",
     items: [{ name: "Wool scarf", unitCents: opts.unitCents ?? 4_000, qty: 1 }],
   });
   const detail = await as.query(api.purchases.get, { purchaseId });
@@ -161,6 +162,54 @@ describe("intake.applyExtraction — orders", () => {
     expect((await as.query(api.purchases.board, {})).purchases).toHaveLength(0);
   });
 
+  it("drops just the one unusable item out of several, and says so in the summary (D58)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-partial-items");
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: id,
+      parsed: orderEmail({
+        items: [
+          { name: "Wool scarf", unitPrice: 79.99, qty: 1, productUrl: null },
+          { name: "Phantom hat", unitPrice: Infinity, qty: 1, productUrl: null },
+        ],
+      }),
+    });
+
+    const board = await as.query(api.purchases.board, {});
+    expect(board.purchases).toHaveLength(1);
+    expect(board.purchases[0].items).toHaveLength(1);
+    expect(board.purchases[0].items[0].name).toBe("Wool scarf");
+
+    const row = await eventRow(t, id);
+    expect(row.status).toBe("needs_review");
+    expect(row.summary).toContain("Phantom hat");
+  });
+
+  it("F4: drops a productUrl that does not parse as a real product link, but keeps the item", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-bad-url");
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: id,
+      parsed: orderEmail({
+        items: [
+          { name: "Wool scarf", unitPrice: 79.99, qty: 1, productUrl: "javascript:alert(1)" },
+          { name: "Wool hat", unitPrice: 19.99, qty: 1, productUrl: "https://nordstrom.com/s/2" },
+        ],
+      }),
+    });
+
+    const board = await as.query(api.purchases.board, {});
+    expect(board.purchases).toHaveLength(1);
+    const items = board.purchases[0].items;
+    expect(items.find((i) => i.name === "Wool scarf")?.productUrl).toBeUndefined();
+    expect(items.find((i) => i.name === "Wool hat")?.productUrl).toBe("https://nordstrom.com/s/2");
+
+    const row = await eventRow(t, id);
+    expect(row.status).toBe("needs_review");
+  });
+
   it("drops a hallucinated purchase date rather than storing it", async () => {
     const t = setup();
     const { as, userId } = await signedIn(t);
@@ -238,6 +287,23 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     expect(row.summary).toContain("not marked returned");
   });
 
+  it("flags a non-positive credit amount as needs_review rather than throwing (D58)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { itemId } = await purchaseWithItem(t, as, { returned: true });
+
+    const id = await queueEvent(t, userId, "evt-bad-credit");
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: id,
+      parsed: refundEmail([{ itemName: "wool scarf", amount: 0, currency: "USD", state: "promised" }]),
+    });
+
+    expect(await claimsOn(t, itemId)).toHaveLength(0);
+    const row = await eventRow(t, id);
+    expect(row.status).toBe("needs_review");
+    expect(row.summary).toContain("unreadable amount");
+  });
+
   it("refuses to guess when an unnamed credit matches no single returned item", async () => {
     const t = setup();
     const { as, userId } = await signedIn(t);
@@ -284,6 +350,104 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     expect(row.summary).toContain("could not be matched to one of your purchases");
   });
 
+  it("skips a purchase that is not active (D55)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    // needs_review, never confirmed to active -- not eligible for refund matching.
+    await as.mutation(api.purchases.create, {
+      merchant: "Nordstrom",
+      merchantDomain: "nordstrom.com",
+      orderRef: "ORD-1",
+      currency: "USD",
+      status: "needs_review",
+      items: [{ name: "Wool scarf", unitCents: 4_000, qty: 1 }],
+    });
+
+    const id = await queueEvent(t, userId, "evt-inactive");
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: id,
+      parsed: refundEmail([{ itemName: "wool scarf", amount: 40, currency: "USD", state: "promised" }]),
+    });
+    const row = await eventRow(t, id);
+    expect(row.status).toBe("needs_review");
+    expect(row.summary).toContain("could not be matched to one of your purchases");
+  });
+
+  it("skips an isExample purchase unless the refund's own merchant says (example) (D55)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const purchaseId = await as.mutation(api.purchases.create, {
+      merchant: "Nordstrom",
+      merchantDomain: "nordstrom.com",
+      orderRef: "ORD-1",
+      purchasedAt: Date.parse("2026-09-01"),
+      currency: "USD",
+      status: "active",
+      isExample: true,
+      items: [{ name: "Wool scarf", unitCents: 4_000, qty: 1 }],
+    });
+    const detail = await as.query(api.purchases.get, { purchaseId });
+    await as.mutation(api.purchases.setReturned, { itemId: detail.items[0]._id, returned: true });
+
+    const idNoLabel = await queueEvent(t, userId, "evt-example-unlabeled");
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: idNoLabel,
+      parsed: refundEmail([{ itemName: "wool scarf", amount: 40, currency: "USD", state: "promised" }]),
+    });
+    expect((await eventRow(t, idNoLabel)).status).toBe("needs_review");
+    expect(await claimsOn(t, detail.items[0]._id)).toHaveLength(0);
+
+    const idLabeled = await queueEvent(t, userId, "evt-example-labeled");
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: idLabeled,
+      parsed: refundEmail(
+        [{ itemName: "wool scarf", amount: 40, currency: "USD", state: "promised" }],
+        { merchant: "Nordstrom (example)" },
+      ),
+    });
+    expect((await eventRow(t, idLabeled)).status).toBe("succeeded");
+    const claims = await claimsOn(t, detail.items[0]._id);
+    expect(claims).toHaveLength(1);
+    expect(claims[0].isExample).toBe(true);
+  });
+
+  it("prefers an exact merchant match over inclusion when both are otherwise ambiguous (D55)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const exact = await as.mutation(api.purchases.create, {
+      merchant: "Nordstrom",
+      merchantDomain: "nordstrom.com",
+      purchasedAt: Date.parse("2026-09-01"),
+      currency: "USD",
+      status: "active",
+      items: [{ name: "Wool scarf", unitCents: 4_000, qty: 1 }],
+    });
+    await as.mutation(api.purchases.create, {
+      merchant: "Nordstrom Rack",
+      merchantDomain: "nordstromrack.com",
+      purchasedAt: Date.parse("2026-09-01"),
+      currency: "USD",
+      status: "active",
+      items: [{ name: "Wool scarf", unitCents: 4_000, qty: 1 }],
+    });
+    const exactDetail = await as.query(api.purchases.get, { purchaseId: exact });
+    const exactItemId = exactDetail.items[0]._id;
+    await as.mutation(api.purchases.setReturned, { itemId: exactItemId, returned: true });
+
+    const id = await queueEvent(t, userId, "evt-exact-merchant");
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: id,
+      // No orderRef, so matching falls to merchant name; "Nordstrom" is an
+      // exact hit on one purchase and a substring hit on both.
+      parsed: refundEmail(
+        [{ itemName: "wool scarf", amount: 40, currency: "USD", state: "promised" }],
+        { orderRef: null },
+      ),
+    });
+    expect((await eventRow(t, id)).status).toBe("succeeded");
+    expect(await claimsOn(t, exactItemId)).toHaveLength(1);
+  });
+
   it("never reaches another user's purchase", async () => {
     const t = setup();
     const a = await signedIn(t, "A");
@@ -299,6 +463,40 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     });
     expect(await claimsOn(t, itemId)).toHaveLength(0);
     expect((await eventRow(t, id)).status).toBe("needs_review");
+  });
+
+  it("marks only the conflicting credit needs_review and does not fail or roll back the event (D54)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { itemId } = await purchaseWithItem(t, as, { returned: true });
+    const id = await queueEvent(t, userId, "evt-conflict");
+
+    // First pass records the promised credit normally.
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: id,
+      parsed: refundEmail([{ itemName: "wool scarf", amount: 40, currency: "USD", state: "promised" }]),
+    });
+    expect((await eventRow(t, id)).status).toBe("succeeded");
+
+    // A retry of the *same* event (same external message id) now proposes a
+    // different amount for the same credit position -- a genuine
+    // idempotency conflict, not a harmless re-apply.
+    await t.run(async (ctx) => await ctx.db.patch(id, { status: "received" }));
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: id,
+      parsed: refundEmail([{ itemName: "wool scarf", amount: 50, currency: "USD", state: "promised" }]),
+    });
+
+    const row = await eventRow(t, id);
+    expect(row.status).toBe("needs_review");
+    expect(row.summary).toContain("needs review");
+
+    // The original ledger event is untouched -- no rollback, no double-write.
+    const claims = await claimsOn(t, itemId);
+    expect(claims).toHaveLength(1);
+    const detail = await as.query(api.claims.get, { claimId: claims[0]._id });
+    expect(detail.events).toHaveLength(1);
+    expect(detail.balance.promised).toBe(4_000);
   });
 
   it("sends an email that is neither an order nor a refund to review", async () => {
@@ -326,6 +524,25 @@ describe("intake — paste, retry and the attention list", () => {
     expect(rows[0].kind).toBe("paste");
   });
 
+  it("scopes the paste action's externalId per user, so two users pasting identical text don't collide (D54)", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    const text = "Order confirmation… ".repeat(5);
+
+    const idA = await a.as.action(api.intake.paste, { text });
+    const idB = await b.as.action(api.intake.paste, { text });
+    expect(idA).not.toBe(idB);
+
+    const rowA = await eventRow(t, idA);
+    const rowB = await eventRow(t, idB);
+    // The digest hashes `${userId}\n${body}`, so two different users pasting the
+    // identical text get different externalIds and are never handed each other's row.
+    expect(rowA.externalId).not.toBe(rowB.externalId);
+    expect(rowA.userId).toBe(a.userId);
+    expect(rowB.userId).toBe(b.userId);
+  });
+
   it("refuses to hand one user the row another user's identical paste created", async () => {
     const t = setup();
     const a = await signedIn(t, "A");
@@ -348,6 +565,19 @@ describe("intake — paste, retry and the attention list", () => {
     await expect(
       t.action(api.intake.paste, { text: "x".repeat(200) }),
     ).rejects.toThrow(ConvexError);
+  });
+
+  it(`F2: caps a user at ${DAILY_BUDGETS.paste.max} NEW pastes a day; a repeat of one on file is still free`, async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const paste = (i: number | string) => `Order confirmation email body padding text ${i}`;
+    for (let i = 0; i < DAILY_BUDGETS.paste.max; i++) {
+      await expect(as.action(api.intake.paste, { text: paste(i) })).resolves.toBeTruthy();
+    }
+    // A repeat of an already-processed paste is served from cache, not a new spend.
+    await expect(as.action(api.intake.paste, { text: paste(0) })).resolves.toBeTruthy();
+
+    await expect(as.action(api.intake.paste, { text: paste("brand new") })).rejects.toThrow(ConvexError);
   });
 
   it("lists only the caller's unfinished events and re-queues one on retry", async () => {
@@ -398,10 +628,13 @@ describe("intake.beginEvent", () => {
 
     await t.run(async (ctx) => await ctx.db.patch(id, { status: "received", attempts: 5 }));
     expect(await t.mutation(internal.intake.beginEvent, { processedEventId: id })).toBeNull();
-    expect((await eventRow(t, id)).status).toBe("failed");
+    const gaveUp = await eventRow(t, id);
+    expect(gaveUp.status).toBe("failed");
+    // D58: a sanitized, user-safe summary is written alongside the raw error.
+    expect(gaveUp.errorSummary).toBe("Something went wrong");
   });
 
-  it("records a processing failure without losing the event", async () => {
+  it("records a processing failure without losing the event, and sanitizes it for the board (D58)", async () => {
     const t = setup();
     const { userId } = await signedIn(t);
     const id = await queueEvent(t, userId, "evt-fail");
@@ -409,6 +642,7 @@ describe("intake.beginEvent", () => {
     const row = await eventRow(t, id);
     expect(row.status).toBe("failed");
     expect(row.lastError).toBe("openai: 500");
+    expect(row.errorSummary).toBe("Provider error");
   });
 });
 

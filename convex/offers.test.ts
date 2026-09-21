@@ -564,3 +564,40 @@ describe("offerChecks (per-store price history)", () => {
     expect((await history(t, offer._id)).map((c) => c.observedCents)).toEqual([12_000]);
   });
 });
+
+describe("dueForRecheck (F5)", () => {
+  it("is false with no confirmed offers, true once one is overdue, and false again right after a recheck", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    expect(await t.query(internal.offers.dueForRecheck, { watchId })).toBe(false);
+
+    await searchOffers(runner(t), watchId, deps(["https://a.example/p"], { "a.example": exact(18_000) }).d);
+    const [a] = await rows(t, watchId);
+    await as.mutation(api.offers.confirm, { offerId: a._id });
+    // Just confirmed (and priced by the find itself): not yet overdue.
+    expect(await t.query(internal.offers.dueForRecheck, { watchId })).toBe(false);
+
+    vi.setSystemTime(T0 + OFFER_FIND_COOLDOWN_MS);
+    expect(await t.query(internal.offers.dueForRecheck, { watchId })).toBe(true);
+
+    await recheckConfirmedOffers(runner(t), watchId, deps([], { "a.example": exact(16_000) }).d);
+    expect(await t.query(internal.offers.dueForRecheck, { watchId })).toBe(false);
+  });
+
+  it("ignores rejected offers and the find marker", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    await searchOffers(
+      runner(t),
+      watchId,
+      deps(["https://a.example/p"], { "a.example": exact(18_000) }).d,
+    );
+    const [a] = await rows(t, watchId);
+    await as.mutation(api.offers.reject, { offerId: a._id });
+    vi.setSystemTime(T0 + OFFER_FIND_COOLDOWN_MS);
+
+    expect(await t.query(internal.offers.dueForRecheck, { watchId })).toBe(false);
+  });
+});

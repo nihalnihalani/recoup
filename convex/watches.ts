@@ -346,7 +346,7 @@ export const create = mutation({
     const userId = await requireUserId(ctx);
     const parsed = parseProductUrl(args.productUrl);
     if (!parsed) throw new ConvexError("Paste a full product link starting with http:// or https://");
-    // Control characters never reach a stored name (review LOW, subject injection).
+    // Control characters never reach a stored name (review LOW, subject injection; F1).
     const givenName = args.name === undefined ? undefined : cleanLine(args.name);
     if (givenName !== undefined && givenName.length > MAX_NAME_CHARS) {
       throw new ConvexError(`name must be at most ${MAX_NAME_CHARS} characters`);
@@ -604,11 +604,23 @@ export const checkWatch = internalAction({
       console.error(`watches.checkWatch failed for ${watchId}`, err);
       observed = { note: errorNote("Price check failed", err) };
     }
-    await ctx.runMutation(internal.watches.recordWatchCheck, {
+    const result = await ctx.runMutation(internal.watches.recordWatchCheck, {
       watchId,
       sourceUrl: watch.productUrl,
       ...observed,
     });
+
+    // F5: a watch's confirmed "same item at another store" offers were never
+    // re-checked after the initial find, so "Cheapest confirmed" could go
+    // stale forever. Ride this successful check to also refresh them, but
+    // only when at least one is actually overdue (`dueForRecheck` reuses
+    // `OFFER_FIND_COOLDOWN_MS`, the same cadence `offers.find` already
+    // respects), so a watch with no confirmed offers -- the common case --
+    // costs nothing extra, and one with some is not re-scraped every 2h tick.
+    if (result.accepted) {
+      const due = await ctx.runQuery(internal.offers.dueForRecheck, { watchId });
+      if (due) await ctx.scheduler.runAfter(0, internal.offers.recheck, { watchId });
+    }
     return null;
   },
 });

@@ -596,6 +596,29 @@ export const recordCandidates = internalMutation({
 // Recheck: confirmed offers only
 // ---------------------------------------------------------------------------
 
+/**
+ * True when this watch has at least one CONFIRMED offer overdue for a
+ * recheck (F5): never checked, or checked more than `OFFER_FIND_COOLDOWN_MS`
+ * ago -- the same cadence `find` already respects. `watches.checkWatch` calls
+ * this before scheduling `recheck`, so a watch with no confirmed offers (the
+ * common case) costs nothing beyond this one indexed read, and one with some
+ * is not re-scraped on every 2h watch check.
+ */
+export const dueForRecheck = internalQuery({
+  args: { watchId: v.id("watches") },
+  returns: v.boolean(),
+  handler: async (ctx, { watchId }) => {
+    const rows = await watchRows(ctx, watchId);
+    const now = Date.now();
+    return rows.some(
+      (r) =>
+        !isMarker(r) &&
+        r.status === "confirmed" &&
+        (r.lastCheckedAt === undefined || now - r.lastCheckedAt >= OFFER_FIND_COOLDOWN_MS),
+    );
+  },
+});
+
 /** The confirmed offers of one watch, at most MAX_OFFER_RECHECKS. Unauthenticated on purpose: called only by `recheck`. */
 export const confirmedForWatch = internalQuery({
   args: { watchId: v.id("watches") },

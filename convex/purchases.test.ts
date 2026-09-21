@@ -77,6 +77,48 @@ describe("purchases", () => {
     ).rejects.toThrow();
   });
 
+  it("F4: create rejects an item productUrl that is not a real product link", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    for (const productUrl of ["javascript:alert(1)", "ftp://acme.example/p", "http://10.0.0.1/p"]) {
+      await expect(
+        as.mutation(api.purchases.create, {
+          ...basePurchase,
+          items: [{ name: "Sweater", unitCents: 8000, qty: 1, productUrl }],
+        }),
+      ).rejects.toThrow();
+    }
+  });
+
+  it("F4: confirm rejects an item productUrl that is not a real product link", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const purchaseId = await as.mutation(api.purchases.create, {
+      ...basePurchase,
+      status: "needs_review" as const,
+      purchasedAt: undefined,
+    });
+    const got = await as.query(api.purchases.get, { purchaseId });
+    await expect(
+      as.mutation(api.purchases.confirm, {
+        purchaseId,
+        merchant: basePurchase.merchant,
+        merchantDomain: basePurchase.merchantDomain,
+        orderRef: basePurchase.orderRef,
+        purchasedAt: basePurchase.purchasedAt,
+        items: [
+          {
+            itemId: got!.items[0]._id,
+            name: got!.items[0].name,
+            unitCents: got!.items[0].unitCents,
+            qty: got!.items[0].qty,
+            productUrl: "javascript:alert(1)",
+          },
+        ],
+      }),
+    ).rejects.toThrow();
+  });
+
   it('rejects currency "usd"', async () => {
     const t = setup();
     const { as } = await signedIn(t);

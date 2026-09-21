@@ -27,7 +27,10 @@ export const verdictValidator = v.object({ label: verdictLabel, reason: v.string
 export const priceSource = v.union(v.literal("recoup"), v.literal("shopsavvy"));
 export const watchStatus = v.union(v.literal("active"), v.literal("paused"), v.literal("archived"), v.literal("bought"));
 export const mailKind = v.union(v.literal("price_drop"));
-export const mailStatus = v.union(v.literal("claimed"), v.literal("sent"), v.literal("failed"));
+/** `queued` sits between `claimed` and `sent`: the component has an outboundId but no confirmed message id yet (F3). */
+export const mailStatus = v.union(
+  v.literal("claimed"), v.literal("queued"), v.literal("sent"), v.literal("failed"),
+);
 export const offerStatus = v.union(v.literal("candidate"), v.literal("confirmed"), v.literal("rejected"));
 
 export default defineSchema({
@@ -44,7 +47,12 @@ export default defineSchema({
     status: purchaseStatus, isExample: v.optional(v.boolean()),
   }).index("by_user", ["userId"]).index("by_user_domain_order", ["userId", "merchantDomain", "orderRef"]),
 
-  /** Line items. `returned` is set only by the user, never by extraction (D15). */
+  /**
+   * Line items. `returned` is set only by the user, never by extraction (D15).
+   * `checkRequestedAt` is stamped when `priceWatch.checkNow` schedules a manual
+   * check, so it carries that check's cooldown the same way a watch's own
+   * `checkRequestedAt` does (F2).
+   */
   items: defineTable({
     purchaseId: v.id("purchases"), userId: v.id("users"), name: v.string(), unitCents: v.number(), qty: v.number(),
     productUrl: v.optional(v.string()), returned: v.boolean(), returnedAt: v.optional(v.number()),
@@ -102,11 +110,13 @@ export default defineSchema({
   /**
    * Outbound notification mail to the account holder (W2). Claim-before-send: the row is inserted with a unique
    * dedupeKey (`watch:<watchId>:<cents>`) before the send is attempted, so a re-run never mails the same event twice.
+   * `outboundId` is set once the component has queued the send (status moves `claimed` -> `queued`); only
+   * `notify.reconcileDrop` confirming a real AgentMail message id moves it on to `sent` (F3, same shape as `drafts`).
    */
   mailLog: defineTable({
     userId: v.id("users"), dedupeKey: v.string(), kind: mailKind, watchId: v.optional(v.id("watches")), to: v.string(),
     subject: v.string(), status: mailStatus, error: v.optional(v.string()), cents: v.optional(v.number()),
-    previousCents: v.optional(v.number()), sentAt: v.optional(v.number()),
+    previousCents: v.optional(v.number()), sentAt: v.optional(v.number()), outboundId: v.optional(vOutboundId),
   }).index("by_dedupe", ["dedupeKey"]).index("by_user", ["userId"]).index("by_watch", ["watchId"]),
 
   /**

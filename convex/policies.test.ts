@@ -108,6 +108,14 @@ describe("refresh", () => {
   it("requires auth", async () => {
     await expect(setup().action(api.policies.refresh, { merchantDomain: "n.example", kind: "returns" })).rejects.toThrow();
   });
+
+  it("rejects a merchantDomain that does not normalise to a real domain", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    await expect(as.action(api.policies.refresh, { merchantDomain: "not a domain", kind: "returns" })).rejects.toThrow(
+      ConvexError,
+    );
+  });
 });
 
 describe("refresh is gated before anything is paid for (pre-launch review B3)", () => {

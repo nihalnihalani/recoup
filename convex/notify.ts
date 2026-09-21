@@ -10,18 +10,30 @@
  * backstop (`drops`), so an alert that could not be mailed (no address, no
  * inbox, daily cap) is still stored, as `failed` with the reason.
  *
- * `sent` means handed to the AgentMail component's send queue from the user's
- * own Recoup inbox; the component owns retries and delivery from there.
- * This path never goes through `drafts.approveAndSend`: that gate is for mail
- * to merchants, and this mail only ever goes to `users.email`.
+ * `claimed` -> `queued` once the component has an outboundId for the message
+ * -> `sent` once `reconcileDrop` has confirmed a real AgentMail message id
+ * (F3, the same claimed/queued/sent shape `drafts.approveAndSend` uses for
+ * mail to merchants). The UI shows "Sending" for `queued` and "Emailed" only
+ * for `sent`. This path never goes through `drafts.approveAndSend` itself:
+ * that gate is for mail to merchants, and this mail only ever goes to
+ * `users.email`.
  */
 import { v } from "convex/values";
 import { getAuthUserId } from "@convex-dev/auth/server";
-import { internalAction, internalMutation, internalQuery, query, type MutationCtx } from "./_generated/server";
+import { vOutboundId } from "@agentmail/convex";
+import {
+  internalAction,
+  internalMutation,
+  internalQuery,
+  query,
+  type MutationCtx,
+  type QueryCtx,
+} from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { mailStatus } from "./schema";
 import { agentmail } from "./mail";
+import { BACKOFF_MS, TERMINAL_FAILURES } from "./drafts";
 import {
   DROP_EMAIL_COUNT_SCAN,
   DROP_EMAIL_WINDOW_MS,
@@ -256,13 +268,46 @@ function sendCtx(ctx: { runMutation: unknown }): Parameters<typeof agentmail.sen
   return ctx as unknown as Parameters<typeof agentmail.sendMessage>[0];
 }
 
-/** Mails one claimed drop. Never throws past the scheduler: every outcome is recorded on the row. */
+/** Same deviation as `sendCtx`, for the read side (`drafts.statusCtx`). */
+function statusCtx(ctx: QueryCtx | MutationCtx): Parameters<typeof agentmail.status>[0] {
+  return ctx as unknown as Parameters<typeof agentmail.status>[0];
+}
+
+/**
+ * Moves a claimed row to `queued` once the component has an outboundId for
+ * it (F3). A row already past `claimed` is left alone, so a retried action
+ * cannot re-queue a row `reconcileDrop` has already resolved.
+ */
+export const markQueued = internalMutation({
+  args: { mailLogId: v.id("mailLog"), outboundId: vOutboundId, to: v.optional(v.string()) },
+  returns: v.null(),
+  handler: async (ctx, { mailLogId, outboundId, to }) => {
+    const row = await ctx.db.get(mailLogId);
+    if (!row || row.status !== "claimed") return null;
+    const recipient = to === undefined ? {} : { to };
+    await ctx.db.patch(mailLogId, { ...recipient, status: "queued", outboundId });
+    return null;
+  },
+});
+
+/**
+ * Enqueues one claimed drop with the component. Never throws past the
+ * scheduler: every outcome is recorded on the row.
+ *
+ * F3: a successful `agentmail.sendMessage` call only means the component
+ * accepted the message for delivery, not that AgentMail has assigned it a
+ * real message id -- the row moves to `queued` here and only
+ * `reconcileDrop`, once it has confirmed that id, moves it on to `sent`.
+ * Before this fix the row (and the "Emailed" label in the UI) went straight
+ * to `sent` from this one enqueue call.
+ */
 export const sendDrop = internalAction({
   args: { mailLogId: v.id("mailLog") },
   returns: v.null(),
   handler: async (ctx, { mailLogId }) => {
     let error: string | null = null;
     let to: string | undefined;
+    let outboundId: Awaited<ReturnType<typeof agentmail.sendMessage>> | undefined;
     try {
       const drop = await ctx.runQuery(internal.notify.dropContext, { mailLogId });
       if (!drop) return null;
@@ -270,7 +315,7 @@ export const sendDrop = internalAction({
       if (drop.problem !== null || drop.inboxId === null || drop.to === null) {
         error = drop.problem ?? "The alert could not be addressed";
       } else {
-        await agentmail.sendMessage(sendCtx(ctx), drop.inboxId, {
+        outboundId = await agentmail.sendMessage(sendCtx(ctx), drop.inboxId, {
           to: drop.to,
           subject: drop.subject,
           text: drop.text,
@@ -282,10 +327,79 @@ export const sendDrop = internalAction({
       error = `Send failed: ${err instanceof Error ? err.message : String(err)}`;
     }
     try {
-      await ctx.runMutation(internal.notify.finishDrop, { mailLogId, error, to });
+      if (outboundId !== undefined) {
+        await ctx.runMutation(internal.notify.markQueued, { mailLogId, outboundId, to });
+        await ctx.scheduler.runAfter(BACKOFF_MS[0], internal.notify.reconcileDrop, {
+          mailLogId,
+          attempt: 1,
+        });
+      } else {
+        await ctx.runMutation(internal.notify.finishDrop, { mailLogId, error, to });
+      }
     } catch (err) {
       console.error(`notify.sendDrop could not record the outcome for ${mailLogId}`, err);
     }
+    return null;
+  },
+});
+
+/**
+ * Applies one AgentMail delivery observation to a queued row (F3, same shape
+ * as `drafts.applySendOutcome`). Exported as a plain function, not
+ * registered: `reconcileDrop` is the only production caller, and tests drive
+ * the transitions directly.
+ *
+ * - a real `agentmailMessageId` -> `sent`
+ * - `failed | bounced | rejected` -> `failed`, with the reason
+ * - still pending, attempts left -> reschedule on the backoff
+ * - still pending, attempts spent -> left `queued`; the UI keeps showing "Sending"
+ */
+export async function applyDropOutcome(
+  ctx: MutationCtx,
+  mailLogId: Id<"mailLog">,
+  attempt: number,
+  status: {
+    status: string;
+    agentmailMessageId: string | null;
+    errorMessage: string | null;
+  } | null,
+): Promise<"sent" | "failed" | "retrying" | "unknown" | "gone"> {
+  const row = await ctx.db.get(mailLogId);
+  if (!row || !row.outboundId || row.status !== "queued") return "gone";
+
+  if (status && (TERMINAL_FAILURES as readonly string[]).includes(status.status)) {
+    await ctx.db.patch(mailLogId, {
+      status: "failed",
+      error: (status.errorMessage ?? `Delivery ${status.status}`).slice(0, MAX_ERROR_CHARS),
+    });
+    return "failed";
+  }
+
+  if (status && status.agentmailMessageId) {
+    await ctx.db.patch(mailLogId, { status: "sent", sentAt: Date.now() });
+    return "sent";
+  }
+
+  if (attempt < BACKOFF_MS.length) {
+    await ctx.scheduler.runAfter(BACKOFF_MS[attempt], internal.notify.reconcileDrop, {
+      mailLogId,
+      attempt: attempt + 1,
+    });
+    return "retrying";
+  }
+
+  return "unknown";
+}
+
+/** The scheduled delivery check (F3, same backoff as `drafts.reconcileSend`). */
+export const reconcileDrop = internalMutation({
+  args: { mailLogId: v.id("mailLog"), attempt: v.number() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const row = await ctx.db.get(args.mailLogId);
+    if (!row || !row.outboundId) return null;
+    const status = await agentmail.status(statusCtx(ctx), row.outboundId);
+    await applyDropOutcome(ctx, args.mailLogId, args.attempt, status);
     return null;
   },
 });
