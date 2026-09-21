@@ -401,4 +401,36 @@ describe("Phase 1 checkpoint decisions (D38-D48)", () => {
     const board = await as.query(api.purchases.board, {});
     expect(board.totals.confirmed).toBe(0);
   });
+
+  it("D57: dismiss on a queued claim best-effort cancels the pending send and always leaves a note", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    await t.mutation(internal.profiles.save, { userId, inboxId: "i@agentmail.to", inboxEmail: "i@agentmail.to" });
+    const { scarf } = await purchaseWithItems(as);
+    const claimId = await openReturnClaim(as, scarf);
+    const draftId = await t.mutation(internal.drafts.insert, {
+      claimId,
+      userId,
+      to: "support@n.example",
+      subject: "Order",
+      body: "Hello",
+    });
+    await as.mutation(api.drafts.approveAndSend, {
+      draftId,
+      to: "support@n.example",
+      subject: "Order",
+      body: "Hello",
+      recipientConfirmed: true,
+    });
+
+    await expect(as.mutation(api.claims.dismiss, { claimId })).resolves.not.toThrow();
+
+    const c = await as.query(api.claims.get, { claimId });
+    expect(c!.claim.status).toBe("dismissed");
+    expect(
+      c!.notes.some(
+        (n) => n.text === "Dismissed; pending send cancelled" || n.text === "Dismissed; send could not be cancelled",
+      ),
+    ).toBe(true);
+  });
 });

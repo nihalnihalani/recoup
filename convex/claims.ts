@@ -7,6 +7,7 @@ import { balance, deriveStatus, newToken, statusAfterEvent, type EventKind } fro
 import { assertCents, assertPositiveCents } from "./lib/money";
 import { eventKind } from "./schema";
 import { cancelPending } from "./followUps";
+import { agentmail } from "./mail";
 
 const MAX_TOKEN_ATTEMPTS = 10;
 
@@ -297,6 +298,12 @@ export const adjustExpected = mutation({
   },
 });
 
+/**
+ * D57: dismissing a `queued` claim best-effort cancels the pending send
+ * (the component throws once a send is no longer pending, e.g. already
+ * delivered), so the cancel is wrapped and always records a note either
+ * way rather than surfacing the cancel outcome as a mutation failure.
+ */
 export const dismiss = mutation({
   args: { claimId: v.id("claims") },
   handler: async (ctx, { claimId }) => {
@@ -305,6 +312,29 @@ export const dismiss = mutation({
     if (claim.status === "confirmed") throw new ConvexError("Cannot dismiss a confirmed claim"); // D48
     await cancelPending(ctx, claim._id);
     await ctx.db.patch(claim._id, { status: "dismissed", version: claim.version + 1, attentionAt: undefined });
+
+    if (claim.status === "queued") {
+      const drafts = await ctx.db
+        .query("drafts")
+        .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+        .collect();
+      const newest = drafts.filter((d) => d.outboundId).sort((a, b) => b.version - a.version)[0];
+      if (newest?.outboundId) {
+        let cancelled = true;
+        try {
+          await agentmail.cancel(ctx, newest.outboundId);
+        } catch {
+          cancelled = false;
+        }
+        await ctx.db.insert("claimNotes", {
+          claimId: claim._id,
+          userId,
+          kind: "status",
+          text: cancelled ? "Dismissed; pending send cancelled" : "Dismissed; send could not be cancelled",
+        });
+        return;
+      }
+    }
     await ctx.db.insert("claimNotes", { claimId: claim._id, userId, kind: "status", text: "Dismissed by user" });
   },
 });
