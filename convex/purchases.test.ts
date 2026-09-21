@@ -220,7 +220,10 @@ describe("purchases", () => {
     expect(board.attention).toHaveLength(2);
     expect(board.attention.every((e) => ["failed", "needs_review"].includes(e.status))).toBe(true);
     expect(board.attention.some((e) => e.summary === "could not match")).toBe(true);
-    expect(board.attention.some((e) => e.lastError === "boom")).toBe(true);
+    // D58: raw lastError is never exposed; a bare lastError falls back to a
+    // sanitized generic summary.
+    expect(board.attention.some((e) => e.errorSummary === "Processing failed")).toBe(true);
+    expect(board.attention.every((e) => !("lastError" in e))).toBe(true);
   });
   it("rejects empty merchantDomain, empty items and far-future purchasedAt (D43)", async () => {
     const t = setup();

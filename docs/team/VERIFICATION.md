@@ -36,3 +36,7 @@ Each entry: date · env · revision · command/scenario · result · counts · l
 - 2026-09-21 · local · dab69a1 · backend lane: `npx vitest run` on owned files · 107/107 (examples 6, priceWatch 10, claims, purchases, followUps, ledger, money) · full suite 180 collected, 167 pass, 13 fail in drafts/replies tests from harness `lib` resolution → T03.1 dispatched
 - 2026-09-21 · local · 6bfe893 (+ uncommitted T10 files) · `npm test` · 17 files, 182 passed · harness now resolves component modules; regression test calls `components.agentmail.lib.listInboundMessages` in-harness
 - 2026-09-21 · local · 31ab7dc · `npm test` · 17 files, 186 passed · D43/D45 policy hardening; independent scenario suite (sonnet-tester) dispatched
+- 2026-09-21 · local · 4b9e693 · `npx vitest run convex/scenarios.test.ts` (independent, requirements-driven, sonnet-tester) · 26 passed; full suite 18 files, 213 passed · all 17 required scenarios covered; OpenAI/AgentMail driven via internal mutations `(offline)`; **gap:** no test advances the Convex scheduler (reconcileSend 30s, reminders) → T13.1
+
+## Required scenarios — status update
+All 15 rows in the table above: **VERIFIED_LOCAL** via `convex/scenarios.test.ts` (plus per-module tests). Live parts remain BLOCKED_EXTERNAL: real OpenAI extraction, real AgentMail send/receive/webhook, real two-tab double-approve under OCC, real scheduler delays.

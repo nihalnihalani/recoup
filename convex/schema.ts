@@ -143,6 +143,7 @@ export default defineSchema({
   /** Idempotency + retry state for inbound webhooks and pastes (D14, D33). */
   processedEvents: defineTable({
     externalId: v.string(), kind: v.string(), status: processedStatus, attempts: v.number(), lastError: v.optional(v.string()),
+    errorSummary: v.optional(v.string()),
     userId: v.optional(v.id("users")), claimId: v.optional(v.id("claims")), route: v.optional(processedRoute),
     summary: v.optional(v.string()), payload: v.optional(v.any()),
   }).index("by_external", ["externalId"]).index("by_status", ["status"]).index("by_user_status", ["userId", "status"]),

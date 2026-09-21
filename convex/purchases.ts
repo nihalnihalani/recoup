@@ -277,7 +277,9 @@ export const board = query({
         kind: e.kind,
         summary: e.summary,
         attempts: e.attempts,
-        lastError: e.lastError,
+        // D58: never expose the raw `lastError`; fall back to a generic
+        // sanitized summary when only the raw error was recorded.
+        errorSummary: e.errorSummary ?? (e.lastError !== undefined ? "Processing failed" : undefined),
       }));
 
     return { purchases: rows, totals: { owed, asked, confirmed }, attention };
