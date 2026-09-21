@@ -322,3 +322,46 @@ describe("mailEvents.onEvent: F8 stashes an unmapped bounce/complaint for a late
     expect(JSON.parse(row!.cursor!)).toMatchObject({ reason: "complained", providerStatus: "complained" });
   });
 });
+
+describe("mailEvents.onEvent: N7 (checkpoint-4 recheck) stash cleanup for an id that is already resolved", () => {
+  it("does not re-stash a redelivered bounce once the mailLog row it maps to has already gone terminal", async () => {
+    const t = setup();
+    const { userId } = await verifiedUser(t);
+    const mailLogId = await sentMailLog(t, userId, "msg-redeliver-1");
+
+    await t.mutation(internal.mailEvents.onEvent, { event: bounceEvent("msg-redeliver-1") }); // -> failed
+    expect((await t.run((ctx) => ctx.db.get(mailLogId)))?.status).toBe("failed");
+
+    // At-least-once redelivery of the SAME event, now that the row is terminal: under the old
+    // logic this fell to `else if (!draftRow)` (true, since no draft is involved here) and stashed
+    // the id anyway, even though nothing will ever consume it again (N7).
+    await t.mutation(internal.mailEvents.onEvent, { event: bounceEvent("msg-redeliver-1") });
+
+    const stash = await t.run((ctx) =>
+      ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", "mailEvent:msg-redeliver-1")).unique(),
+    );
+    expect(stash).toBeNull();
+  });
+
+  it("clears a pre-existing stash entry once a row is found for that id, even on the same event that resolves it", async () => {
+    const t = setup();
+    const { userId } = await verifiedUser(t);
+    // Simulates a stash left behind by an earlier race; nothing under normal operation should be
+    // able to produce this, but a defensive cleanup keeps it from lingering forever either way.
+    await t.run((ctx) =>
+      ctx.db.insert("opsState", {
+        key: "mailEvent:msg-orphan-1",
+        cursor: JSON.stringify({ reason: "bounced", providerStatus: "bounced" }),
+        updatedAt: Date.now(),
+      }),
+    );
+    await sentMailLog(t, userId, "msg-orphan-1");
+
+    await t.mutation(internal.mailEvents.onEvent, { event: complaintEvent("msg-orphan-1") });
+
+    const stash = await t.run((ctx) =>
+      ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", "mailEvent:msg-orphan-1")).unique(),
+    );
+    expect(stash).toBeNull();
+  });
+});

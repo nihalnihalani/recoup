@@ -156,8 +156,6 @@ export const onEvent = internalMutation({
         .withIndex("by_message", (q) => q.eq("agentmailMessageId", messageId))
         .first();
       // --- Merchant mail (drafts) --------------------------------------
-      // (looked up here, ahead of the mailLog branch below, so F8's pending
-      // stash only fires for an id neither side recognizes yet)
       const draftRow = await ctx.db
         .query("drafts")
         .withIndex("by_message", (q) => q.eq("agentmailMessageId", messageId))
@@ -181,13 +179,23 @@ export const onEvent = internalMutation({
           await ctx.db.patch(mailRow._id, { providerStatus: "complained", lastCheckedAt: now });
           await suppressUnlessTombstoned(ctx, mailRow.userId, "complained");
         }
-      } else if (!draftRow) {
-        // F8: neither a resolved (`sent`) mailLog row nor a drafts row
-        // recognizes this id yet -- most likely a price-drop alert still
-        // `queued` (its `agentmailMessageId` is only recorded once
-        // `notify.applyDropOutcome` learns it from the component). Stash the
-        // event so that branch can apply it the moment the id becomes known,
-        // instead of losing an early complaint/bounce.
+      }
+
+      // N7 (checkpoint-4 recheck): both `by_message` lookups only ever find a
+      // row once it has already learned this exact message id -- which only
+      // happens inside `notify.applyDropOutcome`/`drafts.applySendOutcome`'s
+      // own "sent" branch, the same moment either of those already consumes
+      // (and clears) any pending stash for this id. So finding EITHER row
+      // here means this id is already resolved as far as the stash is
+      // concerned: drop any stray entry instead of leaving it to linger
+      // forever (a stale stash from a race, or a redelivered event after the
+      // row already went terminal -- e.g. mailRow now `failed` from this
+      // handler's own earlier application of the same at-least-once event).
+      // Stash a NEW entry only when truly nothing matched yet (F8's original
+      // case: an alert/draft still `queued`, id not recorded anywhere).
+      if (mailRow || draftRow) {
+        await clearPendingMailEvent(ctx, messageId);
+      } else {
         await storePendingMailEvent(ctx, messageId, isBounceLike ? "bounced" : "complained", providerStatus, now);
       }
 
