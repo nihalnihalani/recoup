@@ -401,15 +401,18 @@ describe("drafts.approveAndSend guards", () => {
 
 describe("drafts.approveAndSend reaches the component", () => {
   /**
-   * The enqueue itself cannot run under convex-test: `@agentmail/convex@0.1.0`
-   * ships `dist/test.js` with `import.meta.glob("./component/**\/*.ts")`
-   * resolved against `dist/`, which contains only compiled `.js`, so the
-   * component's module map is empty and any dispatch into it fails with
-   * "Could not find module". What this test can prove is that every D11/D18
-   * guard passes for a confirmed policy contact and the failure is the
-   * harness, not a refusal. The send itself is verified live.
+   * Enqueuing through the real `agentmail` component now works under
+   * convex-test: `test.setup.ts` restored the D51 exhaustive-glob
+   * registration for the "agentmail" component and its two nested
+   * "agentmail/sendPool"/"agentmail/callbackPool" workpools (T01), replacing
+   * the empty module map an unrelated extglob-pattern bug in
+   * `@agentmail/convex`'s own `/test` re-export previously produced (not, as
+   * once believed, a dist/src split). This test now proves every D11/D18
+   * guard passes for a confirmed policy contact AND that the send actually
+   * reaches the component: a real `outboundId` comes back, the draft is
+   * stamped with it, and the claim moves to `queued`.
    */
-  it("passes every guard for a user-confirmed policy contact without an explicit tick", async () => {
+  it("passes every guard for a user-confirmed policy contact without an explicit tick, and reaches the component", async () => {
     vi.useFakeTimers();
     const t = setup();
     const { userId, as } = await signedIn(t);
@@ -418,22 +421,21 @@ describe("drafts.approveAndSend reaches the component", () => {
     const { claimId } = await seed(t, userId);
     const draftId = await newDraft(t, claimId, userId);
 
-    await expect(
-      as.mutation(api.drafts.approveAndSend, {
-        draftId,
-        to: CONTACT,
-        subject: "Refund for order AC-1",
-        body: "Hello, could you confirm the credit?",
-        claimVersion: 1,
-        draftVersion: 1,
-      }),
-    ).rejects.toThrow(/Could not find module/);
+    const outboundId = await as.mutation(api.drafts.approveAndSend, {
+      draftId,
+      to: CONTACT,
+      subject: "Refund for order AC-1",
+      body: "Hello, could you confirm the credit?",
+      claimVersion: 1,
+      draftVersion: 1,
+    });
+    expect(outboundId).toBeTypeOf("string");
+    expect((outboundId as string).length).toBeGreaterThan(0);
 
-    // The mutation rolled back, so nothing was half-written.
     const draft = await t.run((ctx) => ctx.db.get(draftId));
-    expect(draft?.outboundId).toBeUndefined();
+    expect(draft?.outboundId).toBe(outboundId);
     const claim = await t.run((ctx) => ctx.db.get(claimId));
-    expect(claim?.status).toBe("drafted");
+    expect(claim?.status).toBe("queued");
   });
 });
 

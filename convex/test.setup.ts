@@ -2,7 +2,7 @@
 import { convexTest } from "convex-test";
 import agentmail from "@agentmail/convex/test";
 import firecrawl from "@firecrawl/firecrawl-convex/test";
-import workpool from "@convex-dev/workpool/test";
+import workpool from "@convex-dev/workpool/test"; // for .schema only
 import rl from "@convex-dev/rate-limiter/test";
 import bw from "@convex-dev/batch-worker/test"; // for .schema only
 import schema from "./schema";
@@ -10,15 +10,30 @@ import type { Id } from "./_generated/dataModel";
 
 const modules = import.meta.glob("./**/*.*s");
 
-// @convex-dev/rate-limiter's own package `exports` block only exposes deep
-// `src/…` paths through `/test`, and its nested `@convex-dev/batch-worker`
-// component is not auto-registered by convex-test. Glob both components'
-// source directly out of node_modules (D51); `{ exhaustive: true }` is
-// required for `import.meta.glob` to walk into node_modules at all when the
-// glob call itself lives outside the package (unlike `rl.modules`, whose own
-// glob is evaluated from inside the package and needs no such flag). Both
-// components ship `_generated/*.ts` alongside their real modules so
+// D51: several mounted components' own `/test` re-export resolves to an
+// empty module map when loaded from here, so any dispatch into them fails
+// with "Could not find module". `@agentmail/convex/test`'s glob is
+// `"./component/**/!(*.*.*)*.ts"` (meant to skip the `_generated/*.d.ts`
+// stubs) but that extglob negation is not honored by Vite's `import.meta.glob`
+// matcher, so it silently matches nothing at all — not even `lib.ts` — which
+// is why `sendMessage`/`onEvent` dispatch previously failed here (documented
+// at drafts.test.ts:402-437) even though the file-level comment blamed a
+// dist-vs-src split. `@convex-dev/rate-limiter`'s package `exports` block
+// only exposes deep `src/…` paths through `/test`, and its nested
+// `@convex-dev/batch-worker` component is not auto-registered by convex-test
+// at all. The fix for all of them is the same: glob each component's `src/`
+// tree directly out of node_modules with a plain `**/*.ts` pattern.
+// `{ exhaustive: true }` is required for `import.meta.glob` to walk into
+// node_modules at all when the glob call itself lives outside the package
+// (unlike `workpool.modules`/`rl.modules`, whose own glob is evaluated from
+// inside the package and needs no such flag — `@convex-dev/workpool`'s plain
+// `**/*.ts` glob is not affected by the extglob bug and works as shipped, but
+// it is nested twice under "agentmail" here, so it is re-globbed the same way
+// for consistency and to rule out any evaluation-site difference). Every
+// component ships `_generated/*.ts` alongside its real modules so
 // convex-test's root-prefix inference has something to anchor on.
+const agentmailModules = import.meta.glob("../node_modules/@agentmail/convex/src/component/**/*.ts", { exhaustive: true });
+const workpoolModules = import.meta.glob("../node_modules/@convex-dev/workpool/src/component/**/*.ts", { exhaustive: true });
 const rlModules = import.meta.glob("../node_modules/@convex-dev/rate-limiter/src/component/**/*.ts", { exhaustive: true });
 const bwModules = import.meta.glob("../node_modules/@convex-dev/batch-worker/src/component/**/*.ts", { exhaustive: true });
 
@@ -27,19 +42,9 @@ export function setup() {
   process.env.AGENTMAIL_API_KEY = "am-test";
   process.env.AGENTMAIL_WEBHOOK_SECRET = "whsec_test";
   const t = convexTest(schema, modules);
-  // @agentmail/convex@0.1.0 ships `src/component/_generated/*` as compiled
-  // .js/.d.ts only (no .ts source), so `agentmail.modules` (a
-  // `import.meta.glob("./component/**/*.ts")`) never matches a path
-  // containing "_generated" and convex-test's `findModulesRoot` throws.
-  // Add one inert stub module under that path so the root-prefix inference
-  // succeeds; nothing in the component ever dispatches to "_generated/*" at
-  // runtime (those files are type-only re-exports), so this is never loaded.
-  t.registerComponent("agentmail", agentmail.schema, {
-    ...agentmail.modules,
-    "./component/_generated/root.js": async () => ({}),
-  });
-  workpool.register(t, "agentmail/sendPool");
-  workpool.register(t, "agentmail/callbackPool");
+  t.registerComponent("agentmail", agentmail.schema, agentmailModules);
+  t.registerComponent("agentmail/sendPool", workpool.schema, workpoolModules);
+  t.registerComponent("agentmail/callbackPool", workpool.schema, workpoolModules);
   firecrawl.register(t);
   t.registerComponent("rateLimiter", rl.schema, rlModules);
   t.registerComponent("rateLimiter/batchWorker", bw.schema, bwModules);
