@@ -1,7 +1,8 @@
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useQuery } from "convex/react";
+import { Link } from "react-router-dom";
 import { api } from "../../../convex/_generated/api";
-import { SignOutIcon } from "./icons";
+import { SettingsIcon, SignOutIcon } from "./icons";
 
 /** Up to two letters from the part of the address before the @, split on separators. */
 function initialsOf(email: string): string {
@@ -44,6 +45,14 @@ export function UserCard({ collapsed }: { collapsed: boolean }) {
           {inbox ?? (me === undefined ? "Loading…" : "Inbox not set up yet")}
         </p>
       </div>
+      <Link
+        to="/settings"
+        aria-label="Settings"
+        title="Settings"
+        className="flex size-9 shrink-0 items-center justify-center rounded-lg text-gray-500 outline-none transition hover:bg-gray-50 hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-violet-500"
+      >
+        <SettingsIcon />
+      </Link>
       <button
         type="button"
         onClick={() => void signOut()}
