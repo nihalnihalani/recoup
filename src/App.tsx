@@ -1,12 +1,36 @@
 import { Authenticated, AuthLoading, Unauthenticated } from "convex/react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { lazy, Suspense, type ReactNode } from "react";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { ConnectionBanner } from "./components/ConnectionBanner";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Shell } from "./components/Shell";
-import Board from "./pages/Board";
-import Claim from "./pages/Claim";
-import Purchase from "./pages/Purchase";
-import Settings from "./pages/Settings";
+import { Loading } from "./components/States";
 import SignIn from "./pages/SignIn";
-import Watching from "./pages/Watching";
+
+// Route-level code splitting (P10): each page becomes its own chunk instead
+// of all riding in the main bundle, so a visit to /watching never pays for
+// /settings. SignIn stays a static import — it's what unauthenticated users
+// see immediately, so lazily fetching it buys nothing.
+const Board = lazy(() => import("./pages/Board"));
+const Claim = lazy(() => import("./pages/Claim"));
+const Purchase = lazy(() => import("./pages/Purchase"));
+const Settings = lazy(() => import("./pages/Settings"));
+const Watching = lazy(() => import("./pages/Watching"));
+
+/**
+ * Wraps one route's page in its own error boundary and suspense fallback.
+ * Keyed by the full pathname so navigating to a different id (e.g. one
+ * `/purchases/:id` to another) remounts a fresh boundary instead of staying
+ * stuck on a previous error.
+ */
+function RoutedPage({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation();
+  return (
+    <ErrorBoundary key={pathname}>
+      <Suspense fallback={<Loading rows={4} />}>{children}</Suspense>
+    </ErrorBoundary>
+  );
+}
 
 export default function App() {
   return (
@@ -22,13 +46,49 @@ export default function App() {
       </Unauthenticated>
 
       <Authenticated>
+        <ConnectionBanner />
         <Routes>
           <Route element={<Shell />}>
-            <Route path="/" element={<Board />} />
-            <Route path="/purchases/:id" element={<Purchase />} />
-            <Route path="/claims/:id" element={<Claim />} />
-            <Route path="/watching" element={<Watching />} />
-            <Route path="/settings" element={<Settings />} />
+            <Route
+              path="/"
+              element={
+                <RoutedPage>
+                  <Board />
+                </RoutedPage>
+              }
+            />
+            <Route
+              path="/purchases/:id"
+              element={
+                <RoutedPage>
+                  <Purchase />
+                </RoutedPage>
+              }
+            />
+            <Route
+              path="/claims/:id"
+              element={
+                <RoutedPage>
+                  <Claim />
+                </RoutedPage>
+              }
+            />
+            <Route
+              path="/watching"
+              element={
+                <RoutedPage>
+                  <Watching />
+                </RoutedPage>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <RoutedPage>
+                  <Settings />
+                </RoutedPage>
+              }
+            />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
