@@ -64,6 +64,17 @@ export const MAX_OFFERS_PER_WATCH = 40;
 /** Confirmed offers one recheck re-reads, stalest first: each is a paid scrape plus an extraction riding on the watch's own 6h check. */
 export const MAX_OFFER_RECHECKS = 10;
 
+/**
+ * Daily re-check of confirmed other-store offers. A confirmed offer is a store the user told us sells the same
+ * item, so its price is worth keeping current; a candidate nobody confirmed is not, and is never re-read.
+ * One page per tick, stalest first, so a big day is bounded and every offer comes round within a few days.
+ */
+export const OFFER_RECHECK_PAGE = 60;
+/** Watches one tick may schedule. Each one re-reads up to MAX_OFFER_RECHECKS of its confirmed offers. */
+export const OFFER_RECHECK_WATCHES = 20;
+/** Spacing between scheduled re-checks; Firecrawl is rate limited per key. */
+export const OFFER_RECHECK_STAGGER_MS = 5_000;
+
 // --- Daily budgets (pre-launch review B1, B3-B5, H1-H3) ----------------------
 //
 // Counted in the `usage` table, one row per (user, UTC day, kind), by

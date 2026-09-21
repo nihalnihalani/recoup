@@ -34,6 +34,7 @@ import { components, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { offerStatus, priceSource, variantMatch } from "./schema";
 import { ownedWatch, requireUserId } from "./lib/access";
+import { takeGlobalBudget } from "./lib/budget";
 import { assertTimestamp } from "./lib/money";
 import { isTombstoned } from "./lib/accountState";
 import { defaultWatchName } from "./lib/watchUrl";
@@ -52,6 +53,9 @@ import {
   MAX_OFFER_FINDS_PER_DAY,
   MAX_OFFER_PAGES_PER_FIND,
   MAX_OFFER_RECHECKS,
+  OFFER_RECHECK_PAGE,
+  OFFER_RECHECK_STAGGER_MS,
+  OFFER_RECHECK_WATCHES,
   MAX_OFFERS_PER_WATCH,
   OFFER_FIND_COOLDOWN_MS,
   OFFER_FIND_WINDOW_MS,
@@ -783,6 +787,51 @@ export async function recheckConfirmedOffers(
     return 0;
   }
 }
+
+/**
+ * The daily re-check (cron "offer prices"). Confirmed offers are what the
+ * "cheapest store" line rests on, so a price nobody has re-read in days is a
+ * stale claim about money. Reads one bounded page of confirmed offers, stalest
+ * first, and schedules at most OFFER_RECHECK_WATCHES watches, staggered.
+ *
+ * Unauthenticated on purpose: the only caller is the cron. Idempotent: a tick
+ * with nothing stale schedules nothing and costs one indexed read.
+ */
+export const sweepRechecks = internalMutation({
+  args: {},
+  returns: v.object({ watches: v.number() }),
+  handler: async (ctx) => {
+    const rows = await ctx.db
+      .query("offers")
+      .withIndex("by_status_checked", (q) => q.eq("status", "confirmed"))
+      .order("asc")
+      .take(OFFER_RECHECK_PAGE);
+    if (rows.length === 0) return { watches: 0 };
+
+    // One scheduled action per watch, not per offer: `recheckConfirmedOffers` re-reads the watch's own offers.
+    const watchIds: Id<"watches">[] = [];
+    for (const row of rows) {
+      if (watchIds.length >= OFFER_RECHECK_WATCHES) break;
+      if (!watchIds.includes(row.watchId)) watchIds.push(row.watchId);
+    }
+
+    // Each watch re-reads up to MAX_OFFER_RECHECKS pages; charge the deployment switch for the worst case
+    // so a day of re-checks cannot outspend the price sweeps.
+    const allowed = await takeGlobalBudget(ctx, "price_check", watchIds.length * MAX_OFFER_RECHECKS);
+    const budgeted = Math.floor(allowed / MAX_OFFER_RECHECKS);
+    const scheduled = watchIds.slice(0, budgeted);
+
+    const now = Date.now();
+    for (const [i, watchId] of scheduled.entries()) {
+      // Stamp the page's rows for this watch now, so a slow read cannot be picked up twice.
+      for (const row of rows) {
+        if (row.watchId === watchId) await ctx.db.patch(row._id, { lastCheckedAt: now });
+      }
+      await ctx.scheduler.runAfter(i * OFFER_RECHECK_STAGGER_MS, internal.offers.recheck, { watchId });
+    }
+    return { watches: scheduled.length };
+  },
+});
 
 export const recheck = internalAction({
   args: { watchId: v.id("watches") },

@@ -200,7 +200,11 @@ export default defineSchema({
      * pre-declared by sonnet-integrations (T13.1), added here per the T01 schema-ownership convention.
      */
     productName: v.optional(v.string()),
-  }).index("by_watch", ["watchId"]).index("by_user", ["userId"]),
+  })
+    .index("by_watch", ["watchId"])
+    .index("by_user", ["userId"])
+    // The daily re-check reads the stalest confirmed offers first, as a bounded page.
+    .index("by_status_checked", ["status", "lastCheckedAt"]),
 
   /**
    * Per-store price history: one row each time a price is accepted into `offers.lastCents`. Sibling of

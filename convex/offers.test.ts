@@ -4,7 +4,12 @@ import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { NEEDS_RECONFIRM_NOTE, OFFER_CHECK_DEDUPE_MS, recheckConfirmedOffers, searchOffers, type OfferDeps } from "./offers";
 import type { PageObservation } from "./priceWatch";
-import { MAX_OFFER_FINDS_PER_DAY, OFFER_FIND_COOLDOWN_MS, OFFER_FIND_WINDOW_MS } from "./limits";
+import {
+  GLOBAL_DAILY_BUDGETS,
+  MAX_OFFER_FINDS_PER_DAY,
+  OFFER_FIND_COOLDOWN_MS,
+  OFFER_FIND_WINDOW_MS,
+} from "./limits";
 
 /**
  * Offers (W3). No test reaches Firecrawl or OpenAI: `searchOffers` and
@@ -981,5 +986,94 @@ describe("tombstoned owner: scheduled offers work writes nothing (D87)", () => {
     const rechecked = await recheckConfirmedOffers(runner(t), watchId, spendDeps);
     expect(rechecked).toBe(0);
     expect(observed).toHaveLength(0); // still 0: confirmedForWatch is never even reached
+  });
+});
+
+describe("offers.sweepRechecks (daily cron)", () => {
+  async function jobs(t: T) {
+    return await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+  }
+
+  async function confirmedOffer(
+    t: T,
+    watchId: Id<"watches">,
+    userId: Id<"users">,
+    store: string,
+    lastCheckedAt?: number,
+  ) {
+    return await t.run((ctx) =>
+      ctx.db.insert("offers", {
+        watchId,
+        userId,
+        storeDomain: store,
+        productUrl: `https://${store}/p/1`,
+        title: store,
+        status: "confirmed",
+        lastCents: 19_000,
+        currency: "USD",
+        lastCheckedAt,
+      }),
+    );
+  }
+
+  it("schedules one re-check per watch, stalest first, and stamps the rows it took", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const stale = await makeWatch(t, userId, { slug: "stale" });
+    const fresh = await makeWatch(t, userId, { slug: "fresh" });
+    // Two confirmed offers on the stale watch: one watch, one scheduled action.
+    await confirmedOffer(t, stale, userId, "a.example", T0 - 5 * 86_400_000);
+    await confirmedOffer(t, stale, userId, "b.example", T0 - 4 * 86_400_000);
+    await confirmedOffer(t, fresh, userId, "c.example", T0 - 60_000);
+
+    const before = (await jobs(t)).length;
+    const res = await t.mutation(internal.offers.sweepRechecks, {});
+    expect(res.watches).toBe(2);
+    expect((await jobs(t)).length).toBe(before + 2);
+
+    // Every row it read is stamped, so the next tick does not pick the same page up again.
+    const rows = await t.run((ctx) => ctx.db.query("offers").collect());
+    expect(rows.every((r) => (r.lastCheckedAt ?? 0) >= T0)).toBe(true);
+  });
+
+  it("never re-reads a candidate or a rejected offer", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    await t.run(async (ctx) => {
+      for (const status of ["candidate", "rejected"] as const) {
+        await ctx.db.insert("offers", {
+          watchId,
+          userId,
+          storeDomain: `${status}.example`,
+          productUrl: `https://${status}.example/p/1`,
+          title: status,
+          status,
+          lastCheckedAt: T0 - 86_400_000,
+        });
+      }
+    });
+
+    const before = (await jobs(t)).length;
+    expect(await t.mutation(internal.offers.sweepRechecks, {})).toEqual({ watches: 0 });
+    expect((await jobs(t)).length).toBe(before);
+  });
+
+  it("schedules nothing once the deployment's daily price-check switch is spent", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    await confirmedOffer(t, watchId, userId, "a.example", T0 - 86_400_000);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("usage", {
+        day: new Date(T0).toISOString().slice(0, 10),
+        kind: "price_check",
+        count: GLOBAL_DAILY_BUDGETS.price_check.max,
+      });
+    });
+
+    const before = (await jobs(t)).length;
+    expect(await t.mutation(internal.offers.sweepRechecks, {})).toEqual({ watches: 0 });
+    expect((await jobs(t)).length).toBe(before);
   });
 });
