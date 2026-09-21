@@ -129,7 +129,8 @@ try {
   console.error(
     "[codegen:check] FAILED - convex/_generated is stale relative to `npx convex codegen`, " +
       "or codegen itself errored (see output above). Regenerate with `npx convex dev` " +
-      "(or `npx convex codegen`) locally and commit the result.",
+      "(or `npx convex codegen`) locally and commit the result.\n" +
+      `  (${err instanceof Error ? err.message : String(err)})`,
   );
   process.exit(1);
 } finally {
