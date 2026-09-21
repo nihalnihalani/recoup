@@ -363,7 +363,7 @@ describe("boundary: offers.ts", () => {
     const t = setup();
     const { b, worldA, secretsA } = await twoUsers(t);
     const result = await b.as.query(api.offers.listForWatch, { watchId: worldA.watchId });
-    expect(result).toEqual({ offers: [], best: null, searching: false, nextFindAt: null });
+    expect(result).toEqual({ offers: [], best: null, searchingUntil: undefined, nextFindAt: undefined });
     const json = JSON.stringify(result);
     for (const secret of secretsA) expect(json).not.toContain(secret);
   });
