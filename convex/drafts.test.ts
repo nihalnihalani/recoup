@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
-import { applySendOutcome, subjectWithToken } from "./drafts";
+import { applySendOutcome, BACKOFF_MS, subjectWithToken } from "./drafts";
 import { agentmail } from "./mail";
 import { DAILY_BUDGETS, MAX_SENDS_PER_CLAIM } from "./limits";
 
@@ -644,6 +644,40 @@ describe("drafts.reconcileSend transitions (D13)", () => {
     expect(claim?.status).toBe("queued"); // untouched: reconcileSend returned early
     const draft = await t.run((ctx) => ctx.db.get(draftId));
     expect(draft?.outboundId).toBe("outbound-1"); // untouched
+  });
+
+  it("F9: the exhausted branch does not reschedule when the component no longer recognizes the outbound id (status() === null)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { draftId } = await sentDraft(t, userId);
+
+    const outcome = await t.run((ctx) => applySendOutcome(ctx, draftId, BACKOFF_MS.length, null));
+    expect(outcome).toBe("unknown");
+
+    const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    expect(scheduled.filter((j) => j.name.includes("reconcileSend"))).toHaveLength(0);
+  });
+
+  it("F9: repeated recheckSend clicks on a still-pending draft leave at most one reconcileSend pending", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const { draftId } = await sentDraft(t, userId);
+    vi.spyOn(agentmail, "status").mockResolvedValue({
+      status: "pending",
+      agentmailMessageId: null,
+      threadId: null,
+      errorMessage: null,
+    } as never);
+
+    await as.mutation(api.drafts.recheckSend, { draftId });
+    await as.mutation(api.drafts.recheckSend, { draftId });
+    await as.mutation(api.drafts.recheckSend, { draftId });
+
+    const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    const pending = scheduled.filter(
+      (j) => j.name.includes("reconcileSend") && (j.state.kind === "pending" || j.state.kind === "inProgress"),
+    );
+    expect(pending).toHaveLength(1);
   });
 });
 

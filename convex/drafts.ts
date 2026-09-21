@@ -573,11 +573,37 @@ export async function applySendOutcome(
   // rescheduling itself on the same stall interval `notify.ts` uses for
   // `mailLog`, at the same "attempts exhausted" attempt number, until a
   // definite outcome (the `sent`/`failed` branches above) stops it.
-  await ctx.scheduler.runAfter(MAIL_RECONCILE_STALL_MS, internal.drafts.reconcileSend, {
-    draftId: draft._id,
-    attempt: BACKOFF_MS.length,
-  });
+  //
+  // F9 (checkpoint 4): this exhausted branch is also entered synchronously
+  // by `recheckSend` (the owner's manual "check again"), which forces
+  // `attempt = BACKOFF_MS.length` on every call. Without a guard, several
+  // clicks in a row each schedule their own stall-interval reconcile, and
+  // they pile up. Two conditions gate the reschedule:
+  //  - `status !== null`: `null` means the component no longer recognizes
+  //    this outbound id at all -- polling again can never resolve it, so
+  //    stop rather than reschedule forever (the owner can still force one
+  //    more check via `recheckSend`).
+  //  - no `reconcileSend` already pending/in-progress for this draft, read
+  //    off `ctx.db.system`'s `_scheduled_functions` -- so repeated manual
+  //    rechecks leave at most one reconcile scheduled.
+  if (status !== null && !(await hasPendingReconcileSend(ctx, draft._id))) {
+    await ctx.scheduler.runAfter(MAIL_RECONCILE_STALL_MS, internal.drafts.reconcileSend, {
+      draftId: draft._id,
+      attempt: BACKOFF_MS.length,
+    });
+  }
   return "unknown";
+}
+
+/** F9: true when a `reconcileSend` job for this draft is already pending or in progress. */
+async function hasPendingReconcileSend(ctx: MutationCtx, draftId: Id<"drafts">): Promise<boolean> {
+  const jobs = await ctx.db.system.query("_scheduled_functions").collect();
+  return jobs.some((j) => {
+    if (j.state.kind !== "pending" && j.state.kind !== "inProgress") return false;
+    if (!j.name.includes("reconcileSend")) return false;
+    const args = j.args[0] as { draftId?: Id<"drafts"> } | undefined;
+    return args?.draftId === draftId;
+  });
 }
 
 /**
