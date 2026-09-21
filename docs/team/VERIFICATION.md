@@ -47,3 +47,7 @@ All 15 rows in the table above: **VERIFIED_LOCAL** via `convex/scenarios.test.ts
 - 2026-09-21 · production cool-oyster-399 (auditor's own probes) · `/`, `/watching`, `/claims/x`, `/settings`, `/purchases/abc` → 200 HTML; bundle client URL = cool-oyster-399.convex.cloud; `POST /agentmail/webhook {}` → 401; `/.well-known/openid-configuration` + jwks → 200; no secret patterns in src/dist/bundle · VERIFIED_LIVE for C01, C02 routes, C05 rejection path, C20 routing, C21, C23 bundle, C24
 - 2026-09-21 · origin/main acb5e6f · `npx vitest run` 30 files 533 passed; typecheck clean · PR #1 merged in scratch: 31 files 575 passed, typecheck clean, 0 conflicts
 - 2026-09-21 · production bundle content · lacks ca16fe6/acb5e6f strings → production = e813494-era; **prod ≠ main**
+
+## Production-hardening mission
+- 2026-09-21 · local · e521de9 · lead: `npm test` 31/575, typecheck clean, lint 2 warnings, build 552.30 kB chunk warning · baseline reproduced
+- 2026-09-21 · local · 3feb0bd · T04 (sonnet-integrations): shopsavvy 29, verdict 40 tests; full suite 610 passed · new: envelope/size/timestamp/currency/condition validation; `verdictWithQualifier`; no alert/claim field on verdicts (asserted) · follow-ups: schema addendum (T01), market.ts byte cap + condition exclusion (T10), watches swap (T12)
