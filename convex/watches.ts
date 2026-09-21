@@ -38,6 +38,7 @@ import { schedulePolicyFetch } from "./policies";
 import { errorNote, observePrice, rejectionReason, truncate, type PageObservation } from "./priceWatch";
 import {
   GLOBAL_DAILY_BUDGETS,
+  INELIGIBLE_REST_MS,
   MARKET_MAX_POINTS,
   MAX_PURCHASES_PER_USER,
   MAX_WATCHES_PER_USER,
@@ -219,6 +220,12 @@ function summarise(
   const now = argsNow ?? watch.lastObservedAt ?? latest?.observedAt ?? watch._creationTime;
   const priceStale =
     watch.lastObservedAt === undefined || now - watch.lastObservedAt > STALE_PRICE_MS;
+  // F10 (D103): fall back to the last check ATTEMPT's timestamp when there
+  // has never been an accepted observation, so a message built from it can
+  // at least say how long we have been trying (both fields are set together
+  // by recordWatchCheck, so today `lastCents`/`currentCents` would already
+  // be null in that case -- this only matters if that ever changes).
+  const priceObservedAt = watch.lastObservedAt ?? watch.lastCheckedAt;
   const result: QualifiedVerdict = verdictWithQualifier({
     currentCents,
     listCents,
@@ -226,7 +233,15 @@ function summarise(
     now,
     currency: watch.currency,
     market: market.map((m) => ({ observedAt: m.observedAt, cents: m.cents })),
-    priceObservedAt: watch.lastObservedAt,
+    // Force verdictCore's own staleness branch to fire whenever OUR (more
+    // reliable) `priceStale` says so, rather than trusting it to re-derive
+    // the same answer from `now` -- `now` itself can fall back to
+    // `watch.lastObservedAt` right above when the caller omitted its own
+    // coarse `now`, which would make "now - priceObservedAt" trivially zero
+    // and mask real staleness. An artificially-old timestamp (already past
+    // STALE_PRICE_MS) makes verdictCore compute its own honest reason text
+    // instead of duplicating it here.
+    priceObservedAt: priceStale ? now - STALE_PRICE_MS - 1 : priceObservedAt,
   });
   const marketPoints = [...market].sort((a, b) => a.observedAt - b.observedAt);
   const marketPrices = marketPoints.map((m) => m.cents);
@@ -811,9 +826,14 @@ export const recordWatchCheck = internalMutation({
  * user's watch within a bounded number of ticks, not just `PER_USER` at a
  * time. Rows cut purely by the global budget are the one exception: left
  * completely untouched (not bumped), so they stay due and are retried as
- * soon as the switch resets (H3), same as before this change. D87: a
- * tombstoned owner's watches are skipped -- not scheduled, not bumped --
- * left for the account purge to clean up.
+ * soon as the switch resets (H3), same as before this change. F2 (D103): a
+ * tombstoned owner's watches are bumped `INELIGIBLE_REST_MS` out of the due
+ * set (not scheduled), instead of being skipped untouched -- left alone, a
+ * backlog of them (say the exact page size) would occupy the same due page
+ * on every subsequent tick forever, since nothing else ever moves their
+ * `nextCheckAt`, permanently starving any live watch behind them out of the
+ * scan. The account purge (not this sweep) is what removes them for good;
+ * this bump only keeps them from crowding the due set meanwhile.
  */
 export const sweep = internalMutation({
   args: {},
@@ -829,7 +849,10 @@ export const sweep = internalMutation({
     const candidates: Doc<"watches">[] = []; // under the per-user cap; pending the global budget
     const rotated: Doc<"watches">[] = []; // over the per-user cap this tick; bumped, not scheduled
     for (const w of due) {
-      if (await isTombstoned(ctx, w.userId)) continue;
+      if (await isTombstoned(ctx, w.userId)) {
+        await ctx.db.patch(w._id, { nextCheckAt: now + INELIGIBLE_REST_MS });
+        continue;
+      }
       const count = perUser.get(w.userId) ?? 0;
       if (count < WATCH_SWEEP_PER_USER) {
         perUser.set(w.userId, count + 1);

@@ -1117,12 +1117,47 @@ describe("P06 (D73): failed reads cannot make an old price look current", () => 
   });
 });
 
+describe("F10 (D103): priceObservedAt stays consistent with priceStale even off the normal recordWatchCheck path", () => {
+  it("a directly-seeded row with lastCents but no lastObservedAt still gets a stale/unknown verdict, not 'not enough history'", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    // Not reachable through recordWatchCheck (which always sets lastCents
+    // and lastObservedAt together) -- simulates a legacy/migrated/seeded row
+    // where only one of the two was written, the state F10 defends against.
+    const watchId = await t.run((ctx) =>
+      ctx.db.insert("watches", {
+        userId,
+        name: "Legacy row",
+        productUrl: URL,
+        merchantDomain: "acme.example",
+        currency: "USD",
+        status: "active",
+        nextCheckAt: T0,
+        lastCents: 9_000,
+        lastCheckedAt: T0 - 4 * DAY, // an attempt was made, long ago
+        // lastObservedAt intentionally omitted.
+      }),
+    );
+
+    const got = await as.query(api.watches.get, { watchId, now: T0 });
+    expect(got?.watch.priceStale).toBe(true);
+    expect(got?.watch.lastCents).toBe(9_000);
+    // Before this fix, `priceObservedAt: watch.lastObservedAt` was
+    // `undefined`, so verdictCore's own staleness check never ran, and with
+    // zero accepted checks in history it fell through to "not_enough_history"
+    // instead -- inconsistent with `priceStale: true` on the very same row.
+    expect(got?.watch.verdict.label).toBe("unknown");
+    expect(got?.watch.verdict.reason).toMatch(/days ago/);
+    expect(got?.watch.verdict.qualified).toBe(true);
+  });
+});
+
 describe("D87: a tombstoned owner's rows are skipped by every scheduled reader", () => {
   async function tombstone(t: T, userId: Id<"users">) {
     await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: T0, attempts: 0 }));
   }
 
-  it("sweep does not schedule or bump a tombstoned user's due watch", async () => {
+  it("sweep does not schedule a tombstoned user's due watch, but bumps it out of the due set (F2, D103)", async () => {
     const t = setup();
     const { userId } = await signedIn(t);
     const watchId = await seedWatch(t, userId, { nextCheckAt: T0 - HOUR });
@@ -1130,7 +1165,53 @@ describe("D87: a tombstoned owner's rows are skipped by every scheduled reader",
 
     expect(await t.mutation(internal.watches.sweep, {})).toBe(0);
     expect((await scheduled(t)).length).toBe(0);
-    expect((await watchRow(t, watchId)).nextCheckAt).toBe(T0 - HOUR); // left untouched, not even rotated
+    // F2: bumped far out of the due set (not left at T0 - HOUR, which would
+    // put it right back at the head of the very next tick's scan) -- the old
+    // behavior let a backlog of tombstoned rows occupy the due page forever.
+    expect((await watchRow(t, watchId)).nextCheckAt).toBeGreaterThan(T0 + 300 * DAY);
+  });
+
+  it("F2 (D103): due watches on a deleting user (under one page) do not block a live user's due watch on tick 1", async () => {
+    const t = setup();
+    const { userId: gone } = await signedIn(t, "Gone");
+    const { userId: live } = await signedIn(t, "Live");
+    // One fewer than WATCH_SWEEP_PAGE, so the live watch is guaranteed a slot
+    // in the same due page regardless of tie-break order among equal
+    // nextCheckAt values -- this isolates the tombstoned-bump fix itself
+    // (below) from the separate, page-boundary starvation case.
+    for (let i = 0; i < 49; i++) {
+      await seedWatch(t, gone, { nextCheckAt: T0 - HOUR, name: `gone ${i}` });
+    }
+    await tombstone(t, gone);
+    const liveWatchId = await seedWatch(t, live, { nextCheckAt: T0 - HOUR });
+
+    expect(await t.mutation(internal.watches.sweep, {})).toBe(1);
+    const jobs = await scheduled(t);
+    expect(jobs.map((j) => (j.args[0] as { watchId: string }).watchId)).toEqual([String(liveWatchId)]);
+  });
+
+  it("F2 (D103): a full page (WATCH_SWEEP_PAGE) of due watches on a deleting user never permanently blocks a live user's watch", async () => {
+    const t = setup();
+    const { userId: gone } = await signedIn(t, "Gone");
+    const { userId: live } = await signedIn(t, "Live");
+    // Exactly one page of tombstoned, due watches, all older (created
+    // first) than the live one: the very first sweep may not even reach the
+    // live watch's row, but -- unlike before this fix, where these rows
+    // were never touched and would occupy the exact same page forever --
+    // every one of them is bumped out of the due set in that same call, so
+    // the live watch is reachable by the very next tick.
+    for (let i = 0; i < 50; i++) {
+      await seedWatch(t, gone, { nextCheckAt: T0 - HOUR, name: `gone ${i}` });
+    }
+    await tombstone(t, gone);
+    const liveWatchId = await seedWatch(t, live, { nextCheckAt: T0 - HOUR });
+
+    expect(await t.mutation(internal.watches.sweep, {})).toBe(0);
+    expect((await scheduled(t)).length).toBe(0);
+
+    expect(await t.mutation(internal.watches.sweep, {})).toBe(1);
+    const jobs = await scheduled(t);
+    expect(jobs.map((j) => (j.args[0] as { watchId: string }).watchId)).toEqual([String(liveWatchId)]);
   });
 
   it("sweep still serves other users' due watches in the same tick", async () => {
