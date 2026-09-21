@@ -199,6 +199,19 @@ export const MARKET_RETRY_BACKOFF_MS = [600_000, 3_600_000, 21_600_000];
 /** A `success` market lookup can only be manually refreshed after this long. */
 export const MARKET_REFRESH_MIN_AGE_MS = 7 * 86_400_000;
 
+/**
+ * F8 (D103): a `queued`/`running` market claim older than this is reclaimable -- the scheduled
+ * `market.lookup` action almost certainly crashed or was killed rather than still being genuinely in
+ * flight (a real ShopSavvy call times out at 30s; 15 minutes is generous headroom past that plus retry
+ * scheduling, chosen to make a false reclaim of a run that is actually still going vanishingly
+ * unlikely, while still bounding how long a stuck watch stays unrecoverable).
+ *
+ * F-T22-2: was duplicated privately in both `market.ts` (the reclaim itself) and `ops.ts` (`backlog`'s
+ * `staleMarketRunning` diagnostic, which used to define its own copy `MARKET_RUNNING_STALE_MS`); the two
+ * could drift apart with nothing to notice. Single source of truth here now; both import it.
+ */
+export const MARKET_CLAIM_STALE_MS = 15 * 60_000;
+
 /** Beyond this age, `lastObservedAt` is "may be out of date" and `verdict()` returns `unknown` (D73). */
 export const STALE_PRICE_MS = 3 * 86_400_000;
 

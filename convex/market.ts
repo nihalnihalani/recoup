@@ -42,6 +42,7 @@ import { marketState } from "./schema";
 import {
   DAILY_BUDGETS,
   GLOBAL_DAILY_BUDGETS,
+  MARKET_CLAIM_STALE_MS,
   MARKET_HISTORY_DAYS,
   MARKET_MAX_ATTEMPTS,
   MARKET_MAX_POINTS,
@@ -68,15 +69,6 @@ const MAX_RESPONSE_CHARS = 2_000_000;
 const MIGRATE_OPS_KEY = "market.migrateStamps";
 /** Watches one `migrateStamps` transaction scans before rescheduling itself. */
 const MIGRATE_PAGE = 100;
-
-/**
- * F8 (D103): a `queued`/`running` claim older than this is reclaimable -- the scheduled `lookup`
- * action almost certainly crashed or was killed rather than still being genuinely in flight (a real
- * ShopSavvy call times out at TIMEOUT_MS = 30s; 15 minutes is generous headroom past that plus retry
- * scheduling, chosen to make a false reclaim of a run that is actually still going vanishingly
- * unlikely, while still bounding how long a stuck watch stays unrecoverable).
- */
-const MARKET_CLAIM_STALE_MS = 15 * 60_000;
 
 type MarketState = Infer<typeof marketState>;
 
