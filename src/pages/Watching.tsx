@@ -97,7 +97,8 @@ function AddWatch() {
         </div>
       </div>
       {error && <ErrorBox error={error} />}
-      <p className="text-xs text-gray-400">
+      {/* F-T24-1/D114: text-gray-400 on white measured 2.6:1 (WCAG AA needs 4.5:1); text-gray-600 measures 7.56:1. */}
+      <p className="text-xs text-gray-600">
         Works with retailers and marketplaces alike. No affiliate links; every price shows where and when it was read.
       </p>
     </form>

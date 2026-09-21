@@ -121,7 +121,8 @@ export function ActivityTimeline({
             const body = (
               <>
                 <p className="text-sm font-semibold text-gray-900">{kind.title}</p>
-                <p className="mt-0.5 text-xs tabular-nums text-gray-400">
+                {/* F-T24-1/D114: text-gray-400 on white measured 2.6:1 (WCAG AA needs 4.5:1); text-gray-600 measures 7.56:1. */}
+                <p className="mt-0.5 text-xs tabular-nums text-gray-600">
                   <time dateTime={new Date(event.at).toISOString()}>{when(event.at)}</time>
                 </p>
                 <p className="mt-1 line-clamp-2 text-sm text-gray-500">{detail(event)}</p>
