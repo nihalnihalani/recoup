@@ -353,7 +353,7 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 **Owner:** sonnet-backend-3 · **Status:** pending (after T18.2) · **Files:** insights.ts, watches.ts, tracking.ts, notify.ts, offers.ts, profiles.ts reads; sweep in notify/priceWatch/watches/offers/policies/market/inbound.
 
 ### T18.4 — Checkpoint 6b: AgentMail component data purge (D115 6b-5)
-**Owner:** sonnet-backend-3 · **Status:** in_progress · **Files:** patches/@agentmail+convex+0.1.0.patch, convex/mailPurge.ts (+test); call site wired by T18.1/lead.
+**Owner:** sonnet-backend-3 · **Status:** verified (bbc8bbf; lead re-ran 3/3, check-patch OK; call site + cron → T18.1 addendum) · **Files:** patches/@agentmail+convex+0.1.0.patch, convex/mailPurge.ts (+test); call site wired by T18.1/lead.
 
 ### T16 — P07 retention (bounded, resumable, audit-preserving) plus P08 backend fixes: returns validators and string bounds on cla
 **Owner:** sonnet-backend · **Phase:** 2 · **Blocks on:** T12 · **High-risk:** True
