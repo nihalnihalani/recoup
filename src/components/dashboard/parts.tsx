@@ -15,8 +15,13 @@ export function Bone({ className }: { className: string }) {
   return <div className={`animate-pulse rounded-md bg-gray-100 motion-reduce:animate-none ${className}`} />;
 }
 
+/**
+ * F-T24c-1 (D120): was `text-gray-500` on `bg-gray-100`, 4.39:1 (fails the
+ * 4.5:1 AA minimum for normal text). Switched to `text-gray-600`, matching
+ * `RecentNote`'s already-verified 6.87:1 on the same background.
+ */
 export function ExampleChip() {
-  return <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">Example</span>;
+  return <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">Example</span>;
 }
 
 /**

@@ -507,11 +507,55 @@ function SettingsContent() {
   );
 }
 
+/**
+ * Mirrors `convex/account.ts`'s file-local `INBOX_DELETE_MAX_ATTEMPTS` (not
+ * exported — this task owns display only, `convex/**` is out of scope).
+ * Duplicated by hand, same acknowledged-drift pattern `Privacy.tsx` already
+ * uses for its `limits.ts` retention numbers: update this if that constant
+ * ever changes.
+ */
+const INBOX_DELETE_MAX_ATTEMPTS = 5;
+
+/**
+ * `deletionStatus`'s `inboxDeleted`/`attempts`, rendered literally (D119/
+ * D121): never inferred from `status` alone, and never rounded a `null`/
+ * `undefined` up to a success claim.
+ *  - `status === "deleted"`: the retry chain has concluded one way or the
+ *    other (see `convex/account.ts`'s `purge` docstring) — `inboxDeleted`
+ *    should always be a real boolean by then; the `undefined` branch is
+ *    defensive only (the field is optional on the wire).
+ *  - `status === "deleting"`: `attempts === 0` means the chain has not yet
+ *    reached the inbox-delete step (still purging app data), not a failed
+ *    attempt.
+ */
+function remoteInboxStatus(status: "deleting" | "deleted", inboxDeleted: boolean | undefined, attempts: number): string {
+  if (status === "deleted") {
+    if (inboxDeleted === true) return "Deleted";
+    if (inboxDeleted === false) return `Failed after ${attempts} attempt${attempts === 1 ? "" : "s"}`;
+    return "Status unknown";
+  }
+  return attempts > 0 ? `Pending (attempt ${attempts} of ${INBOX_DELETE_MAX_ATTEMPTS})` : "Pending";
+}
+
+/**
+ * `deletionStatus`'s `mailDataPurged`, rendered literally (D119/D121): the
+ * mail component's own stored copies of this inbox's mail are only ever
+ * touched once an inbox actually existed AND the inbox-delete retry chain
+ * has concluded — so an `undefined` value while still `deleting` means "not
+ * reached yet", while an `undefined` value once `deleted` means "there was
+ * never an inbox to purge copies of" (never claimed as "purged").
+ */
+function storedMailCopiesStatus(status: "deleting" | "deleted", mailDataPurged: boolean | undefined): string {
+  if (mailDataPurged === true) return "Purged";
+  if (mailDataPurged === false) return "Incomplete";
+  return status === "deleted" ? "None to purge" : "Pending";
+}
+
 /** Read-only status page shown to a still-signed-in tab while `api.account.deletionStatus` reports `deleting`/`deleted` — every mutation would fail once `requireUserId` sees the tombstone, so no controls are offered, only the current status and a way to sign out. */
 function DeletionInProgress({
   status,
 }: {
-  status: { status: "deleting" | "deleted"; inboxDeleted?: boolean; attempts: number };
+  status: { status: "deleting" | "deleted"; inboxDeleted?: boolean; mailDataPurged?: boolean; attempts: number };
 }) {
   const { signOut } = useAuthActions();
   return (
@@ -525,12 +569,22 @@ function DeletionInProgress({
             ? "This account and its data have been removed."
             : "Your data is being removed. This can take a little while and does not need this page open."}
         </p>
+        <dl className="mt-4 space-y-1.5 rounded-xl border border-gray-200 bg-gray-50 px-3.5 py-3 text-left text-xs">
+          <div className="flex items-center justify-between gap-3">
+            <dt className="text-gray-500">Remote inbox</dt>
+            <dd className="font-semibold text-gray-900">
+              {remoteInboxStatus(status.status, status.inboxDeleted, status.attempts)}
+            </dd>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <dt className="text-gray-500">Stored mail copies</dt>
+            <dd className="font-semibold text-gray-900">
+              {storedMailCopiesStatus(status.status, status.mailDataPurged)}
+            </dd>
+          </div>
+        </dl>
         {status.status === "deleting" && (
-          <p className="mt-2 text-xs text-gray-500">
-            {status.inboxDeleted === false
-              ? "Removing your data is finished; deleting your Recoup inbox with the mail provider is still retrying."
-              : "This page will not update further — reload to check status."}
-          </p>
+          <p className="mt-2 text-xs text-gray-500">This page will not update further — reload to check status.</p>
         )}
         <button type="button" onClick={() => void signOut()} className={`mt-5 ${primaryButtonClass}`}>
           Sign out
