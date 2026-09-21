@@ -79,7 +79,7 @@ To receive mail, create an AgentMail webhook for received messages that points a
 | `convex/lib/passage.ts`, `policyText.ts` | Verbatim passage verification and policy page selection |
 | `convex/purchases.ts`, `claims.ts` | Purchases, items, board; claims and ledger events |
 | `convex/policies.ts` | Policy research with Firecrawl, immutable snapshots |
-| `convex/priceWatch.ts`, `crons.ts` | Price reads for owned items, check-now, and the four crons: price watch every 2 hours, watch sweep hourly, plus hourly inbound-retry and mail-sweep safety nets (`convex/crons.ts` is the source of truth for cadence) |
+| `convex/priceWatch.ts`, `crons.ts` | Price reads for owned items, check-now, and the five crons: price watch every 2 hours, watch sweep hourly, hourly inbound-retry and mail-sweep safety nets, and a daily retention sweep (`convex/crons.ts` is the source of truth for cadence) |
 | `convex/watches.ts`, `convex/lib/verdict.ts`, `watchUrl.ts` | Watched items not bought yet; the computed verdict; product link parsing |
 | `convex/notify.ts` | Price-drop email to the account holder, once per watch per price (not yet run live) |
 | `convex/offers.ts` | Same item at other stores: candidates from search, user-confirmed offers (not yet run live) |
