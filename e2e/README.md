@@ -96,6 +96,28 @@ accounts (`e2e.<runId>.<n>@example.com`, from the `newEmail` fixture) don't
 have this problem and are used wherever a spec needs an account of its own
 rather than the shared read-mostly fixture set.
 
+**Do not override `--workers` above 1 for this suite — this is a confirmed
+finding, not a style preference (F-T23-2, `docs/team/DECISIONS.md` D125;
+re-confirmed as F-AUD-11 in `docs/team/CONNECTIONS.md`).** T23's Phase 4
+verification ran this suite with `npx playwright test --reporter=line
+--workers=2` (an explicit instruction, not this config's default) and
+reproduced exactly the race this section predicts: two spec files under the
+same project concurrently called `testing:resetUser`/`seedUser`/
+`seedFixtures` against the same shared `e2e.lead@example.com` address,
+producing `ConvexError: seedFixtures: user not found`. The same run at the
+config's own `workers: 1` passed clean. **Neither this config nor
+`.github/workflows/ci.yml`'s `e2e` job currently enforces `workers: 1`
+programmatically** — `playwright.config.ts`'s `workers: 1` is the default,
+but any `--workers` CLI flag on top of `npx playwright test`/`npm run e2e`
+silently overrides it, and CI does not pass `--workers=1` explicitly (it
+relies on the config default only). If either changes, add an explicit
+`--workers=1` at the call site rather than trusting the default alone. Until
+`e2e/fixtures.ts` gives every spec file (not just every project) a fully
+unique lead account — the same fix `leadEmailFor()`'s own doc comment
+describes for the desktop-vs-mobile case, generalized to per-file — treat
+any `--workers` override above 1 as producing false-negative failures that
+look like real regressions, not evidence of a new defect.
+
 ## Artifact locations
 
 - HTML report: `playwright-report/index.html` (open with `npx playwright
