@@ -98,3 +98,56 @@ A second, independent fixture — mixed-currency, distinct from the `SIZES` fixt
 | `tracking.overview` | same | 222 | 53,299 | 176 |
 
 All three report `truncated: true` here — the added 51-item purchase trips a real, identical per-purchase cut in every one of them, while the 24 well-formed purchases underneath it still render in full (confirmed by `dashboard.test.ts`'s own item-count assertions). Separately, at the same 24-purchase account with NO overflow purchase, `insights.sources`/`tracking.overview` report `truncated: false` (nothing to cut) while `insights.activity` truthfully reports `truncated: true` on its own, much tighter `FEED_LIMIT` (40 total events) — 24 purchases × 2 priced items each is 120 activity events, genuinely over that window. The three dashboard read models do not share one truncation trigger; each is honest about its own. All comfortably inside every ceiling.
+
+## Final numbers @ 529f545 (T23, Phase 4 verification)
+
+Re-measured 2026-09-21 from the main checkout (`git rev-parse HEAD` =
+`86020f0e930479790de7e7dfc1a5d5781ff4fb1a` at measurement time; confirmed
+via `git diff --stat 529f545 86020f0` that no `convex/**` file differs
+between that HEAD and the T23 candidate revision `529f545` — the only
+changes are `docs/team/DECISIONS.md` plus three frontend files unrelated to
+any query measured here — so these numbers are valid, unmodified evidence
+for the candidate). Command: `npx vitest run convex/readBudget.test.ts
+convex/dashboard.test.ts convex/fairness.test.ts --reporter=verbose`, reading
+the same `[read-budget]` JSON lines the tests themselves print via
+`ctx.meta.getTransactionMetrics()`. Result: **3 files, 22 passed + 1
+expected fail (23), 41.95s.**
+
+| Query | Fixture | documentsRead | bytesRead | databaseQueries | ms |
+|---|---|---:|---:|---:|---:|
+| `insights.activity` | 40 purchases×20 items×10 checks, 60 watches×20 checks | 2,199 | 530,744 | 205 | 898.4 |
+| `insights.sources` | same + 1 watch×300 offers | 2,299 | 562,844 | 243 | 806.3 |
+| `insights.priceHistory` | 1 watch×300 offers×20 checks, amid 200 other watches | 290 | 78,559 | 43 | 96.7 |
+| `tracking.overview` | 40 purchases×20 items×10 checks | 2,791 | 674,119 | 291 | 1,205.4 |
+| `watches.list` | 60 watches×20 checks + 1 watch×300 offers | 1,261 | 304,900 | 126 | 222.2 |
+| `offers.listForWatch` | 1 watch×300 offers | 101 | 32,370 | 3 | 6.6 |
+| `intake.needsAttention` | 500 processedEvents (250 failed, 250 needs_review) | 100 | 22,200 | 3 | 22.6 |
+| `watches.sweep` | 60 due watches (+1 not-yet-due) | 100 | 24,040 | 52 | 79.2 |
+| `watches.sweep` (multi-user) | 6 users, 10/10/10/10/5/5 due watches | 100 | 24,200 | 52 | 1.7 |
+| `claims.get` | 1 claim × 200 ledgerEvents | 203 | 40,834 | 9 | 4.0 |
+| `priceWatch.eligibleItems` | 500 items × 65 claims/item | 2,500 | 673,950 | 2,001 | 11,510 |
+| `priceWatch.eligibleItems` | 500 items × 65 claims/item (D101 regression case) | 2,500 | 673,950 | 2,001 | 10,926 |
+| `priceWatch.eligibleItems` | 500 items × 61 claims/item | 2,500 | 673,950 | 2,001 | 10,065 |
+| `insights.sources` (dashboard fixture) | 24 mixed-currency purchases×2 items + 1×51-item purchase | 220 | 52,717 | 127 | — |
+| `insights.activity` (dashboard fixture) | same | 226 | 54,195 | 139 | — |
+| `tracking.overview` (dashboard fixture) | same | 222 | 53,299 | 177 | 12.4 |
+
+All values are **identical** to the "T15 update" section above (measured
+earlier at `main 5e306db+`) to within measurement noise — the only
+difference anywhere is `tracking.overview` (dashboard fixture)'s
+`databaseQueries` reading 177 here vs 176 in the T15 update, a 1-query
+difference not reproduced on re-run and not correlated with any `convex/**`
+change between the two measurement points; not treated as a regression.
+`priceWatch.eligibleItems` again confirms **no scaling with claims-per-item**
+(65 and 61 claims/item both read exactly 2,500 documents / 2,001 database
+queries), reconfirming D101's fix is still in effect at the candidate
+revision. Every number stays far inside the 32,000-document / 16 MiB /
+4,096-database-query ceilings — **no regression, no new transaction-limit
+risk, P07's acceptance line ("documented data sizes, read counts/bytes and
+timings; no transaction-limit failure") holds at the candidate revision.**
+
+`convex/fairness.test.ts` in the same run: 4 passed + 1 expected fail
+(`it.fails`, `convex/fairness.test.ts:220`, "watches.sweep... does not let
+one user's backlog occupy the entire first tick" — D74/F-D74-1, LOW,
+unchanged, not a regression) — matching the single expected-fail counted in
+the full 1287-test worktree run (`docs/reviews/phase4-verification.md` §1).
