@@ -19,6 +19,7 @@
     "postinstall": "patch-package --error-on-fail",
     "verify:patch": "node scripts/check-patch.mjs",
     "codegen:check": "node scripts/check-codegen.mjs",
+    "smoke": "node scripts/smoke.mjs",
     "e2e": "playwright test",
     "deploy": "npx @convex-dev/static-hosting deploy"
   },
