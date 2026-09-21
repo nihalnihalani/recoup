@@ -3,19 +3,25 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run",
     "test:watch": "vitest",
+    "test:ci": "node scripts/check-test-count.mjs 600",
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p convex/tsconfig.json --noEmit",
-    "postinstall": "patch-package",
+    "postinstall": "patch-package --error-on-fail",
+    "verify:patch": "node scripts/check-patch.mjs",
+    "codegen:check": "node scripts/check-codegen.mjs",
     "deploy": "npx @convex-dev/static-hosting deploy"
   },
   "dependencies": {
-    "@agentmail/convex": "^0.1.0",
+    "@agentmail/convex": "0.1.0",
     "@auth/core": "^0.41.1",
     "@convex-dev/auth": "^0.0.95",
     "@convex-dev/rate-limiter": "0.4.0",
