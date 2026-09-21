@@ -334,8 +334,9 @@ describe("watches.recordWatchCheck acceptance (D16)", () => {
     ["a currency that is not a code", { currency: "dollars" }, /currency/],
     ["an unsure variant", { variantMatch: "unsure" }, /variant/],
     ["a page that is not the product", { variantMatch: "none" }, /does not price/],
-    ["a negative amount", { observedCents: -1 }, /usable amount/],
-    ["a fractional amount", { observedCents: 10.5 }, /usable amount/],
+    ["a negative amount", { observedCents: -1 }, /does not show a price/],
+    ["a fractional amount", { observedCents: 10.5 }, /does not show a price/],
+    ["a zero amount (a model's way of saying no price)", { observedCents: 0 }, /does not show a price/],
   ];
   it.each(rejections)("stores %s as a note with no cents", async (_label, override, pattern) => {
     const t = setup();

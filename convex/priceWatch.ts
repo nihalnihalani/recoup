@@ -293,8 +293,9 @@ export function rejectionReason(
 ): string | null {
   if (args.isRange) return "Page shows a price range, not a single price";
   if (args.observedCents === undefined) return null; // nothing to accept; caller's note stands
-  if (!Number.isSafeInteger(args.observedCents) || args.observedCents < 0) {
-    return "Extracted price is not a usable amount";
+  // Zero is what a model returns for "no price on the page"; nothing is sold for $0.00 (found live, W3).
+  if (!Number.isSafeInteger(args.observedCents) || args.observedCents <= 0) {
+    return "The page does not show a price";
   }
   if (args.variantMatch !== "exact") {
     return args.variantMatch === "none"

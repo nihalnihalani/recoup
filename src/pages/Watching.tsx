@@ -20,7 +20,6 @@ import {
   primaryButtonClass,
   secondaryButtonClass,
   sectionClass,
-  toDateInput,
   when,
 } from "../lib/ui";
 
@@ -109,7 +108,11 @@ function BoughtForm({ watch, onDone }: { watch: Watch; onDone: () => void }) {
   const markBought = useMutation(api.watches.markBought);
   const navigate = useNavigate();
   const [paid, setPaid] = useState(watch.lastCents === null ? "" : (watch.lastCents / 100).toFixed(2));
-  const [date, setDate] = useState(() => toDateInput(Date.now()));
+  const [date, setDate] = useState(() => {
+    // Today in the shopper's own timezone; an ISO (UTC) date is tomorrow for evening shoppers in the Americas.
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
