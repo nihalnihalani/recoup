@@ -344,7 +344,7 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 **Files:** convex/http.ts (+http.test.ts), convex/limits.ts, convex/ops.ts (+ops.test.ts), convex/insights.ts (+freshness.test.ts flip only), package.json (script only), docs/ops/RUNBOOK.md (two lines), and the `console.error` → `logEvent` sweep in notify.ts, priceWatch.ts, watches.ts, offers.ts, policies.ts, market.ts, inbound.ts. Contract: F-T22-1/2/3, F-T15-1, D112 RUNBOOK/ops lines, D109 sweep.
 
 ### T18.1 — Checkpoint 6b: export IDOR/termination, byte-aware pages, sign-in gate, purge re-drive, test strength (D115 6b-1/2/4/6/8)
-**Owner:** sonnet-backend · **Status:** in_progress · **Files:** convex/account.ts, account.test.ts, auth.ts (+auth tests), crons.ts, limits.ts, lib/accountState.ts.
+**Owner:** sonnet-backend · **Status:** done (4369077, 4ff771e, 6facbde et al.; lead re-ran 5 files 108/108; awaiting Opus checkpoint 6c) · **Files:** convex/account.ts, account.test.ts, auth.ts (+auth tests), crons.ts, limits.ts, lib/accountState.ts, schema.ts (accountState addenda: inboxId, activePurgeJobId, mailDataPurged).
 
 ### T18.2 — Checkpoint 6b: tombstone gates on write lanes (D115 6b-3 writers, 6b-7)
 **Owner:** sonnet-integrations · **Status:** verified (3830a68..14c1303; lead re-ran 8 files 203/203; F-T21-1 flipped; D116 bounds landed) · **Files:** convex/inbound.ts, replies.ts, intake.ts, profiles.ts, drafts.ts, policies.ts (+tests).
