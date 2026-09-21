@@ -16,6 +16,13 @@ historical now; see "Historical documents" at the bottom if you need it.
 - **Candidate:** `3f5f739f27138eb1c77c6e8cd2559e66297b0a1c` (short `3f5f739`),
   code-identical to `4c3c71e` (T18.5 + T24e; `3f5f739` only adds one docs
   file). Tagged **`rc-2026-09-21`** (annotated, pushed to `origin`).
+  **Superseded as of D129** (Opus checkpoint 6d, found concurrently with
+  this task): one new MEDIUM (B-9, alert webhook `events` surviving past
+  their `outboundMessages` row's 7-day purge) routed to **T18.6**
+  (sonnet-backend, in flight). The next candidate will be tagged
+  `rc-2026-09-21.2` — `rc-2026-09-21` itself never moves. See
+  `docs/reviews/release-candidate.md`'s banner and §14 for the exact,
+  mostly-mechanical reissue delta.
 - **Dev deployment `adorable-lion-138`** (disposable, D83 item 3): current
   code deployed (`npx convex dev --once`, wave-11 close), current candidate's
   static site deployed and smoke-tested (6/7 — see below), one full
@@ -54,6 +61,7 @@ Highlights relevant to resuming:
 | CI codegen-drift check (`codegen:check`) | Needs a dedicated Convex deployment's admin key as a repo secret; none is provisioned | `docs/ops/RELEASE.md` §4; `docs/ops/INSTALL.md` |
 | CI Playwright job (`e2e`) | Needs `E2E_CONVEX_URL`/`E2E_DEPLOY_KEY` repo secrets pointing at a dedicated deployment; none is provisioned | `docs/ops/RELEASE.md` §4 |
 | `scripts/check-patch.mjs` asserting the full AgentMail patch (not just the env declaration) | F-T18.4-1 (D119): scripts are source, out of every `sonnet-verifier` task's file-ownership list so far; a manual check is documented instead | `docs/ops/RELEASE.md` §2 |
+| `rc-2026-09-21.2` tag/manifest reissue | Blocked on **T18.6** (sonnet-backend, in flight) landing the B-9 MEDIUM fix + B-1…B-7 LOWs from checkpoint 6d (D129); the lead will message the new candidate hash once it's gated | `docs/reviews/release-candidate.md` banner + §14 (the reissue delta — mostly mechanical, not a redo) |
 
 None of the above blocks the release candidate itself — every open finding
 in the register is LOW (`docs/reviews/release-candidate.md` §11). They block

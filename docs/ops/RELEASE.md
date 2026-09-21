@@ -15,6 +15,19 @@ smoke + backup/restore, all against the disposable `adorable-lion-138`
 only). Production deploy to `cool-oyster-399` is not authorized in this
 mission (D83 item 6) — see "The single remaining action" below.
 
+> **The candidate tag this file was written against, `rc-2026-09-21`, is
+> superseded.** `docs/team/DECISIONS.md` D129 (Opus checkpoint 6d, found
+> while this document was being written) requires one more fix pass —
+> **T18.6** — before the candidate is release-ready; the new candidate will
+> be tagged `rc-2026-09-21.2` (tags never move — `rc-2026-09-21` keeps
+> pointing at `3f5f739` permanently as a historical record). **The procedure
+> below is unchanged by this** — deploy order, the `CONVEX_DEPLOYMENT`
+> footgun, rollback limits, the manual patch check, and the four missing CI
+> secrets are all process documentation, independent of which commit is the
+> current candidate. Only the tag name in §5's final command changes. See
+> `docs/reviews/release-candidate.md`'s banner and §14 for the exact delta
+> once T18.6 lands.
+
 ## 0. Before you start
 
 - Read `docs/reviews/release-candidate.md` for the exact candidate you are
@@ -218,9 +231,11 @@ procedure. **Nothing in this task deployed to production.** The exact
 action still outstanding, worded the way it should be executed:
 
 ```
-deploy rc-2026-09-21 to cool-oyster-399 and run scripts/smoke.mjs against it
+deploy rc-2026-09-21.2 to cool-oyster-399 and run scripts/smoke.mjs against it
 ```
 
-This requires the production deploy authority D83 item 6 reserves to the
-user/co-author. See `docs/reviews/release-candidate.md` §13 for the same
-statement alongside the concrete command sequence.
+(Substitute whatever tag is actually current if this file is read after a
+further reissue — see the superseded notice at the top.) This requires the
+production deploy authority D83 item 6 reserves to the user/co-author. See
+`docs/reviews/release-candidate.md` §13 for the same statement alongside the
+concrete command sequence.

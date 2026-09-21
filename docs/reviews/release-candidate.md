@@ -15,6 +15,30 @@ attempted.**
 
 Model (self-reported from my system prompt): Sonnet 5 (claude-sonnet-5)
 
+> **STATUS: `rc-2026-09-21` is SUPERSEDED. Do not deploy it.** While this
+> manifest was being written, Opus checkpoint 6d (`docs/team/DECISIONS.md`
+> D129, read-only at this exact candidate `3f5f739`) found one new **MEDIUM**
+> finding — **B-9**: `mailPurge.cleanupFinalizedOutbound`'s daily sweep
+> deletes a finalized `outboundMessages` row after 7 days but never its
+> `events`, and `purgeOutbound({ outboundId })` (the account-deletion path)
+> can no longer find them once the `outboundMessages` row is gone (it only
+> has an `outboundId` key; `mailLog.agentmailMessageId` is the join key that
+> would let it delete by message id too) — so alert delivery/bounce events
+> older than 7 days can survive both the daily cleanup path and account
+> deletion in the shared alerts inbox. Plus several LOW items (B-1, B-2,
+> B-3, B-4, B-5, B-6, B-7). Routed to a new task **T18.6** (sonnet-backend,
+> `convex/**` + `patches/**`). D129's own words: *"The release candidate
+> moves to the commit after T18.6; T25's manifest is re-issued as
+> `rc-2026-09-21.2` (tags never move)."*
+>
+> **Everything below remains an accurate, truthful record of what was
+> verified against commit `3f5f739`** — every gate, hash, smoke result and
+> backup/restore proof is real and still holds for that exact commit. It is
+> `3f5f739` itself that is no longer the team's intended release candidate.
+> Do not act on §13's "single remaining action" until a `rc-2026-09-21.2`
+> tag/manifest exists. See §14 for exactly what changes and what carries
+> over unchanged when T18.6 lands.
+
 ## 1. Candidate identity
 
 | | |
@@ -327,10 +351,13 @@ Per D83 item 6, restated by this task's own launch brief: **production
 deploy to `cool-oyster-399` is not authorized in this mission.** No command
 in this task touched, queried, or attempted to reach `cool-oyster-399`.
 
-**The single remaining action, exactly as it will need to be run:**
+**The single remaining action, exactly as it will need to be run — against
+whichever tag is current at deploy time (`rc-2026-09-21` is superseded per
+the banner at the top of this document; use `rc-2026-09-21.2` once it
+exists):**
 
 ```sh
-deploy rc-2026-09-21 to cool-oyster-399 and run scripts/smoke.mjs against it
+deploy rc-2026-09-21.2 to cool-oyster-399 and run scripts/smoke.mjs against it
 ```
 
 Concretely (see `docs/ops/RELEASE.md` for the full sequence with backup and
@@ -353,3 +380,65 @@ per D83's own risk note: "Production deployment authority and credentials
 belong to the user/co-author") should read `docs/ops/RELEASE.md` in full
 first — it also lists the env vars to set/verify by name and the four CI
 secrets that are still missing.
+
+## 14. Re-issuing as `rc-2026-09-21.2` (once T18.6 lands, D129)
+
+The lead will message the new candidate hash once T18.6 (B-9 + the B-1…B-7
+LOWs) is verified and gated. This section is written so that re-issue is a
+short, mechanical delta against this document, not a from-scratch redo.
+
+**Re-run, against the new commit (same commands as §3–§6 above, new
+outputs):**
+
+1. `git worktree add --detach <path> <new-hash>`, `npm ci`, all six gates
+   (§3) — T18.6 touches `convex/mailPurge.ts`, `convex/account.ts` (or
+   wherever the `messageId` key threads through), and `patches/
+   @agentmail+convex+0.1.0.patch` (per D129: "`purgeOutbound` accepts
+   `messageId` as an alternate key"), so re-run `npm run verify:patch`
+   specifically, not just assume it still passes — the patch content is
+   changing.
+2. `npm run build`; re-hash every file under `dist/` (§4) — expect at least
+   the JS chunk(s) touching `mailPurge`/`account` to change; hashes for
+   unrelated chunks (e.g. `vendor-react-*`, `vendor-router-*`) should stay
+   identical if their source didn't change (useful as a sanity check that
+   the diff is scoped where D129 says it is).
+3. Re-run the manual patch-completeness check (`docs/ops/RELEASE.md` §2) —
+   the exact `grep` targets may need a third pattern for `purgeOutbound`'s
+   new `messageId` parameter; check `patches/@agentmail+convex+0.1.0.patch`'s
+   new diff before assuming the two existing `grep`s still cover it.
+4. Static deploy the new `dist/` to `adorable-lion-138` (§6's `upload`
+   command, unchanged) and **re-run `npm run smoke`**. Expect the same F-T25-1
+   false positive on check 4 (it comes from the pinned `convex` package, not
+   this app's code, and T18.6 does not touch dependency versions) — if check
+   4 ever passes clean instead, that is itself worth a note (would mean
+   something about the dependency tree changed).
+
+**Reuse as-is (commit-independent; do not re-run):**
+
+- §7's backup/restore proof. The export→import mechanism against
+  `adorable-lion-138` was proven end-to-end and is not tied to any specific
+  application commit — Convex's export/import operates on the deployment's
+  data, not its code. Re-doing it for `.2` would prove nothing new. (If a
+  fresh restore proof is ever wanted anyway — e.g. after T18.6 changes what
+  gets written to `outboundMessages`/`events` — treat that as a deliberate
+  new test, not a required part of the reissue.)
+- §5's environment presence matrix, unless T18.6 adds/removes an env var
+  (it does not, per D129's description — confirm with one `npx convex env
+  list --deployment adorable-lion-138` names-only check rather than a full
+  re-derivation).
+- §9's crons list, unless T18.6 changes `convex/crons.ts` itself (D129
+  describes changes to `mailPurge.ts`'s internals and the patch, not the
+  cron registration/cadence).
+- §8's migrations list (T18.6 does not touch `authMigrate.ts`/`market.ts`).
+- §12's rollback limits and §13's deploy-sequence shape (process
+  documentation, not candidate-specific) — only the tag name in the
+  commands changes.
+
+**Must be re-derived, not reused:**
+
+- §1 (candidate SHA/tag), §2 if the toolchain machine differs, §11's
+  findings register (close B-9 + whichever of B-1…B-7 T18.6 fixes; carry
+  forward every LOW this document already lists that T18.6 does not touch,
+  e.g. F-T25-1, F-T18.4-1, F-D74-1, F-T24d-1, F-T23-1, F-T18.1-1).
+- A fresh `git tag -a rc-2026-09-21.2 <new-hash> -m ...` — **never** move or
+  force-update the existing `rc-2026-09-21` tag (D129: "tags never move").
