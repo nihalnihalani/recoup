@@ -4,6 +4,7 @@ import { type ReactNode, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import { DELETION_REMOVED_NOW, DELETION_WHAT_REMAINS } from "../lib/accountDeletion";
 import {
   EXPORT_CLOSE,
   EXPORT_TABLES,
@@ -152,17 +153,29 @@ function SettingsContent() {
    * the browser never holds a second, fully-serialized copy of the export
    * in memory. The server pages at 200 rows; nothing here reads a whole
    * table at once either.
+   *
+   * D115 (checkpoint 6b-2): `fetchAllRows` itself caps pages per table and
+   * throws rather than looping forever if the cursor never goes `null` (a
+   * real server-side bug for tables with a large via-parent fan-out, being
+   * fixed separately — this client guard does not depend on that fix
+   * landing). Any throw from a table's fetch — that cap, or the query
+   * itself rejecting — aborts the WHOLE export immediately (no later
+   * tables are fetched, no partial file is downloaded) and the error names
+   * the table it happened on, since a bare error otherwise doesn't say
+   * which of nineteen tables failed.
    */
   async function handleExport() {
     setExportError(null);
     setExportDone(false);
     setExportProgress(null);
     setExportBusy(true);
+    let failedTable: (typeof EXPORT_TABLES)[number] | null = null;
     try {
       const exportedAt = Date.now();
       const parts: string[] = [exportPreamble(exportedAt)];
       for (let i = 0; i < EXPORT_TABLES.length; i++) {
         const table = EXPORT_TABLES[i];
+        failedTable = table; // Set before the fetch: if it throws, this IS the table that failed.
         setExportProgress({ table, rows: 0 });
         const rows = await fetchAllRows(
           (cursor) => convex.query(api.account.exportPage, { table, cursor }),
@@ -170,6 +183,7 @@ function SettingsContent() {
         );
         parts.push(exportTableChunk(table, rows, i === 0));
       }
+      failedTable = null;
       parts.push(EXPORT_CLOSE);
 
       const blob = new Blob(parts, { type: "application/json" });
@@ -185,7 +199,7 @@ function SettingsContent() {
       setExportDone(true);
       setExportProgress(null);
     } catch (error) {
-      setExportError(errorText(error));
+      setExportError(failedTable ? `While exporting "${failedTable}": ${errorText(error)}` : errorText(error));
       setExportProgress(null);
     } finally {
       setExportBusy(false);
@@ -456,16 +470,8 @@ function SettingsContent() {
         <SettingsCard title="Delete account" icon={<TrashIcon />} className="lg:col-span-2">
           <div className="space-y-4">
             <div className="space-y-2 text-sm text-gray-500">
-              <p>
-                Deletes your account now, not just hides it: every purchase, item, claim, ledger entry, draft,
-                reply, watch and mail log row is removed, including your money history.
-              </p>
-              <p>
-                What stays: an anonymous tombstone recording that an account existed and was deleted — no purchases,
-                claims or messages are attached to it. Deleting your Recoup inbox with the mail provider can take a
-                little time; Recoup keeps retrying until it succeeds. Emails already sent to stores cannot be
-                recalled or unsent.
-              </p>
+              <p>{DELETION_REMOVED_NOW}</p>
+              <p>{DELETION_WHAT_REMAINS}</p>
             </div>
 
             <div>

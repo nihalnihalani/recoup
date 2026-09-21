@@ -58,8 +58,18 @@ export function exportFilename(date: Date): string {
   return `recoup-export-${y}-${m}-${d}.json`;
 }
 
-/** Safety valve against a non-terminating cursor (server bug or a mocked `fetchPage` in a test) — no real export ever approaches this many pages at 200 rows/page. */
-const MAX_PAGES_PER_TABLE = 100_000;
+/**
+ * Safety valve against a non-terminating cursor. D115 (checkpoint 6b-2,
+ * Opus review of T18 at e265bb9): the server's own via-parent pagination
+ * (`convex/account.ts`'s `readParentTable`) had a real bug where a parent
+ * with more than 200 children never advanced its queue, so `exportPage`
+ * could return a `cursor` that never becomes `null` — this client-side cap
+ * stays regardless of whether/when that server bug is fixed, because a
+ * frontend loop should never trust a server cursor to be well-behaved.
+ * 500 pages at 200 rows/page is 100,000 rows, far more than any real
+ * account-owned table, so this never fires for a genuine export.
+ */
+const MAX_PAGES_PER_TABLE = 500;
 
 /**
  * Walks one table's pages via `fetchPage` (typically `(cursor) =>
@@ -67,7 +77,10 @@ const MAX_PAGES_PER_TABLE = 100_000;
  * server reports `cursor: null`, calling `onPage` after each page so a
  * caller can render progress ("purchases: 640 rows…") without waiting for
  * the whole table. Returns every row for that table, concatenated in
- * server order.
+ * server order. Throws (rather than looping forever) if the cursor is
+ * still non-null after `MAX_PAGES_PER_TABLE` pages, or if any one page
+ * fetch itself throws — either way the caller's export aborts entirely
+ * rather than silently returning a partial table.
  */
 export async function fetchAllRows(
   fetchPage: (cursor: string | undefined) => Promise<ExportPage>,
@@ -82,7 +95,9 @@ export async function fetchAllRows(
     if (result.cursor === null) return rows;
     cursor = result.cursor;
   }
-  throw new Error("Export did not finish paging — the server never returned a null cursor.");
+  throw new Error(
+    `Export did not finish paging after ${MAX_PAGES_PER_TABLE} pages — the server never returned a null cursor.`,
+  );
 }
 
 /**

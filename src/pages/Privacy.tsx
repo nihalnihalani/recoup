@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { DELETION_REMOVED_NOW, DELETION_WHAT_REMAINS } from "../lib/accountDeletion";
 
 /**
  * T19: public Privacy & services page, reachable signed in or signed out
@@ -138,13 +139,10 @@ export default function Privacy() {
                 Settings
               </Link>
               , "Export my data" downloads everything the account owns — every table listed under Providers above —
-              as one JSON file on your own device. "Delete account" removes your purchases, items, claims, the
-              ledger, drafts, replies, watches, price history and the mail log now, including your money history;
-              what remains afterward is an anonymous tombstone recording only that an account existed and was
-              deleted. Deleting the associated Recoup inbox with the mail provider can take a little time and is
-              retried automatically if it does not succeed right away. Emails already sent to stores before deletion
-              cannot be recalled or unsent.
+              as one JSON file on your own device.
             </p>
+            <p className={bodyClass}>{DELETION_REMOVED_NOW}</p>
+            <p className={bodyClass}>{DELETION_WHAT_REMAINS}</p>
           </Section>
 
           <Section id="contact" title="Contact">
