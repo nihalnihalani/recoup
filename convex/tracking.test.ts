@@ -43,6 +43,80 @@ describe("tracking.overview", () => {
     const out = await bob.query(api.tracking.overview, {});
     expect(out.items).toHaveLength(0);
   });
+
+  it("F6 (D103): archive churn beyond MAX_PURCHASES cannot hide an active purchase (P05-shaped)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    // The active purchase is created FIRST (older); 61 archived purchases
+    // (one more than MAX_PURCHASES) are created after it. A `by_user` page
+    // ordered newest-first, filtered to "active" only after reading, would
+    // never even reach this row -- it is the 62nd newest.
+    const activeId = await t.run((ctx) =>
+      ctx.db.insert("purchases", {
+        userId, merchant: "Old Active Store", merchantDomain: "old-active.example", currency: "USD", status: "active",
+      }),
+    );
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 61; i++) {
+        await ctx.db.insert("purchases", {
+          userId, merchant: `Archived ${i}`, merchantDomain: `archived${i}.example`, currency: "USD", status: "archived",
+        });
+      }
+    });
+    await t.run((ctx) =>
+      ctx.db.insert("items", {
+        purchaseId: activeId, userId, name: "Still here", unitCents: 1_000, qty: 1, returned: false,
+      }),
+    );
+
+    const out = await as.query(api.tracking.overview, {});
+    expect(out.items.some((i) => i.name === "Still here")).toBe(true);
+  });
+
+  it("F5b (D103): totals never sum money across currencies; byCurrency has the full breakdown", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+
+    async function seedClaimedItem(currency: string, unresolvedCents: number) {
+      return await t.run(async (ctx) => {
+        const purchaseId = await ctx.db.insert("purchases", {
+          userId, merchant: `${currency} Store`, merchantDomain: `${currency.toLowerCase()}.example`,
+          purchasedAt: Date.now() - 2 * 86_400_000, currency, status: "active",
+        });
+        const itemId = await ctx.db.insert("items", {
+          purchaseId, userId, name: `${currency} item`, unitCents: 10_000, qty: 1, returned: false,
+        });
+        await ctx.db.insert("claims", {
+          purchaseId, itemId, userId, type: "price_adjustment", expectedCents: unresolvedCents,
+          status: "detected", token: `tok-${currency}`, version: 1,
+        });
+        return { purchaseId, itemId };
+      });
+    }
+
+    // USD is the larger claim: it should be picked as primaryCurrency.
+    await seedClaimedItem("USD", 5_000);
+    await seedClaimedItem("EUR", 1_000);
+
+    const out = await as.query(api.tracking.overview, {});
+    expect(out.totals.mixedCurrencies).toBe(true);
+    expect(out.totals.primaryCurrency).toBe("USD");
+    // The legacy single-number field is USD-only, never USD+EUR summed as if they were the same money.
+    expect(out.totals.foundCents).toBe(5_000);
+    expect(out.totals.byCurrency).toEqual({
+      USD: { foundCents: 5_000, recoveredCents: 0, exampleFoundCents: 0 },
+      EUR: { foundCents: 1_000, recoveredCents: 0, exampleFoundCents: 0 },
+    });
+  });
+
+  it("F5b (D103): a single-currency account reports mixedCurrencies: false", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    await as.mutation(api.examples.load, {});
+    const out = await as.query(api.tracking.overview, {});
+    expect(out.totals.mixedCurrencies).toBe(false);
+    expect(out.totals.primaryCurrency).toBe("USD");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -148,11 +222,97 @@ describe("tracking.overview: read budget at 40 purchases x 50 items x 30 checks 
       );
       expect(errorMessage).toBeNull();
       expect(result).toBeDefined();
-      // MAX_ITEMS_PER_PURCHASE (50) caps each purchase's items, so 1 of each
-      // purchase's 51 is left out -- exactly what `truncated` reports below.
-      expect(result!.items).toHaveLength(PURCHASES * 50);
+      // F3 (D103): MAX_ITEMS_TOTAL (250) now bounds the grand total across
+      // every purchase, not just each purchase's own 50 -- 40 purchases x 51
+      // items would otherwise be 2,000+ items; `truncated` (below) says so.
+      expect(result!.items).toHaveLength(250);
       expect(result!.truncated).toBe(true);
       expect(metrics.documentsRead.used).toBeLessThan(32_000);
+      // F3 (D103): the actual failure this shape reproduced was Convex's
+      // SEPARATE "Too many index ranges read (4096)" limit (`databaseQueries`),
+      // not the document-count one above -- see tracking.ts's MAX_POINTS doc
+      // comment for why documentsRead alone was never the real constraint.
+      expect(metrics.databaseQueries.used).toBeLessThan(4_096);
+    },
+    150_000,
+  );
+
+  // The literal shape D103's F3 finding reproduced the crash at.
+  it(
+    "60 purchases x 50 items x 12 checks does not throw 'Too many index ranges read (4096)' (F3, D103)",
+    async () => {
+      const t = limitedHarness();
+      const userId: Id<"users"> = await t.run((ctx) => ctx.db.insert("users", { name: "Heavy" }));
+      const as = t.withIdentity({ subject: `${userId}|session` });
+      const NOW = Date.UTC(2026, 8, 21, 12);
+      const DAY = 86_400_000;
+      const HOUR = 3_600_000;
+      const PURCHASES = 60;
+      const ITEMS_PER_PURCHASE = 50;
+      const CHECKS_PER_ITEM = 12;
+
+      for (let p = 0; p < PURCHASES; p++) {
+        await t.run(async (ctx) => {
+          const merchantDomain = `f3store${p}.example`;
+          const purchaseId = await ctx.db.insert("purchases", {
+            userId,
+            merchant: `Store ${p}`,
+            merchantDomain,
+            purchasedAt: NOW - 10 * DAY,
+            currency: "USD",
+            status: "active",
+          });
+          for (let i = 0; i < ITEMS_PER_PURCHASE; i++) {
+            const productUrl = `https://${merchantDomain}/p/${i}`;
+            const itemId = await ctx.db.insert("items", {
+              purchaseId,
+              userId,
+              name: `Item ${p}-${i}`,
+              unitCents: 5_000,
+              qty: 1,
+              productUrl,
+              returned: false,
+            });
+            for (let c = 0; c < CHECKS_PER_ITEM; c++) {
+              await ctx.db.insert("priceChecks", {
+                itemId,
+                userId,
+                observedCents: 4_500 + c,
+                currency: "USD",
+                observedAt: NOW - (CHECKS_PER_ITEM - c) * HOUR,
+                sourceUrl: productUrl,
+              });
+            }
+          }
+        });
+      }
+
+      const { result, errorMessage, metrics } = await as.run(async (ctx) => {
+        let result: Awaited<ReturnType<typeof ctx.runQuery<typeof api.tracking.overview>>> | undefined;
+        let errorMessage: string | null = null;
+        try {
+          result = await ctx.runQuery(api.tracking.overview, { now: NOW });
+        } catch (e) {
+          errorMessage = e instanceof Error ? e.message : String(e);
+        }
+        const metrics = await ctx.meta.getTransactionMetrics();
+        return { result, errorMessage, metrics };
+      });
+
+      // eslint-disable-next-line no-console
+      console.log(
+        "[read-budget] tracking.overview (60x50x12, F3)",
+        JSON.stringify({
+          documentsRead: metrics.documentsRead.used,
+          databaseQueries: metrics.databaseQueries.used,
+          errorMessage,
+        }),
+      );
+      expect(errorMessage).toBeNull();
+      expect(result).toBeDefined();
+      expect(result!.truncated).toBe(true); // 3,000 items total, capped at MAX_ITEMS_TOTAL (250)
+      expect(metrics.documentsRead.used).toBeLessThan(32_000);
+      expect(metrics.databaseQueries.used).toBeLessThan(4_096);
     },
     150_000,
   );

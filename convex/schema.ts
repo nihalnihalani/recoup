@@ -230,7 +230,12 @@ export default defineSchema({
     token: v.string(), version: v.number(), attentionAt: v.optional(v.number()), openedFromPriceCheckId: v.optional(v.id("priceChecks")),
     sendUnknown: v.optional(v.boolean()), isExample: v.optional(v.boolean()),
   }).index("by_user", ["userId"]).index("by_item", ["itemId"]).index("by_token", ["token"]).index("by_thread", ["threadId"])
-    .index("by_item_type_status", ["itemId", "type", "status"]),
+    .index("by_item_type_status", ["itemId", "type", "status"])
+    /** F3 (D103): lets `tracking.overview` fetch every price_adjustment claim
+     * for a whole purchase's items in one range read, instead of one query
+     * per item -- see tracking.ts's docstring for the "too many index
+     * ranges read" failure this replaces. */
+    .index("by_purchase_type", ["purchaseId", "type", "status"]),
 
   /** Append-only facts about money. Idempotency keys are scoped per claim (D38). Only user confirmation creates confirmed_credit (Inv 3). */
   ledgerEvents: defineTable({

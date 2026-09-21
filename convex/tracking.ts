@@ -12,16 +12,34 @@ import { MAX_ITEMS_PER_PURCHASE } from "./limits";
 const MAX_PURCHASES = 60;
 /**
  * Observations read per item for the chart, newest first in the read, oldest
- * first in the payload. D93: lowered from 90 -- at MAX_PURCHASES x
- * MAX_ITEMS_PER_PURCHASE owner maxima (60x50), 90 checks/item alone would
- * read up to 270,000 priceChecks documents, the actual dominant cost behind
- * the measured 40x50x30 overflow (62,040 documents; the items-per-purchase
- * cap alone does not fix this, since a purchase legitimately holds up to
- * MAX_ITEMS_PER_PURCHASE items already). 12 matches `insights.ts`'s
- * `CHECKS_PER_PRODUCT` for the same reason and keeps this comfortably under
- * the 32,000-document ceiling even at owner maxima.
+ * first in the payload. D93: lowered from 90 to 12, matching `insights.ts`'s
+ * `CHECKS_PER_PRODUCT`, for the same reason that constant is 12: even
+ * bounded per item, a large document COUNT is not this query's actual
+ * failure mode (see F3/D103 below).
+ *
+ * F3 (D103) correction to this comment's earlier claim: the crash this
+ * query hit at owner maxima (60 purchases x 50 items x 12 checks) was never
+ * "too many documents read" (that ceiling is 32,000, and this shape stays
+ * under it) -- it was Convex's SEPARATE "Too many index ranges read (4096)"
+ * limit, which counts every `.withIndex(...)` query issued in the
+ * transaction, not the documents they return. The old code issued two such
+ * queries per item (priceChecks, and a claims lookup) on top of one per
+ * purchase (policy, items page): 60 x (2 + 50 x 2) = 6,120 ranges, over the
+ * limit regardless of MAX_POINTS. The fix has two parts: the per-item claims
+ * query became one per-purchase query (`by_purchase_type`, grouped by item
+ * in memory, below), and `MAX_ITEMS_TOTAL` caps the grand total of items
+ * whose checks/claim get read across every purchase combined -- per-purchase
+ * bounds alone cannot stop the purchases x items product from growing
+ * without limit as an account gets bigger.
  */
 const MAX_POINTS = 12;
+/**
+ * F3 (D103): ceiling on the total number of items `overview` reads price
+ * history and a claim for, across every purchase combined -- see MAX_POINTS'
+ * doc comment. Purchases beyond this budget still count toward `truncated`
+ * but contribute no `trackedItem` rows this call.
+ */
+const MAX_ITEMS_TOTAL = 250;
 
 const point = v.object({ at: v.number(), cents: v.number() });
 
@@ -78,11 +96,28 @@ export const overview = query({
     totals: v.object({
       tracked: v.number(),
       watching: v.number(),
+      /**
+       * F5b (D103): money in `purchases.currency` for `primaryCurrency` only
+       * (D72: never summed across currencies) -- the currency with the most
+       * combined found+recovered money, ties broken by whichever purchase
+       * was read first (newest first). `null`/all-zero when nothing has a
+       * price-adjustment claim yet, or the caller has no active purchases.
+       * `byCurrency` below always has the complete, per-currency breakdown;
+       * these three fields exist for callers that only want one headline
+       * number and are willing to see it scoped to one currency rather than
+       * a meaningless cross-currency sum.
+       */
       foundCents: v.number(),
       recoveredCents: v.number(),
       checks: v.number(),
-      /** Unresolved money on labelled example purchases; excluded from foundCents (D27). */
+      /** Unresolved money on labelled example purchases, in `primaryCurrency`; excluded from foundCents (D27). */
       exampleFoundCents: v.number(),
+      /** True when the account's claims span more than one currency (F5b/D103): `byCurrency` is the honest total, the three fields above are only a partial view. */
+      mixedCurrencies: v.boolean(),
+      /** ISO 4217 code the three totals above are scoped to, or `null` when there is no money to report yet. */
+      primaryCurrency: v.union(v.string(), v.null()),
+      /** The complete per-currency breakdown (F5b/D103), one entry per currency any active purchase's claims touched. */
+      byCurrency: v.record(v.string(), v.object({ foundCents: v.number(), recoveredCents: v.number(), exampleFoundCents: v.number() })),
     }),
     /** True when the purchase list and/or some purchase's item list was cut off (P07/D93): the UI should say so rather than silently showing a partial account. */
     truncated: v.boolean(),
@@ -90,29 +125,60 @@ export const overview = query({
   handler: async (ctx, args) => {
     const empty = {
       items: [],
-      totals: { tracked: 0, watching: 0, foundCents: 0, recoveredCents: 0, checks: 0, exampleFoundCents: 0 },
+      totals: {
+        tracked: 0, watching: 0, foundCents: 0, recoveredCents: 0, checks: 0, exampleFoundCents: 0,
+        mixedCurrencies: false, primaryCurrency: null, byCurrency: {},
+      },
       truncated: false,
     };
     const userId = await getAuthUserId(ctx);
     if (!userId) return empty;
 
+    // F6 (D103): scoped to "active" by the index itself, like insights.ts's
+    // userPurchases -- not a `by_user` page filtered by status afterward,
+    // which could push an active purchase out of the page entirely behind
+    // enough newer archived/needs_review ones (the same P05-shaped bug D72
+    // already fixed in insights.ts).
     const purchases = await ctx.db
       .query("purchases")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", "active"))
       .order("desc")
       .take(MAX_PURCHASES + 1);
     let truncated = purchases.length > MAX_PURCHASES;
     const validatedNow = assertCoarseNow(args.now);
 
+    // F3 (D103): the per-purchase item budget is decided up front, in
+    // purchase order (newest first), before any of it is spent -- see
+    // MAX_ITEMS_TOTAL's doc comment.
+    let itemsRoom = MAX_ITEMS_TOTAL;
+    const perPurchaseCap = purchases.slice(0, MAX_PURCHASES).map(() => {
+      const cap = Math.min(MAX_ITEMS_PER_PURCHASE, itemsRoom);
+      itemsRoom -= cap;
+      return cap;
+    });
+
     const items = [];
     let watching = 0;
-    let foundCents = 0;
-    let exampleFoundCents = 0;
-    let recoveredCents = 0;
     let checks = 0;
+    // F5b (D103): accumulated per currency, never mixed (D72). See the
+    // `byCurrency`/`primaryCurrency` doc comments above for how the single-
+    // number legacy fields below are derived from this.
+    type CurrencyTotals = { foundCents: number; recoveredCents: number; exampleFoundCents: number };
+    const byCurrency = new Map<string, CurrencyTotals>();
+    function currencyTotals(currency: string): CurrencyTotals {
+      let row = byCurrency.get(currency);
+      if (!row) {
+        row = { foundCents: 0, recoveredCents: 0, exampleFoundCents: 0 };
+        byCurrency.set(currency, row);
+      }
+      return row;
+    }
 
-    for (const purchase of purchases.slice(0, MAX_PURCHASES)) {
-      if (purchase.status !== "active") continue;
+    for (const [i, purchase] of purchases.slice(0, MAX_PURCHASES).entries()) {
+      const cap = perPurchaseCap[i];
+      if (cap < MAX_ITEMS_PER_PURCHASE) truncated = true; // the shared budget, not this purchase's own size, capped the ask
+      if (cap === 0) continue;
+
       const policy = await latest(ctx, userId, purchase.merchantDomain, "price_adjustment");
       const windowDays = policy?.windowDays;
       const ends =
@@ -121,16 +187,31 @@ export const overview = query({
           : undefined;
       const now = validatedNow ?? purchase.purchasedAt ?? purchase._creationTime;
 
-      // D93: bounded per purchase (MAX_ITEMS_PER_PURCHASE), not an unbounded
-      // .collect() -- a purchase with an unusually large item list only ever
-      // truncates that purchase's own items, and is reported via `truncated`.
       const rows = await ctx.db
         .query("items")
         .withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id))
-        .take(MAX_ITEMS_PER_PURCHASE + 1);
-      if (rows.length > MAX_ITEMS_PER_PURCHASE) truncated = true;
+        .take(cap);
+      if (rows.length >= cap) truncated = true;
 
-      for (const item of rows.slice(0, MAX_ITEMS_PER_PURCHASE)) {
+      // F3 (D103): one range read for every non-dismissed price_adjustment
+      // claim on this whole purchase (`by_purchase_type`), instead of one
+      // per item -- grouped below to the newest claim per item, the same
+      // pick `claims.filter(...).sort(...)[0]` made per item before. This is
+      // what turns the per-purchase query count from O(items) into O(1),
+      // the dominant fix for the "too many index ranges read" crash (see
+      // MAX_POINTS' doc comment).
+      const purchaseClaims = await ctx.db
+        .query("claims")
+        .withIndex("by_purchase_type", (q) => q.eq("purchaseId", purchase._id).eq("type", "price_adjustment"))
+        .collect();
+      const priceClaimByItem = new Map<string, (typeof purchaseClaims)[number]>();
+      for (const c of purchaseClaims) {
+        if (c.status === "dismissed") continue;
+        const existing = priceClaimByItem.get(c.itemId);
+        if (!existing || c._creationTime > existing._creationTime) priceClaimByItem.set(c.itemId, c);
+      }
+
+      for (const item of rows) {
         const recent = await ctx.db
           .query("priceChecks")
           .withIndex("by_item", (q) => q.eq("itemId", item._id))
@@ -142,27 +223,19 @@ export const overview = query({
           .reverse();
         const latestPoint = points[points.length - 1];
 
-        // D93: narrowed to this item's own price_adjustment claims (see
-        // `priceWatch.hasOpenPriceClaim`'s docstring for why this bounds the
-        // read regardless of how many dismissed return_credit claims exist).
-        const claims = await ctx.db
-          .query("claims")
-          .withIndex("by_item_type_status", (q) => q.eq("itemId", item._id).eq("type", "price_adjustment"))
-          .collect();
-        const priceClaim = claims
-          .filter((c) => c.status !== "dismissed")
-          .sort((a, b) => b._creationTime - a._creationTime)[0];
+        const priceClaim = priceClaimByItem.get(item._id);
         const balance = priceClaim ? await claimBalance(ctx, priceClaim) : undefined;
 
         const isExample = purchase.isExample === true;
         if (item.productUrl && !item.returned && ends !== undefined && ends > now) watching += 1;
         checks += recent.length;
         if (priceClaim && balance && !isExample) {
-          foundCents += Math.max(balance.unresolved, 0);
-          recoveredCents += Math.max(balance.confirmed - balance.debited, 0);
+          const t = currencyTotals(purchase.currency);
+          t.foundCents += Math.max(balance.unresolved, 0);
+          t.recoveredCents += Math.max(balance.confirmed - balance.debited, 0);
         } else if (priceClaim && balance && isExample) {
           // Never mixed into real totals (D27); reported apart so the UI can explain a $0 headline over example rows.
-          exampleFoundCents += Math.max(balance.unresolved, 0);
+          currencyTotals(purchase.currency).exampleFoundCents += Math.max(balance.unresolved, 0);
         }
 
         items.push({
@@ -201,9 +274,34 @@ export const overview = query({
       }
     }
 
+    // F5b (D103): pick the currency with the most combined found+recovered
+    // money as `primaryCurrency` for the legacy single-number fields (ties,
+    // including all-zero, broken by iteration order -- purchases were read
+    // newest first, so that is "the most recently touched currency").
+    let primaryCurrency: string | null = null;
+    let primaryScore = -1;
+    for (const [currency, t] of byCurrency) {
+      const score = t.foundCents + t.recoveredCents;
+      if (score > primaryScore) {
+        primaryScore = score;
+        primaryCurrency = currency;
+      }
+    }
+    const primary = primaryCurrency ? byCurrency.get(primaryCurrency)! : { foundCents: 0, recoveredCents: 0, exampleFoundCents: 0 };
+
     return {
       items,
-      totals: { tracked: items.length, watching, foundCents, recoveredCents, checks, exampleFoundCents },
+      totals: {
+        tracked: items.length,
+        watching,
+        foundCents: primary.foundCents,
+        recoveredCents: primary.recoveredCents,
+        checks,
+        exampleFoundCents: primary.exampleFoundCents,
+        mixedCurrencies: byCurrency.size > 1,
+        primaryCurrency,
+        byCurrency: Object.fromEntries(byCurrency),
+      },
       truncated,
     };
   },
