@@ -27,6 +27,7 @@
  * its own `purgeStep` loop).
  */
 import { v } from "convex/values";
+import { vOutboundId } from "@agentmail/convex";
 import { internalAction, internalMutation } from "./_generated/server";
 import { components } from "./_generated/api";
 
@@ -103,6 +104,34 @@ export const cleanupFinalizedOutbound = internalMutation({
       olderThan: args.olderThan,
     });
     return null;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// T18.5 (D124 B1): single-outbound purge.
+//
+// Price-drop alerts go out from ONE shared inbox (`ALERTS_INBOX_ID`,
+// `convex/notify.ts`'s `sendDrop`), never a user's own inbox -- so unlike
+// every other outbound send in this app, its component `outboundMessages`
+// row (and that row's delivery/bounce `events`) is NOT reachable by
+// `purgeInboxData` above, which only ever drains ONE inbox at a time and
+// must never touch the shared alerts inbox wholesale (that would destroy
+// every OTHER user's alert history along with this one user's). The
+// `mailLog` row itself (Recoup's own bookkeeping, `convex/schema.ts`) already
+// records exactly which component row to remove via `outboundId`; this is
+// the thin `internal.*` wrapper `convex/account.ts`'s `purgeStep` calls, for
+// each `mailLog` row it is about to delete that carries one, mirroring
+// `cleanupFinalizedOutbound`'s wrapper-only-touches-`components`-here
+// convention so `account.ts` never imports `components` directly.
+export const purgeOutbound = internalMutation({
+  args: { outboundId: vOutboundId },
+  returns: v.object({ remaining: v.boolean() }),
+  handler: async (ctx, { outboundId }) => {
+    // `vOutboundId`'s TS type is `Id<"outboundMessages">` (the component's own
+    // table, `@agentmail/convex`'s client index), the same branded id
+    // `notify.ts`'s `agentmail.cancel`/`status` calls already pass straight
+    // through -- no cast needed.
+    return await ctx.runMutation(components.agentmail.lib.purgeOutbound, { outboundId });
   },
 });
 

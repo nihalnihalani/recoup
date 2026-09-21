@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { convexTest } from "convex-test";
 import { exportPKCS8, generateKeyPair } from "jose";
-import { ConvexError } from "convex/values";
+import { ConvexError, type GenericId } from "convex/values";
 import { api, internal, components } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
@@ -65,6 +65,44 @@ type T = ReturnType<typeof setup>;
 // `exportPage`/`purgeStep` touch (direct, via-parent, and status-iterated).
 // ---------------------------------------------------------------------------
 
+/**
+ * T18.5 (D124 B1): `seedFullAccount`'s queued mailLog row below needs a
+ * syntactically valid component `outboundMessages` id, not a placeholder
+ * string like the pre-T18.5 `"ob-1" as never` -- `purgeStep`'s mailLog step
+ * now calls `mailPurge.purgeOutbound` (a component mutation) for every
+ * mailLog row carrying an `outboundId`, and the component's own
+ * `v.id("outboundMessages")` argument validator rejects a malformed id
+ * outright (`Validator error: Expected ID for table "outboundMessages"`).
+ *
+ * Minted ONCE, in a throwaway backend, via a real `enqueueSend` call (the
+ * only way to obtain a genuinely valid id -- component tables are a separate
+ * mock backend `t.run` cannot reach, per `mailPurge.test.ts`'s own
+ * docstring). Reused as a plain string constant across every OTHER test's
+ * OWN fresh `setup()` backend rather than calling `enqueueSend` inside each
+ * one: id FORMAT validation is structural (table name + encoding), not "does
+ * this row exist in THIS backend", so `ctx.db.get` on this id in a different
+ * backend returns `null` (not a throw) and `purgeOutbound` cleanly no-ops on
+ * it. This sidesteps a real gotcha: `enqueueSend` also schedules the actual
+ * send pipeline (a workpool action that POSTs over HTTP), and workpool's own
+ * periodic internal status report self-reschedules indefinitely once a job
+ * exists -- several callers below drain every scheduled function to
+ * completion (`finishAllScheduledFunctions`/`vi.runAllTimers`), which hit
+ * convex-test's "too many iterations" guard the moment a real send was ever
+ * enqueued in THAT SAME backend, even after `cancelSend` finalizes the row.
+ * `mailPurge.test.ts` avoids the same trap by simply never draining scheduled
+ * functions; this suite cannot avoid that, so it avoids the live send instead.
+ */
+let SAMPLE_OUTBOUND_ID: string;
+beforeAll(async () => {
+  const seedT = setup();
+  SAMPLE_OUTBOUND_ID = await seedT.mutation(components.agentmail.lib.enqueueSend, {
+    config: { retryAttempts: 1, initialBackoffMs: 10 },
+    inboxId: "inbox-seed-sample",
+    kind: "send" as const,
+    payload: { to: "sample@example.com", subject: "sample", text: "sample" },
+  });
+});
+
 async function seedFullAccount(t: T, userId: Id<"users">, email: string) {
   return await t.run(async (ctx) => {
     const profileId = await ctx.db.insert("profiles", { userId, inboxId: `inbox-${userId}`, inboxEmail: email });
@@ -126,7 +164,7 @@ async function seedFullAccount(t: T, userId: Id<"users">, email: string) {
     });
     const queuedMailLogId = await ctx.db.insert("mailLog", {
       userId, dedupeKey: `watch:${watchId}:6900`, kind: "price_drop", to: email, subject: "Price drop!",
-      status: "queued", outboundId: "ob-1" as never, attempt: 0, nextCheckAt: T0 + 600_000,
+      status: "queued", outboundId: SAMPLE_OUTBOUND_ID as never, attempt: 0, nextCheckAt: T0 + 600_000,
     });
 
     const alertSettingsId = await ctx.db.insert("alertSettings", {
@@ -1339,5 +1377,177 @@ describe("checkpoint 6b (D115) LOW — purgeAuth resets the deleted email's name
     expect(after.authAttempt.ok).toBe(true);
     expect(after.authSignUp.ok).toBe(true);
     expect(after.authMailPerEmail.ok).toBe(true);
+  });
+});
+
+describe("T18.5 (D124 B1): purgeStep's mailLog step purges the shared alerts inbox's per-message component rows", () => {
+  const RUNTIME_CONFIG = { retryAttempts: 1, initialBackoffMs: 10 };
+
+  /** Manual bounded drive of `purgeStep`, mirroring the checkpoint-6c reviewer's own `purgeToCompletion` helper -- deliberately NOT `finishAllScheduledFunctions`/`vi.runAllTimers`, which would also run `enqueueSend`'s real send pipeline for every OTHER already-`sent` seed in this file's `SAMPLE_OUTBOUND_ID` and spin through workpool's self-rescheduling status report forever under fake timers. `purgeStep` is a plain mutation; calling it directly never touches the scheduler at all. */
+  async function purgeToCompletion(t: T, userId: Id<"users">) {
+    let done = false;
+    for (let i = 0; i < 100 && !done; i++) {
+      done = (await t.mutation(internal.account.purgeStep, { userId })).done;
+    }
+    expect(done).toBe(true);
+  }
+
+  /**
+   * Drives one `enqueueSend`'d outbound message to a real terminal status
+   * (`agentmailMessageId` set, exactly like production's `onSendComplete`)
+   * without `vi.runAllTimers`/`finishAllScheduledFunctions` -- a bounded
+   * `advance + finishInProgressScheduledFunctions` loop instead, which
+   * drains only what is ALREADY due rather than following workpool's own
+   * self-rescheduling status-report timer forever. Requires `global.fetch`
+   * stubbed by the caller (a 2xx JSON response with `message_id`/`thread_id`
+   * and an `application/json` content-type -- `agentmailFetch` returns
+   * `null` for a response with no matching content-type).
+   */
+  async function driveSend(t: T, outboundId: GenericId<"outboundMessages">) {
+    let status: { status: string; agentmailMessageId: string | null } | null = null;
+    for (let i = 0; i < 60; i++) {
+      vi.advanceTimersByTime(50);
+      await t.finishInProgressScheduledFunctions();
+      status = await t.query(components.agentmail.lib.getOutboundStatus, { outboundId });
+      if (status && status.status !== "pending") return status;
+    }
+    throw new Error(`driveSend: outbound ${outboundId} never left pending (last: ${JSON.stringify(status)})`);
+  }
+
+  function stubSuccessfulSend(messageId: string, threadId: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ message_id: messageId, thread_id: threadId }), { status: 200, headers: { "content-type": "application/json" } })),
+    );
+  }
+
+  it("before: an alerts-inbox outboundMessages row for the user's price-drop alert (plus its delivery event) survives purgeStep untouched [FAILS on pre-T18.5 account.ts]", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const alertsInbox = "inbox_alerts_shared";
+    stubSuccessfulSend("mid-alert-1", "th-alert-1");
+
+    // The exact shape `notify.sendDrop` produces: a send from the SHARED
+    // alerts inbox to the user's own personal address.
+    const outboundId = await t.mutation(components.agentmail.lib.enqueueSend, {
+      config: RUNTIME_CONFIG, inboxId: alertsInbox, kind: "send" as const,
+      payload: { to: "victim.personal@gmail.example", subject: "Price drop: Jacket", text: "now $70" },
+    });
+    await driveSend(t, outboundId);
+    // The delivery webhook that follows a real send, keyed to the same message id `onSendComplete` just stamped.
+    await t.mutation(components.agentmail.lib.handleEvent, {
+      config: RUNTIME_CONFIG,
+      event: { type: "event", event_type: "message.delivered", event_id: "deliv-alert-1", delivery: { inbox_id: alertsInbox, message_id: "mid-alert-1", thread_id: "th-alert-1", to: ["victim.personal@gmail.example"] } },
+    });
+
+    await t.run((ctx) =>
+      ctx.db.insert("mailLog", {
+        userId: a.userId, dedupeKey: "watch:w1:7000", kind: "price_drop", to: "victim.personal@gmail.example",
+        subject: "Price drop: Jacket", status: "queued", outboundId, attempt: 0, nextCheckAt: T0 + 600_000,
+      }),
+    );
+
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    await purgeToCompletion(t, a.userId);
+
+    // Drain the shared alerts inbox's OWN wholesale purge to see what, if
+    // anything, is left attributable to this user (the reviewer's own
+    // check, da6c.test.ts "A2 mailPurge probes" -- ported here as the
+    // regression assertion instead of the original defect-confirming one).
+    let alertsDeleted = 0;
+    let cursor: string | undefined;
+    for (let i = 0; i < 10; i++) {
+      const r: { cursor: string | null; deleted: number } = await t.mutation(components.agentmail.lib.purgeInbox, { inboxId: alertsInbox, cursor });
+      alertsDeleted += r.deleted;
+      if (r.cursor === null) break;
+      cursor = r.cursor;
+    }
+    expect(alertsDeleted).toBe(0);
+  });
+
+  it("after: purgeStep's mailLog step deletes the outbound row and its events by id, and never touches another user's alert in the same shared inbox", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    const alertsInbox = "inbox_alerts_shared";
+
+    stubSuccessfulSend("mid-a", "th-a");
+    const outboundIdA = await t.mutation(components.agentmail.lib.enqueueSend, {
+      config: RUNTIME_CONFIG, inboxId: alertsInbox, kind: "send" as const,
+      payload: { to: "a.personal@gmail.example", subject: "Price drop: Jacket", text: "now $70" },
+    });
+    await driveSend(t, outboundIdA);
+    await t.mutation(components.agentmail.lib.handleEvent, {
+      config: RUNTIME_CONFIG,
+      event: { type: "event", event_type: "message.delivered", event_id: "deliv-a", delivery: { inbox_id: alertsInbox, message_id: "mid-a", thread_id: "th-a", to: ["a.personal@gmail.example"] } },
+    });
+    await t.run((ctx) =>
+      ctx.db.insert("mailLog", {
+        userId: a.userId, dedupeKey: "watch:wa:7000", kind: "price_drop", to: "a.personal@gmail.example",
+        subject: "Price drop: Jacket", status: "queued", outboundId: outboundIdA, attempt: 0, nextCheckAt: T0 + 600_000,
+      }),
+    );
+
+    // B's own alert in the SAME shared inbox must survive A's deletion.
+    stubSuccessfulSend("mid-b", "th-b");
+    const outboundIdB = await t.mutation(components.agentmail.lib.enqueueSend, {
+      config: RUNTIME_CONFIG, inboxId: alertsInbox, kind: "send" as const,
+      payload: { to: "b.personal@gmail.example", subject: "Price drop: Boots", text: "now $40" },
+    });
+    await driveSend(t, outboundIdB);
+    await t.mutation(components.agentmail.lib.handleEvent, {
+      config: RUNTIME_CONFIG,
+      event: { type: "event", event_type: "message.delivered", event_id: "deliv-b", delivery: { inbox_id: alertsInbox, message_id: "mid-b", thread_id: "th-b", to: ["b.personal@gmail.example"] } },
+    });
+    await t.run((ctx) =>
+      ctx.db.insert("mailLog", {
+        userId: b.userId, dedupeKey: "watch:wb:4000", kind: "price_drop", to: "b.personal@gmail.example",
+        subject: "Price drop: Boots", status: "queued", outboundId: outboundIdB, attempt: 0, nextCheckAt: T0 + 600_000,
+      }),
+    );
+
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    await purgeToCompletion(t, a.userId);
+
+    // A's mailLog row itself is gone (ordinary table purge).
+    expect(await t.run((ctx) => ctx.db.query("mailLog").withIndex("by_user", (q) => q.eq("userId", a.userId)).collect())).toHaveLength(0);
+
+    // A's component row is gone...
+    expect(await t.query(components.agentmail.lib.getOutboundStatus, { outboundId: outboundIdA })).toBeNull();
+    // ...B's own row is untouched by A's purge (checked BEFORE the
+    // destructive drain below, which would otherwise delete it too as part
+    // of counting what remains -- `purgeInbox` deletes what it reads).
+    expect(await t.query(components.agentmail.lib.getOutboundStatus, { outboundId: outboundIdB })).not.toBeNull();
+    // B's own mailLog row (Recoup's own bookkeeping) is untouched either way.
+    expect(await t.run((ctx) => ctx.db.query("mailLog").withIndex("by_user", (q) => q.eq("userId", b.userId)).collect())).toHaveLength(1);
+
+    // Finally, drain the shared alerts inbox's OWN wholesale purge (destructive)
+    // to confirm A's event is really gone via the same `by_message` route
+    // `purgeOutbound` uses, and that exactly B's 2 rows (its own outbound
+    // message + its own delivery event) are what is left -- proves A's purge
+    // never touched B's alert.
+    let alertsDeleted = 0;
+    let cursor: string | undefined;
+    for (let i = 0; i < 10; i++) {
+      const r: { cursor: string | null; deleted: number } = await t.mutation(components.agentmail.lib.purgeInbox, { inboxId: alertsInbox, cursor });
+      alertsDeleted += r.deleted;
+      if (r.cursor === null) break;
+      cursor = r.cursor;
+    }
+    expect(alertsDeleted).toBe(2);
+  });
+
+  it("bounded: a mailLog row whose outboundId no longer resolves to a component row (already purged, or never a real one) is still deleted cleanly, no throw", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    await t.run((ctx) =>
+      ctx.db.insert("mailLog", {
+        userId: a.userId, dedupeKey: "watch:wg:1", kind: "price_drop", to: "gone@example.com",
+        subject: "Price drop", status: "queued", outboundId: SAMPLE_OUTBOUND_ID as never, attempt: 0, nextCheckAt: T0 + 600_000,
+      }),
+    );
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    await purgeToCompletion(t, a.userId);
+    expect(await t.run((ctx) => ctx.db.query("mailLog").withIndex("by_user", (q) => q.eq("userId", a.userId)).collect())).toHaveLength(0);
   });
 });

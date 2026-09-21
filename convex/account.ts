@@ -572,6 +572,59 @@ async function deleteDirectPage(ctx: MutationCtx, table: TableNames, index: stri
 }
 
 /**
+ * T18.5 (D124 B1): page size for the `mailLog` purge step specifically, far
+ * smaller than every other direct table's `RETENTION_PAGE` (200). A price-
+ * drop alert mailLog row carrying an `outboundId` needs its own extra
+ * `ctx.runMutation` round trip (`mailPurge.purgeOutbound`, into the AgentMail
+ * component) before it is safe to delete -- see `deleteMailLogPage` below --
+ * so this step's real per-call cost is not just 200 local deletes but up to
+ * 200 EXTRA component mutation calls layered on top. 25 keeps one
+ * `purgeStep` call's total work bounded the same conservative way
+ * `PROCESSED_EVENTS_PAGE` already bounds the byte-heavy `processedEvents`
+ * step, without slowing down every OTHER user's purge (most mailLog rows
+ * carry no `outboundId` at all -- claim-email sends go through the user's
+ * own inbox, drained wholesale by `mailPurge.purgeInboxData` instead; see
+ * that module's docstring).
+ */
+const MAILLOG_PURGE_PAGE = 25;
+
+/**
+ * T18.5 (D124 B1): a price-drop alert's `mailLog` row (`convex/notify.ts`'s
+ * `sendDrop`) is sent from the shared `ALERTS_INBOX_ID` inbox, never the
+ * user's own -- so unlike every other outbound send in this app, its
+ * component `outboundMessages` row and delivery/bounce `events` are NOT
+ * reachable by `purge`'s `mailPurge.purgeInboxData` call (which only ever
+ * drains ONE inbox, and must never be pointed at the shared alerts inbox: a
+ * whole-inbox purge there would destroy every OTHER user's alert history,
+ * not just this user's). Before deleting a `mailLog` row that carries an
+ * `outboundId`, this purges that ONE component row (and its events) by id
+ * instead, via `mailPurge.purgeOutbound` (a component mutation, callable
+ * from this app mutation through `ctx.runMutation`, same as any other
+ * `internal.*` call). Bounded to a handful of retries per row (a single
+ * outbound message realistically has only a few events -- sent, delivered,
+ * bounced -- so `remaining` almost never comes back `true` even once); a row
+ * that still is not exhausted after that is left for the NEXT `purgeStep`
+ * call to finish (it is not deleted from `mailLog` yet, so the page does not
+ * advance past it and the same row is retried).
+ */
+const MAILLOG_OUTBOUND_PURGE_ATTEMPTS = 5;
+
+async function deleteMailLogPage(ctx: MutationCtx, userId: Id<"users">, cursor: string | null, numItems: number): Promise<{ deleted: number; isDone: boolean; continueCursor: string }> {
+  const page = await paginateByUser(ctx, "mailLog", "by_user", userId, cursor, numItems);
+  for (const row of page.page) {
+    const outboundId = (row as Doc<"mailLog">).outboundId;
+    if (outboundId) {
+      for (let i = 0; i < MAILLOG_OUTBOUND_PURGE_ATTEMPTS; i++) {
+        const result = await ctx.runMutation(internal.mailPurge.purgeOutbound, { outboundId });
+        if (!result.remaining) break;
+      }
+    }
+    await deleteRow(ctx, row);
+  }
+  return { deleted: page.page.length, isDone: page.isDone, continueCursor: page.continueCursor };
+}
+
+/**
  * Deletes up to `numItems` rows from a "via-parent" table's page (children
  * only -- the parent table is its own, later, step), same one-`.paginate()`-
  * call design as `readParentTable`, but simpler: a deleted row never comes
@@ -666,7 +719,13 @@ export const purgeStep = internalMutation({
     let stepDone: boolean;
     let nextCursor: string | null;
     if (spec.kind === "direct") {
-      const result = await deleteDirectPage(ctx, table, spec.index, userId, cursorIn, RETENTION_PAGE);
+      // T18.5 (D124 B1): mailLog rows can carry a component outboundId that
+      // needs its own purge call before the row is safe to delete -- see
+      // `deleteMailLogPage`'s docstring -- so this one table uses a smaller
+      // page than every other direct table's `RETENTION_PAGE`.
+      const result = table === "mailLog"
+        ? await deleteMailLogPage(ctx, userId, cursorIn, MAILLOG_PURGE_PAGE)
+        : await deleteDirectPage(ctx, table, spec.index, userId, cursorIn, RETENTION_PAGE);
       stepDone = result.isDone;
       nextCursor = result.isDone ? null : result.continueCursor;
     } else if (spec.kind === "status") {

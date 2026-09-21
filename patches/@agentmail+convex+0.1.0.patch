@@ -1,8 +1,8 @@
 diff --git a/node_modules/@agentmail/convex/dist/component/_generated/component.d.ts b/node_modules/@agentmail/convex/dist/component/_generated/component.d.ts
-index 6c2860c..39473aa 100644
+index 6c2860c..acc5e62 100644
 --- a/node_modules/@agentmail/convex/dist/component/_generated/component.d.ts
 +++ b/node_modules/@agentmail/convex/dist/component/_generated/component.d.ts
-@@ -162,5 +162,21 @@ export type ComponentApi<
+@@ -162,5 +162,34 @@ export type ComponentApi<
        null,
        Name
      >;
@@ -20,6 +20,19 @@ index 6c2860c..39473aa 100644
 +      "internal",
 +      { inboxId: string; cursor?: string },
 +      { cursor: string | null; deleted: number },
++      Name
++    >;
++
++    // ---- Purge single outbound (T18.5 / D124 B1) ------------------------
++    // Deletes ONE outboundMessages row and its events (via by_message), for
++    // a send from a SHARED inbox that must not be purged wholesale (e.g.
++    // Recoup's price-drop alerts inbox). Bounded the same way purgeInbox is;
++    // `remaining: true` means call again with the SAME outboundId.
++    purgeOutbound: FunctionReference<
++      "mutation",
++      "internal",
++      { outboundId: GenericId<"outboundMessages"> },
++      { remaining: boolean },
 +      Name
 +    >;
    };
@@ -54,10 +67,10 @@ index 3d15ed6..6e45e2a 100644
  component.use(workpool, { name: "callbackPool" });
  export default component;
 diff --git a/node_modules/@agentmail/convex/dist/component/lib.d.ts b/node_modules/@agentmail/convex/dist/component/lib.d.ts
-index 2db242a..20e52ca 100644
+index 2db242a..685a9c6 100644
 --- a/node_modules/@agentmail/convex/dist/component/lib.d.ts
 +++ b/node_modules/@agentmail/convex/dist/component/lib.d.ts
-@@ -181,5 +181,12 @@ export declare const handleEvent: import("convex/server").RegisteredMutation<"pu
+@@ -181,5 +181,17 @@ export declare const handleEvent: import("convex/server").RegisteredMutation<"pu
  export declare const cleanupFinalizedOutbound: import("convex/server").RegisteredMutation<"public", {
      olderThan?: number | undefined;
  }, Promise<void>>;
@@ -68,14 +81,19 @@ index 2db242a..20e52ca 100644
 +    cursor: string | null;
 +    deleted: number;
 +}>>;
++export declare const purgeOutbound: import("convex/server").RegisteredMutation<"internal", {
++    outboundId: import("convex/values").GenericId<"outboundMessages">;
++}, Promise<{
++    remaining: boolean;
++}>>;
  export {};
  //# sourceMappingURL=lib.d.ts.map
 \ No newline at end of file
 diff --git a/node_modules/@agentmail/convex/dist/component/lib.js b/node_modules/@agentmail/convex/dist/component/lib.js
-index c245802..c3ba38c 100644
+index c245802..99ae5f0 100644
 --- a/node_modules/@agentmail/convex/dist/component/lib.js
 +++ b/node_modules/@agentmail/convex/dist/component/lib.js
-@@ -476,4 +476,63 @@ export const cleanupFinalizedOutbound = mutation({
+@@ -476,4 +476,90 @@ export const cleanupFinalizedOutbound = mutation({
          }
      },
  });
@@ -138,6 +156,33 @@ index c245802..c3ba38c 100644
 +        };
 +    },
 +});
++// ---------------------------------------------------------------------------
++// T18.5 (D124 B1): single-outbound purge. See src/component/lib.ts for the
++// full design note (why a shared "alerts" inbox cannot be purged wholesale).
++// ---------------------------------------------------------------------------
++export const purgeOutbound = internalMutation({
++    args: { outboundId: v.id("outboundMessages") },
++    returns: v.object({ remaining: v.boolean() }),
++    handler: async (ctx, args) => {
++        const row = await ctx.db.get(args.outboundId);
++        if (!row)
++            return { remaining: false };
++        const messageId = row.agentmailMessageId;
++        if (messageId) {
++            const page = await ctx.db
++                .query("events")
++                .withIndex("by_message", (q) => q.eq("messageId", messageId))
++                .take(PURGE_PAGE);
++            for (const event of page) {
++                await ctx.db.delete(event._id);
++            }
++            if (page.length === PURGE_PAGE)
++                return { remaining: true };
++        }
++        await ctx.db.delete(args.outboundId);
++        return { remaining: false };
++    },
++});
  //# sourceMappingURL=lib.js.map
 \ No newline at end of file
 diff --git a/node_modules/@agentmail/convex/dist/component/schema.d.ts b/node_modules/@agentmail/convex/dist/component/schema.d.ts
@@ -185,10 +230,10 @@ index 5bf49d1..c620afd 100644
  //# sourceMappingURL=schema.js.map
 \ No newline at end of file
 diff --git a/node_modules/@agentmail/convex/src/component/_generated/component.d.ts b/node_modules/@agentmail/convex/src/component/_generated/component.d.ts
-index 6c2860c..39473aa 100644
+index 6c2860c..acc5e62 100644
 --- a/node_modules/@agentmail/convex/src/component/_generated/component.d.ts
 +++ b/node_modules/@agentmail/convex/src/component/_generated/component.d.ts
-@@ -162,5 +162,21 @@ export type ComponentApi<
+@@ -162,5 +162,34 @@ export type ComponentApi<
        null,
        Name
      >;
@@ -206,6 +251,19 @@ index 6c2860c..39473aa 100644
 +      "internal",
 +      { inboxId: string; cursor?: string },
 +      { cursor: string | null; deleted: number },
++      Name
++    >;
++
++    // ---- Purge single outbound (T18.5 / D124 B1) ------------------------
++    // Deletes ONE outboundMessages row and its events (via by_message), for
++    // a send from a SHARED inbox that must not be purged wholesale (e.g.
++    // Recoup's price-drop alerts inbox). Bounded the same way purgeInbox is;
++    // `remaining: true` means call again with the SAME outboundId.
++    purgeOutbound: FunctionReference<
++      "mutation",
++      "internal",
++      { outboundId: GenericId<"outboundMessages"> },
++      { remaining: boolean },
 +      Name
 +    >;
    };
@@ -229,10 +287,10 @@ index b1cc7f1..a61a50f 100644
  component.use(workpool, { name: "callbackPool" });
  
 diff --git a/node_modules/@agentmail/convex/src/component/lib.ts b/node_modules/@agentmail/convex/src/component/lib.ts
-index 121dd58..4c7e4cd 100644
+index 121dd58..7b78c4b 100644
 --- a/node_modules/@agentmail/convex/src/component/lib.ts
 +++ b/node_modules/@agentmail/convex/src/component/lib.ts
-@@ -580,3 +580,107 @@ export const cleanupFinalizedOutbound = mutation({
+@@ -580,3 +580,156 @@ export const cleanupFinalizedOutbound = mutation({
      }
    },
  });
@@ -338,6 +396,55 @@ index 121dd58..4c7e4cd 100644
 +      cursor: next.phase === "done" ? null : JSON.stringify(next),
 +      deleted: page.page.length,
 +    };
++  },
++});
++
++// ---------------------------------------------------------------------------
++// T18.5 (D124 B1): single-outbound purge.
++//
++// `purgeInbox` above scopes a purge to one `inboxId` -- correct for a user's
++// own personal inbox, but Recoup also sends price-drop alerts from ONE
++// shared "alerts" inbox to many different users' personal addresses
++// (`convex/notify.ts`'s `sendDrop`). Purging that whole shared inbox when
++// any single user deletes their account would destroy every OTHER user's
++// alert history too, so it is never purged wholesale. `purgeOutbound`
++// instead deletes exactly the one `outboundMessages` row a caller already
++// knows about (Recoup's own `mailLog.outboundId`) and that row's `events`
++// (via `by_message`, keyed on the row's own `agentmailMessageId`) -- no
++// `by_inbox` scoping needed, since the row id itself is the scope.
++// ---------------------------------------------------------------------------
++
++/**
++ * Deletes one `outboundMessages` row and its `events`. Bounded the same way
++ * `purgeInbox` is (<= `PURGE_PAGE` events read per call via `.take()`, the
++ * one non-`.paginate()` bounded read this execution needs): a single
++ * outbound message realistically has a handful of events (sent, delivered,
++ * bounced...), so in practice this always converges in one call, but the
++ * row itself is deleted only once no more events remain -- `remaining: true`
++ * tells the caller to invoke this again with the SAME `outboundId` (deleted
++ * events never come back, so repeated calls always terminate). Idempotent:
++ * a second call for an already-purged id returns `{ remaining: false }`
++ * having done nothing.
++ */
++export const purgeOutbound = internalMutation({
++  args: { outboundId: v.id("outboundMessages") },
++  returns: v.object({ remaining: v.boolean() }),
++  handler: async (ctx, args) => {
++    const row = await ctx.db.get(args.outboundId);
++    if (!row) return { remaining: false };
++
++    const messageId = row.agentmailMessageId;
++    if (messageId) {
++      const page = await ctx.db
++        .query("events")
++        .withIndex("by_message", (q) => q.eq("messageId", messageId))
++        .take(PURGE_PAGE);
++      for (const event of page) await ctx.db.delete(event._id);
++      if (page.length === PURGE_PAGE) return { remaining: true };
++    }
++
++    await ctx.db.delete(args.outboundId);
++    return { remaining: false };
 +  },
 +});
 diff --git a/node_modules/@agentmail/convex/src/component/schema.ts b/node_modules/@agentmail/convex/src/component/schema.ts
