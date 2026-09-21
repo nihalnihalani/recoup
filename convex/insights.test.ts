@@ -252,6 +252,43 @@ describe("insights P05 accounting", () => {
     const activity = await as.query(api.insights.activity, {});
     expect(activity.events.length).toBeGreaterThan(0);
   });
+
+  it("D93 (D103): MAX_ITEMS_TOTAL bounds documentsRead well under 4,000 for a purchase-heavy account, and sets truncated", async () => {
+    const t = heavySetup();
+    const { as, userId } = await signedIn(t);
+    // 30 purchases x20 items (each under MAX_PURCHASES=40 and
+    // MAX_ITEMS_PER_PURCHASE=50 individually) x5 checks: 600 items total,
+    // well past MAX_ITEMS_TOTAL=150 -- before this fix, nothing capped the
+    // purchases x items product, so this alone would read every one of the
+    // 600 items plus up to 5 checks each (3,000 priceChecks).
+    for (let p = 0; p < 30; p++) {
+      await t.run(async (ctx) => {
+        const purchaseId = await ctx.db.insert("purchases", {
+          userId, merchant: "Store", merchantDomain: `shop${p}.example`, currency: "USD", status: "active",
+        });
+        for (let i = 0; i < 20; i++) {
+          const itemId = await ctx.db.insert("items", {
+            purchaseId, userId, name: `Item ${i}`, unitCents: 1_000, qty: 1, returned: false,
+          });
+          for (let c = 0; c < 5; c++) {
+            await ctx.db.insert("priceChecks", {
+              itemId, userId, observedCents: 900 + c, currency: "USD", observedAt: BASE + c * HOUR, sourceUrl: "https://shopx.example/p",
+            });
+          }
+        }
+      });
+    }
+
+    for (const fn of [api.insights.activity, api.insights.sources] as const) {
+      const { documentsRead, result } = await as.run(async (ctx) => {
+        const result = await ctx.runQuery(fn, {} as never);
+        const metrics = await ctx.meta.getTransactionMetrics();
+        return { documentsRead: metrics.documentsRead.used, result };
+      });
+      expect(documentsRead).toBeLessThan(4_000);
+      expect(result.truncated).toBe(true);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -298,15 +335,23 @@ async function seedOffer(
   t: T,
   userId: Id<"users">,
   watchId: Id<"watches">,
-  o: { store: string; status: "candidate" | "confirmed" | "rejected"; lastCents?: number; lastCheckedAt?: number; checks?: Array<[number, number]> },
+  o: {
+    store: string;
+    status: "candidate" | "confirmed" | "rejected";
+    lastCents?: number;
+    lastCheckedAt?: number;
+    checks?: Array<[number, number]>;
+    currency?: string;
+  },
 ) {
+  const currency = o.currency ?? "USD";
   return await t.run(async (ctx) => {
     const offerId = await ctx.db.insert("offers", {
       watchId, userId, storeDomain: o.store, productUrl: `https://${o.store}/p/1`, title: "Desk lamp", status: o.status,
-      lastCents: o.lastCents, currency: "USD", lastCheckedAt: o.lastCheckedAt,
+      lastCents: o.lastCents, currency, lastCheckedAt: o.lastCheckedAt,
     });
     for (const [hour, cents] of o.checks ?? []) {
-      await ctx.db.insert("offerChecks", { offerId, watchId, userId, observedCents: cents, currency: "USD", observedAt: BASE + hour * HOUR });
+      await ctx.db.insert("offerChecks", { offerId, watchId, userId, observedCents: cents, currency, observedAt: BASE + hour * HOUR });
     }
     return offerId;
   });
@@ -419,6 +464,29 @@ describe("insights.priceHistory", () => {
     expect(await bob.query(api.insights.priceHistory, {})).toBeNull();
     expect(await t.query(api.insights.priceHistory, { watchId })).toBeNull();
   });
+
+  it("F5a (D103): lowest never compares across currencies -- a cheaper offer in a different currency is shown but excluded", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId, { checks: [[1, 5_000], [3, 4_500]] }); // USD primary
+    await seedOffer(t, userId, watchId, { store: "rei.example", status: "confirmed", lastCents: 4_200, checks: [[2, 4_400], [3, 3_900]] }); // USD, genuinely cheapest
+    // Raw cents lower than every USD point, but priced in a different currency (D72): must never win "lowest".
+    await seedOffer(t, userId, watchId, {
+      store: "jp.example",
+      status: "confirmed",
+      currency: "JPY",
+      lastCents: 500,
+      checks: [[2, 500]],
+    });
+
+    const out = await as.query(api.insights.priceHistory, { watchId });
+    expect(new Set(out!.stores.map((s) => s.domain))).toEqual(new Set(["acme.example", "rei.example", "jp.example"]));
+    // The JPY store is still shown, with its own (unconverted) points...
+    const jp = out!.stores.find((s) => s.domain === "jp.example")!;
+    expect(jp.points).toEqual([{ at: BASE + 2 * HOUR, cents: 500 }]);
+    // ...but "lowest" is scoped to the primary's own currency (USD), same as before this offer existed.
+    expect(out!.lowest).toEqual({ cents: 3_900, at: BASE + 3 * HOUR, domain: "rei.example" });
+  });
 });
 
 describe("insights.trackedTable", () => {
@@ -453,6 +521,20 @@ describe("insights.trackedTable", () => {
         lowestCents: 3_800, lowestDomain: "rei.example",
       },
     ]);
+  });
+
+  it("F5a (D103): lowestCents/lowestDomain never compare across currencies", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const lamp = await seedWatch(t, userId, { name: "Lamp", slug: "lamp", checks: [[1, 5_000], [2, 4_000]] }); // USD
+    await seedOffer(t, userId, lamp, { store: "rei.example", status: "confirmed", lastCents: 3_800, checks: [[2, 3_800]] }); // USD, genuinely cheapest
+    await seedOffer(t, userId, lamp, { store: "jp.example", status: "confirmed", currency: "JPY", lastCents: 300, checks: [[2, 300]] });
+
+    const table = await as.query(api.insights.trackedTable, {});
+    const row = table.find((r) => r.watchId === lamp)!;
+    expect(row.stores.find((s) => s.domain === "jp.example")?.lastCents).toBe(300); // still shown
+    expect(row.lowestCents).toBe(3_800);
+    expect(row.lowestDomain).toBe("rei.example");
   });
 
   it("never shows one user's watches to another", async () => {

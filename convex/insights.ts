@@ -26,6 +26,18 @@ const MAX_PURCHASES = 40;
 const MAX_CLAIMS = 40;
 const CHECKS_PER_PRODUCT = 12;
 const FEED_LIMIT = 40;
+/**
+ * D93 (D103): a ceiling on the TOTAL number of purchase items `activity`/
+ * `sources` fetch price-check history for, across every purchase combined --
+ * not per purchase. `MAX_ITEMS_PER_PURCHASE` (50, shared app-wide) times
+ * `MAX_PURCHASES` (40) purchases is up to 2,000 items, each costing another
+ * `CHECKS_PER_PRODUCT` reads: unbounded per-purchase caps alone cannot stop
+ * that multiplication (a account with many purchases, each holding a modest
+ * item count, still blows past any reasonable read budget). Once this many
+ * items have been read this call, later purchases still get their
+ * `purchase_added` event, just no per-item price events -- `truncated` says so.
+ */
+const MAX_ITEMS_TOTAL = 150;
 /** Watch statuses that can still contribute to the dashboard (archived never read at all). */
 const COUNTED_WATCH_STATUSES = ["active", "paused", "bought"] as const;
 
@@ -148,50 +160,82 @@ export const activity = query({
 
     // D72 canonical counting: a bought watch's checks and drops are carried by
     // the purchase item `markBought` created, so it contributes nothing here.
-    for (const watch of watches.rows) {
-      if (watch.purchaseId) continue;
-      const base = { subject: watch.name, storeDomain: watch.merchantDomain, watchId: watch._id };
-      events.push({ ...base, id: `${watch._id}:added`, at: watch._creationTime, kind: "watch_added" });
-      const checks = await ctx.db
-        .query("watchChecks")
-        .withIndex("by_watch", (q) => q.eq("watchId", watch._id))
-        .order("desc")
-        .take(CHECKS_PER_PRODUCT);
-      if (checks.length >= CHECKS_PER_PRODUCT) truncated = true;
-      events.push(...priceEvents(checks, base));
-    }
-
-    for (const purchase of purchases.rows) {
-      events.push({
-        id: `${purchase._id}:added`,
-        at: purchase._creationTime,
-        kind: "purchase_added",
-        subject: purchase.merchant,
-        storeDomain: purchase.merchantDomain,
-        purchaseId: purchase._id,
-        note: purchase.isExample ? "Example" : undefined,
-      });
-      const items = await ctx.db
-        .query("items")
-        .withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id))
-        .take(MAX_ITEMS_PER_PURCHASE);
-      if (items.length >= MAX_ITEMS_PER_PURCHASE) truncated = true;
-      for (const item of items) {
+    // D93: fanned out with Promise.all (each watch's checks page is an
+    // independent read) instead of one page at a time in series.
+    const liveWatchRows = watches.rows.filter((w) => !w.purchaseId);
+    const watchEventLists = await Promise.all(
+      liveWatchRows.map(async (watch) => {
+        const base = { subject: watch.name, storeDomain: watch.merchantDomain, watchId: watch._id };
         const checks = await ctx.db
-          .query("priceChecks")
-          .withIndex("by_item", (q) => q.eq("itemId", item._id))
+          .query("watchChecks")
+          .withIndex("by_watch", (q) => q.eq("watchId", watch._id))
           .order("desc")
           .take(CHECKS_PER_PRODUCT);
         if (checks.length >= CHECKS_PER_PRODUCT) truncated = true;
-        events.push(
-          ...priceEvents(checks, {
-            subject: item.name,
+        return [{ ...base, id: `${watch._id}:added`, at: watch._creationTime, kind: "watch_added" as const }, ...priceEvents(checks, base)];
+      }),
+    );
+    events.push(...watchEventLists.flat());
+
+    // D93: the purchase/item fan-out is also parallelized per purchase, and
+    // MAX_ITEMS_TOTAL bounds the grand total of items whose price history is
+    // actually read, across every purchase combined (see its doc comment) --
+    // not just per purchase, which cannot bound the purchases x items
+    // product. The per-purchase share of that budget is decided up front, in
+    // one synchronous (no I/O) pass over `purchases.rows` in its existing
+    // order (newest first) -- fixing each purchase's `take()` size before any
+    // read starts, so the parallel reads below never race on a shared
+    // counter. This means an earlier, small purchase can leave some of its
+    // reserved share unused rather than it flowing to a later one; a
+    // reasonable trade for reads that can safely run in parallel.
+    let itemsRoom = MAX_ITEMS_TOTAL;
+    const perPurchaseCap = purchases.rows.map(() => {
+      const cap = Math.min(MAX_ITEMS_PER_PURCHASE, itemsRoom);
+      itemsRoom -= cap;
+      return cap;
+    });
+
+    const purchaseEventLists = await Promise.all(
+      purchases.rows.map(async (purchase, i) => {
+        const purchaseEvents: ActivityEvent[] = [
+          {
+            id: `${purchase._id}:added`,
+            at: purchase._creationTime,
+            kind: "purchase_added",
+            subject: purchase.merchant,
             storeDomain: purchase.merchantDomain,
             purchaseId: purchase._id,
+            note: purchase.isExample ? "Example" : undefined,
+          },
+        ];
+        const cap = perPurchaseCap[i];
+        if (cap < MAX_ITEMS_PER_PURCHASE) truncated = true; // the shared budget, not this purchase's own size, capped the ask
+        if (cap === 0) return purchaseEvents;
+        const items = await ctx.db
+          .query("items")
+          .withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id))
+          .take(cap);
+        if (items.length >= cap) truncated = true;
+        const itemEventLists = await Promise.all(
+          items.map(async (item) => {
+            const checks = await ctx.db
+              .query("priceChecks")
+              .withIndex("by_item", (q) => q.eq("itemId", item._id))
+              .order("desc")
+              .take(CHECKS_PER_PRODUCT);
+            if (checks.length >= CHECKS_PER_PRODUCT) truncated = true;
+            return priceEvents(checks, {
+              subject: item.name,
+              storeDomain: purchase.merchantDomain,
+              purchaseId: purchase._id,
+            });
           }),
         );
-      }
-    }
+        purchaseEvents.push(...itemEventLists.flat());
+        return purchaseEvents;
+      }),
+    );
+    events.push(...purchaseEventLists.flat());
 
     const mails = await ctx.db
       .query("mailLog")
@@ -216,67 +260,77 @@ export const activity = query({
       .order("desc")
       .take(MAX_CLAIMS);
     if (claims.length >= MAX_CLAIMS) truncated = true;
-    for (const claim of claims) {
-      const item = await ctx.db.get(claim.itemId);
-      const purchase = await ctx.db.get(claim.purchaseId);
-      const base = {
-        subject: item?.name ?? "Claim",
-        storeDomain: purchase?.merchantDomain,
-        currency: purchase?.currency,
-        claimId: claim._id,
-        purchaseId: claim.purchaseId,
-      };
-      events.push({
-        ...base,
-        id: `${claim._id}:opened`,
-        at: claim._creationTime,
-        kind: "claim_opened",
-        cents: claim.expectedCents,
-        note: claim.isExample ? "Example" : undefined,
-      });
-
-      const drafts = await ctx.db
-        .query("drafts")
-        .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
-        .collect();
-      for (const draft of drafts) {
-        if (!draft.agentmailMessageId || draft.approvedAt === undefined) continue;
-        events.push({ ...base, id: `${draft._id}:sent`, at: draft.approvedAt, kind: "ask_sent", note: draft.to });
-      }
-
-      const replies = await ctx.db
-        .query("replies")
-        .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
-        .collect();
-      for (const reply of replies) {
-        events.push({
+    // D93: each claim's own reads (item/purchase lookups, drafts/replies/
+    // ledger pages) are independent of every other claim's, so they run in
+    // parallel too.
+    const claimEventLists = await Promise.all(
+      claims.map(async (claim) => {
+        const claimEvents: ActivityEvent[] = [];
+        const [item, purchase, drafts, replies, ledger] = await Promise.all([
+          ctx.db.get(claim.itemId),
+          ctx.db.get(claim.purchaseId),
+          ctx.db
+            .query("drafts")
+            .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+            .collect(),
+          ctx.db
+            .query("replies")
+            .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+            .collect(),
+          ctx.db
+            .query("ledgerEvents")
+            .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+            .collect(),
+        ]);
+        const base = {
+          subject: item?.name ?? "Claim",
+          storeDomain: purchase?.merchantDomain,
+          currency: purchase?.currency,
+          claimId: claim._id,
+          purchaseId: claim.purchaseId,
+        };
+        claimEvents.push({
           ...base,
-          id: reply._id,
-          at: reply.receivedAt,
-          kind: "reply_received",
-          note: reply.summary,
+          id: `${claim._id}:opened`,
+          at: claim._creationTime,
+          kind: "claim_opened",
+          cents: claim.expectedCents,
+          note: claim.isExample ? "Example" : undefined,
         });
-      }
 
-      const ledger = await ctx.db
-        .query("ledgerEvents")
-        .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
-        .collect();
-      for (const entry of ledger) {
-        events.push({
-          ...base,
-          id: entry._id,
-          at: entry._creationTime,
-          kind:
-            entry.kind === "confirmed_credit"
-              ? "credit_confirmed"
-              : entry.kind === "promised_credit"
-                ? "credit_promised"
-                : "charged_again",
-          cents: entry.cents,
-        });
-      }
-    }
+        for (const draft of drafts) {
+          if (!draft.agentmailMessageId || draft.approvedAt === undefined) continue;
+          claimEvents.push({ ...base, id: `${draft._id}:sent`, at: draft.approvedAt, kind: "ask_sent", note: draft.to });
+        }
+
+        for (const reply of replies) {
+          claimEvents.push({
+            ...base,
+            id: reply._id,
+            at: reply.receivedAt,
+            kind: "reply_received",
+            note: reply.summary,
+          });
+        }
+
+        for (const entry of ledger) {
+          claimEvents.push({
+            ...base,
+            id: entry._id,
+            at: entry._creationTime,
+            kind:
+              entry.kind === "confirmed_credit"
+                ? "credit_confirmed"
+                : entry.kind === "promised_credit"
+                  ? "credit_promised"
+                  : "charged_again",
+            cents: entry.cents,
+          });
+        }
+        return claimEvents;
+      }),
+    );
+    events.push(...claimEventLists.flat());
 
     const sorted = events.sort((a, b) => b.at - a.at);
     if (sorted.length > FEED_LIMIT) truncated = true;
@@ -367,53 +421,76 @@ export const sources = query({
     truncated = watches.truncated || purchases.truncated;
 
     // D72 canonical counting: a bought watch's checks, drops and offers are
-    // carried by the purchase item `markBought` created, so it is skipped here.
-    for (const watch of watches.rows) {
-      if (watch.purchaseId) continue;
-      const target = row(watch.merchantDomain);
-      target.watching += 1;
-      const checks = await ctx.db
-        .query("watchChecks")
-        .withIndex("by_watch", (q) => q.eq("watchId", watch._id))
-        .order("desc")
-        .take(CHECKS_PER_PRODUCT);
-      if (checks.length >= CHECKS_PER_PRODUCT) truncated = true;
-      tally(target, checks, watch.name);
+    // carried by the purchase item `markBought` created, so it is skipped
+    // here. D93: fanned out with Promise.all -- every watch's reads are
+    // independent, and mutating the shared `rows` map from parallel branches
+    // is safe here because every mutation (`+=`, `Math.max`, `considerBest`'s
+    // min) is commutative, so it does not matter which branch runs first.
+    await Promise.all(
+      watches.rows
+        .filter((w) => !w.purchaseId)
+        .map(async (watch) => {
+          const target = row(watch.merchantDomain);
+          target.watching += 1;
+          const checks = await ctx.db
+            .query("watchChecks")
+            .withIndex("by_watch", (q) => q.eq("watchId", watch._id))
+            .order("desc")
+            .take(CHECKS_PER_PRODUCT);
+          if (checks.length >= CHECKS_PER_PRODUCT) truncated = true;
+          tally(target, checks, watch.name);
 
-      // Shared with priceHistory/trackedTable (offers.ts): reads every row for
-      // the watch, so a confirmed offer behind any number of candidate or
-      // rejected rows is never missed (P05).
-      for (const offer of await confirmedOffers(ctx, watch._id, userId)) {
-        const store = row(offer.storeDomain);
-        store.offers += 1;
-        if (offer.lastCheckedAt !== undefined) {
-          store.lastCheckedAt = Math.max(store.lastCheckedAt ?? 0, offer.lastCheckedAt);
-        }
-        if (offer.lastCents !== undefined && offer.currency !== undefined) {
-          considerBest(store, offer.lastCents, offer.currency, watch.name);
-        }
-      }
-    }
+          // Shared with priceHistory/trackedTable (offers.ts): reads every row
+          // for the watch, so a confirmed offer behind any number of candidate
+          // or rejected rows is never missed (P05).
+          for (const offer of await confirmedOffers(ctx, watch._id, userId)) {
+            const store = row(offer.storeDomain);
+            store.offers += 1;
+            if (offer.lastCheckedAt !== undefined) {
+              store.lastCheckedAt = Math.max(store.lastCheckedAt ?? 0, offer.lastCheckedAt);
+            }
+            if (offer.lastCents !== undefined && offer.currency !== undefined) {
+              considerBest(store, offer.lastCents, offer.currency, watch.name);
+            }
+          }
+        }),
+    );
 
-    for (const purchase of purchases.rows) {
-      if (purchase.isExample) continue;
-      const target = row(purchase.merchantDomain);
-      const items = await ctx.db
-        .query("items")
-        .withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id))
-        .take(MAX_ITEMS_PER_PURCHASE);
-      if (items.length >= MAX_ITEMS_PER_PURCHASE) truncated = true;
-      for (const item of items) {
-        target.bought += 1;
-        const checks = await ctx.db
-          .query("priceChecks")
-          .withIndex("by_item", (q) => q.eq("itemId", item._id))
-          .order("desc")
-          .take(CHECKS_PER_PRODUCT);
-        if (checks.length >= CHECKS_PER_PRODUCT) truncated = true;
-        tally(target, checks, item.name);
-      }
-    }
+    // D93: same MAX_ITEMS_TOTAL discipline as `activity` (see its doc
+    // comment) -- the per-purchase share is fixed up front, in order, before
+    // any of the parallel reads below start.
+    const nonExample = purchases.rows.filter((p) => !p.isExample);
+    let itemsRoom = MAX_ITEMS_TOTAL;
+    const perPurchaseCap = nonExample.map(() => {
+      const cap = Math.min(MAX_ITEMS_PER_PURCHASE, itemsRoom);
+      itemsRoom -= cap;
+      return cap;
+    });
+    await Promise.all(
+      nonExample.map(async (purchase, i) => {
+        const target = row(purchase.merchantDomain);
+        const cap = perPurchaseCap[i];
+        if (cap < MAX_ITEMS_PER_PURCHASE) truncated = true;
+        if (cap === 0) return;
+        const items = await ctx.db
+          .query("items")
+          .withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id))
+          .take(cap);
+        if (items.length >= cap) truncated = true;
+        await Promise.all(
+          items.map(async (item) => {
+            target.bought += 1;
+            const checks = await ctx.db
+              .query("priceChecks")
+              .withIndex("by_item", (q) => q.eq("itemId", item._id))
+              .order("desc")
+              .take(CHECKS_PER_PRODUCT);
+            if (checks.length >= CHECKS_PER_PRODUCT) truncated = true;
+            tally(target, checks, item.name);
+          }),
+        );
+      }),
+    );
 
     const sorted = [...rows.values()].sort(
       (a, b) => b.watching + b.bought + b.offers - (a.watching + a.bought + a.offers) || b.checks - a.checks,
@@ -549,6 +626,19 @@ async function offerPoints(ctx: QueryCtx, offer: Doc<"offers">, limit: number): 
   return rows.map((c) => ({ at: c.observedAt, cents: c.observedCents })).reverse();
 }
 
+/**
+ * F5a (D103): the currency each entry of `storeSeries`'s returned array
+ * prices in, in the same order (primary store first, then
+ * `offers.slice(0, MAX_OFFER_STORES)`) -- kept separate from `HistoryStore`
+ * itself (which has no `currency` field; adding one would be a public-schema
+ * change) purely so `priceHistory`/`trackedTable` can scope their "lowest"
+ * comparison to one currency (D72: money is never compared across
+ * currencies) without touching what is sent to the client.
+ */
+function storeCurrencies(watch: Doc<"watches">, offers: Doc<"offers">[]): Array<string | null> {
+  return [watch.currency ?? null, ...offers.slice(0, MAX_OFFER_STORES).map((o) => o.currency ?? null)];
+}
+
 /** Shared by both read models: the primary store, then the watch's confirmed offers, each with its own series. */
 async function storeSeries(
   ctx: QueryCtx,
@@ -628,8 +718,17 @@ export const priceHistory = query({
     const offers = offersByWatch.get(watch._id) ?? (await confirmedOffers(ctx, watch._id, userId));
     const stores = await storeSeries(ctx, watch, offers, CHART_POINTS);
 
+    // F5a (D103): "lowest" only ever compares points priced in the primary
+    // store's own currency (D72) -- a store whose offer is in a different
+    // currency is still shown in `stores`, just excluded from this
+    // comparison, the same way `insights.sources`'s `considerBest` already
+    // scopes a store's "best" price to matching currencies.
+    const currencies = storeCurrencies(watch, offers);
+    const primaryCurrency = currencies[0];
     let lowest: { cents: number; at: number; domain: string } | null = null;
-    for (const store of stores) {
+    for (let i = 0; i < stores.length; i++) {
+      if (primaryCurrency !== null && currencies[i] !== primaryCurrency) continue;
+      const store = stores[i];
       for (const p of store.points) {
         if (lowest === null || p.cents < lowest.cents || (p.cents === lowest.cents && p.at < lowest.at)) {
           lowest = { cents: p.cents, at: p.at, domain: store.domain };
@@ -666,8 +765,13 @@ export const trackedTable = query({
     for (const watch of await liveWatches(ctx, userId)) {
       const offers = await confirmedOffers(ctx, watch._id, userId);
       const stores = await storeSeries(ctx, watch, offers, TABLE_POINTS);
+      // F5a (D103): same currency scoping as `priceHistory.lowest`.
+      const currencies = storeCurrencies(watch, offers);
+      const primaryCurrency = currencies[0];
       let lowest: { cents: number; domain: string } | null = null;
-      for (const store of stores) {
+      for (let i = 0; i < stores.length; i++) {
+        if (primaryCurrency !== null && currencies[i] !== primaryCurrency) continue;
+        const store = stores[i];
         if (store.lastCents !== null && (lowest === null || store.lastCents < lowest.cents)) {
           lowest = { cents: store.lastCents, domain: store.domain };
         }
