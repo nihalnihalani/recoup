@@ -29,8 +29,10 @@
  */
 import { v } from "convex/values";
 import { vEvent, type AgentMailEvent } from "@agentmail/convex";
-import { internalMutation } from "./_generated/server";
+import { internalMutation, type MutationCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { suppressAddress } from "./alerts";
+import { isTombstoned } from "./lib/accountState";
 
 const MAX_ERROR_CHARS = 1000;
 
@@ -41,6 +43,91 @@ function messageIdOf(event: AgentMailEvent): string | undefined {
     | undefined;
   const id = payload?.message_id;
   return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// F8 (checkpoint 4): a pending event stash for a message id this handler does
+// not yet recognize.
+//
+// `onEvent` is at-least-once and races `notify.reconcileDrop`: a bounce or
+// complaint webhook can arrive here BEFORE `applyDropOutcome` has ever
+// learned this AgentMail message id (that only happens once the row leaves
+// `queued`), so the `by_message` lookup below misses and the event would
+// otherwise be silently lost. There is no dedicated table for this (out of
+// this task's schema scope); `opsState` rows keyed `mailEvent:<messageId>`
+// stand in, reusing its existing `cursor` string field (JSON-encoded) and
+// `updatedAt` for a 7-day TTL. Only `notify.applyDropOutcome`'s `sent`
+// branch ever consumes one, once it learns the same message id.
+// ---------------------------------------------------------------------------
+
+const PENDING_MAIL_EVENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export type PendingMailEvent = { reason: "bounced" | "complained"; providerStatus: string };
+
+function pendingMailEventKey(messageId: string): string {
+  return `mailEvent:${messageId}`;
+}
+
+/** Upserts (by key) the pending event for a message id this handler could not yet map to a row. */
+export async function storePendingMailEvent(
+  ctx: MutationCtx,
+  messageId: string,
+  reason: PendingMailEvent["reason"],
+  providerStatus: string,
+  now: number,
+): Promise<void> {
+  const key = pendingMailEventKey(messageId);
+  const existing = await ctx.db
+    .query("opsState")
+    .withIndex("by_key", (q) => q.eq("key", key))
+    .unique();
+  const cursor = JSON.stringify({ reason, providerStatus } satisfies PendingMailEvent);
+  if (existing) await ctx.db.patch(existing._id, { cursor, updatedAt: now });
+  else await ctx.db.insert("opsState", { key, cursor, updatedAt: now });
+}
+
+/** Reads back a pending event; `null` when absent, malformed, or past its TTL (a stale row is simply overwritten by the next writer -- nothing proactively sweeps it). */
+export async function getPendingMailEvent(
+  ctx: MutationCtx,
+  messageId: string,
+  now: number = Date.now(),
+): Promise<PendingMailEvent | null> {
+  const row = await ctx.db
+    .query("opsState")
+    .withIndex("by_key", (q) => q.eq("key", pendingMailEventKey(messageId)))
+    .unique();
+  if (!row || !row.cursor || now - row.updatedAt > PENDING_MAIL_EVENT_TTL_MS) return null;
+  try {
+    const parsed = JSON.parse(row.cursor) as Partial<PendingMailEvent>;
+    if (parsed.reason !== "bounced" && parsed.reason !== "complained") return null;
+    return { reason: parsed.reason, providerStatus: typeof parsed.providerStatus === "string" ? parsed.providerStatus : parsed.reason };
+  } catch {
+    return null;
+  }
+}
+
+/** Consumes (deletes) a pending event once `notify.applyDropOutcome` has applied it. */
+export async function clearPendingMailEvent(ctx: MutationCtx, messageId: string): Promise<void> {
+  const row = await ctx.db
+    .query("opsState")
+    .withIndex("by_key", (q) => q.eq("key", pendingMailEventKey(messageId)))
+    .unique();
+  if (row) await ctx.db.delete(row._id);
+}
+
+/**
+ * F10 (checkpoint 4): never let a suppression side effect create a fresh
+ * `alertSettings` row (`alerts.suppressAddress` -> `getOrCreateSettings`) for
+ * a tombstoned user. The mailLog row's own status change (below) is applied
+ * either way -- this only guards the settings-row side effect.
+ */
+async function suppressUnlessTombstoned(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  reason: "bounced" | "complained",
+): Promise<void> {
+  if (await isTombstoned(ctx, userId)) return;
+  await suppressAddress(ctx, userId, reason);
 }
 
 export const onEvent = internalMutation({
@@ -68,6 +155,14 @@ export const onEvent = internalMutation({
         .query("mailLog")
         .withIndex("by_message", (q) => q.eq("agentmailMessageId", messageId))
         .first();
+      // --- Merchant mail (drafts) --------------------------------------
+      // (looked up here, ahead of the mailLog branch below, so F8's pending
+      // stash only fires for an id neither side recognizes yet)
+      const draftRow = await ctx.db
+        .query("drafts")
+        .withIndex("by_message", (q) => q.eq("agentmailMessageId", messageId))
+        .first();
+
       // Only a row already `sent` is a LATE event; anything else (still
       // `queued`, or already `failed`/`suppressed` from an earlier delivery
       // of this same event) is left alone -- idempotent by construction.
@@ -80,19 +175,22 @@ export const onEvent = internalMutation({
             error: `The email ${providerStatus} after delivery`.slice(0, MAX_ERROR_CHARS),
             lastCheckedAt: now,
           });
-          await suppressAddress(ctx, mailRow.userId, "bounced");
+          await suppressUnlessTombstoned(ctx, mailRow.userId, "bounced");
         } else {
           // Complaint after a completed send stays `sent` (it was delivered), but flags the address.
           await ctx.db.patch(mailRow._id, { providerStatus: "complained", lastCheckedAt: now });
-          await suppressAddress(ctx, mailRow.userId, "complained");
+          await suppressUnlessTombstoned(ctx, mailRow.userId, "complained");
         }
+      } else if (!draftRow) {
+        // F8: neither a resolved (`sent`) mailLog row nor a drafts row
+        // recognizes this id yet -- most likely a price-drop alert still
+        // `queued` (its `agentmailMessageId` is only recorded once
+        // `notify.applyDropOutcome` learns it from the component). Stash the
+        // event so that branch can apply it the moment the id becomes known,
+        // instead of losing an early complaint/bounce.
+        await storePendingMailEvent(ctx, messageId, isBounceLike ? "bounced" : "complained", providerStatus, now);
       }
 
-      // --- Merchant mail (drafts) --------------------------------------
-      const draftRow = await ctx.db
-        .query("drafts")
-        .withIndex("by_message", (q) => q.eq("agentmailMessageId", messageId))
-        .first();
       if (draftRow) {
         const claim = await ctx.db.get(draftRow.claimId);
         // A late bounce/complaint on a claim already moved on (drafted again,

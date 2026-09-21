@@ -291,3 +291,34 @@ describe("mailEvents.onEvent: drafts (merchant mail)", () => {
     expect(notes).toHaveLength(1);
   });
 });
+
+describe("mailEvents.onEvent: F10 isTombstoned guard around suppressAddress", () => {
+  it("a tombstoned user's late bounce still updates the sent mailLog row, but creates no alertSettings row", async () => {
+    const t = setup();
+    const { userId } = await verifiedUser(t);
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }),
+    );
+    const mailLogId = await sentMailLog(t, userId, "msg-tomb-1");
+
+    await t.mutation(internal.mailEvents.onEvent, { event: bounceEvent("msg-tomb-1") });
+
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("failed"); // the row's own status is still recorded
+    const settings = await alertSettingsRow(t, userId);
+    expect(settings).toBeNull(); // ...but no alertSettings row was created for the tombstoned user
+  });
+});
+
+describe("mailEvents.onEvent: F8 stashes an unmapped bounce/complaint for a later reconcile", () => {
+  it("an id that matches neither a mailLog nor a drafts row is stashed in opsState under mailEvent:<id>, not silently dropped", async () => {
+    const t = setup();
+    await t.mutation(internal.mailEvents.onEvent, { event: complaintEvent("msg-unmapped-1") });
+
+    const row = await t.run((ctx) =>
+      ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", "mailEvent:msg-unmapped-1")).unique(),
+    );
+    expect(row).not.toBeNull();
+    expect(JSON.parse(row!.cursor!)).toMatchObject({ reason: "complained", providerStatus: "complained" });
+  });
+});
