@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
-import { OFFER_CHECK_DEDUPE_MS, recheckConfirmedOffers, searchOffers, type OfferDeps } from "./offers";
+import { NEEDS_RECONFIRM_NOTE, OFFER_CHECK_DEDUPE_MS, recheckConfirmedOffers, searchOffers, type OfferDeps } from "./offers";
 import type { PageObservation } from "./priceWatch";
 import { MAX_OFFER_FINDS_PER_DAY, OFFER_FIND_COOLDOWN_MS, OFFER_FIND_WINDOW_MS } from "./limits";
 
@@ -816,13 +816,106 @@ describe("confirmed-offer variant drift -> needs_reconfirm (T13/P04)", () => {
           confidence: 0.9,
           isRange: false,
           variantMatch: "exact",
-          productName: offer.title, // resembles the offer's own stored title, not the watch's name
+          // F4 (D103): resembles the offer's stored `productName` (bootstrapped at confirm time from
+          // the WATCH's own name, `NAME`), not `offer.title` -- the drift check no longer compares
+          // against title at all (see the ShopSavvy-sourced case below, where title is the retailer's
+          // own name and would never resemble a product name in the first place).
+          productName: NAME,
         },
       ],
     });
     const resumed = (await rows(t, watchId)).find((r) => r._id === offer._id)!;
     expect(resumed.lastCents).toBe(16_000);
     expect(resumed.note).toBeUndefined();
+  });
+
+  it("a ShopSavvy-sourced confirmed offer survives its first recheck with the price updated (F4/D103, DA-10)", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId, { lastCents: 25_000 });
+    await t.run((ctx) => ctx.db.patch(watchId, { marketState: "running" }));
+    // A ShopSavvy candidate: its `title` is the RETAILER's name (market.ts), never the product's.
+    await t.mutation(internal.market.recordSnapshot, {
+      watchId,
+      outcome: "success",
+      points: [],
+      stores: [
+        {
+          retailer: "Best Buy",
+          storeDomain: "bestbuy.example",
+          productUrl: "https://bestbuy.example/p",
+          cents: 19_999,
+          currency: "USD",
+          observedAt: T0,
+        },
+      ],
+    });
+    const [offer] = await rows(t, watchId);
+    expect(offer.title).toBe("Best Buy"); // sanity: confirms the setup this bug depended on
+
+    await as.mutation(api.offers.confirm, { offerId: offer._id });
+    const confirmed = (await rows(t, watchId)).find((r) => r._id === offer._id)!;
+    expect(confirmed.productName).toBe(NAME); // bootstrapped from the watch's own name at confirm time
+
+    // A realistic recheck: a real-looking product-name read off the store page, similar to (but not a
+    // verbatim copy of) the watch's own name -- the kind of thing a real page's extractor returns.
+    // Before F4 this would have been compared against `offer.title` ("Best Buy") instead, and would
+    // have been flagged as drift on this very first recheck.
+    await t.mutation(internal.offers.recordRechecks, {
+      watchId,
+      results: [
+        {
+          offerId: offer._id,
+          observedCents: 18_500,
+          currency: "USD",
+          confidence: 0.9,
+          isRange: false,
+          variantMatch: "exact",
+          productName: "Acme Down Jacket - Blue, Size M",
+        },
+      ],
+    });
+
+    const after = (await rows(t, watchId)).find((r) => r._id === offer._id)!;
+    expect(after.lastCents).toBe(18_500); // price updated, not frozen behind a false drift flag
+    expect(after.note).toBeUndefined();
+  });
+
+  it("confirm clears NEEDS_RECONFIRM_NOTE, whether it is a plain re-confirm or a reject -> confirm (F4/D103)", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId, { lastCents: 25_000 });
+    await t.mutation(internal.offers.recordCandidates, {
+      watchId,
+      candidates: [candWithTitle("drift.example", exact(18_000), "Acme Down Jacket, Blue, M")],
+    });
+    const [offer] = await rows(t, watchId);
+    await as.mutation(api.offers.confirm, { offerId: offer._id });
+
+    const flagDrift = () =>
+      t.mutation(internal.offers.recordCandidates, {
+        watchId,
+        candidates: [candWithTitle("drift.example", exact(9_000), "Sony WH-1000XM5 Wireless Headphones")],
+      });
+
+    await flagDrift();
+    const flagged = (await rows(t, watchId)).find((r) => r._id === offer._id)!;
+    expect(flagged.note).toBe(NEEDS_RECONFIRM_NOTE); // sanity: it really is flagged
+
+    // A plain re-confirm (status is already "confirmed" -- previously treated as a full no-op) still
+    // clears the flag: the user looking again and confirming IS the reconfirmation.
+    await as.mutation(api.offers.confirm, { offerId: offer._id });
+    const reconfirmed = (await rows(t, watchId)).find((r) => r._id === offer._id)!;
+    expect(reconfirmed.note).toBeUndefined();
+    expect(reconfirmed.status).toBe("confirmed");
+
+    // reject -> confirm clears it too.
+    await flagDrift();
+    await as.mutation(api.offers.reject, { offerId: offer._id });
+    await as.mutation(api.offers.confirm, { offerId: offer._id });
+    const afterRejectConfirm = (await rows(t, watchId)).find((r) => r._id === offer._id)!;
+    expect(afterRejectConfirm.note).toBeUndefined();
+    expect(afterRejectConfirm.status).toBe("confirmed");
   });
 });
 
@@ -861,5 +954,32 @@ describe("tombstoned owner: scheduled offers work writes nothing (D87)", () => {
     });
     expect(writtenRechecks).toBe(0);
     expect((await rows(t, watchId)).find((r) => r._id === offer._id)?.lastCents).toBe(18_000);
+  });
+
+  it("searchOffers and recheckConfirmedOffers spend nothing -- no Firecrawl search, no price-extractor observe -- once the owner is tombstoned (F12/D103, DA-14)", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    // A confirmed offer for recheckConfirmedOffers to (not) act on below.
+    await searchOffers(runner(t), watchId, deps(["https://a.example/p"], { "a.example": exact(18_000) }).d);
+    const [offer] = await rows(t, watchId);
+    await as.mutation(api.offers.confirm, { offerId: offer._id });
+
+    await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: T0, attempts: 0 }));
+
+    const { d: spendDeps, observed, searches } = deps(["https://b.example/p"], { "b.example": exact(5_000) });
+
+    const searchWritten = await searchOffers(runner(t), watchId, spendDeps);
+    expect(searchWritten).toBe(0);
+    // Before F12, `watchForSearch` did not check the tombstone: searchOffers would still have run the
+    // (paid) Firecrawl search and the (paid) price-extractor observe for every candidate page, only to
+    // have `recordCandidates` throw the write away. Gating in `watchForSearch` -- read BEFORE either --
+    // stops both from ever running.
+    expect(searches).toHaveLength(0);
+    expect(observed).toHaveLength(0);
+
+    const rechecked = await recheckConfirmedOffers(runner(t), watchId, spendDeps);
+    expect(rechecked).toBe(0);
+    expect(observed).toHaveLength(0); // still 0: confirmedForWatch is never even reached
   });
 });

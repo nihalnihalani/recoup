@@ -83,8 +83,14 @@ const LIST_LIMIT = 20;
  * of one window (older ones are deleted by `find`). Reading this many rows off
  * `by_watch` is therefore reading ALL of them, so filtering by status
  * afterwards cannot miss a row.
+ *
+ * Exported so `market.ts`'s `recordSnapshot` can use the SAME generous,
+ * documented bound when it counts a watch's existing real offers before
+ * capping at MAX_OFFERS_PER_WATCH (F11/D103): its own narrower take-limit
+ * (MAX_OFFERS_PER_WATCH + MARKET_MAX_STORES) could be crowded out by
+ * FIND_MARKER rows and undercount, letting the cap be exceeded.
  */
-const WATCH_ROWS = MAX_OFFERS_PER_WATCH + 60;
+export const WATCH_ROWS = MAX_OFFERS_PER_WATCH + 60;
 const MAX_TITLE_CHARS = 200;
 /** `offerChecks` rows dropped at once when a candidate is replaced by another page; a candidate only gains rows from finds. */
 const STALE_CHECKS_PAGE = 100;
@@ -345,7 +351,25 @@ export const find = mutation({
 async function decide(ctx: MutationCtx, offerId: Id<"offers">, status: "confirmed" | "rejected"): Promise<null> {
   const userId = await requireUserId(ctx);
   const offer = await ownedOffer(ctx, offerId, userId);
-  if (offer.status !== status) await ctx.db.patch(offerId, { status }); // a retry is a no-op
+  const patch: Partial<Doc<"offers">> = {};
+  if (offer.status !== status) patch.status = status;
+  if (status === "confirmed") {
+    // F4 (D103): re-confirming (a plain retry, or reject -> confirm) is the user looking again --
+    // whatever "this may have changed" flag a recheck left clears, even when the status itself does
+    // not change (so this is no longer a pure no-op the way it was before this fix).
+    if (needsReconfirm(offer)) patch.note = undefined;
+    // F4 (D103): the reference a recheck's drift check compares against (never `title`, which for a
+    // ShopSavvy-sourced offer is the RETAILER's name, not the product's). Set once, from the watch's
+    // own name -- the same "what to search/match on" the rest of this file already trusts (`find`
+    // itself refuses to run without one). Left alone if already set; a watch with no real name yet
+    // falls back to `recordRechecks`'s first-successful-read bootstrap.
+    if (offer.productName === undefined) {
+      const watch = await ctx.db.get(offer.watchId);
+      const name = watch ? searchName(watch) : null;
+      if (name !== null) patch.productName = name.slice(0, MAX_TITLE_CHARS);
+    }
+  }
+  if (Object.keys(patch).length > 0) await ctx.db.patch(offerId, patch);
   // An offer priced before per-store history existed starts its series at the price it was confirmed with.
   if (status === "confirmed" && offer.lastCents !== undefined) {
     const any = await ctx.db
@@ -461,13 +485,23 @@ export const listForWatch = query({
 // Search: read, search + observe, record
 // ---------------------------------------------------------------------------
 
-/** What `search` and `recheck` need. Unauthenticated on purpose: called only by those actions. */
+/**
+ * What `search` and `recheck` need. Unauthenticated on purpose: called only by those actions.
+ *
+ * F12 (D103): the tombstone check runs HERE, before `searchOffers`/`recheckConfirmedOffers` ever call
+ * Firecrawl or the price extractor -- both paid. The write side (`recordCandidates`/`recordRechecks`)
+ * already refuses a tombstoned owner's rows (D87), but that is only a write guard: without this, a
+ * deleting owner's watch still paid for a full search-and-extract cycle every time, for a write that
+ * was always going to be thrown away. Both `searchOffers` and `recheckConfirmedOffers` call this
+ * query FIRST, so returning null here is enough to stop either from spending anything (DA-14).
+ */
 export const watchForSearch = internalQuery({
   args: { watchId: v.id("watches") },
   returns: v.union(v.object({ name: v.string(), merchantDomain: v.string() }), v.null()),
   handler: async (ctx, { watchId }) => {
     const watch = await ctx.db.get(watchId);
     if (!watch || (watch.status !== "active" && watch.status !== "paused")) return null;
+    if (await isTombstoned(ctx, watch.userId)) return null;
     const name = searchName(watch);
     return name === null ? null : { name, merchantDomain: watch.merchantDomain };
   },
@@ -687,11 +721,21 @@ export const dueForRecheck = internalQuery({
   },
 });
 
-/** The confirmed offers of one watch, at most MAX_OFFER_RECHECKS. Unauthenticated on purpose: called only by `recheck`. */
+/**
+ * The confirmed offers of one watch, at most MAX_OFFER_RECHECKS. Unauthenticated on purpose: called
+ * only by `recheck`.
+ *
+ * F12 (D103): also tombstone-gated, defensively -- `recheckConfirmedOffers` already bails out via
+ * `watchForSearch` before reaching this, but this query is not only ever called right after that one,
+ * so it does not rely on that ordering to keep a deleting owner's rows from being read for a paid
+ * observe.
+ */
 export const confirmedForWatch = internalQuery({
   args: { watchId: v.id("watches") },
   returns: v.array(v.object({ offerId: v.id("offers"), productUrl: v.string() })),
   handler: async (ctx, { watchId }) => {
+    const watch = await ctx.db.get(watchId);
+    if (!watch || (await isTombstoned(ctx, watch.userId))) return [];
     const rows = await watchRows(ctx, watchId);
     return rows
       .filter((r) => !isMarker(r) && r.status === "confirmed")
@@ -770,19 +814,34 @@ export const recordRechecks = internalMutation({
     for (const r of results.slice(0, MAX_OFFER_RECHECKS)) {
       const offer = await ctx.db.get(r.offerId);
       if (!offer || offer.watchId !== watchId || offer.status !== "confirmed" || isMarker(offer)) continue;
-      // P04: a recheck that no longer looks like the confirmed product -- "none" variant, or a
-      // freshly-read product name that does not resemble the stored title -- must not silently
-      // authorize whatever price it saw. Flag it instead of updating the price.
+      // F4 (D103): the first successful read that returns a product name, for an offer that never got
+      // one at confirm time (the watch had no real name yet) -- bootstrap the reference instead of
+      // judging drift against nothing. Never flagged: there is no prior reading to have drifted from.
+      const firstRead = offer.productName === undefined && r.productName !== undefined;
+      // P04: a recheck that no longer looks like the confirmed product -- "none" variant, or a freshly-
+      // read product name that does not resemble the STORED PRODUCT NAME -- must not silently authorize
+      // whatever price it saw. Flag it instead of updating the price.
+      //
+      // F4 (D103): compares `offer.productName` to `r.productName`, never `offer.title`. For a
+      // ShopSavvy-sourced offer `title` is the RETAILER's name (e.g. "Walmart"), not the product's --
+      // comparing that against a real product name is near-guaranteed to look like drift on the very
+      // first recheck (DA-10). `productName` is always a product name, on both sides, whatever the
+      // offer's source.
       const drift =
         r.variantMatch === "none" ||
-        (r.productName !== undefined && titleSimilarity(offer.title, r.productName) < TITLE_DRIFT_THRESHOLD);
+        (!firstRead &&
+          offer.productName !== undefined &&
+          r.productName !== undefined &&
+          titleSimilarity(offer.productName, r.productName) < TITLE_DRIFT_THRESHOLD);
       if (drift) {
         await ctx.db.patch(offer._id, { lastCheckedAt: now, note: NEEDS_RECONFIRM_NOTE });
         written++;
         continue;
       }
       const price = priceFields(r, watch.currency, now);
-      await ctx.db.patch(offer._id, price);
+      const patch: Partial<Doc<"offers">> = { ...price };
+      if (firstRead) patch.productName = r.productName!.slice(0, MAX_TITLE_CHARS);
+      await ctx.db.patch(offer._id, patch);
       await appendOfferCheck(ctx, { offerId: offer._id, watchId, userId: offer.userId }, price, now, "recoup");
       written++;
     }
