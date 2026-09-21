@@ -9,7 +9,8 @@ Two lines exist:
 Which line is canonical, and whether the returns case stays in the pitch. Lead recommends: adopt origin/main, keep returns in product and demo per the approved design. See the lead's report in the session transcript.
 
 ## In flight
-- `sonnet-porter`: porting D39, D45 floor, D52–D58 onto origin/main as branch `port-checkpoint-fixes` (pushed as a branch only; never to main).
+- DONE: `origin/port-checkpoint-fixes` (2c03d4b) = origin/main + D52–D58 ports (D39/D45 were already present as `netRecovered`/`MIN_PASSAGE_CHARS`). 413 tests, typecheck/lint clean. Ready to merge into main once the user decides.
+- `opus-devils-advocate` checkpoint 3: adversarial review of the collaborator's new surfaces (watches/offers/notify/tracking/limits/patch) on the port branch.
 
 ## Rules now in force
 - Nobody pulls/merges/rebases/pushes `main` until the user decides.
