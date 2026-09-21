@@ -47,6 +47,8 @@ async function seedSentClaim(
       version: 1,
     });
   });
+  // T18.5 (D124 B5): `drafts.insert` can now return `null` for a
+  // tombstoned owner; this fixture's userId is always active.
   const draftId = await t.mutation(internal.drafts.insert, {
     claimId,
     userId,
@@ -54,6 +56,7 @@ async function seedSentClaim(
     subject: "Refund for order AC-1 [RC-AB12CD]",
     body: "Hello",
   });
+  if (draftId === null) throw new Error("insert refused unexpectedly");
   await t.run((ctx) => ctx.db.patch(draftId, { approvedAt: Date.now() }));
   return claimId;
 }

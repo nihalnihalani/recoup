@@ -65,8 +65,22 @@ export const accountStateStatus = v.union(v.literal("deleting"), v.literal("dele
 export default defineSchema({
   ...authTables,
 
-  /** One AgentMail inbox per user; inbound mail is routed to a user through by_inbox. */
-  profiles: defineTable({ userId: v.id("users"), inboxId: v.string(), inboxEmail: v.string() })
+  /**
+   * One AgentMail inbox per user; inbound mail is routed to a user through by_inbox.
+   *
+   * `inboxId`/`inboxEmail` are optional (T18.5 addendum, F-AUD-2/D126): a row
+   * can exist as a PLACEHOLDER before either is known -- `profiles.ensureInbox`
+   * claims this row first (stamping `provisioningAt`) to make concurrent
+   * inbox provisioning single-flight (only one caller ever POSTs to the
+   * provider), then fills both fields in via `profiles.save` once the
+   * provider responds. A row with `provisioningAt` set and `inboxId` unset is
+   * "claimed, provider POST in flight"; reclaimable by a later caller once
+   * `provisioningAt` is more than `PROVISIONING_STALE_MS` old (`profiles.ts`).
+   */
+  profiles: defineTable({
+    userId: v.id("users"), inboxId: v.optional(v.string()), inboxEmail: v.optional(v.string()),
+    provisioningAt: v.optional(v.number()),
+  })
     .index("by_user", ["userId"]).index("by_inbox", ["inboxId"]),
 
   /** The case. purchasedAt is optional until the user confirms the extraction (D25). */
@@ -312,10 +326,21 @@ export default defineSchema({
     activePurgeJobId: v.optional(v.id("_scheduled_functions")),
     /**
      * T18.4 (D115 6b-5), wired by T18.1: whether the AgentMail component's
-     * own per-inbox rows (`inboundMessages`/`outboundMessages`/`events`) were
-     * fully drained by `mailPurge.purgeInboxData`. `true` vacuously when the
-     * user never provisioned an inbox; `false` (not hidden/coerced) if that
-     * action's own bounded loop reported `complete: false`.
+     * own rows for the user's OWN inbox (`inboundMessages`/`outboundMessages`/
+     * `events`, scoped by `inboxId` via `mailPurge.purgeInboxData`) were
+     * fully drained. `true` vacuously when the user never provisioned an
+     * inbox; `false` (not hidden/coerced) if that action's own bounded loop
+     * reported `complete: false`.
+     *
+     * T18.5 (D124 B1) note: this flag does NOT cover price-drop alert
+     * component rows -- those are sent from the separate, shared
+     * `ALERTS_INBOX_ID` inbox (`convex/notify.ts`'s `sendDrop`), which is
+     * never purged wholesale (doing so would delete every OTHER user's
+     * alerts too). Those rows are purged individually, unconditionally, by
+     * `outboundId`, inside `purgeStep`'s `mailLog` step
+     * (`mailPurge.purgeOutbound`) -- not reflected in this field at all, and
+     * not expected to be: by the time `purgeStep`'s `mailLog` step reports
+     * done, every such row for this user is already gone, flag or no flag.
      */
     mailDataPurged: v.optional(v.boolean()),
   }).index("by_user", ["userId"]).index("by_status", ["status"]),

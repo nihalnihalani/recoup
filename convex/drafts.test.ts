@@ -97,13 +97,18 @@ async function newDraft(
   userId: Id<"users">,
   to = CONTACT,
 ): Promise<Id<"drafts">> {
-  return await t.mutation(internal.drafts.insert, {
+  // T18.5 (D124 B5): `insert` can now return `null` for a tombstoned owner;
+  // this fixture is only ever used with a live, signed-in `userId`, so a
+  // `null` here would itself be a bug in the calling test.
+  const draftId = await t.mutation(internal.drafts.insert, {
     claimId,
     userId,
     to,
     subject: "Refund for order AC-1 [RC-AB12CD]",
     body: "Hello, could you confirm the credit for my returned scarf?",
   });
+  if (draftId === null) throw new Error("newDraft: insert refused (unexpectedly tombstoned userId in a test fixture)");
+  return draftId;
 }
 
 afterEach(() => {
@@ -1225,5 +1230,32 @@ describe("the send path is not a mail relay (pre-launch review B1)", () => {
       as.mutation(api.drafts.approveAndSend, sendArgs(draftId, { recipientConfirmed: undefined })),
     ).rejects.toThrow("Confirm this recipient before sending");
     expect(await t.run(async (ctx) => (await ctx.db.query("usage").collect()).length)).toBe(0);
+  });
+});
+
+describe("T18.5 (D124 B5): drafts.insert is tombstone-gated (mirrors priceWatch.recordCheck, B4)", () => {
+  it("before/after: a generate() model call finishing mid-purge (after requestDeletion) inserts no draft row [FAILS pre-T18.5]", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const { claimId } = await seed(t, userId);
+
+    await as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+
+    const result = await t.mutation(internal.drafts.insert, {
+      claimId, userId, to: CONTACT, subject: "late", body: "late body",
+    });
+    expect(result).toBeNull();
+    expect(await t.run((ctx) => ctx.db.query("drafts").withIndex("by_claim", (q) => q.eq("claimId", claimId)).collect())).toHaveLength(0);
+  });
+
+  it("an active (non-tombstoned) owner's insert is unaffected by the new gate", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { claimId } = await seed(t, userId);
+    const draftId = await t.mutation(internal.drafts.insert, {
+      claimId, userId, to: CONTACT, subject: "ok", body: "ok body",
+    });
+    expect(draftId).not.toBeNull();
+    expect(await t.run((ctx) => ctx.db.query("drafts").withIndex("by_claim", (q) => q.eq("claimId", claimId)).collect())).toHaveLength(1);
   });
 });

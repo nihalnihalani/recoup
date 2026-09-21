@@ -226,7 +226,7 @@ export const requireActiveUserId = internalQuery({
 export const generate = action({
   args: { claimId: v.id("claims") },
   returns: v.id("drafts"),
-  handler: async (ctx, { claimId }) => {
+  handler: async (ctx, { claimId }): Promise<Id<"drafts">> => {
     const userId = await ctx.runQuery(internal.drafts.requireActiveUserId, {});
     const c = await ctx.runQuery(internal.drafts.context, { claimId });
     if (!c || c.claim.userId !== userId) throw new ConvexError("Claim not found");
@@ -275,13 +275,20 @@ export const generate = action({
     const subject = `${out.subject.replace(/[[\]]/g, "").trim().slice(0, MAX_SUBJECT_CHARS)} [RC-${claim.token}]`;
     const body = out.body.trim().slice(0, MAX_BODY_CHARS);
 
-    const draftId: Id<"drafts"> = await ctx.runMutation(internal.drafts.insert, {
+    const draftId: Id<"drafts"> | null = await ctx.runMutation(internal.drafts.insert, {
       claimId,
       userId,
       to: c.confirmedContact ?? "",
       subject,
       body,
     });
+    // T18.5 (D124 B5): the account was deleted while `extract` above was in
+    // flight -- `insert` refused rather than writing a draft the finished
+    // purge would never see again. Nothing useful can be returned to a
+    // caller whose account no longer exists; `generate`'s declared return
+    // stays a plain `Id<"drafts">` (never widened to nullable) so every
+    // OTHER caller keeps its existing non-null contract.
+    if (draftId === null) throw new ConvexError("This account is being deleted.");
     return draftId;
   },
 });
@@ -300,10 +307,16 @@ export const insert = internalMutation({
     subject: v.string(),
     body: v.string(),
   },
-  returns: v.id("drafts"),
+  returns: v.union(v.id("drafts"), v.null()),
   handler: async (ctx, args) => {
     const claim = await ctx.db.get(args.claimId);
     if (!claim || claim.userId !== args.userId) throw new ConvexError("Claim not found");
+    // T18.5 (D124 B5): `generate`'s own model call (`extract`) can take real
+    // time; a `requestDeletion` landing while it is in flight (after
+    // `requireActiveUserId` already passed) must not let the LATE draft
+    // still land after the purge finished. Same write-time gate as
+    // `priceWatch.recordCheck`/`policies.fetchBoth`.
+    if (await isTombstoned(ctx, args.userId)) return null;
     const prev = await ctx.db
       .query("drafts")
       .withIndex("by_claim", (q) => q.eq("claimId", args.claimId))
@@ -460,7 +473,11 @@ export const approveAndSend = mutation({
       .query("profiles")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .unique();
-    if (!profile) throw new ConvexError("Set up your Recoup inbox first");
+    // T18.5 addendum (F-AUD-2): a `profiles` row can now exist as a
+    // provisioning-in-flight placeholder (no `inboxId` yet) -- checked, not
+    // just row presence, or `agentmail.sendMessage` below would be called
+    // with `undefined`.
+    if (!profile?.inboxId) throw new ConvexError("Set up your Recoup inbox first");
 
     // The same cap `update` applies; the client's copy of the text is never trusted to have gone through it.
     const body = args.body.trim().slice(0, MAX_BODY_CHARS);

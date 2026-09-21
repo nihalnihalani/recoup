@@ -450,6 +450,8 @@ describe("claims", () => {
       const { as, userId } = await signedIn(t);
       const { scarf } = await purchaseWithItems(as);
       const claimId = await openReturnClaim(as, scarf);
+      // T18.5 (D124 B5): `drafts.insert` can now return `null` for a
+      // tombstoned owner; this fixture's userId is always active.
       const draftId = await t.mutation(internal.drafts.insert, {
         claimId,
         userId,
@@ -457,6 +459,7 @@ describe("claims", () => {
         subject: "Refund please",
         body: "Hello",
       });
+      if (draftId === null) throw new Error("insert refused unexpectedly");
       await t.run(async (ctx) => {
         await ctx.db.patch(draftId, { outboundId: "outbound-1" as never, approvedAt: Date.now() });
         await ctx.db.patch(claimId, { status: "queued" });
