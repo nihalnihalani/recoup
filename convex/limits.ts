@@ -152,10 +152,22 @@ export const DROP_RECLAIM_MIN_MS = 86_400_000;
 
 // --- ShopSavvy market-history state machine (T09, D71) -----------------------
 
-/** Attempts (claim + fetch) before a market lookup gives up as `terminal_failure`. */
-export const MARKET_MAX_ATTEMPTS = 3;
+/**
+ * Attempts (claim + fetch) before a market lookup gives up as `terminal_failure`.
+ *
+ * D105 (D103 F9 follow-up): raised from 3 to 4. At 3, `MARKET_RETRY_BACKOFF_MS[2]`
+ * (the 6h step) was dead code: the 3rd attempt's post-failure count (3) already
+ * failed `< MARKET_MAX_ATTEMPTS` and went straight to `terminal_failure`, so only
+ * index [0] (10m, before attempt 2) and [1] (1h, before attempt 3) were ever
+ * read -- contradicting D71's own description ("3 attempts with 10m/1h/6h
+ * backoff"). 4 attempts makes all three backoff steps reachable (10m before
+ * attempt 2, 1h before attempt 3, 6h before attempt 4), matching the backoff
+ * array's own length. `market.ts` (a different lane's file) already
+ * documented this gap and deferred the constant change here.
+ */
+export const MARKET_MAX_ATTEMPTS = 4;
 
-/** Backoff before each retry after attempts 1 and 2 (10m, 1h, 6h). */
+/** Backoff before each retry after attempts 1, 2 and 3 (10m, 1h, 6h) -- D105: all three are now reachable. */
 export const MARKET_RETRY_BACKOFF_MS = [600_000, 3_600_000, 21_600_000];
 
 /** A `success` market lookup can only be manually refreshed after this long. */
@@ -171,6 +183,20 @@ export const PRICE_CHECK_PER_USER_PER_TICK = 10;
 
 /** Watches one `watches.sweep` tick advances per user, off `watches.by_status_nextCheck`. */
 export const WATCH_SWEEP_PER_USER = 10;
+
+/**
+ * F1/F2 (D103): how far `priceWatch.eligibleItems` and `watches.sweep` push
+ * `nextCheckAt`/`by_status_nextCheck` for a row whose ineligibility is not
+ * expected to clear on its own (closed price-adjustment window, no product
+ * link, returned item, example purchase, archived purchase; a tombstoned
+ * owner's row in either table) -- far enough that it permanently leaves the
+ * scan's head instead of being re-read (and, before this, never re-stamped
+ * at all) on every tick, which is what let a backlog of such rows starve
+ * every other item/watch behind them out of the scan indefinitely. A year is
+ * arbitrary but effectively "never" at a 2h/1h cadence, and small enough to
+ * stay an ordinary, safe timestamp (nowhere near Number.MAX_SAFE_INTEGER).
+ */
+export const INELIGIBLE_REST_MS = 365 * 86_400_000;
 
 // --- Retention (T22, D75) -----------------------------------------------------
 
