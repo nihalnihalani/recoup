@@ -350,7 +350,7 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 **Owner:** sonnet-integrations · **Status:** verified (3830a68..14c1303; lead re-ran 8 files 203/203; F-T21-1 flipped; D116 bounds landed) · **Files:** convex/inbound.ts, replies.ts, intake.ts, profiles.ts, drafts.ts, policies.ts (+tests).
 
 ### T18.3 — Checkpoint 6b: tombstone-aware reads (D115 6b-3 readers) + console.error sweep (T24c)
-**Owner:** sonnet-backend-3 · **Status:** pending (after T18.2) · **Files:** insights.ts, watches.ts, tracking.ts, notify.ts, offers.ts, profiles.ts reads; sweep in notify/priceWatch/watches/offers/policies/market/inbound.
+**Owner:** sonnet-backend-4 · **Status:** done (845a9fa, f7975eb; 9 reads gated, 12 sweep sites replaced, freshness unified); lead found a ~1% UUID/`fc-` regex flake in the five log-shape tests → fix in flight · **Files:** insights.ts, watches.ts, tracking.ts, notify.ts, offers.ts, profiles.ts reads; sweep in notify/priceWatch/watches/offers/policies/market/inbound.
 
 ### T18.4 — Checkpoint 6b: AgentMail component data purge (D115 6b-5)
 **Owner:** sonnet-backend-3 · **Status:** verified (bbc8bbf; lead re-ran 3/3, check-patch OK; call site + cron → T18.1 addendum) · **Files:** patches/@agentmail+convex+0.1.0.patch, convex/mailPurge.ts (+test); call site wired by T18.1/lead.
