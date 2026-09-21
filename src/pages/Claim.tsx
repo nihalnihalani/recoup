@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { ConvexError } from "convex/values";
 import { useParams } from "react-router-dom";
@@ -375,26 +375,318 @@ function LedgerEventsList({ events, currency }: { events: ClaimData["events"]; c
 }
 
 // ---------------------------------------------------------------------------
-// Draft / thread section (placeholder until api.drafts.generate lands, T11b-2)
+// Draft / thread section (D13, D18): write, send, and follow the reply thread.
 // ---------------------------------------------------------------------------
 
-function DraftSection({ claim, messages }: { claim: Doc<"claims">; messages: ClaimData["messages"] }) {
+const DRAFT_ELIGIBLE_STATUSES = new Set(["detected", "drafted", "reopened", "promised"]);
+
+function domainOf(email: string): string {
+  return email.split("@")[1]?.toLowerCase() ?? "";
+}
+
+function WriteDraftButton({ claimId, label = "Write draft" }: { claimId: Id<"claims">; label?: string }) {
+  const generate = useAction(api.drafts.generate);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleClick() {
+    setError(null);
+    setSubmitting(true);
+    try {
+      await generate({ claimId });
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't write a draft."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
-    <section className="space-y-2 rounded-lg border border-dashed border-line bg-ink/[0.02] p-4">
-      <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Ask the store</h2>
-      <p className="text-sm text-ink/60">Draft and send arrive next.</p>
-      {claim.threadId && <p className="text-xs text-ink/40">Thread: {claim.threadId}</p>}
-      {messages.length > 0 && (
-        <ul className="space-y-1 text-sm">
-          {messages.map((m, i) => (
-            // Shape of an inbound message from the AgentMail component isn't finalized yet
-            // (arrives with drafts/replies, T11b-2); render it opaquely for now.
-            <li key={i} className="overflow-x-auto rounded-md border border-line bg-white/60 px-3 py-2 text-xs">
-              <pre className="whitespace-pre-wrap">{JSON.stringify(m, null, 2)}</pre>
-            </li>
-          ))}
-        </ul>
+    <div className="space-y-1">
+      <button
+        type="button"
+        onClick={() => void handleClick()}
+        disabled={submitting}
+        className="rounded-md bg-harbor px-4 py-2 text-sm font-semibold text-paper disabled:opacity-60"
+      >
+        {submitting ? "Writing…" : label}
+      </button>
+      {error && (
+        <p role="alert" className="text-sm text-rust">
+          {error}
+        </p>
       )}
+    </div>
+  );
+}
+
+function SendStatusLine({ claim, draft }: { claim: Doc<"claims">; draft: Doc<"drafts"> }) {
+  const status = useQuery(api.drafts.sendStatus, { draftId: draft._id });
+
+  if (draft.sendError) {
+    return (
+      <div className="mt-2 space-y-1">
+        <p role="alert" className="text-xs text-rust">
+          Send failed: {draft.sendError}
+        </p>
+        <WriteDraftButton claimId={claim._id} label="Write a new draft" />
+      </div>
+    );
+  }
+
+  if (claim.sendUnknown) {
+    return <p className="mt-2 text-xs font-semibold uppercase tracking-wide text-gold">Delivery unknown — check your inbox</p>;
+  }
+
+  const sent = status?.agentmailMessageId != null;
+  return (
+    <p className="mt-2 text-xs font-semibold uppercase tracking-wide text-ink/40">{sent ? "sent" : "queued"}</p>
+  );
+}
+
+function DraftForm({
+  claim,
+  purchase,
+  policy,
+  draft,
+}: {
+  claim: Doc<"claims">;
+  purchase: Doc<"purchases">;
+  policy: Doc<"policies"> | null;
+  draft: Doc<"drafts">;
+}) {
+  const approveAndSend = useMutation(api.drafts.approveAndSend);
+  const markPacketSent = useMutation(api.drafts.markPacketSent);
+
+  const [to, setTo] = useState(draft.to);
+  const [subject, setSubject] = useState(draft.subject);
+  const [body, setBody] = useState(draft.body);
+  const [recipientConfirmed, setRecipientConfirmed] = useState(draft.recipientConfirmed ?? false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copyNotice, setCopyNotice] = useState<string | null>(null);
+
+  const domainMismatch = to.trim() !== "" && domainOf(to) !== purchase.merchantDomain.toLowerCase();
+  const nonEmailChannel = !policy || policy.channel !== "email";
+
+  async function handleApproveAndSend(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setSubmitting(true);
+    try {
+      await approveAndSend({ draftId: draft._id, to, subject, body, recipientConfirmed });
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't send this message."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleCopyAndMarkSent() {
+    setError(null);
+    setCopyNotice(null);
+    setSubmitting(true);
+    try {
+      try {
+        await navigator.clipboard.writeText(`${subject}\n\n${body}`);
+        setCopyNotice("Copied to clipboard.");
+      } catch {
+        setCopyNotice("Couldn't copy automatically — copy the subject and body above by hand.");
+      }
+      await markPacketSent({ claimId: claim._id, note: policy?.channel ?? "unknown" });
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't mark this packet sent."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={(e) => void handleApproveAndSend(e)}
+      className="space-y-3 rounded-lg border border-line bg-white/70 p-4"
+    >
+      <div>
+        <label htmlFor="draft-to" className="mb-1 block text-sm font-medium text-ink">
+          To
+        </label>
+        <input
+          id="draft-to"
+          type="email"
+          required
+          value={to}
+          onChange={(e) => setTo(e.target.value)}
+          className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-harbor focus:ring-2 focus:ring-harbor/20"
+        />
+        {domainMismatch && (
+          <p role="alert" className="mt-1 text-xs text-rust">
+            This address doesn't match the merchant's domain ({purchase.merchantDomain}).
+          </p>
+        )}
+      </div>
+      <div>
+        <label htmlFor="draft-subject" className="mb-1 block text-sm font-medium text-ink">
+          Subject
+        </label>
+        <input
+          id="draft-subject"
+          type="text"
+          required
+          value={subject}
+          onChange={(e) => setSubject(e.target.value)}
+          className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-harbor focus:ring-2 focus:ring-harbor/20"
+        />
+      </div>
+      <div>
+        <label htmlFor="draft-body" className="mb-1 block text-sm font-medium text-ink">
+          Body
+        </label>
+        <textarea
+          id="draft-body"
+          rows={8}
+          required
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-harbor focus:ring-2 focus:ring-harbor/20"
+        />
+      </div>
+      <label className="flex items-center gap-2 text-sm text-ink">
+        <input type="checkbox" checked={recipientConfirmed} onChange={(e) => setRecipientConfirmed(e.target.checked)} />
+        I confirm this recipient
+      </label>
+      {error && (
+        <p role="alert" className="text-sm text-rust">
+          {error}
+        </p>
+      )}
+      {copyNotice && <p className="text-sm text-ink/60">{copyNotice}</p>}
+      {nonEmailChannel ? (
+        <button
+          type="button"
+          onClick={() => void handleCopyAndMarkSent()}
+          disabled={submitting}
+          className="rounded-md bg-harbor px-4 py-2 text-sm font-semibold text-paper disabled:opacity-60"
+        >
+          {submitting ? "Marking sent…" : `Copy packet and mark sent via ${policy?.channel ?? "unknown"}`}
+        </button>
+      ) : (
+        <button
+          type="submit"
+          disabled={submitting}
+          className="rounded-md bg-harbor px-4 py-2 text-sm font-semibold text-paper disabled:opacity-60"
+        >
+          {submitting ? "Sending…" : "Approve and send"}
+        </button>
+      )}
+    </form>
+  );
+}
+
+function ReminderLine({ followUps }: { followUps: ClaimData["followUps"] }) {
+  const pending = followUps.find((f) => f.status === "pending");
+  if (!pending) return null;
+  return (
+    <p className="text-xs text-ink/40">We'll check back on {new Date(pending.fireAt).toLocaleDateString()}.</p>
+  );
+}
+
+function Thread({
+  claim,
+  drafts,
+  messages,
+  replies,
+}: {
+  claim: Doc<"claims">;
+  drafts: ClaimData["drafts"];
+  messages: ClaimData["messages"];
+  replies: ClaimData["replies"];
+}) {
+  const sent = drafts.filter((d) => d.outboundId);
+
+  type Item =
+    | { kind: "sent"; ts: number; draft: (typeof sent)[number] }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    | { kind: "inbound"; ts: number; message: any };
+
+  const items: Item[] = [
+    ...sent.map((d) => ({ kind: "sent" as const, ts: d.approvedAt ?? d._creationTime, draft: d })),
+    ...messages.map((m) => ({ kind: "inbound" as const, ts: m.timestamp, message: m })),
+  ].sort((a, b) => a.ts - b.ts);
+
+  if (items.length === 0) {
+    return <p className="text-sm text-ink/40">No messages yet.</p>;
+  }
+
+  return (
+    <ul className="space-y-2">
+      {items.map((it, i) =>
+        it.kind === "sent" ? (
+          <li key={`sent-${it.draft._id}`} className="rounded-md border border-line bg-white/60 px-3 py-2 text-sm">
+            <p className="text-xs font-semibold uppercase tracking-wide text-ink/40">You → {it.draft.to}</p>
+            <p className="mt-1 font-medium text-ink">{it.draft.subject}</p>
+            <p className="mt-1 whitespace-pre-wrap text-ink/70">{it.draft.body}</p>
+            <SendStatusLine claim={claim} draft={it.draft} />
+          </li>
+        ) : (
+          <li
+            key={`msg-${it.message.messageId ?? i}`}
+            className="rounded-md border border-line bg-white/60 px-3 py-2 text-sm"
+          >
+            <p className="text-xs font-semibold uppercase tracking-wide text-ink/40">
+              {it.message.from ?? "Merchant"}
+            </p>
+            {it.message.subject && <p className="mt-1 font-medium text-ink">{it.message.subject}</p>}
+            <p className="mt-1 whitespace-pre-wrap text-ink/70">
+              {it.message.text ?? it.message.extractedText ?? ""}
+            </p>
+            {(() => {
+              const reply = replies.find((r) => r.messageId === it.message.messageId);
+              if (!reply) return null;
+              return (
+                <>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center rounded-full border border-line bg-ink/5 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink/60">
+                      {reply.classification.replace("_", " ")}
+                    </span>
+                    <span className="text-xs text-ink/60">{reply.summary}</span>
+                  </div>
+                  {reply.senderMismatch && (
+                    <p role="alert" className="mt-1 text-xs text-rust">
+                      This reply came from a different address than we sent to.
+                    </p>
+                  )}
+                </>
+              );
+            })()}
+          </li>
+        ),
+      )}
+    </ul>
+  );
+}
+
+function AskTheStoreSection({ data }: { data: ClaimData }) {
+  const { claim, purchase, policy, drafts, replies, messages, followUps, balance } = data;
+  const eligible = DRAFT_ELIGIBLE_STATUSES.has(claim.status) && balance.unresolved > 0;
+  const currentDraft = drafts.find((d) => !d.outboundId);
+
+  return (
+    <section className="space-y-3 rounded-lg border border-line bg-ink/[0.02] p-4">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Ask the store</h2>
+
+      {eligible && <WriteDraftButton claimId={claim._id} />}
+      {!eligible && drafts.length === 0 && <p className="text-sm text-ink/50">Nothing to ask yet.</p>}
+
+      {currentDraft && purchase && (
+        <DraftForm key={currentDraft._id} claim={claim} purchase={purchase} policy={policy} draft={currentDraft} />
+      )}
+
+      <ReminderLine followUps={followUps} />
+
+      <div className="space-y-2 border-t border-line pt-3">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Thread</h3>
+        <Thread claim={claim} drafts={drafts} messages={messages} replies={replies} />
+      </div>
     </section>
   );
 }
@@ -458,7 +750,7 @@ function ClaimContent({ claimId }: { claimId: Id<"claims"> }) {
     );
   }
 
-  const { claim, item, purchase, events, notes, policy, messages, balance } = data;
+  const { claim, item, purchase, events, notes, policy, balance } = data;
   const currency = purchase?.currency ?? "USD";
 
   return (
@@ -487,7 +779,7 @@ function ClaimContent({ claimId }: { claimId: Id<"claims"> }) {
 
       <LedgerEventsList events={events} currency={currency} />
 
-      <DraftSection claim={claim} messages={messages} />
+      <AskTheStoreSection data={data} />
 
       <DismissButton claim={claim} />
     </div>
