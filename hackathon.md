@@ -2,7 +2,7 @@
 
 Price dropped after you bought? Recoup gets the difference back. Haven't bought yet? It watches the price everywhere and tells you when to.
 
-- Live URL: TODO (production placeholder, not deployed yet; will be the project's `convex.site` URL). The dev preview is https://earnest-setter-354.convex.site
+- Live URL: https://cool-oyster-399.convex.site (production). Dev preview: https://earnest-setter-354.convex.site
 - Demo video: TODO (placeholder, not recorded yet; under three minutes)
 
 ## What it does

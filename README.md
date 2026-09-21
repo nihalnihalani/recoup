@@ -13,7 +13,7 @@ What Recoup promises:
 - Money only counts when you confirm it arrived.
 - Every price shows where and when it was read. Every policy shows the exact sentence it came from.
 
-In progress: price-drop emails, "I bought it" on a watched item, and the same item at other stores. The backend for all three is written; none is in the UI or has been run live yet. Dev preview: https://earnest-setter-354.convex.site
+Live: https://cool-oyster-399.convex.site. Price-drop emails, "I bought it" on a watched item, and the same item at other stores are in the UI and have run end to end on production (see the status log in `docs/plans/2026-09-20-recoup-iterations.md`).
 
 Built for the Convex All Gas hackathon. The submission write-up, architecture and honest limits are in [`hackathon.md`](./hackathon.md).
 
