@@ -15,6 +15,8 @@ import { requireUserId } from "./lib/access";
 import { extract } from "./lib/ai";
 import { InboundEmail, type InboundEmailT } from "./lib/schemas";
 import { normalizeDomain } from "./lib/policyText";
+import { assertCents, assertPositiveCents, assertQty, toCents } from "./lib/money";
+import { sanitizeError } from "./lib/errors";
 import { applyEvent, openClaim } from "./claims";
 import { parseProductUrl } from "./lib/watchUrl";
 import { cleanLine } from "./lib/text";
@@ -52,18 +54,6 @@ const OWNERLESS_AFTER_MS = 86_400_000;
 // (ARCHITECTURE_PATTERNS §Actions): every number is re-derived here and a
 // violation downgrades the event to needs_review instead of writing money.
 // ---------------------------------------------------------------------------
-
-function safeCents(amount: number): number | null {
-  if (!Number.isFinite(amount)) return null;
-  const cents = Math.round(Math.abs(amount) * 100);
-  if (!Number.isSafeInteger(cents) || cents > MAX_CENTS) return null;
-  return cents;
-}
-
-function safeQty(qty: number): number | null {
-  if (!Number.isSafeInteger(qty) || qty < 1 || qty > MAX_QTY) return null;
-  return qty;
-}
 
 function safeCurrency(code: string): string | null {
   const upper = code.trim().toUpperCase();
@@ -117,9 +107,11 @@ export const beginEvent = internalMutation({
     const row = await ctx.db.get(processedEventId);
     if (!row || row.status !== "received" || !row.userId) return null;
     if (row.attempts >= MAX_ATTEMPTS) {
+      const lastError = `Gave up after ${MAX_ATTEMPTS} attempts`;
       await ctx.db.patch(processedEventId, {
         status: "failed",
-        lastError: `Gave up after ${MAX_ATTEMPTS} attempts`,
+        lastError,
+        errorSummary: sanitizeError(lastError), // D58
       });
       return null;
     }
@@ -147,9 +139,13 @@ export const failEvent = internalMutation({
   handler: async (ctx, args) => {
     const row = await ctx.db.get(args.processedEventId);
     if (!row) return null;
+    const lastError = args.lastError.slice(0, MAX_ERROR_CHARS);
     await ctx.db.patch(args.processedEventId, {
       status: "failed",
-      lastError: args.lastError.slice(0, MAX_ERROR_CHARS),
+      lastError,
+      // D58: `errorSummary` is the only thing the board's "needs attention"
+      // list ever shows; the raw `lastError` stays server-side for operators.
+      errorSummary: sanitizeError(lastError),
     });
     return null;
   },
@@ -267,12 +263,19 @@ async function applyOrder(
 
   type CleanItem = { name: string; unitCents: number; qty: number; productUrl: string | undefined };
   const items: CleanItem[] = [];
+  // D58: unitPrice and qty are validated at the boundary (safeCents/safeQty
+  // above); a violation drops just that item -- never the whole event to
+  // `failed` -- with the reason surfaced in the event's summary below.
+  const skipped: string[] = [];
   for (const it of order.items) {
     if (items.length >= MAX_ITEMS_PER_PURCHASE) break;
     const unitCents = safeCents(it.unitPrice);
     const qty = safeQty(it.qty);
     const name = cleanLine(it.name).slice(0, 200);
-    if (unitCents === null || qty === null || name.length === 0) continue;
+    if (unitCents === null || qty === null || name.length === 0) {
+      skipped.push(name.length > 0 ? name : "an unnamed item");
+      continue;
+    }
     items.push({
       name,
       unitCents,
@@ -318,29 +321,43 @@ async function applyOrder(
   }
 
   const note = currency ? "" : ` Currency was unclear, assumed USD.`;
+  const skippedNote =
+    skipped.length > 0 ? ` Could not read ${skipped.join(", ")} — add ${skipped.length === 1 ? "it" : "them"} manually if needed.` : "";
   await finish(
     ctx,
     processedEventId,
     "needs_review",
-    `Order from ${cleanLine(order.merchant).slice(0, 120) || merchantDomain} with ${items.length} item${items.length === 1 ? "" : "s"} — confirm the details to start tracking it.${note}`,
+    `Order from ${cleanLine(order.merchant).slice(0, 120) || merchantDomain} with ${items.length} item${items.length === 1 ? "" : "s"} — confirm the details to start tracking it.${note}${skippedNote}`,
   );
 }
 
 /**
- * Finds the purchase a refund email is about. Exact `orderRef` wins; failing
- * that the merchant name must identify exactly one purchase, because guessing
- * would attach a credit to the wrong order's ledger.
+ * Finds the purchase a refund email is about (D55). Only `active` purchases
+ * are eligible, and an `isExample` purchase is skipped unless the refund's
+ * own merchant name explicitly marks it as an example -- so the examples
+ * flow can still exercise this path end to end without a real refund ever
+ * landing on a demo purchase. Preference order: exact `orderRef`, then exact
+ * merchant name, then merchant-name inclusion; each tier must identify
+ * exactly one purchase, because guessing would attach a credit to the wrong
+ * order's ledger.
  */
 async function matchPurchase(
   ctx: MutationCtx,
   userId: Id<"users">,
   refund: NonNullable<InboundEmailT["refund"]>,
 ): Promise<Doc<"purchases"> | null> {
-  const purchases = await ctx.db
+  const all = await ctx.db
     .query("purchases")
     .withIndex("by_user", (q) => q.eq("userId", userId))
     .order("desc")
     .take(PURCHASE_SCAN_LIMIT);
+
+  const refundIsExample = Boolean(refund.merchant?.toLowerCase().includes("(example)"));
+  const purchases = all.filter((p) => {
+    if (p.status !== "active") return false;
+    if (p.isExample) return refundIsExample;
+    return true;
+  });
 
   const ref = refund.orderRef?.trim();
   if (ref) {
@@ -349,6 +366,8 @@ async function matchPurchase(
   }
   const merchant = refund.merchant?.trim();
   if (merchant) {
+    const byExactName = purchases.filter((p) => norm(p.merchant) === norm(merchant));
+    if (byExactName.length === 1) return byExactName[0];
     const byName = purchases.filter(
       (p) => norm(p.merchant).includes(norm(merchant)) || norm(merchant).includes(norm(p.merchant)),
     );
@@ -390,6 +409,7 @@ async function applyRefund(
   processedEventId: Id<"processedEvents">,
   userId: Id<"users">,
   sourceMessageId: string | undefined,
+  messageIdOrPasteHash: string,
   refund: NonNullable<InboundEmailT["refund"]>,
 ) {
   const purchase = await matchPurchase(ctx, userId, refund);
@@ -424,9 +444,15 @@ async function applyRefund(
   for (let i = 0; i < refund.credits.length; i++) {
     const credit = refund.credits[i];
     const currency = safeCurrency(credit.currency) ?? purchase.currency;
-    const cents = safeCents(credit.amount);
-    if (cents === null || cents === 0) {
-      unmatched.push("A credit with an unreadable amount");
+    // D58: a non-positive or otherwise invalid credit amount is a per-credit
+    // needs_review entry (via `unmatched` below), never a thrown error --
+    // the same boundary assert the ledger itself uses (lib/money), not a
+    // bespoke check.
+    let cents: number;
+    try {
+      cents = assertPositiveCents(toCents(credit.amount), "credit amount");
+    } catch {
+      unmatched.push(`A credit with an unreadable amount (${credit.amount})`);
       continue;
     }
     const item = matchItem(items, credit.itemName, cents);
@@ -457,20 +483,37 @@ async function applyRefund(
         type: "return_credit",
         expectedCents: item.unitCents * item.qty,
         policyId: returnsPolicy?._id,
+        isExample: purchase.isExample, // D55
       });
       claim = await ctx.db.get(claimId);
     }
     if (!claim) continue;
 
-    await applyEvent(
-      ctx,
-      claim,
-      "promised_credit",
-      cents,
-      `Merchant email says the refund is ${credit.state} (${sourceMessageId ?? "pasted email"})`,
-      `intake:${processedEventId}:${i}`,
-    );
-    applied++;
+    // D54: the idempotency key is external and per credit -- scoped to this
+    // message (or paste), the matched item, and the credit's position in the
+    // email, so two different credits (or a retried extraction) never
+    // collide with each other. A key collision with a conflicting kind or
+    // amount marks only this credit needs_review; the event as a whole still
+    // succeeds rather than rolling back credits already applied above.
+    try {
+      await applyEvent(
+        ctx,
+        claim,
+        "promised_credit",
+        cents,
+        `Merchant email says the refund is ${credit.state} (${sourceMessageId ?? "pasted email"})`,
+        `${messageIdOrPasteHash}:${item._id}:${i}`,
+      );
+      applied++;
+    } catch (err) {
+      if (err instanceof ConvexError && err.data === "idempotency conflict") {
+        unmatched.push(
+          `Credit of ${money(cents, currency)} for "${item.name}" needs review: conflicts with a previously recorded credit`,
+        );
+        continue;
+      }
+      throw err;
+    }
   }
 
   if (unmatched.length > 0) {
@@ -508,13 +551,26 @@ export const applyExtraction = internalMutation({
     // A paste has no message id; its content hash is just as stable, so a re-run of the same paste is
     // recognised as "already applied" too (B5).
     const orderSourceId = sourceMessageId ?? (row.kind === "paste" ? row.externalId : undefined);
+    // D54: the external, per-message identity used to scope refund credit
+    // idempotency keys -- the AgentMail message id for a forwarded email, or
+    // the event's own externalId (a per-user hash for a pasted one). Stable
+    // across a retry of the same event, so a retried extraction still
+    // dedupes against ledger events it already wrote.
+    const messageIdOrPasteHash = sourceMessageId ?? row.externalId;
 
     if (parsed.kind === "order" && parsed.order) {
       await applyOrder(ctx, args.processedEventId, row.userId, orderSourceId, parsed.order);
       return null;
     }
     if (parsed.kind === "refund" && parsed.refund) {
-      await applyRefund(ctx, args.processedEventId, row.userId, sourceMessageId, parsed.refund);
+      await applyRefund(
+        ctx,
+        args.processedEventId,
+        row.userId,
+        sourceMessageId,
+        messageIdOrPasteHash,
+        parsed.refund,
+      );
       return null;
     }
     await finish(
@@ -550,8 +606,10 @@ export const paste = action({
       throw new ConvexError("That email is too long to process");
     }
 
-    // The user is part of the hashed input (review LOW): the same email pasted by two people is two events, so
-    // nobody learns what somebody else pasted and nobody can pre-block an email for another account.
+    // D54 / review LOW: the user is part of the hashed input, so the same
+    // email pasted by two people is two events -- nobody learns what
+    // somebody else pasted and nobody can pre-block an email for another
+    // account.
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${userId}\n${body}`));
     const externalId = `paste:${Array.from(new Uint8Array(digest))
       .map((b) => b.toString(16).padStart(2, "0"))

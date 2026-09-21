@@ -17,7 +17,7 @@ const CONTACT = "support@acme.example";
 async function seedSentClaim(
   t: ReturnType<typeof setup>,
   userId: Id<"users">,
-  opts: { draftTo?: string; status?: "sent" | "confirmed" } = {},
+  opts: { draftTo?: string; status?: "sent" | "confirmed" | "dismissed" } = {},
 ): Promise<Id<"claims">> {
   const claimId = await t.run(async (ctx) => {
     const purchaseId = await ctx.db.insert("purchases", {
@@ -216,6 +216,37 @@ describe("replies.apply money rules (D21)", () => {
 
     const claim = await t.run((ctx) => ctx.db.get(claimId));
     expect(claim?.status).toBe("confirmed");
+  });
+
+  it("still inserts the reply row for a dismissed claim, but never throws or writes a ledger event (D53)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const claimId = await seedSentClaim(t, userId, { status: "dismissed" });
+
+    const result = await t.mutation(internal.replies.apply, {
+      claimId,
+      messageId: "msg-dismissed-1",
+      from: CONTACT,
+      classification: "promise",
+      summary: "We'll refund $10.",
+      promisedAmount: 10,
+    });
+
+    expect(result.deduped).toBe(false);
+    expect(result.replyId).not.toBeNull();
+    expect(result.ledgerWritten).toBe(false);
+    expect(await ledger(t, claimId)).toHaveLength(0);
+
+    const claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).toBe("dismissed");
+
+    const rows = await t.run((ctx) =>
+      ctx.db
+        .query("replies")
+        .withIndex("by_claim", (q) => q.eq("claimId", claimId))
+        .collect(),
+    );
+    expect(rows).toHaveLength(1);
   });
 });
 

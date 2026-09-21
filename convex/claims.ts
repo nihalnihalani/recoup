@@ -8,6 +8,15 @@ import { assertCents, assertPositiveCents } from "./lib/money";
 import { eventKind } from "./schema";
 import { cancelPending } from "./followUps";
 import { claimBalance } from "./lib/balance";
+import { agentmail } from "./mail";
+
+/**
+ * Same accepted deviation as `drafts.sendCtx` (D12a): the AgentMail
+ * component's ctx types predate convex 1.46's `runMutation` overload.
+ */
+function cancelCtx(ctx: MutationCtx): Parameters<typeof agentmail.cancel>[0] {
+  return ctx as unknown as Parameters<typeof agentmail.cancel>[0];
+}
 
 const MAX_TOKEN_ATTEMPTS = 10;
 
@@ -298,6 +307,36 @@ export const dismiss = mutation({
     if (claim.status === "confirmed") throw new ConvexError("A confirmed claim cannot be dismissed");
     await cancelPending(ctx, claim._id);
     await ctx.db.patch(claim._id, { status: "dismissed", version: claim.version + 1, attentionAt: undefined });
+
+    // D57: dismissing a claim with a send in flight best-effort cancels it
+    // with AgentMail so it doesn't land after the user has walked away. A
+    // cancel failure never blocks the dismissal itself; either outcome is
+    // recorded as a note.
+    if (claim.status === "queued") {
+      const newest = (
+        await ctx.db
+          .query("drafts")
+          .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+          .collect()
+      )
+        .filter((d) => d.outboundId)
+        .sort((a, b) => b.version - a.version)[0];
+      if (newest?.outboundId) {
+        let cancelled = true;
+        try {
+          await agentmail.cancel(cancelCtx(ctx), newest.outboundId);
+        } catch {
+          cancelled = false;
+        }
+        await ctx.db.insert("claimNotes", {
+          claimId: claim._id,
+          userId,
+          kind: "status",
+          text: cancelled ? "Dismissed; pending send cancelled" : "Dismissed; send could not be cancelled",
+        });
+        return;
+      }
+    }
     await ctx.db.insert("claimNotes", { claimId: claim._id, userId, kind: "status", text: "Dismissed by user" });
   },
 });

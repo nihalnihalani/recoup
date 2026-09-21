@@ -233,7 +233,11 @@ export const apply = internalMutation({
       const evidence = `Merchant reply (${args.classification}): ${args.summary
         .trim()
         .slice(0, MAX_SUMMARY_CHARS)}`;
-      if (promisedCents !== undefined) {
+      // D53: a dismissed claim is terminal -- `applyEvent` would throw, which
+      // would roll back the whole mutation including the reply insert above.
+      // Skip the ledger write instead of relying on `applyEvent` to refuse,
+      // so a reply on a dismissed claim never fails the event.
+      if (promisedCents !== undefined && claim.status !== "dismissed") {
         // `promised_credit` never reduces `unresolved` (lib/ledger): it records
         // what was said, and moves the claim to `promised`.
         await applyEvent(
@@ -254,7 +258,7 @@ export const apply = internalMutation({
       return {
         deduped: false,
         replyId,
-        ledgerWritten: promisedCents !== undefined,
+        ledgerWritten: promisedCents !== undefined && claim.status !== "dismissed",
       };
     }
 

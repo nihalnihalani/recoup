@@ -3,6 +3,7 @@ import { internalMutation, type MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { tokenFromSubject } from "./lib/ledger";
+import { sanitizeError } from "./lib/errors";
 
 /** How much of a message body we keep for the retry payload (D14). */
 const MAX_TEXT_CHARS = 60_000;
@@ -181,6 +182,7 @@ export const onMessageReceived = internalMutation({
         await ctx.db.patch(eventId, {
           status: "failed",
           lastError,
+          errorSummary: sanitizeError(lastError), // D58
           summary: "Inbound message could not be routed.",
         });
       } else {

@@ -404,5 +404,37 @@ describe("claims", () => {
       await credit(as, claimId, 4000, "c1");
       await expect(as.mutation(api.claims.dismiss, { claimId })).rejects.toThrow(/confirmed/);
     });
+
+    it("D57: dismissing a queued claim best-effort cancels the pending send and notes the outcome", async () => {
+      const t = setup();
+      const { as, userId } = await signedIn(t);
+      const { scarf } = await purchaseWithItems(as);
+      const claimId = await openReturnClaim(as, scarf);
+      const draftId = await t.mutation(internal.drafts.insert, {
+        claimId,
+        userId,
+        to: "support@northwind.example",
+        subject: "Refund please",
+        body: "Hello",
+      });
+      await t.run(async (ctx) => {
+        await ctx.db.patch(draftId, { outboundId: "outbound-1" as never, approvedAt: Date.now() });
+        await ctx.db.patch(claimId, { status: "queued" });
+      });
+
+      await as.mutation(api.claims.dismiss, { claimId });
+
+      const claim = await t.run((ctx) => ctx.db.get(claimId));
+      expect(claim?.status).toBe("dismissed");
+
+      const notes = await t.run((ctx) =>
+        ctx.db
+          .query("claimNotes")
+          .withIndex("by_claim", (q) => q.eq("claimId", claimId))
+          .collect(),
+      );
+      expect(notes).toHaveLength(1);
+      expect(notes[0].text).toMatch(/Dismissed; (pending send cancelled|send could not be cancelled)/);
+    });
   });
 });
