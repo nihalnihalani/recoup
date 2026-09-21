@@ -332,7 +332,7 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 **Contract:** `StatCards` renders `totals.byCurrency` (one line per currency, `primaryCurrency` first) instead of formatting the scoped `recoveredCents` with a guessed currency; `Purchase.tsx` passes `useCoarseNow()` as `now` to `purchases.get` so verdict staleness is real. Typecheck/lint clean; a `src/lib` unit test for the byCurrency formatter.
 
 ### T16.1 — Checkpoint 6a MEDIUMs (D112 6a-1, 6a-2)
-**Owner:** sonnet-backend-2 · **Phase:** 3 (fix) · **Status:** in_progress
+**Owner:** sonnet-backend-2 · **Phase:** 3 (fix) · **Status:** verified (d18f209, a2eb2ec; lead re-ran 6 files 130/130; SHA-256 via crypto.subtle; dual legacy-key lookup landed)
 **Files:** convex/lib/idempotency.ts (+test, new), convex/claims.ts, convex/replies.ts, convex/intake.ts (+tests), convex/inbound.ts (+test), convex/limits.ts, convex/lib/rateLimits.ts. Contract: D112 rows 6a-1 and 6a-2 verbatim.
 
 ### T12.3 — Checkpoint 6a C3 test strength and LOW wiring gaps (D112 6a-3..6)
