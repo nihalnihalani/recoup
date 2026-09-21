@@ -183,6 +183,8 @@ Source: the status log at the bottom of `docs/plans/2026-09-20-recoup-iterations
 - Not started or blocked: T13 hardening pass, T14 deploy to `convex.site`, T15 video, T16 submission.
 
 ## Honest limits
+- Price history before you start watching comes from the ShopSavvy Data API, and is labelled as theirs wherever it appears. It never opens a claim and never sends an alert: only a price Recoup reads from the store's own page does either. Most of what that API returns for a product is the date each retailer listing was last seen rather than a dense per-day series, so the history is a real but uneven record, and prices from a different variant or a bundle are filtered out by a band around the median rather than by knowing which is which.
+
 
 - Price history starts the day watching starts. Recoup has no archive of past prices, so a new watch says "not enough history yet" until it has a week of observations.
 - Stores that block automated reads or require a login are covered only when the public page can be read. When a page cannot be read, the check is stored as a failed read; it is never shown as a current price. Marketplace listings are individual sellers, not a stable product price.

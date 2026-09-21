@@ -25,6 +25,14 @@ export type VerdictInput = {
   now: number;
   /** ISO 4217 code for the amounts in `reason`; USD when not known yet. */
   currency?: string;
+  /**
+   * Dated prices from ShopSavvy for the same product (W1b). Our own history
+   * starts the day a watch starts, so this is what lets a new watch say
+   * something true instead of "not enough history yet". It is weaker evidence:
+   * it is only read when our own history is too thin, and the reason always
+   * names the source.
+   */
+  market?: Array<{ observedAt: number; cents: number }>;
 };
 
 export type Verdict = { label: VerdictLabel; reason: string };
@@ -69,6 +77,46 @@ function doubledMedian(sorted: number[]): number {
   return sorted.length % 2 === 1 ? sorted[mid] * 2 : sorted[mid - 1] + sorted[mid];
 }
 
+
+/**
+ * A verdict from third-party history, used only when our own is too thin. Needs
+ * the same number of points as our own history would, so one stale listing
+ * cannot produce a confident answer, and always says where the prices came from.
+ */
+function fromMarket(
+  currentCents: number,
+  market: Array<{ observedAt: number; cents: number }>,
+  money: (cents: number) => string,
+  formatDay: (ms: number) => string,
+): Verdict | null {
+  if (market.length < MIN_OBSERVATIONS) return null;
+  const sorted = [...market].sort((a, b) => a.observedAt - b.observedAt);
+  const prices = sorted.map((p) => p.cents).sort((a, b) => a - b);
+  const lowest = prices[0];
+  const highest = prices[prices.length - 1];
+  const since = formatDay(sorted[0].observedAt);
+  // A flat range says nothing about whether today is a good day to buy.
+  if (highest === lowest) return null;
+
+  if (currentCents * 100 <= lowest * 101) {
+    return {
+      label: "good_price",
+      reason: `${money(currentCents)} is at or below the lowest price ShopSavvy has recorded since ${since} (${money(lowest)} to ${money(highest)}).`,
+    };
+  }
+  const median2 = doubledMedian(prices);
+  if (currentCents * 2 * 100 > median2 * 105) {
+    return {
+      label: "wait",
+      reason: `ShopSavvy has recorded ${money(lowest)} to ${money(highest)} since ${since}, so ${money(currentCents)} is above the usual price.`,
+    };
+  }
+  return {
+    label: "fair",
+    reason: `${money(currentCents)} is in the usual range ShopSavvy has recorded since ${since} (${money(lowest)} to ${money(highest)}).`,
+  };
+}
+
 export function verdict(input: VerdictInput): Verdict {
   const { currentCents, now } = input;
   const money = (cents: number) => formatCents(cents, input.currency);
@@ -100,6 +148,8 @@ export function verdict(input: VerdictInput): Verdict {
   }
 
   if (history.length < MIN_OBSERVATIONS || spanMs < MIN_SPAN_DAYS * DAY_MS) {
+    const marketVerdict = fromMarket(currentCents, input.market ?? [], money, formatDay);
+    if (marketVerdict) return marketVerdict;
     if (listCents !== null) {
       const percentOff = Math.round(((listCents - currentCents) * 100) / listCents);
       return {

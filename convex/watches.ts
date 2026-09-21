@@ -32,11 +32,12 @@ import { defaultWatchName, parseProductUrl } from "./lib/watchUrl";
 import { verdict, type Verdict } from "./lib/verdict";
 import { imageUrlChange } from "./lib/imageUrl";
 import { cleanLine } from "./lib/text";
-import { charge, consumeGlobalBudget, takeGlobalBudget } from "./lib/budget";
+import { charge, consumeGlobalBudget, takeGlobalBudget, tryConsumeGlobalBudget } from "./lib/budget";
 import { schedulePolicyFetch } from "./policies";
 import { errorNote, observePrice, rejectionReason, truncate, type PageObservation } from "./priceWatch";
 import {
   GLOBAL_DAILY_BUDGETS,
+  MARKET_MAX_POINTS,
   MAX_PURCHASES_PER_USER,
   MAX_WATCHES_PER_USER,
   MAX_WATCH_CREATES_PER_HOUR,
@@ -99,6 +100,31 @@ const watchSummary = v.object({
   verdict: verdictValidator,
   /** Accepted observations, oldest first, at most 30. */
   spark: v.array(sparkPoint),
+  /**
+   * Prices for the same product from ShopSavvy, oldest first (W1b). Third-party
+   * evidence, always shown as such: it reaches back years where `spark` starts
+   * the day the watch started, but it never opens a claim or sends an alert.
+   * `null` when the lookup has not run, found nothing, or is not configured.
+   */
+  market: v.union(
+    v.object({
+      source: v.literal("shopsavvy"),
+      points: v.array(
+        v.object({
+          observedAt: v.number(),
+          cents: v.number(),
+          retailer: v.union(v.string(), v.null()),
+        }),
+      ),
+      lowestCents: v.number(),
+      highestCents: v.number(),
+      /** Oldest point, so the UI can say how far back the evidence goes. */
+      since: v.number(),
+      /** Why there is no history, when there is none. */
+      note: v.union(v.string(), v.null()),
+    }),
+    v.null(),
+  ),
 });
 
 const watchCheckView = v.object({
@@ -131,11 +157,20 @@ async function recentChecks(ctx: QueryCtx, watchId: Id<"watches">, n: number) {
     .take(n);
 }
 
+/** Third-party dated prices for the verdict (W1b). Bounded by MARKET_MAX_POINTS on write. */
+async function marketFor(ctx: QueryCtx, watchId: Id<"watches">): Promise<Array<Doc<"marketPrices">>> {
+  return await ctx.db
+    .query("marketPrices")
+    .withIndex("by_watch", (q) => q.eq("watchId", watchId))
+    .take(MARKET_MAX_POINTS);
+}
+
 /** `checks` newest first. The verdict only ever sees the newest VERDICT_WINDOW. */
 function summarise(
   watch: Doc<"watches">,
   checks: Doc<"watchChecks">[],
   now: number,
+  market: Array<Doc<"marketPrices">> = [],
 ): Infer<typeof watchSummary> {
   const window = checks.slice(0, VERDICT_WINDOW);
   const accepted = window.flatMap((c) =>
@@ -150,7 +185,10 @@ function summarise(
     history: accepted.map(({ observedAt, cents }) => ({ observedAt, cents })),
     now,
     currency: watch.currency,
+    market: market.map((m) => ({ observedAt: m.observedAt, cents: m.cents })),
   });
+  const marketPoints = [...market].sort((a, b) => a.observedAt - b.observedAt);
+  const marketPrices = marketPoints.map((m) => m.cents);
   const newest = checks[0];
   return {
     _id: watch._id,
@@ -179,6 +217,30 @@ function summarise(
       .slice(0, SPARK_POINTS)
       .reverse()
       .map(({ observedAt, cents }) => ({ observedAt, observedCents: cents })),
+    market:
+      marketPoints.length === 0
+        ? watch.marketNote === undefined
+          ? null
+          : {
+              source: "shopsavvy" as const,
+              points: [],
+              lowestCents: 0,
+              highestCents: 0,
+              since: 0,
+              note: watch.marketNote,
+            }
+        : {
+            source: "shopsavvy" as const,
+            points: marketPoints.map((m) => ({
+              observedAt: m.observedAt,
+              cents: m.cents,
+              retailer: m.retailer === "market" ? null : m.retailer,
+            })),
+            lowestCents: Math.min(...marketPrices),
+            highestCents: Math.max(...marketPrices),
+            since: marketPoints[0].observedAt,
+            note: watch.marketNote ?? null,
+          },
   };
 }
 
@@ -206,7 +268,9 @@ export const list = query({
       .slice(0, LIST_LIMIT);
     const now = Date.now();
     return await Promise.all(
-      watches.map(async (w) => summarise(w, await recentChecks(ctx, w._id, VERDICT_WINDOW), now)),
+      watches.map(async (w) =>
+        summarise(w, await recentChecks(ctx, w._id, VERDICT_WINDOW), now, await marketFor(ctx, w._id)),
+      ),
     );
   },
 });
@@ -222,7 +286,7 @@ export const get = query({
     if (!watch || watch.userId !== userId || watch.status === "archived") return null;
     const checks = await recentChecks(ctx, watchId, GET_CHECKS);
     return {
-      watch: summarise(watch, checks, Date.now()),
+      watch: summarise(watch, checks, Date.now(), await marketFor(ctx, watchId)),
       checks: checks.map((c) => ({
         _id: c._id,
         observedAt: c.observedAt,
@@ -635,6 +699,15 @@ export const recordWatchCheck = internalMutation({
     // in the transaction that accepted the price, so a re-run cannot mail twice.
     if (observedCents !== undefined) {
       await claimDrop(ctx, watch, observedCents, watch.currency ?? args.currency ?? "USD");
+    }
+
+    // W1b: once we know the product is real and what currency it prices in, ask ShopSavvy for the
+    // history we do not have. Once per watch ever (`marketFetchedAt`), and the global switch bounds
+    // the spend; a refusal leaves the watch working on our own reads alone.
+    if (observedCents !== undefined && watch.marketFetchedAt === undefined && watch.status !== "bought") {
+      if (await tryConsumeGlobalBudget(ctx, "market_lookup", GLOBAL_DAILY_BUDGETS.market_lookup.max, 1, now)) {
+        await ctx.scheduler.runAfter(0, internal.market.lookup, { watchId: watch._id });
+      }
     }
 
     return { watchCheckId, accepted, note: note === undefined ? null : truncate(note) };

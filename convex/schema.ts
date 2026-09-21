@@ -24,6 +24,7 @@ export const verdictLabel = v.union(
   v.literal("good_price"), v.literal("fair"), v.literal("wait"), v.literal("inflated_discount"), v.literal("not_enough_history"), v.literal("unknown"),
 );
 export const verdictValidator = v.object({ label: verdictLabel, reason: v.string() });
+export const priceSource = v.union(v.literal("recoup"), v.literal("shopsavvy"));
 export const watchStatus = v.union(v.literal("active"), v.literal("paused"), v.literal("archived"), v.literal("bought"));
 export const mailKind = v.union(v.literal("price_drop"));
 export const mailStatus = v.union(v.literal("claimed"), v.literal("sent"), v.literal("failed"));
@@ -73,9 +74,11 @@ export default defineSchema({
    * by_status_nextCheck; `checkRequestedAt` is stamped when a check is scheduled and carries the manual-check cooldown; `lastCents` is the latest accepted price for list views. `purchaseId` is set when a watch is bought (W4).
    */
   watches: defineTable({
+    /** Set when ShopSavvy has been asked about this product, so we never spend a second lookup on it. */
     userId: v.id("users"), name: v.string(), productUrl: v.string(), merchantDomain: v.string(), currency: v.optional(v.string()),
     targetCents: v.optional(v.number()), status: watchStatus, lastCheckedAt: v.optional(v.number()), nextCheckAt: v.number(),
     lastCents: v.optional(v.number()), purchaseId: v.optional(v.id("purchases")), checkRequestedAt: v.optional(v.number()),
+    marketFetchedAt: v.optional(v.number()), marketNote: v.optional(v.string()),
     /** The product page's Open Graph image (absolute https), captured by a watch check. */
     imageUrl: v.optional(v.string()),
   }).index("by_user", ["userId"]).index("by_user_status", ["userId", "status"]).index("by_status_nextCheck", ["status", "nextCheckAt"]),
@@ -114,7 +117,7 @@ export default defineSchema({
     watchId: v.id("watches"), userId: v.id("users"), storeDomain: v.string(), productUrl: v.string(), title: v.string(),
     status: offerStatus, variantMatch: v.optional(variantMatch), matchConfidence: v.optional(v.number()),
     lastCents: v.optional(v.number()), currency: v.optional(v.string()), lastCheckedAt: v.optional(v.number()),
-    note: v.optional(v.string()),
+    note: v.optional(v.string()), source: v.optional(priceSource),
   }).index("by_watch", ["watchId"]).index("by_user", ["userId"]),
 
   /**
@@ -123,8 +126,18 @@ export default defineSchema({
    */
   offerChecks: defineTable({
     offerId: v.id("offers"), watchId: v.id("watches"), userId: v.id("users"), observedCents: v.number(),
-    currency: v.optional(v.string()), observedAt: v.number(),
+    currency: v.optional(v.string()), observedAt: v.number(), source: v.optional(priceSource),
   }).index("by_offer", ["offerId", "observedAt"]).index("by_watch", ["watchId", "observedAt"]),
+
+  /**
+   * Dated prices for a watched product from the ShopSavvy Data API, so a watch has a price range on day one
+   * instead of "not enough history yet". Third-party evidence: always labelled, never opens a claim or sends
+   * an alert (only our own read of the store page does that). `marketKey` dedupes a store's day.
+   */
+  marketPrices: defineTable({
+    watchId: v.id("watches"), userId: v.id("users"), retailer: v.string(), storeDomain: v.optional(v.string()),
+    cents: v.number(), currency: v.string(), observedAt: v.number(), marketKey: v.string(),
+  }).index("by_watch", ["watchId", "observedAt"]).index("by_key", ["watchId", "marketKey"]),
 
   /** Money the store owes on one item for one reason. Balance is derived from ledgerEvents, never stored. */
   claims: defineTable({

@@ -220,7 +220,9 @@ describe("watches ownership", () => {
     await expect(o.mutation(api.watches.setStatus, { watchId, status: "paused" })).rejects.toThrow(ConvexError);
     await expect(o.mutation(api.watches.rename, { watchId, name: "mine now" })).rejects.toThrow(ConvexError);
 
-    expect(await scheduled(t)).toHaveLength(0);
+    // The one scheduled job is the owner's own market-history lookup (W1b), from the accepted check above.
+    const jobs = await scheduled(t);
+    expect(jobs.every((j) => String(j.name).includes("market"))).toBe(true);
     const row = await watchRow(t, watchId);
     expect(row.status).toBe("active");
     expect(row.targetCents).toBeUndefined();

@@ -79,17 +79,20 @@ export type Budget = {
   global?: { kind: GlobalBudgetKind; units: number };
 };
 
-export type GlobalBudgetKind = "price_check" | "policy_fetch" | "drop_email";
+export type GlobalBudgetKind = "price_check" | "policy_fetch" | "drop_email" | "market_lookup";
 
 /**
  * Deployment-wide daily kill switches (usage rows with no userId), so the worst day is bounded in dollars whatever
  * the number of accounts.
  */
 export const GLOBAL_DAILY_BUDGETS: Record<GlobalBudgetKind, { max: number; label: string }> = {
+  /** One unit = one ShopSavvy lookup (3 credits + 1 per day of history). Bounds the trial plan's 1,000 monthly credits against any number of accounts. */
+  market_lookup: { max: 40, label: "market history look-ups" },
   /** One unit = one scrape + one extraction (~1-2 cents). The two sweeps alone can use 1,800 a day (50/h + 50/2h); 3,000 leaves room for manual checks and caps the day at roughly $50. */
   price_check: { max: 3_000, label: "price checks" },
   /** One unit = one policy research (a search that scrapes 3 pages plus up to 3 extractions, ~5 cents). 500 is ~250 new stores a day and at most about $25. */
   policy_fetch: { max: 500, label: "store policy look-ups" },
+  /** One ShopSavvy lookup bills 3 credits plus one per day of history; at MARKET_HISTORY_DAYS=14 that is 17. The trial plan holds 1,000 credits a month, so 20 a day is about a third of it and leaves room to demo. */
   /** Drop alerts leave from one shared inbox to unverified addresses (B2); 300 a day keeps the sending domain's reputation safe however many accounts exist. */
   drop_email: { max: 300, label: "price alert emails" },
 };
@@ -111,9 +114,20 @@ export const DAILY_BUDGETS = {
   item_check: { max: 40, label: "checking prices on your purchases", global: { kind: "price_check", units: 1 } },
   /** Manual "check now" on watches, on top of the 10-minute per-watch cooldown (H2): 40 is most of a full watch list once a day. */
   watch_check: { max: 40, label: "checking prices on watched items", global: { kind: "price_check", units: 1 } },
+  /** A paid third-party lookup; see MARKET_HISTORY_DAYS for what one costs. */
+  market_lookup: { max: 5, label: "market history look-ups", global: { kind: "market_lookup", units: 1 } },
 } as const satisfies Record<string, Budget>;
 
 export type BudgetKind = keyof typeof DAILY_BUDGETS;
+
+// --- ShopSavvy market history ------------------------------------------------
+
+/** Days of history asked for per lookup. One credit per day, so this is the price of the feature. */
+export const MARKET_HISTORY_DAYS = 14;
+/** Most dated points kept per watch. A chart needs a shape, not every row. */
+export const MARKET_MAX_POINTS = 120;
+/** Most stores one lookup may add as offer candidates, so a popular product cannot flood the panel. */
+export const MARKET_MAX_STORES = 8;
 
 /** Sends per claim, ever (B1): the first ask, a corrected address and one follow-up. */
 export const MAX_SENDS_PER_CLAIM = 3;
