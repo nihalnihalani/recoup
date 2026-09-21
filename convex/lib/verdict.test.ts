@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { formatCents, verdict } from "./verdict";
+import { formatCents, verdict, verdictWithQualifier } from "./verdict";
+import { MIN_OUTLIER_POINTS } from "./shopsavvy";
 
 const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 8, 20);
@@ -173,6 +174,209 @@ describe("verdict: good_price / fair / wait", () => {
   it("ignores observations dated in the future", () => {
     const history = [...base, ...hist([[0, 10_000]]), { observedAt: NOW + DAY, cents: 1 }];
     expect(verdict({ currentCents: 10_000, listCents: null, history, now: NOW }).label).toBe("good_price");
+  });
+});
+
+describe("verdict: market fallback", () => {
+  /** `cents[i]` observed `daysAgo[i]` days before NOW, as a market (ShopSavvy) point. */
+  function market(points: Array<[daysAgo: number, cents: number]>) {
+    return points.map(([daysAgo, cents]) => ({ observedAt: NOW - daysAgo * DAY, cents }));
+  }
+
+  it(`requires at least MIN_OUTLIER_POINTS (${MIN_OUTLIER_POINTS}) market points, mirroring shopsavvy's outlier bar`, () => {
+    expect(MIN_OUTLIER_POINTS).toBe(4);
+  });
+
+  it("falls back to not_enough_history when the market has fewer than MIN_OUTLIER_POINTS points", () => {
+    const v = verdict({
+      currentCents: 40_000,
+      listCents: null,
+      history: [],
+      now: NOW,
+      market: market([[30, 35_000], [20, 40_000], [10, 45_000]]),
+    });
+    expect(v.label).toBe("not_enough_history");
+  });
+
+  it("uses the market fallback once it has at least MIN_OUTLIER_POINTS points", () => {
+    const v = verdict({
+      currentCents: 35_000,
+      listCents: null,
+      history: [],
+      now: NOW,
+      market: market([[40, 35_000], [30, 40_000], [20, 45_000], [10, 40_000]]),
+    });
+    expect(v.label).toBe("good_price");
+    expect(v.reason).toContain("ShopSavvy");
+  });
+
+  it("ignores a market point dated in the future, mirroring the own-history future filter", () => {
+    const withFuture = verdict({
+      currentCents: 35_000,
+      listCents: null,
+      history: [],
+      now: NOW,
+      market: [...market([[40, 35_000], [30, 40_000], [20, 45_000], [10, 40_000]]), { observedAt: NOW + DAY, cents: 1 }],
+    });
+    const withoutFuture = verdict({
+      currentCents: 35_000,
+      listCents: null,
+      history: [],
+      now: NOW,
+      market: market([[40, 35_000], [30, 40_000], [20, 45_000], [10, 40_000]]),
+    });
+    expect(withFuture).toEqual(withoutFuture);
+  });
+
+  it("does not count a future-dated point toward the MIN_OUTLIER_POINTS floor", () => {
+    const v = verdict({
+      currentCents: 40_000,
+      listCents: null,
+      history: [],
+      now: NOW,
+      // Only 3 valid points once the future one is dropped.
+      market: [...market([[30, 35_000], [20, 40_000], [10, 45_000]]), { observedAt: NOW + DAY, cents: 1 }],
+    });
+    expect(v.label).toBe("not_enough_history");
+  });
+});
+
+describe("verdict: stale priceObservedAt", () => {
+  it("returns unknown with the age when the last price is older than the staleness horizon", () => {
+    const v = verdict({
+      currentCents: 10_000,
+      listCents: null,
+      history: hist([[20, 10_000], [14, 10_000], [7, 10_000]]),
+      now: NOW,
+      priceObservedAt: NOW - 4 * DAY,
+    });
+    expect(v.label).toBe("unknown");
+    expect(v.reason).toContain("4 days ago");
+  });
+
+  it("is checked before any history comparison, even with plenty of history", () => {
+    const v = verdict({
+      currentCents: 9_000,
+      listCents: null,
+      history: hist([[20, 10_000], [14, 10_000], [7, 10_000], [0, 9_000]]),
+      now: NOW,
+      priceObservedAt: NOW - 10 * DAY,
+    });
+    expect(v.label).toBe("unknown");
+  });
+
+  it("does not fire exactly at the staleness horizon (3 days)", () => {
+    const v = verdict({
+      currentCents: 10_000,
+      listCents: null,
+      history: hist([[20, 10_000], [14, 10_000], [7, 10_000]]),
+      now: NOW,
+      priceObservedAt: NOW - 3 * DAY,
+    });
+    expect(v.label).toBe("good_price");
+  });
+
+  it("fires just past the staleness horizon", () => {
+    const v = verdict({
+      currentCents: 10_000,
+      listCents: null,
+      history: hist([[20, 10_000], [14, 10_000], [7, 10_000]]),
+      now: NOW,
+      priceObservedAt: NOW - 3 * DAY - 1,
+    });
+    expect(v.label).toBe("unknown");
+  });
+
+  it("is a no-op when priceObservedAt is not supplied (backward compatible)", () => {
+    const v = verdict({
+      currentCents: 10_000,
+      listCents: null,
+      history: hist([[20, 10_000], [14, 10_000], [7, 10_000]]),
+      now: NOW,
+    });
+    expect(v.label).toBe("good_price");
+  });
+});
+
+describe("verdict: never carries a claim or alert trigger", () => {
+  it("verdict() output has only label and reason — no alert/claim field of any kind", () => {
+    const v = verdict({ currentCents: 9_000, listCents: null, history: hist([[20, 10_000], [14, 10_000], [7, 10_000], [0, 9_000]]), now: NOW });
+    const keys = Object.keys(v).map((k) => k.toLowerCase());
+    expect(keys.sort()).toEqual(["label", "reason"]);
+    expect(keys.some((k) => k.includes("alert") || k.includes("claim"))).toBe(false);
+  });
+
+  it("verdictWithQualifier() output never carries an alert/claim field either", () => {
+    const scenarios = [
+      { currentCents: null, listCents: null, history: [], now: NOW },
+      { currentCents: 10_000, listCents: null, history: [], now: NOW },
+      { currentCents: 9_000, listCents: null, history: hist([[20, 10_000], [14, 10_000], [7, 10_000], [0, 9_000]]), now: NOW },
+      { currentCents: 10_000, listCents: null, history: hist([[20, 10_000], [14, 10_000], [7, 10_000]]), now: NOW, priceObservedAt: NOW - 4 * DAY },
+    ];
+    for (const input of scenarios) {
+      const v = verdictWithQualifier(input);
+      const keys = Object.keys(v).map((k) => k.toLowerCase());
+      expect(keys.some((k) => k.includes("alert") || k.includes("claim")), JSON.stringify(v)).toBe(false);
+    }
+  });
+});
+
+describe("verdictWithQualifier", () => {
+  it("flags unknown (no price) as qualified", () => {
+    const v = verdictWithQualifier({ currentCents: null, listCents: null, history: [], now: NOW });
+    expect(v.label).toBe("unknown");
+    expect(v.qualified).toBe(true);
+    expect(v.qualifiedReason).not.toBeNull();
+  });
+
+  it("flags not_enough_history as qualified", () => {
+    const v = verdictWithQualifier({ currentCents: 10_000, listCents: null, history: [], now: NOW });
+    expect(v.label).toBe("not_enough_history");
+    expect(v.qualified).toBe(true);
+  });
+
+  it("does not flag a good_price backed by sufficient own history as qualified", () => {
+    const v = verdictWithQualifier({
+      currentCents: 9_000,
+      listCents: null,
+      history: hist([[20, 10_000], [14, 10_000], [7, 10_000], [0, 9_000]]),
+      now: NOW,
+    });
+    expect(v.label).toBe("good_price");
+    expect(v.qualified).toBe(false);
+    expect(v.qualifiedReason).toBeNull();
+  });
+
+  it("flags a verdict derived from the market fallback as qualified, even though the label is confident-sounding", () => {
+    const v = verdictWithQualifier({
+      currentCents: 35_000,
+      listCents: null,
+      history: [],
+      now: NOW,
+      market: [
+        { observedAt: NOW - 40 * DAY, cents: 35_000 },
+        { observedAt: NOW - 30 * DAY, cents: 40_000 },
+        { observedAt: NOW - 20 * DAY, cents: 45_000 },
+        { observedAt: NOW - 10 * DAY, cents: 40_000 },
+      ],
+    });
+    expect(v.label).toBe("good_price");
+    expect(v.qualified).toBe(true);
+    expect(v.qualifiedReason).toMatch(/shopsavvy/i);
+  });
+
+  it("has the same label/reason as verdict() for every scenario", () => {
+    const inputs = [
+      { currentCents: null, listCents: null, history: [], now: NOW },
+      { currentCents: 10_000, listCents: null, history: [], now: NOW },
+      { currentCents: 9_000, listCents: null, history: hist([[20, 10_000], [14, 10_000], [7, 10_000], [0, 9_000]]), now: NOW },
+    ];
+    for (const input of inputs) {
+      const plain = verdict(input);
+      const qualified = verdictWithQualifier(input);
+      expect(qualified.label).toBe(plain.label);
+      expect(qualified.reason).toBe(plain.reason);
+    }
   });
 });
 
