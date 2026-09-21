@@ -1,9 +1,14 @@
 import { ConvexError } from "convex/values";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import { setup, signedIn } from "./test.setup";
 import { researchPolicy } from "./policies";
 import { verifyPassage } from "./lib/passage";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 const baseSnapshot = {
   merchantDomain: "n.example",
@@ -197,5 +202,115 @@ describe("researchPolicy", () => {
     expect(doc?.confidence).toBe(0);
     expect(doc?.channel).toBe("unknown");
     expect(doc?.note).toMatch(/^Firecrawl/);
+  });
+});
+
+describe("latest prefers a user-confirmed snapshot (review M1)", () => {
+  it("returns the newest confirmed snapshot over any newer unconfirmed one, without editing either (D17)", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const read = () =>
+      t.run(async (ctx) => {
+        const { latest } = await import("./policies");
+        return latest(ctx, userId, "n.example", "returns");
+      });
+
+    const oldConfirmed = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, windowDays: 14 });
+    await as.mutation(api.policies.confirm, { policyId: oldConfirmed, channel: "email" });
+    const confirmed = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, windowDays: 30 });
+    await as.mutation(api.policies.confirm, { policyId: confirmed, channel: "email" });
+    // A later failed re-fetch, the shape researchPolicy records.
+    const failed = await t.mutation(internal.policies.insertSnapshot, {
+      userId,
+      ...baseSnapshot,
+      channel: "unknown",
+      passage: "",
+      confidence: 0,
+      note: "No policy page found on the merchant's domain",
+    });
+
+    const found = await read();
+    expect(found?._id).toBe(confirmed);
+    expect(found?.windowDays).toBe(30);
+    // The failed row is still there, untouched: the read changed, not the data.
+    expect((await t.run((ctx) => ctx.db.get(failed)))?.confirmedByUser).toBe(false);
+  });
+
+  it("is scoped to the user, domain and kind", async () => {
+    const t = setup();
+    const owner = await signedIn(t, "Owner");
+    const other = await signedIn(t, "Other");
+    const theirs = await t.mutation(internal.policies.insertSnapshot, { userId: other.userId, ...baseSnapshot });
+    await other.as.mutation(api.policies.confirm, { policyId: theirs, channel: "email" });
+    const mine = await t.mutation(internal.policies.insertSnapshot, { userId: owner.userId, ...baseSnapshot });
+    await t.mutation(internal.policies.insertSnapshot, { userId: owner.userId, ...baseSnapshot, kind: "price_adjustment" });
+
+    const found = await t.run(async (ctx) => {
+      const { latest } = await import("./policies");
+      return latest(ctx, owner.userId, "n.example", "returns");
+    });
+    expect(found?._id).toBe(mine);
+  });
+});
+
+describe("fetchBoth skips a kind researched in the last 24h (review M1)", () => {
+  const rowsFor = (t: ReturnType<typeof setup>) => t.run((ctx) => ctx.db.query("policies").collect());
+
+  it("inserts nothing and makes no request when both kinds are fresh", async () => {
+    const fetchSpy = vi.fn(async () => new Response("{}", { status: 500 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const confirmed = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, kind: "price_adjustment", windowDays: 14 });
+    await as.mutation(api.policies.confirm, { policyId: confirmed, channel: "email" });
+    await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, kind: "returns" });
+
+    await t.action(internal.policies.fetchBoth, { userId, merchantDomain: "n.example" });
+
+    expect(await rowsFor(t)).toHaveLength(2);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("hasFreshSnapshot: false with no snapshot, true inside 24h, false after, and per user", async () => {
+    vi.useFakeTimers();
+    const now = Date.UTC(2026, 8, 20, 12);
+    vi.setSystemTime(now);
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const other = await signedIn(t, "Other");
+    const key = { merchantDomain: "n.example", kind: "returns" as const };
+
+    expect(await t.query(internal.policies.hasFreshSnapshot, { userId, ...key })).toBe(false);
+    await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot });
+    expect(await t.query(internal.policies.hasFreshSnapshot, { userId, ...key })).toBe(true);
+    expect(await t.query(internal.policies.hasFreshSnapshot, { userId: other.userId, ...key })).toBe(false);
+    expect(await t.query(internal.policies.hasFreshSnapshot, { userId, ...key, kind: "price_adjustment" })).toBe(false);
+
+    vi.setSystemTime(now + 24 * 3_600_000 - 1);
+    expect(await t.query(internal.policies.hasFreshSnapshot, { userId, ...key })).toBe(true);
+    vi.setSystemTime(now + 24 * 3_600_000);
+    expect(await t.query(internal.policies.hasFreshSnapshot, { userId, ...key })).toBe(false);
+  });
+
+  it("researches only the stale kind; the new row is an insert, not an edit (D17)", async () => {
+    // Only the clock is faked: the Firecrawl client's own timers must still run.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const now = Date.UTC(2026, 8, 20, 12);
+    vi.setSystemTime(now);
+    // No network: any request the Firecrawl component makes fails, which researchPolicy records as a snapshot.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const stale = await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, kind: "returns" });
+    vi.setSystemTime(now + 25 * 3_600_000);
+    await t.mutation(internal.policies.insertSnapshot, { userId, ...baseSnapshot, kind: "price_adjustment" });
+
+    await t.action(internal.policies.fetchBoth, { userId, merchantDomain: "n.example" });
+
+    const rows = await rowsFor(t);
+    expect(rows.filter((r) => r.kind === "price_adjustment")).toHaveLength(1);
+    const returns = rows.filter((r) => r.kind === "returns");
+    expect(returns).toHaveLength(2);
+    expect(returns.find((r) => r._id === stale)?.passage).toBe(baseSnapshot.passage);
   });
 });

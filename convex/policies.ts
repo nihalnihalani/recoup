@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { FirecrawlClient } from "@firecrawl/firecrawl-convex";
 import type { SearchResponse } from "@firecrawl/firecrawl-convex";
-import { action, internalAction, internalMutation, mutation } from "./_generated/server";
+import { action, internalAction, internalMutation, internalQuery, mutation } from "./_generated/server";
 import type { ActionCtx, QueryCtx } from "./_generated/server";
 import { components, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -10,9 +10,12 @@ import { extract } from "./lib/ai";
 import { Policy } from "./lib/schemas";
 import type { PolicyT } from "./lib/schemas";
 import { verifyPassage } from "./lib/passage";
+import { latestPolicy } from "./lib/latestPolicy";
 import { assertWindowDays } from "./lib/money";
 import { channel, policyKind } from "./schema";
 import { requireUserId, ownedPolicy } from "./lib/access";
+import { POLICY_REFETCH_MIN_AGE_MS } from "./limits";
+
 
 const firecrawl = new FirecrawlClient(components.firecrawl);
 
@@ -145,17 +148,43 @@ export async function researchPolicy(
   });
 }
 
-/** Scheduler-driven: research both policy kinds for a merchant. Never throws (D17). */
+/**
+ * True when any snapshot for this user+domain+kind was retrieved inside the
+ * re-fetch window. Unauthenticated on purpose: the only caller is `fetchBoth`,
+ * which the scheduler runs with a `userId` a mutation resolved from `ctx.auth`.
+ */
+export const hasFreshSnapshot = internalQuery({
+  args: { userId: v.id("users"), merchantDomain: v.string(), kind: policyKind },
+  returns: v.boolean(),
+  handler: async (ctx, { userId, merchantDomain, kind }) => {
+    const newest = await ctx.db
+      .query("policies")
+      .withIndex("by_user_domain_kind", (q) => q.eq("userId", userId).eq("merchantDomain", merchantDomain).eq("kind", kind))
+      .order("desc")
+      .first();
+    return newest !== null && Date.now() - newest.retrievedAt < POLICY_REFETCH_MIN_AGE_MS;
+  },
+});
+
+/**
+ * Scheduler-driven: research both policy kinds for a merchant. Never throws (D17).
+ * A kind researched in the last 24h is skipped (review M1): confirming a
+ * purchase must not bury the policy the user just confirmed under a failed
+ * re-fetch, nor pay for the same search twice. `refresh` is the user's way to force one.
+ */
 export const fetchBoth = internalAction({
   args: { userId: v.id("users"), merchantDomain: v.string() },
+  returns: v.null(),
   handler: async (ctx, args) => {
     for (const kind of ["price_adjustment", "returns"] as const) {
       try {
+        if (await ctx.runQuery(internal.policies.hasFreshSnapshot, { ...args, kind })) continue;
         await researchPolicy(ctx, { ...args, kind });
       } catch (err) {
         console.error("policies.fetchBoth failed", { merchantDomain: args.merchantDomain, kind, err });
       }
     }
+    return null;
   },
 });
 
@@ -179,13 +208,15 @@ export const insertSnapshot = internalMutation({
   },
 });
 
-/** Newest snapshot for a merchant/kind, or null. Plain query helper (not a Convex `query`). */
+/**
+ * The snapshot to act on for a merchant/kind, or null: the newest one the user
+ * confirmed, else the newest of any. A confirmed snapshot is the user's own
+ * fact, so a newer unconfirmed (possibly failed) fetch never shadows it
+ * (review M1). Snapshots stay immutable (D17); this only changes which is read.
+ * Plain query helper (not a Convex `query`). Bounded; see lib/latestPolicy.ts.
+ */
 export async function latest(ctx: QueryCtx, userId: Id<"users">, merchantDomain: string, kind: PolicyKind) {
-  return ctx.db
-    .query("policies")
-    .withIndex("by_user_domain_kind", (q) => q.eq("userId", userId).eq("merchantDomain", merchantDomain).eq("kind", kind))
-    .order("desc")
-    .first();
+  return latestPolicy(ctx, userId, merchantDomain, kind);
 }
 
 /** User-triggered re-research. Returns the id of the newly inserted snapshot. */

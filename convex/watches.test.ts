@@ -559,3 +559,161 @@ describe("watches.setStatus / archive", () => {
     await expect(as.mutation(api.watches.setStatus, { watchId, status: "active" })).rejects.toThrow(ConvexError);
   });
 });
+
+describe("watches.markBought (W4)", () => {
+  const bought = (watchId: Id<"watches">) => ({ watchId, paidCents: 8_000, purchasedAt: T0 - DAY });
+
+  it("turns the watch into an owned active purchase with its price history carried over", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId, { name: "Down Jacket" });
+    await t.mutation(internal.watches.recordWatchCheck, good(watchId, 10_000));
+    vi.setSystemTime(T0 + HOUR);
+    await t.mutation(internal.watches.recordWatchCheck, { watchId, sourceUrl: URL, note: "Page did not load" });
+    vi.setSystemTime(T0 + 2 * HOUR);
+    await t.mutation(internal.watches.recordWatchCheck, good(watchId, 9_000));
+
+    const purchaseId = await as.mutation(api.watches.markBought, {
+      ...bought(watchId),
+      qty: 2,
+      orderRef: "  AC-77 ",
+    });
+
+    const detail = await as.query(api.purchases.get, { purchaseId });
+    expect(detail.purchase).toMatchObject({
+      userId,
+      status: "active",
+      merchant: "Acme",
+      merchantDomain: "acme.example",
+      currency: "USD",
+      orderRef: "AC-77",
+      purchasedAt: T0 - DAY,
+    });
+    expect(detail.items).toHaveLength(1);
+    expect(detail.items[0]).toMatchObject({
+      name: "Down Jacket",
+      unitCents: 8_000,
+      qty: 2,
+      productUrl: URL,
+      returned: false,
+    });
+    // Accepted checks only, newest first, original observation times kept.
+    expect(detail.items[0].priceChecks.map((c) => [c.observedCents, c.observedAt])).toEqual([
+      [9_000, T0 + 2 * HOUR],
+      [10_000, T0],
+    ]);
+
+    const row = await watchRow(t, watchId);
+    expect(row.status).toBe("bought");
+    expect(row.purchaseId).toBe(purchaseId);
+    // The policy research is scheduled exactly as purchases.create does.
+    const jobs = await scheduled(t);
+    expect(jobs.filter((j) => j.name.includes("fetchBoth"))).toHaveLength(1);
+  });
+
+  it("defaults qty to 1 and currency to USD, and works for a paused watch", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId, { status: "paused" });
+    const purchaseId = await as.mutation(api.watches.markBought, bought(watchId));
+    const detail = await as.query(api.purchases.get, { purchaseId });
+    expect(detail.purchase.currency).toBe("USD");
+    expect(detail.items[0].qty).toBe(1);
+    expect(detail.items[0].priceChecks).toEqual([]);
+  });
+
+  it("carries over at most the newest 90 accepted checks", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId, { currency: "USD" });
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 95; i++) {
+        await ctx.db.insert("watchChecks", {
+          watchId,
+          userId,
+          observedCents: 10_000 + i,
+          currency: "USD",
+          observedAt: T0 - (95 - i) * HOUR,
+          sourceUrl: URL,
+        });
+      }
+    });
+    const purchaseId = await as.mutation(api.watches.markBought, bought(watchId));
+    const copied = await t.run(async (ctx) => {
+      const item = await ctx.db
+        .query("items")
+        .withIndex("by_purchase", (q) => q.eq("purchaseId", purchaseId))
+        .unique();
+      return ctx.db
+        .query("priceChecks")
+        .withIndex("by_item", (q) => q.eq("itemId", item!._id))
+        .collect();
+    });
+    expect(copied).toHaveLength(90);
+    expect(copied[0].observedCents).toBe(10_005);
+    expect(copied[89].observedCents).toBe(10_094);
+  });
+
+  it("refuses another user's watch and a signed-out caller, writing nothing", async () => {
+    const t = setup();
+    const owner = await signedIn(t, "Owner");
+    const other = await signedIn(t, "Other");
+    const watchId = await seedWatch(t, owner.userId);
+
+    await expect(other.as.mutation(api.watches.markBought, bought(watchId))).rejects.toThrow(/Watch not found/);
+    await expect(t.mutation(api.watches.markBought, bought(watchId))).rejects.toThrow(ConvexError);
+
+    expect(await t.run((ctx) => ctx.db.query("purchases").collect())).toHaveLength(0);
+    expect((await watchRow(t, watchId)).status).toBe("active");
+  });
+
+  it("refuses a second call, so a retry cannot create a second purchase", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await as.mutation(api.watches.markBought, bought(watchId));
+    await expect(as.mutation(api.watches.markBought, bought(watchId))).rejects.toThrow(/already marked as bought/);
+    expect(await t.run((ctx) => ctx.db.query("purchases").collect())).toHaveLength(1);
+  });
+
+  it("refuses an archived watch and bad input", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const archived = await seedWatch(t, userId, { status: "archived" });
+    await expect(as.mutation(api.watches.markBought, bought(archived))).rejects.toThrow(/no longer being watched/);
+
+    const watchId = await seedWatch(t, userId);
+    const bad = [
+      { paidCents: 0 },
+      { paidCents: 19.99 },
+      { paidCents: Number.NaN },
+      { purchasedAt: T0 + 3 * DAY },
+      { purchasedAt: -1 },
+      { qty: 0 },
+      { qty: 1.5 },
+      { orderRef: "x".repeat(101) },
+    ];
+    for (const over of bad) {
+      await expect(as.mutation(api.watches.markBought, { ...bought(watchId), ...over })).rejects.toThrow(ConvexError);
+    }
+    expect(await t.run((ctx) => ctx.db.query("purchases").collect())).toHaveLength(0);
+  });
+
+  it("a bought watch is never swept, checked or alerted again", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await t.run((ctx) => ctx.db.patch(watchId, { targetCents: 20_000 }));
+    await as.mutation(api.watches.markBought, bought(watchId));
+    const before = (await scheduled(t)).length;
+
+    vi.setSystemTime(T0 + 2 * DAY);
+    expect(await t.mutation(internal.watches.sweep, {})).toBe(0);
+    await expect(as.mutation(api.watches.checkNow, { watchId })).rejects.toThrow(/no longer being watched/);
+    expect(await t.query(internal.watches.watchForCheck, { watchId })).toBeNull();
+    // A check that was already in flight still records, but claims no alert.
+    await t.mutation(internal.watches.recordWatchCheck, good(watchId, 5_000));
+    expect(await t.run((ctx) => ctx.db.query("mailLog").collect())).toHaveLength(0);
+    expect((await scheduled(t)).length).toBe(before);
+  });
+});

@@ -25,6 +25,9 @@ export const verdictLabel = v.union(
 );
 export const verdictValidator = v.object({ label: verdictLabel, reason: v.string() });
 export const watchStatus = v.union(v.literal("active"), v.literal("paused"), v.literal("archived"), v.literal("bought"));
+export const mailKind = v.union(v.literal("price_drop"));
+export const mailStatus = v.union(v.literal("claimed"), v.literal("sent"), v.literal("failed"));
+export const offerStatus = v.union(v.literal("candidate"), v.literal("confirmed"), v.literal("rejected"));
 
 export default defineSchema({
   ...authTables,
@@ -77,6 +80,27 @@ export default defineSchema({
     currency: v.optional(v.string()), confidence: v.optional(v.number()), variantMatch: v.optional(variantMatch), observedAt: v.number(),
     sourceUrl: v.string(), note: v.optional(v.string()),
   }).index("by_watch", ["watchId", "observedAt"]),
+
+  /**
+   * Outbound notification mail to the account holder (W2). Claim-before-send: the row is inserted with a unique
+   * dedupeKey (`watch:<watchId>:<cents>`) before the send is attempted, so a re-run never mails the same event twice.
+   */
+  mailLog: defineTable({
+    userId: v.id("users"), dedupeKey: v.string(), kind: mailKind, watchId: v.optional(v.id("watches")), to: v.string(),
+    subject: v.string(), status: mailStatus, error: v.optional(v.string()), cents: v.optional(v.number()),
+    previousCents: v.optional(v.number()), sentAt: v.optional(v.number()),
+  }).index("by_dedupe", ["dedupeKey"]).index("by_user", ["userId"]).index("by_watch", ["watchId"]),
+
+  /**
+   * The same product at another store (W3). A `candidate` came from search and is never trusted: only a
+   * user-`confirmed` offer is re-checked, ranked, or allowed to drive a verdict or an alert.
+   */
+  offers: defineTable({
+    watchId: v.id("watches"), userId: v.id("users"), storeDomain: v.string(), productUrl: v.string(), title: v.string(),
+    status: offerStatus, variantMatch: v.optional(variantMatch), matchConfidence: v.optional(v.number()),
+    lastCents: v.optional(v.number()), currency: v.optional(v.string()), lastCheckedAt: v.optional(v.number()),
+    note: v.optional(v.string()),
+  }).index("by_watch", ["watchId"]).index("by_user", ["userId"]),
 
   /** Money the store owes on one item for one reason. Balance is derived from ledgerEvents, never stored. */
   claims: defineTable({

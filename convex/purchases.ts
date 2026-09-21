@@ -8,6 +8,7 @@ import { claimsWithBalance } from "./lib/balance";
 import { assertCents, assertCurrency, assertNonEmpty, assertQty, assertTimestamp } from "./lib/money";
 import { cancelPending } from "./followUps";
 import { normalizeDomain } from "./lib/policyText";
+import { latestPolicy } from "./lib/latestPolicy";
 import { verdict } from "./lib/verdict";
 
 const itemInput = v.object({
@@ -203,15 +204,7 @@ export const get = query({
     );
     // Latest snapshot per kind for this user+domain (D17).
     const policyRows = await Promise.all(
-      POLICY_KINDS.map((kind) =>
-        ctx.db
-          .query("policies")
-          .withIndex("by_user_domain_kind", (q) =>
-            q.eq("userId", userId).eq("merchantDomain", purchase.merchantDomain).eq("kind", kind),
-          )
-          .order("desc")
-          .first(),
-      ),
+      POLICY_KINDS.map((kind) => latestPolicy(ctx, userId, purchase.merchantDomain, kind)),
     );
     const policies = policyRows.filter((p): p is Doc<"policies"> => p !== null);
     return { purchase, items, policies };

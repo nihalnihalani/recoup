@@ -1,7 +1,7 @@
-import { ConvexError, v } from "convex/values";
+import { v } from "convex/values";
 import { mutation } from "./_generated/server";
 import { requireUserId } from "./lib/access";
-import { applyEvent, openClaim } from "./claims";
+import { openClaim } from "./claims";
 import { windowEndsAt } from "./lib/ledger";
 
 const DAY = 86_400_000;
@@ -9,12 +9,18 @@ const HOUR = 3_600_000;
 const DOMAIN = "northwind.example";
 const MERCHANT = "Northwind Outfitters";
 const WINDOW_DAYS = 14;
+const AUDIO_DOMAIN = "haldenaudio.example";
+const AUDIO_MERCHANT = "Halden Audio";
+const AUDIO_WINDOW_DAYS = 30;
 
 /**
- * Seeds two labelled example purchases into the caller's account (D04, D27).
+ * Seeds two labelled example purchases into the caller's account (D04, D27),
+ * both price drops after purchase, at two made-up stores.
  * Idempotent per user: if the caller already owns an example purchase, nothing
  * is inserted. Every contact address is on the reserved `.example` TLD, so no
  * real mail can be sent by accident, and nothing here touches the network.
+ * Accounts that loaded an earlier version of the example keep the rows they
+ * already have; there is no migration.
  */
 export const load = mutation({
   args: {},
@@ -31,20 +37,6 @@ export const load = mutation({
 
     const now = Date.now();
 
-    const returnsPolicy = await ctx.db.insert("policies", {
-      userId,
-      merchantDomain: DOMAIN,
-      kind: "returns",
-      windowDays: WINDOW_DAYS,
-      channel: "email",
-      contactEmail: `returns@${DOMAIN}`,
-      passage: `Example policy: refunds are processed within 14 days of receipt at our warehouse. If you have not heard from us after 14 days, email returns@${DOMAIN} with your order number and the items returned.`,
-      sourceUrl: `https://${DOMAIN}/returns`,
-      retrievedAt: now,
-      confidence: 1,
-      confirmedByUser: true,
-      isExample: true,
-    });
     const priceAdjustmentPolicy = await ctx.db.insert("policies", {
       userId,
       merchantDomain: DOMAIN,
@@ -60,65 +52,7 @@ export const load = mutation({
       isExample: true,
     });
 
-    // Story one: two items returned, the sweater was credited, the scarf was not.
-    const returnsPurchase = await ctx.db.insert("purchases", {
-      userId,
-      merchant: MERCHANT,
-      merchantDomain: DOMAIN,
-      orderRef: "NW-48211",
-      purchasedAt: now - 26 * DAY,
-      currency: "USD",
-      status: "active",
-      isExample: true,
-    });
-    const sweater = await ctx.db.insert("items", {
-      purchaseId: returnsPurchase,
-      userId,
-      name: "Merino crew sweater",
-      unitCents: 8000,
-      qty: 1,
-      returned: true,
-      returnedAt: now - 23 * DAY,
-    });
-    const scarf = await ctx.db.insert("items", {
-      purchaseId: returnsPurchase,
-      userId,
-      name: "Wool scarf, oat",
-      unitCents: 4000,
-      qty: 1,
-      returned: true,
-      returnedAt: now - 23 * DAY,
-    });
-    const sweaterClaimId = await openClaim(ctx, {
-      userId,
-      purchaseId: returnsPurchase,
-      itemId: sweater,
-      type: "return_credit",
-      expectedCents: 8000,
-      policyId: returnsPolicy,
-      isExample: true,
-    });
-    const sweaterClaim = await ctx.db.get(sweaterClaimId);
-    if (!sweaterClaim) throw new ConvexError("Example claim missing");
-    await applyEvent(
-      ctx,
-      sweaterClaim,
-      "confirmed_credit",
-      8000,
-      "Example: $80.00 refund for the Merino crew sweater seen on the card statement",
-      `example:${returnsPurchase}:sweater`,
-    );
-    await openClaim(ctx, {
-      userId,
-      purchaseId: returnsPurchase,
-      itemId: scarf,
-      type: "return_credit",
-      expectedCents: 4000,
-      policyId: returnsPolicy,
-      isExample: true,
-    });
-
-    // Story two: bought at $120, now observed at $95 inside the 14-day window.
+    // Story one: bought at $120, now observed at $95 inside the 14-day window.
     const purchasedAt = now - 5 * DAY;
     const productUrl = `https://${DOMAIN}/p/waxed-field-jacket`;
     const dropPurchase = await ctx.db.insert("purchases", {
@@ -190,6 +124,89 @@ export const load = mutation({
       isExample: true,
     });
 
-    return { loaded: true, purchaseIds: [returnsPurchase, dropPurchase] };
+    // Story two, a different store: headphones bought at $199, now $169 inside a 30-day window.
+    const audioPolicy = await ctx.db.insert("policies", {
+      userId,
+      merchantDomain: AUDIO_DOMAIN,
+      kind: "price_adjustment",
+      windowDays: AUDIO_WINDOW_DAYS,
+      channel: "email",
+      contactEmail: `support@${AUDIO_DOMAIN}`,
+      passage: `Example policy: if our price for an item you bought drops within 30 days of your order, email support@${AUDIO_DOMAIN} with your order number and we will credit the difference.`,
+      sourceUrl: `https://${AUDIO_DOMAIN}/price-match`,
+      retrievedAt: now,
+      confidence: 1,
+      confirmedByUser: true,
+      isExample: true,
+    });
+    const audioPurchasedAt = now - 9 * DAY;
+    const audioUrl = `https://${AUDIO_DOMAIN}/p/over-ear-headphones`;
+    const audioPurchase = await ctx.db.insert("purchases", {
+      userId,
+      merchant: AUDIO_MERCHANT,
+      merchantDomain: AUDIO_DOMAIN,
+      orderRef: "HA-20931",
+      purchasedAt: audioPurchasedAt,
+      currency: "USD",
+      status: "active",
+      isExample: true,
+    });
+    const headphones = await ctx.db.insert("items", {
+      purchaseId: audioPurchase,
+      userId,
+      name: "Over-ear wireless headphones",
+      unitCents: 19900,
+      qty: 1,
+      productUrl: audioUrl,
+      returned: false,
+    });
+    const audioHistory: Array<[number, number]> = [
+      [9 * DAY, 19900],
+      [8 * DAY, 19900],
+      [7 * DAY, 19900],
+      [6 * DAY, 19900],
+      [5 * DAY, 18900],
+      [4 * DAY, 18900],
+      [3 * DAY, 19900],
+      [2 * DAY, 17900],
+      [1 * DAY, 17900],
+    ];
+    for (const [ago, cents] of audioHistory) {
+      await ctx.db.insert("priceChecks", {
+        itemId: headphones,
+        userId,
+        observedCents: cents,
+        currency: "USD",
+        confidence: 1,
+        variantMatch: "exact",
+        observedAt: now - ago,
+        sourceUrl: audioUrl,
+        note: "Example observation",
+      });
+    }
+    const audioDrop = await ctx.db.insert("priceChecks", {
+      itemId: headphones,
+      userId,
+      observedCents: 16900,
+      currency: "USD",
+      confidence: 1,
+      variantMatch: "exact",
+      observedAt: now - 3 * HOUR,
+      sourceUrl: audioUrl,
+      note: "Example observation",
+    });
+    await openClaim(ctx, {
+      userId,
+      purchaseId: audioPurchase,
+      itemId: headphones,
+      type: "price_adjustment",
+      expectedCents: 3000,
+      windowEndsAt: windowEndsAt(audioPurchasedAt, AUDIO_WINDOW_DAYS),
+      policyId: audioPolicy,
+      openedFromPriceCheckId: audioDrop,
+      isExample: true,
+    });
+
+    return { loaded: true, purchaseIds: [dropPurchase, audioPurchase] };
   },
 });

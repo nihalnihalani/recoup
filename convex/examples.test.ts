@@ -50,49 +50,39 @@ describe("examples.load", () => {
       expect(p.userId).toBe(userId);
       expect(p.isExample).toBe(true);
       expect(p.status).toBe("active");
-      expect(p.merchant).toBe("Northwind Outfitters");
+      expect(p.merchantDomain).toMatch(/\.example$/);
       expect(p.purchasedAt).toBeLessThan(before);
     }
-    expect(w.items).toHaveLength(3);
-    expect(w.claims).toHaveLength(3);
+    expect(w.purchases.map((p) => p.merchant).sort()).toEqual(["Halden Audio", "Northwind Outfitters"]);
+    expect(w.items).toHaveLength(2);
+    expect(w.claims).toHaveLength(2);
+    expect(w.events).toHaveLength(0);
     for (const c of w.claims) {
       expect(c.userId).toBe(userId);
       expect(c.isExample).toBe(true);
+      expect(c.type).toBe("price_adjustment");
+      expect(c.status).toBe("detected");
       expect(Number.isInteger(c.expectedCents)).toBe(true);
     }
     for (const i of w.items) expect(Number.isInteger(i.unitCents)).toBe(true);
   });
 
-  it("returns story: sweater credited, scarf open for 4000 against a confirmed .example policy", async () => {
+  it("seeds nothing about returns: no returned items, no returns policy, only confirmed .example policies", async () => {
     const t = setup();
     const { as, userId } = await signedIn(t);
     await as.mutation(load, {});
     const w = await worldOf(t, userId);
 
-    const sweater = w.items.find((i) => i.unitCents === 8000)!;
-    const scarf = w.items.find((i) => i.unitCents === 4000)!;
-    expect(sweater.returned).toBe(true);
-    expect(scarf.returned).toBe(true);
-
-    const sweaterClaim = w.claims.find((c) => c.itemId === sweater._id)!;
-    expect(sweaterClaim.status).toBe("confirmed");
-    expect(w.events.filter((e) => e.claimId === sweaterClaim._id).map((e) => e.cents)).toEqual([8000]);
-
-    const scarfClaim = w.claims.find((c) => c.itemId === scarf._id)!;
-    expect(scarfClaim.type).toBe("return_credit");
-    expect(scarfClaim.expectedCents).toBe(4000);
-    expect(scarfClaim.status).toBe("detected");
-    expect(w.events.filter((e) => e.claimId === scarfClaim._id)).toHaveLength(0);
-
-    const policy = w.policies.find((p) => p._id === scarfClaim.policyId)!;
-    expect(policy.kind).toBe("returns");
-    expect(policy.confirmedByUser).toBe(true);
-    expect(policy.isExample).toBe(true);
-    expect(policy.contactEmail).toMatch(/\.example$/);
-    for (const p of w.policies) expect(p.contactEmail).toMatch(/@[a-z.]+\.example$/);
-
-    const got = await as.query(api.claims.get, { claimId: scarfClaim._id });
-    expect(got.balance.unresolved).toBe(4000);
+    for (const i of w.items) expect(i.returned).toBe(false);
+    expect(w.policies).toHaveLength(2);
+    for (const p of w.policies) {
+      expect(p.kind).toBe("price_adjustment");
+      expect(p.confirmedByUser).toBe(true);
+      expect(p.isExample).toBe(true);
+      expect(p.contactEmail).toMatch(/@[a-z.]+\.example$/);
+      expect(p.sourceUrl).toMatch(/^https:\/\/[a-z.]+\.example\//);
+    }
+    for (const c of w.priceChecks) expect(c.note).toBe("Example observation");
   });
 
   it("price story: 12000 bought, 9500 observed, 2500 claim with a future window", async () => {
@@ -103,8 +93,8 @@ describe("examples.load", () => {
 
     const jacket = w.items.find((i) => i.unitCents === 12000)!;
     expect(jacket.returned).toBe(false);
-    const claim = w.claims.find((c) => c.type === "price_adjustment")!;
-    expect(claim.itemId).toBe(jacket._id);
+    const claim = w.claims.find((c) => c.itemId === jacket._id)!;
+    expect(claim.type).toBe("price_adjustment");
     expect(claim.expectedCents).toBe(2500);
     expect(claim.windowEndsAt!).toBeGreaterThan(Date.now());
 
@@ -116,6 +106,35 @@ describe("examples.load", () => {
     const policy = w.policies.find((p) => p._id === claim.policyId)!;
     expect(policy.kind).toBe("price_adjustment");
     expect(policy.windowDays).toBe(14);
+  });
+
+  it("second price story, different store: 19900 bought, 16900 observed, 3000 claim inside a 30-day window", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    await as.mutation(load, {});
+    const w = await worldOf(t, userId);
+
+    const headphones = w.items.find((i) => i.unitCents === 19900)!;
+    expect(headphones.returned).toBe(false);
+    const purchase = w.purchases.find((p) => p._id === headphones.purchaseId)!;
+    expect(purchase.merchantDomain).toBe("haldenaudio.example");
+
+    const claim = w.claims.find((c) => c.itemId === headphones._id)!;
+    expect(claim.type).toBe("price_adjustment");
+    expect(claim.expectedCents).toBe(3000);
+    expect(claim.windowEndsAt!).toBeGreaterThan(Date.now());
+
+    const check = w.priceChecks.find((c) => c._id === claim.openedFromPriceCheckId)!;
+    expect(check.itemId).toBe(headphones._id);
+    expect(check.observedCents).toBe(16900);
+    expect(check.sourceUrl).toContain("haldenaudio.example");
+
+    const policy = w.policies.find((p) => p._id === claim.policyId)!;
+    expect(policy.merchantDomain).toBe("haldenaudio.example");
+    expect(policy.windowDays).toBe(30);
+
+    const got = await as.query(api.claims.get, { claimId: claim._id });
+    expect(got.balance.unresolved).toBe(3000);
   });
 
   it("is idempotent per user", async () => {
@@ -147,9 +166,8 @@ describe("examples.load", () => {
     const w1 = await worldOf(t, one.userId);
     const w2 = await worldOf(t, two.userId);
     expect(w2.purchases).toHaveLength(2);
-    expect(w2.claims).toHaveLength(3);
-    expect(w2.events).toHaveLength(1);
-    expect(w2.claims.filter((c) => c.status === "confirmed")).toHaveLength(1);
+    expect(w2.claims).toHaveLength(2);
+    expect(w2.events).toHaveLength(0);
     expect(w1.purchases).toHaveLength(2);
     const ids1 = new Set(w1.purchases.map((p) => p._id));
     for (const p of w2.purchases) expect(ids1.has(p._id)).toBe(false);

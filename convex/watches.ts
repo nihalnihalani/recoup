@@ -26,7 +26,8 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { variantMatch, verdictValidator, watchStatus } from "./schema";
 import { ownedWatch, requireUserId } from "./lib/access";
-import { assertNonEmpty, assertPositiveCents } from "./lib/money";
+import { assertCurrency, assertNonEmpty, assertPositiveCents, assertQty, assertTimestamp } from "./lib/money";
+import { claimDrop } from "./notify";
 import { defaultWatchName, parseProductUrl } from "./lib/watchUrl";
 import { verdict, type Verdict } from "./lib/verdict";
 import { errorNote, observePrice, rejectionReason, truncate, type PageObservation } from "./priceWatch";
@@ -40,6 +41,12 @@ import {
   WATCH_SWEEP_PAGE,
   WATCH_SWEEP_STAGGER_MS,
 } from "./limits";
+
+/** Accepted watch checks carried into a purchase's price history by `markBought`. */
+const CARRY_OVER_CHECKS = 90;
+/** Rows `markBought` may walk to find them; failed checks sit between accepted ones. */
+const CARRY_OVER_SCAN = 360;
+const MAX_ORDER_REF_CHARS = 100;
 
 const MAX_NAME_CHARS = 200;
 /** `list` page size. */
@@ -377,6 +384,101 @@ export const archive = mutation({
   },
 });
 
+/** "Acme" from `acme.example`, "Big Store" from `big-store.co.uk`: the first label, spaced and capitalised. */
+function merchantName(merchantDomain: string): string {
+  const label = merchantDomain.split(".")[0] ?? "";
+  const words = label.split(/[-_]+/).filter((w) => w.length > 0);
+  if (words.length === 0) return merchantDomain;
+  return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+/**
+ * "I bought it" (W4). The watch becomes an active purchase with one item, its
+ * accepted price history carries over, and both policy kinds are researched
+ * exactly as `purchases.create` does, so the price-adjustment window starts
+ * counting down. The watch ends as `bought`: never swept, checked or alerted
+ * again. A second call is refused, so a retry cannot create a second purchase.
+ */
+export const markBought = mutation({
+  args: {
+    watchId: v.id("watches"),
+    paidCents: v.number(),
+    purchasedAt: v.number(),
+    qty: v.optional(v.number()),
+    orderRef: v.optional(v.string()),
+  },
+  returns: v.id("purchases"),
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const watch = await ownedWatch(ctx, args.watchId, userId);
+    if (watch.status === "bought") throw new ConvexError("This item is already marked as bought");
+    if (watch.status !== "active" && watch.status !== "paused") {
+      throw new ConvexError("This item is no longer being watched");
+    }
+    // Same validations as `purchases.create`, except a paid price of zero is refused.
+    const unitCents = assertPositiveCents(args.paidCents, "paidCents");
+    const purchasedAt = assertTimestamp(args.purchasedAt, "purchasedAt");
+    const qty = assertQty(args.qty ?? 1);
+    const currency = assertCurrency(watch.currency ?? "USD");
+    const orderRef = args.orderRef?.trim() || undefined;
+    if (orderRef !== undefined && orderRef.length > MAX_ORDER_REF_CHARS) {
+      throw new ConvexError(`orderRef must be at most ${MAX_ORDER_REF_CHARS} characters`);
+    }
+
+    const purchaseId = await ctx.db.insert("purchases", {
+      userId,
+      merchant: merchantName(watch.merchantDomain),
+      // Already the bare registrable host: `parseProductUrl` normalised it at create.
+      merchantDomain: watch.merchantDomain,
+      orderRef,
+      purchasedAt,
+      currency,
+      status: "active",
+    });
+    const itemId = await ctx.db.insert("items", {
+      purchaseId,
+      userId,
+      name: watch.name,
+      unitCents,
+      qty,
+      productUrl: watch.productUrl,
+      returned: false,
+    });
+
+    // Newest accepted checks, bounded; inserted oldest first so `by_item`
+    // (creation order) reads the same way the watch's history did.
+    const carried: Doc<"watchChecks">[] = [];
+    let scanned = 0;
+    const newestFirst = ctx.db
+      .query("watchChecks")
+      .withIndex("by_watch", (q) => q.eq("watchId", watch._id))
+      .order("desc");
+    for await (const check of newestFirst) {
+      if (check.observedCents !== undefined) carried.push(check);
+      if (carried.length >= CARRY_OVER_CHECKS || ++scanned >= CARRY_OVER_SCAN) break;
+    }
+    for (const check of carried.reverse()) {
+      await ctx.db.insert("priceChecks", {
+        itemId,
+        userId,
+        observedCents: check.observedCents,
+        currency: check.currency,
+        confidence: check.confidence,
+        variantMatch: check.variantMatch,
+        observedAt: check.observedAt,
+        sourceUrl: check.sourceUrl,
+      });
+    }
+
+    await ctx.db.patch(watch._id, { status: "bought", purchaseId });
+    await ctx.scheduler.runAfter(0, internal.policies.fetchBoth, {
+      userId,
+      merchantDomain: watch.merchantDomain,
+    });
+    return purchaseId;
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Check: read, observe, record
 // ---------------------------------------------------------------------------
@@ -499,6 +601,13 @@ export const recordWatchCheck = internalMutation({
       patch.name = productName.slice(0, MAX_NAME_CHARS);
     }
     await ctx.db.patch(watch._id, patch);
+
+    // W2: `watch` is still the row as it was before this check, so its
+    // `lastCents` is the previous accepted price. The claim is written here,
+    // in the transaction that accepted the price, so a re-run cannot mail twice.
+    if (observedCents !== undefined) {
+      await claimDrop(ctx, watch, observedCents, watch.currency ?? args.currency ?? "USD");
+    }
 
     return { watchCheckId, accepted, note: note === undefined ? null : truncate(note) };
   },

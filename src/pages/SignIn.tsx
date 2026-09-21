@@ -53,7 +53,8 @@ export default function SignIn() {
           {flow === "signIn" ? "Welcome back" : "Create your account"}
         </h1>
         <p className="mt-2 text-sm text-ink/60">
-          Price dropped after you bought? Recoup gets the difference back.
+          Price dropped after you bought? Recoup gets the difference back. Haven't bought yet? It watches the
+          price everywhere and tells you when to.
         </p>
 
         <form onSubmit={(event) => void handleSubmit(event)} className="mt-6 space-y-4">
@@ -112,6 +113,13 @@ export default function SignIn() {
             {flow === "signIn" ? "Create an account" : "Sign in"}
           </button>
         </div>
+
+        <ul className="mt-5 space-y-1 text-xs text-ink/60">
+          <li>No affiliate links and no sponsored ranking.</li>
+          <li>You approve every message before it is sent. Recoup never files claims in bulk.</li>
+          <li>Money only counts when you confirm it arrived.</li>
+          <li>Every price shows where and when it was read. Every policy shows the exact sentence it came from.</li>
+        </ul>
       </div>
     </div>
   );

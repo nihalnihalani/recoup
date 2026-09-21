@@ -14,6 +14,7 @@
  * tell" instead of silence. A price-adjustment claim is opened ONLY from here
  * (D20), through `claims.openClaim`, never from the client.
  */
+import { latestPolicy } from "./lib/latestPolicy";
 import { ConvexError, v } from "convex/values";
 import { FirecrawlClient, type ScrapeOptions } from "@firecrawl/firecrawl-convex";
 import {
@@ -112,13 +113,7 @@ async function latestPricePolicy(
   userId: Id<"users">,
   merchantDomain: string,
 ): Promise<Doc<"policies"> | null> {
-  return await ctx.db
-    .query("policies")
-    .withIndex("by_user_domain_kind", (q) =>
-      q.eq("userId", userId).eq("merchantDomain", merchantDomain).eq("kind", "price_adjustment"),
-    )
-    .order("desc")
-    .first();
+  return latestPolicy(ctx, userId, merchantDomain, "price_adjustment");
 }
 
 /** True when an unsettled price-adjustment claim already exists for this item. */
