@@ -171,13 +171,15 @@ describe("retryable failures and backoff", () => {
     expect(await marketRows(t, watchId)).toHaveLength(0);
     // D105: MARKET_MAX_ATTEMPTS is now 4, so all three MARKET_RETRY_BACKOFF_MS
     // steps are exercised (after the 1st, 2nd and 3rd failures — the 4th
-    // goes straight to terminal). The initial manual charge plus each of the
-    // MARKET_MAX_ATTEMPTS-1 auto-scheduled retries all go through
-    // `tryCharge`: every one of the MARKET_MAX_ATTEMPTS draws from BOTH the
-    // user's daily cap and the shared global cap (F7/D103 — the auto path
-    // used to draw only from the global one, see "one user cannot exhaust
-    // the global switch" below).
-    expect(await usageCount(t, userId, "market_lookup")).toBe(MARKET_MAX_ATTEMPTS);
+    // goes straight to terminal). C5 (D107): only the INITIAL manual attempt
+    // charges the user's per-user daily cap; the three auto-scheduled retries
+    // that follow it (attempts 2, 3, 4 — each `trigger: "auto"` with
+    // `marketAttempts > 0` already) draw only from the shared global cap, so
+    // a single watch's own failure chain cannot by itself exhaust — or even
+    // meaningfully dent — the user's whole daily allowance (self-lockout,
+    // Opus checkpoint-5 recheck C5). Every one of the MARKET_MAX_ATTEMPTS
+    // attempts still draws from the global cap (F7/D103 stands for that half).
+    expect(await usageCount(t, userId, "market_lookup")).toBe(1);
     expect(await usageCount(t, undefined, "market_lookup")).toBe(MARKET_MAX_ATTEMPTS);
   });
 
@@ -369,6 +371,46 @@ describe("per-user auto budget (F7/D103)", () => {
   });
 });
 
+describe("self-lockout (C5/D107, Opus checkpoint-5 recheck)", () => {
+  it("a watch's own retry chain (4 auto-scheduled failures) consumes only 1 per-user unit, leaving the full daily allowance free for manual refreshes", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+
+    const failing = await seedWatch(t, userId, { slug: "failing" });
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({}, 429)));
+    const claim = await t.mutation(internal.market.requestLookup, { watchId: failing, trigger: "manual" });
+    expect(claim.scheduled).toBe(true);
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const failedRow = await watchRow(t, failing);
+    expect(failedRow.marketState).toBe("terminal_failure");
+    expect(failedRow.marketAttempts).toBe(MARKET_MAX_ATTEMPTS);
+    // Without C5, the three AUTO-triggered retries this cycle scheduled for
+    // itself (attempts 2, 3, 4 — never a user action) would also have drawn
+    // from the per-user counter, leaving only
+    // DAILY_BUDGETS.market_lookup.max - MARKET_MAX_ATTEMPTS units of the
+    // user's OWN daily allowance for the rest of the day.
+    expect(await usageCount(t, userId, "market_lookup")).toBe(1);
+
+    // The full per-user allowance is still available for manual refreshes on
+    // other watches, the same day.
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(bodyWithOnePoint())));
+    for (let i = 1; i < DAILY_BUDGETS.market_lookup.max; i++) {
+      const watchId = await seedWatch(t, userId, { slug: `ok-${i}` });
+      const result = await as.mutation(api.market.refresh, { watchId });
+      expect(result).toMatchObject({ scheduled: true, state: "queued" });
+    }
+    expect(await usageCount(t, userId, "market_lookup")).toBe(DAILY_BUDGETS.market_lookup.max);
+
+    const oneMore = await seedWatch(t, userId, { slug: "over-budget" });
+    expect(await as.mutation(api.market.refresh, { watchId: oneMore })).toMatchObject({
+      scheduled: false,
+      reason: "budget",
+    });
+  });
+});
+
 describe("refresh", () => {
   it("throws for a non-owner", async () => {
     const t = setup();
@@ -436,6 +478,45 @@ describe("refresh", () => {
       scheduled: false,
       reason: "budget",
     });
+  });
+});
+
+describe("terminal_failure manual retry regains a retry chain (C6/D107, Opus checkpoint-5 recheck)", () => {
+  it("a manual refresh out of terminal_failure resets marketAttempts to 0, so one new failure lands as retryable_failure at attempts 1, not straight back to terminal", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({}, 429)));
+
+    await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const terminal = await watchRow(t, watchId);
+    expect(terminal.marketState).toBe("terminal_failure");
+    expect(terminal.marketAttempts).toBe(MARKET_MAX_ATTEMPTS);
+
+    // A manual refresh from terminal_failure is allowed (D71's gate refuses
+    // only an AUTO trigger there). `finishAllScheduledFunctions` above fast-
+    // forwarded the clock through the whole backoff chain, so capture "now"
+    // fresh rather than assuming it is still T0.
+    const refreshedAt = Date.now();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({}, 503)));
+    const refreshResult = await as.mutation(api.market.refresh, { watchId });
+    expect(refreshResult).toMatchObject({ scheduled: true, state: "queued" });
+    // C6: the reset happens in the SAME transaction as the claim, before the
+    // scheduled `lookup` even runs.
+    expect((await watchRow(t, watchId)).marketAttempts).toBe(0);
+
+    await t.action(internal.market.lookup, { watchId });
+
+    const afterOneFailure = await watchRow(t, watchId);
+    // Without C6 this would go straight back to terminal_failure:
+    // marketAttempts was already sitting at MARKET_MAX_ATTEMPTS from the
+    // exhausted cycle, so even a single new failure would have nowhere left
+    // to retry to.
+    expect(afterOneFailure.marketState).toBe("retryable_failure");
+    expect(afterOneFailure.marketAttempts).toBe(1);
+    expect(afterOneFailure.marketNextRetryAt).toBe(refreshedAt + MARKET_RETRY_BACKOFF_MS[0]);
   });
 });
 

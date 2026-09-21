@@ -29,17 +29,19 @@
  * flight (archived, bought, or the owner's account was tombstoned).
  */
 import { v, type Infer } from "convex/values";
-import { internalAction, internalMutation, internalQuery, mutation, type QueryCtx } from "./_generated/server";
+import { internalAction, internalMutation, internalQuery, mutation, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { ownedWatch, requireUserId } from "./lib/access";
 import { isTombstoned } from "./lib/accountState";
-import { tryCharge } from "./lib/budget";
+import { tryCharge, tryConsumeGlobalBudget } from "./lib/budget";
 import { cleanStoreUrl, FIND_MARKER, registrableHost, sameStore } from "./lib/offerMatch";
 import { WATCH_ROWS } from "./offers";
 import { parseSnapshot, flattenHistory, hostOf, type MarketSnapshot } from "./lib/shopsavvy";
 import { marketState } from "./schema";
 import {
+  DAILY_BUDGETS,
+  GLOBAL_DAILY_BUDGETS,
   MARKET_HISTORY_DAYS,
   MARKET_MAX_ATTEMPTS,
   MARKET_MAX_POINTS,
@@ -234,6 +236,37 @@ export const OUT_OF_STOCK_NOTE = "Out of stock according to ShopSavvy; confirm i
 export const CURRENCY_MISMATCH_NOTE = "Listed by ShopSavvy in a different currency; price not shown here";
 
 /**
+ * C5 (D107, Opus checkpoint-5 recheck): charges the per-user `market_lookup`
+ * counter only for attempt 1 -- a brand-new watch's first automatic check, or
+ * ANY manual refresh (a deliberate, user-initiated ask, whatever `attempts`
+ * happens to be: a manual re-try mid-backoff or a manual refresh out of
+ * `terminal_failure` are both still "the user asking"). A purely automatic
+ * retry continuation (`trigger === "auto"` with `attempts > 0`, i.e. the
+ * scheduled follow-up after an earlier failure in THIS cycle) draws only from
+ * the deployment-wide global counter.
+ *
+ * Before this, every attempt -- including the automatic retries F7/D103
+ * itself schedules -- charged the per-user counter, so one watch's own
+ * MARKET_MAX_ATTEMPTS-long failure chain could by itself exhaust the user's
+ * whole daily allowance, self-locking out even a same-day MANUAL refresh
+ * (DA-style self-lockout).
+ */
+async function chargeMarketLookup(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  trigger: "auto" | "manual",
+  attempts: number,
+  now: number,
+): Promise<boolean> {
+  if (trigger === "auto" && attempts > 0) {
+    const budget = DAILY_BUDGETS.market_lookup;
+    const global = budget.global!;
+    return tryConsumeGlobalBudget(ctx, global.kind, GLOBAL_DAILY_BUDGETS[global.kind].max, global.units, now);
+  }
+  return tryCharge(ctx, userId, "market_lookup", now);
+}
+
+/**
  * The transactional claim (D71). Both the public `refresh` and the automatic
  * path from `watches.recordWatchCheck` go through this: it is the only place
  * that reads the current state, decides whether another lookup is allowed,
@@ -286,15 +319,26 @@ export const requestLookup = internalMutation({
 
     // F7 (D103): the auto path used to charge only the deployment-wide global switch, so one user with
     // enough watches could exhaust the ENTIRE global market_lookup budget (40/day) on their own watches'
-    // first checks alone, starving every other user's for the rest of the day (DA-7). `tryCharge` already
-    // draws from both the per-user cap (5/day) and the global one for a manual refresh; charging the SAME
-    // per-user counter for an auto lookup bounds one user's auto-triggered spend the same way, using the
-    // existing DAILY_BUDGETS.market_lookup config unchanged.
-    if (!(await tryCharge(ctx, watch.userId, "market_lookup", now))) {
+    // first checks alone, starving every other user's for the rest of the day (DA-7). Charging the SAME
+    // per-user counter for an auto lookup's FIRST attempt bounds one user's auto-triggered spend the same
+    // way. C5 (D107): a pure retry continuation charges the global counter only -- see
+    // `chargeMarketLookup`'s doc comment for why.
+    const attempts = watch.marketAttempts ?? 0;
+    if (!(await chargeMarketLookup(ctx, watch.userId, trigger, attempts, now))) {
       return { scheduled: false, state: current ?? "not_configured", reason: "budget" };
     }
 
-    await ctx.db.patch(watchId, { marketState: "queued", marketClaimedAt: now });
+    const patch: Partial<Doc<"watches">> = { marketState: "queued", marketClaimedAt: now };
+    // C6 (D107): a manual refresh out of `terminal_failure` must regain a
+    // full retry chain -- otherwise `marketAttempts` is still sitting at
+    // MARKET_MAX_ATTEMPTS from the exhausted cycle, and the very next
+    // failure (even just one) has nowhere left to go and jumps straight back
+    // to terminal_failure, defeating the point of letting the user retry by
+    // hand. Scoped to exactly this transition (not e.g. a retryable_failure
+    // resumed past its backoff, which IS a genuine continuation of the same
+    // chain and must keep counting from where it left off).
+    if (current === "terminal_failure") patch.marketAttempts = 0;
+    await ctx.db.patch(watchId, patch);
     await ctx.scheduler.runAfter(0, internal.market.lookup, { watchId });
     return { scheduled: true, state: "queued" };
   },
