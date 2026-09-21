@@ -42,6 +42,8 @@ export const Policy = z.object({
 export const Price = z.object({
   price: z.number().nullable().describe("single current selling price in major units; null if not a single unambiguous number"),
   currency: z.string().nullable().describe("ISO 4217 code shown on the page, else null"),
+  listPrice: z.number().nullable().describe("the struck-through / was / list price shown on the page in major units, else null"),
+  productName: z.string().nullable().describe("the product's name as the page titles it, a short plain name; null if the page is not a product page"),
   isRange: z.boolean().describe("true if the page shows a price range or 'from' price"),
   variantMatch: z.enum(["exact", "unsure", "none"]).describe("whether the price is for the exact named product/variant"),
   note: z.string().nullable(),

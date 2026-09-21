@@ -19,6 +19,12 @@ export const processedRoute = v.union(v.literal("reply"), v.literal("intake"), v
 export const noteKind = v.union(v.literal("note"), v.literal("status"), v.literal("expected_change"));
 export const followUpStatus = v.union(v.literal("pending"), v.literal("fired"), v.literal("cancelled"));
 export const variantMatch = v.union(v.literal("exact"), v.literal("unsure"), v.literal("none"));
+/** W1b. Produced only by lib/verdict.ts, never by the model. */
+export const verdictLabel = v.union(
+  v.literal("good_price"), v.literal("fair"), v.literal("wait"), v.literal("inflated_discount"), v.literal("not_enough_history"), v.literal("unknown"),
+);
+export const verdictValidator = v.object({ label: verdictLabel, reason: v.string() });
+export const watchStatus = v.union(v.literal("active"), v.literal("paused"), v.literal("archived"), v.literal("bought"));
 
 export default defineSchema({
   ...authTables,
@@ -54,6 +60,23 @@ export default defineSchema({
     confidence: v.optional(v.number()), variantMatch: v.optional(variantMatch), observedAt: v.number(), sourceUrl: v.string(),
     note: v.optional(v.string()),
   }).index("by_item", ["itemId"]),
+
+  /**
+   * A product the user has NOT bought yet (W1). `nextCheckAt` is denormalised so the sweep reads a bounded page off
+   * by_status_nextCheck; `checkRequestedAt` is stamped when a check is scheduled and carries the manual-check cooldown; `lastCents` is the latest accepted price for list views. `purchaseId` is set when a watch is bought (W4).
+   */
+  watches: defineTable({
+    userId: v.id("users"), name: v.string(), productUrl: v.string(), merchantDomain: v.string(), currency: v.optional(v.string()),
+    targetCents: v.optional(v.number()), status: watchStatus, lastCheckedAt: v.optional(v.number()), nextCheckAt: v.number(),
+    lastCents: v.optional(v.number()), purchaseId: v.optional(v.id("purchases")), checkRequestedAt: v.optional(v.number()),
+  }).index("by_user", ["userId"]).index("by_user_status", ["userId", "status"]).index("by_status_nextCheck", ["status", "nextCheckAt"]),
+
+  /** One observation of a watched page; sibling of priceChecks. observedCents undefined = no usable price (D16). listCents is the page's claimed "was" price. */
+  watchChecks: defineTable({
+    watchId: v.id("watches"), userId: v.id("users"), observedCents: v.optional(v.number()), listCents: v.optional(v.number()),
+    currency: v.optional(v.string()), confidence: v.optional(v.number()), variantMatch: v.optional(variantMatch), observedAt: v.number(),
+    sourceUrl: v.string(), note: v.optional(v.string()),
+  }).index("by_watch", ["watchId", "observedAt"]),
 
   /** Money the store owes on one item for one reason. Balance is derived from ledgerEvents, never stored. */
   claims: defineTable({

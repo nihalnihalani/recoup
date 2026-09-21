@@ -55,6 +55,7 @@ const STAGGER_MS = 3_000;
 export const CHECK_COOLDOWN_MS = 60_000;
 
 const MAX_NOTE_CHARS = 500;
+const MAX_NAME_CHARS = 200;
 /** Below this a "page" is an interstitial or an error page, not a product. */
 const MIN_PAGE_CHARS = 200;
 
@@ -92,11 +93,11 @@ const recordResult = v.object({
   note: v.optional(v.string()),
 });
 
-function truncate(note: string): string {
+export function truncate(note: string): string {
   return note.slice(0, MAX_NOTE_CHARS);
 }
 
-function errorNote(prefix: string, err: unknown): string {
+export function errorNote(prefix: string, err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   return truncate(`${prefix}: ${message}`);
 }
@@ -229,7 +230,7 @@ export const recordCheck = internalMutation({
     if (!purchase || purchase.userId !== item.userId) throw new ConvexError("Purchase not found");
 
     const now = Date.now();
-    const rejection = rejectionReason(args, purchase.currency);
+    const rejection = rejectionReason(args, purchase.currency, "the purchase was");
 
     const priceCheckId = await ctx.db.insert("priceChecks", {
       itemId: item._id,
@@ -278,8 +279,13 @@ export const recordCheck = internalMutation({
   },
 });
 
-/** D16 in one place. Returns null when the observation is usable. */
-function rejectionReason(
+/**
+ * D16 in one place. Returns null when the observation is usable.
+ * `expectedCurrency` is null when nothing is known yet (a watch before its
+ * first accepted check): any stated currency passes. `expectedWas` finishes
+ * the mismatch sentence ("the purchase was" / "this watch is tracked").
+ */
+export function rejectionReason(
   args: {
     observedCents?: number;
     currency?: string;
@@ -287,7 +293,8 @@ function rejectionReason(
     isRange?: boolean;
     variantMatch?: "exact" | "unsure" | "none";
   },
-  purchaseCurrency: string,
+  expectedCurrency: string | null,
+  expectedWas: string,
 ): string | null {
   if (args.isRange) return "Page shows a price range, not a single price";
   if (args.observedCents === undefined) return null; // nothing to accept; caller's note stands
@@ -300,8 +307,8 @@ function rejectionReason(
       : "Could not tell which variant the price is for";
   }
   if (!args.currency) return "The page does not state a currency";
-  if (args.currency !== purchaseCurrency) {
-    return `Page price is in ${args.currency}, the purchase was in ${purchaseCurrency}`;
+  if (expectedCurrency !== null && args.currency !== expectedCurrency) {
+    return `Page price is in ${args.currency}, ${expectedWas} in ${expectedCurrency}`;
   }
   if (args.confidence === undefined || args.confidence < MIN_CONFIDENCE) {
     return "Low confidence in the extracted price";
@@ -326,16 +333,16 @@ export const checkItem = internalAction({
     const item = await ctx.runQuery(internal.priceWatch.itemForCheck, { itemId });
     if (!item) return null;
 
-    let observed: {
-      observedCents?: number;
-      currency?: string;
-      confidence?: number;
-      isRange?: boolean;
-      variantMatch?: "exact" | "unsure" | "none";
-      note?: string;
-    };
+    let observed: Observation;
     try {
-      observed = await observePrice(ctx, item.name, item.productUrl);
+      // `listCents` and `productName` are for watches (W1); an owned item
+      // already has a name and `priceChecks` has no list-price column.
+      const { listCents: _listCents, productName: _productName, ...rest } = await observePrice(
+        ctx,
+        item.name,
+        item.productUrl,
+      );
+      observed = rest;
     } catch (err) {
       console.error(`priceWatch.checkItem failed for ${itemId}`, err);
       observed = { note: errorNote("Price check failed", err) };
@@ -349,7 +356,7 @@ export const checkItem = internalAction({
   },
 });
 
-type Observation = {
+export type Observation = {
   observedCents?: number;
   currency?: string;
   confidence?: number;
@@ -358,17 +365,25 @@ type Observation = {
   note?: string;
 };
 
+/** What the page also said, used only by watches (W1, W1b). */
+export type PageObservation = Observation & {
+  /** The page's claimed "was"/list price in minor units, unverified. */
+  listCents?: number;
+  productName?: string;
+};
+
 /**
  * The external half of a price check: scrape the page, extract the price.
  * Exported so it can be exercised directly against a real retailer without
- * seeding a purchase.
+ * seeding a purchase, and shared with `watches.checkWatch`. `name` is null
+ * when the user pasted a bare link and nobody knows the product's name yet.
  */
 export async function observePrice(
   // The ActionCtx shape Firecrawl needs; inferred from the caller.
   ctx: Parameters<FirecrawlClient["scrape"]>[0],
-  name: string,
+  name: string | null,
   productUrl: string,
-): Promise<Observation> {
+): Promise<PageObservation> {
   const page = await firecrawl.scrape(ctx, productUrl, scrapeOptions());
   const markdown = typeof page.markdown === "string" ? page.markdown : "";
   if (markdown.length < MIN_PAGE_CHARS) {
@@ -378,7 +393,9 @@ export async function observePrice(
   const parsed = await extract(
     "price",
     Price,
-    `${SYSTEM}\n\nThe product is: ${name.slice(0, 200)}`,
+    name === null
+      ? `${SYSTEM}\n\nThe product is the main product this page sells.`
+      : `${SYSTEM}\n\nThe product is: ${name.slice(0, 200)}`,
     markdown,
   );
 
@@ -390,8 +407,19 @@ export async function observePrice(
       return { note: `Extracted price is out of range: ${parsed.price}` };
     }
   }
+  let listCents: number | undefined;
+  if (parsed.listPrice !== null) {
+    try {
+      listCents = toCents(parsed.listPrice);
+    } catch {
+      listCents = undefined; // a claimed "was" price we cannot represent is simply not shown
+    }
+  }
+  const productName = parsed.productName?.trim();
   return {
     observedCents,
+    listCents,
+    productName: productName ? productName.slice(0, MAX_NAME_CHARS) : undefined,
     currency: parsed.currency ? parsed.currency.trim().toUpperCase() : undefined,
     confidence: parsed.confidence,
     isRange: parsed.isRange,

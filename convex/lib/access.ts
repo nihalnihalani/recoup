@@ -40,3 +40,9 @@ export async function ownedDraft(ctx: Ctx, draftId: Id<"drafts">, userId: Id<"us
   if (!d || d.userId !== userId) throw new ConvexError("Draft not found");
   return d;
 }
+
+export async function ownedWatch(ctx: Ctx, watchId: Id<"watches">, userId: Id<"users">) {
+  const w = await ctx.db.get(watchId);
+  if (!w || w.userId !== userId) throw new ConvexError("Watch not found");
+  return w;
+}

@@ -25,6 +25,9 @@ import type * as lib_money from "../lib/money.js";
 import type * as lib_passage from "../lib/passage.js";
 import type * as lib_policyText from "../lib/policyText.js";
 import type * as lib_schemas from "../lib/schemas.js";
+import type * as lib_verdict from "../lib/verdict.js";
+import type * as lib_watchUrl from "../lib/watchUrl.js";
+import type * as limits from "../limits.js";
 import type * as mail from "../mail.js";
 import type * as policies from "../policies.js";
 import type * as priceWatch from "../priceWatch.js";
@@ -32,6 +35,7 @@ import type * as profiles from "../profiles.js";
 import type * as purchases from "../purchases.js";
 import type * as replies from "../replies.js";
 import type * as tracking from "../tracking.js";
+import type * as watches from "../watches.js";
 
 import type {
   ApiFromModules,
@@ -57,6 +61,9 @@ declare const fullApi: ApiFromModules<{
   "lib/passage": typeof lib_passage;
   "lib/policyText": typeof lib_policyText;
   "lib/schemas": typeof lib_schemas;
+  "lib/verdict": typeof lib_verdict;
+  "lib/watchUrl": typeof lib_watchUrl;
+  limits: typeof limits;
   mail: typeof mail;
   policies: typeof policies;
   priceWatch: typeof priceWatch;
@@ -64,6 +71,7 @@ declare const fullApi: ApiFromModules<{
   purchases: typeof purchases;
   replies: typeof replies;
   tracking: typeof tracking;
+  watches: typeof watches;
 }>;
 
 /**

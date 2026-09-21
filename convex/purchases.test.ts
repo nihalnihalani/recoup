@@ -300,4 +300,28 @@ describe("merchant domain normalisation (review H7)", () => {
     const got = await as.query(api.purchases.get, { purchaseId: id });
     expect(got!.purchase.merchantDomain).toBe("bestbuy.com");
   });
+  it("gives every item a verdict from its accepted price checks only (W1b)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const id = await as.mutation(api.purchases.create, basePurchase);
+    const before = await as.query(api.purchases.get, { purchaseId: id });
+    expect(before.items.map((i) => i.verdict.label)).toEqual(["unknown", "unknown"]);
+
+    const itemId = before.items[0]._id;
+    const now = Date.now();
+    const DAY = 86_400_000;
+    await t.run(async (ctx) => {
+      const base = { itemId, userId, sourceUrl: "https://northwind.example/p/sweater" };
+      for (const [daysAgo, cents] of [[9, 8000], [5, 8000], [1, 7000]]) {
+        await ctx.db.insert("priceChecks", { ...base, observedAt: now - daysAgo * DAY, observedCents: cents, currency: "USD" });
+      }
+      // A rejected check (no cents) is not history.
+      await ctx.db.insert("priceChecks", { ...base, observedAt: now, note: "Page shows a price range" });
+    });
+
+    const after = await as.query(api.purchases.get, { purchaseId: id });
+    expect(after.items[0].verdict.label).toBe("good_price");
+    expect(after.items[0].verdict.reason).toContain("$70.00");
+    expect(after.items[1].verdict.label).toBe("unknown");
+  });
 });

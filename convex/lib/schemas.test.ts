@@ -104,6 +104,8 @@ describe("Price", () => {
     const fixture = {
       price: null,
       currency: null,
+      listPrice: null,
+      productName: null,
       isRange: true,
       variantMatch: "unsure",
       note: "from $95",
@@ -116,6 +118,8 @@ describe("Price", () => {
     const fixture = {
       price: 95,
       currency: "USD",
+      listPrice: 120,
+      productName: "Jacket",
       isRange: false,
       variantMatch: "maybe",
       note: null,

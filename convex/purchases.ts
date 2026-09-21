@@ -8,6 +8,7 @@ import { claimsWithBalance } from "./lib/balance";
 import { assertCents, assertCurrency, assertNonEmpty, assertQty, assertTimestamp } from "./lib/money";
 import { cancelPending } from "./followUps";
 import { normalizeDomain } from "./lib/policyText";
+import { verdict } from "./lib/verdict";
 
 const itemInput = v.object({
   name: v.string(),
@@ -172,16 +173,33 @@ export const get = query({
       .query("items")
       .withIndex("by_purchase", (q) => q.eq("purchaseId", purchaseId))
       .collect();
+    const now = Date.now();
     const items = await Promise.all(
-      rawItems.map(async (it) => ({
-        ...it,
-        claims: await claimsWithBalance(ctx, it._id),
-        priceChecks: await ctx.db
+      rawItems.map(async (it) => {
+        const priceChecks = await ctx.db
           .query("priceChecks")
           .withIndex("by_item", (q) => q.eq("itemId", it._id))
           .order("desc")
-          .take(30),
-      })),
+          .take(30);
+        // W1b: the same verdict line a watch gets, from the accepted checks
+        // already loaded. `priceChecks` has no list-price column, so the
+        // inflated-discount call cannot fire here.
+        const history = priceChecks.flatMap((c) =>
+          c.observedCents === undefined ? [] : [{ observedAt: c.observedAt, cents: c.observedCents }],
+        );
+        return {
+          ...it,
+          claims: await claimsWithBalance(ctx, it._id),
+          priceChecks,
+          verdict: verdict({
+            currentCents: history[0]?.cents ?? null,
+            listCents: null,
+            history,
+            now,
+            currency: purchase.currency,
+          }),
+        };
+      }),
     );
     // Latest snapshot per kind for this user+domain (D17).
     const policyRows = await Promise.all(
