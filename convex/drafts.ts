@@ -21,7 +21,8 @@ import { agentmail } from "./mail";
 import { scheduleClaimReminder } from "./followUps";
 import { charge } from "./lib/budget";
 import { stripControl } from "./lib/text";
-import { MAX_SENDS_PER_CLAIM } from "./limits";
+import { isTombstoned } from "./lib/accountState";
+import { MAIL_RECONCILE_STALL_MS, MAX_SENDS_PER_CLAIM } from "./limits";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -562,12 +563,28 @@ export async function applySendOutcome(
   }
 
   if (claim.status === "queued") await ctx.db.patch(claim._id, { sendUnknown: true });
+  // T06 durable-delivery review: backoff exhausted must not mean "never
+  // checked again" -- without this, a draft whose delivery never resolves
+  // (worker outage, a status the component never settles) is stuck
+  // `sendUnknown` forever unless the user happens to click "check again"
+  // (`recheckSend`). `drafts` has no `nextCheckAt`/`by_status_nextCheck`
+  // column to drive a `notify.sweepStalled`-style cron sweep (schema.ts is
+  // out of scope for this task), so the sibling mechanism is this mutation
+  // rescheduling itself on the same stall interval `notify.ts` uses for
+  // `mailLog`, at the same "attempts exhausted" attempt number, until a
+  // definite outcome (the `sent`/`failed` branches above) stops it.
+  await ctx.scheduler.runAfter(MAIL_RECONCILE_STALL_MS, internal.drafts.reconcileSend, {
+    draftId: draft._id,
+    attempt: BACKOFF_MS.length,
+  });
   return "unknown";
 }
 
 /**
  * The scheduled delivery check (D13, D29). Reads the component's view of the
- * outbound message and hands it to `applySendOutcome`.
+ * outbound message and hands it to `applySendOutcome`. Skips a tombstoned
+ * account (D87): a scheduled mutation reaching a `deleting`/`deleted`
+ * user's own claim/draft rows must not keep touching them.
  */
 export const reconcileSend = internalMutation({
   args: { draftId: v.id("drafts"), attempt: v.number() },
@@ -575,6 +592,7 @@ export const reconcileSend = internalMutation({
   handler: async (ctx, args) => {
     const draft = await ctx.db.get(args.draftId);
     if (!draft || !draft.outboundId) return null;
+    if (await isTombstoned(ctx, draft.userId)) return null;
     const status = await agentmail.status(statusCtx(ctx), draft.outboundId);
     await applySendOutcome(ctx, args.draftId, args.attempt, status);
     return null;

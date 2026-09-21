@@ -603,6 +603,48 @@ describe("drafts.reconcileSend transitions (D13)", () => {
     );
     expect(followUps).toHaveLength(1);
   });
+
+  it("T06 durable-delivery review: exhausting the backoff also schedules a stall-interval recheck, not just sendUnknown", async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { claimId, draftId } = await sentDraft(t, userId);
+    const pending = { status: "pending", agentmailMessageId: null, threadId: null, errorMessage: null };
+
+    const outcome = await t.run((ctx) => applySendOutcome(ctx, draftId, 5, pending));
+    expect(outcome).toBe("unknown");
+
+    const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    expect(scheduled).toHaveLength(1); // the sibling stall-interval reconcile, since drafts has no nextCheckAt column to sweep off of
+
+    // It eventually resolves once AgentMail catches up.
+    const status = vi.spyOn(agentmail, "status").mockResolvedValue({
+      status: "sent",
+      agentmailMessageId: "msg-late",
+      threadId: null,
+      errorMessage: null,
+    } as never);
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect(status).toHaveBeenCalled();
+    const claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).toBe("sent");
+  });
+
+  it("T06 durable-delivery review (D87): reconcileSend skips a tombstoned account without touching the draft/claim", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { claimId, draftId } = await sentDraft(t, userId);
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }),
+    );
+
+    await t.mutation(internal.drafts.reconcileSend, { draftId, attempt: 1 });
+
+    const claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).toBe("queued"); // untouched: reconcileSend returned early
+    const draft = await t.run((ctx) => ctx.db.get(draftId));
+    expect(draft?.outboundId).toBe("outbound-1"); // untouched
+  });
 });
 
 describe("drafts.update", () => {
