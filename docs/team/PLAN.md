@@ -336,7 +336,7 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 **Files:** convex/lib/idempotency.ts (+test, new), convex/claims.ts, convex/replies.ts, convex/intake.ts (+tests), convex/inbound.ts (+test), convex/limits.ts, convex/lib/rateLimits.ts. Contract: D112 rows 6a-1 and 6a-2 verbatim.
 
 ### T12.3 — Checkpoint 6a C3 test strength and LOW wiring gaps (D112 6a-3..6)
-**Owner:** sonnet-backend-3 · **Phase:** 3 (fix) · **Status:** in_progress
+**Owner:** sonnet-backend-3 · **Phase:** 3 (fix) · **Status:** verified (10f9abf..c7e308c; lead re-ran 4 files 106/106; neutered-helper proof: all 4 resurrection tests fail with no-op helpers)
 **Files:** convex/priceWatch.test.ts, convex/purchases.ts (+test), convex/policies.ts (+test), convex/lib/schedule.ts (+test). Contract: D112 rows 6a-3..6a-6 verbatim.
 
 ### T16 — P07 retention (bounded, resumable, audit-preserving) plus P08 backend fixes: returns validators and string bounds on cla
