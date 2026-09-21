@@ -1,5 +1,5 @@
 diff --git a/node_modules/@agentmail/convex/dist/component/_generated/component.d.ts b/node_modules/@agentmail/convex/dist/component/_generated/component.d.ts
-index 6c2860c..acc5e62 100644
+index 6c2860c..fb54685 100644
 --- a/node_modules/@agentmail/convex/dist/component/_generated/component.d.ts
 +++ b/node_modules/@agentmail/convex/dist/component/_generated/component.d.ts
 @@ -162,5 +162,34 @@ export type ComponentApi<
@@ -31,7 +31,7 @@ index 6c2860c..acc5e62 100644
 +    purgeOutbound: FunctionReference<
 +      "mutation",
 +      "internal",
-+      { outboundId: GenericId<"outboundMessages"> },
++      { outboundId?: GenericId<"outboundMessages">; messageId?: string },
 +      { remaining: boolean },
 +      Name
 +    >;
@@ -67,10 +67,10 @@ index 3d15ed6..6e45e2a 100644
  component.use(workpool, { name: "callbackPool" });
  export default component;
 diff --git a/node_modules/@agentmail/convex/dist/component/lib.d.ts b/node_modules/@agentmail/convex/dist/component/lib.d.ts
-index 2db242a..685a9c6 100644
+index 2db242a..810eb99 100644
 --- a/node_modules/@agentmail/convex/dist/component/lib.d.ts
 +++ b/node_modules/@agentmail/convex/dist/component/lib.d.ts
-@@ -181,5 +181,17 @@ export declare const handleEvent: import("convex/server").RegisteredMutation<"pu
+@@ -181,5 +181,18 @@ export declare const handleEvent: import("convex/server").RegisteredMutation<"pu
  export declare const cleanupFinalizedOutbound: import("convex/server").RegisteredMutation<"public", {
      olderThan?: number | undefined;
  }, Promise<void>>;
@@ -82,7 +82,8 @@ index 2db242a..685a9c6 100644
 +    deleted: number;
 +}>>;
 +export declare const purgeOutbound: import("convex/server").RegisteredMutation<"internal", {
-+    outboundId: import("convex/values").GenericId<"outboundMessages">;
++    outboundId?: import("convex/values").GenericId<"outboundMessages"> | undefined;
++    messageId?: string | undefined;
 +}, Promise<{
 +    remaining: boolean;
 +}>>;
@@ -90,10 +91,38 @@ index 2db242a..685a9c6 100644
  //# sourceMappingURL=lib.d.ts.map
 \ No newline at end of file
 diff --git a/node_modules/@agentmail/convex/dist/component/lib.js b/node_modules/@agentmail/convex/dist/component/lib.js
-index c245802..99ae5f0 100644
+index c245802..122aadb 100644
 --- a/node_modules/@agentmail/convex/dist/component/lib.js
 +++ b/node_modules/@agentmail/convex/dist/component/lib.js
-@@ -476,4 +476,90 @@ export const cleanupFinalizedOutbound = mutation({
+@@ -457,6 +457,12 @@ async function applyEventToOutbound(ctx, messageId, event) {
+ // stamps finalizedAt on sent rows so they get reclaimed even if AgentMail
+ // never delivers a follow-up delivery/bounce webhook.
+ const SWEEPABLE_STATUSES = ["sent", ...TERMINAL_STATUSES];
++// B-9 (D129, checkpoint 6d): deletes a finalized row's own events (by
++// `agentmailMessageId`, via `by_message`, bounded to PURGE_PAGE per row per
++// call) BEFORE deleting the row itself, so a later `purgeOutbound({
++// outboundId })` -- which can no longer resolve this id once this sweep has
++// run -- does not find the row gone and its events orphaned forever. See
++// src/component/lib.ts for the full design note.
+ export const cleanupFinalizedOutbound = mutation({
+     args: { olderThan: v.optional(v.number()) },
+     handler: async (ctx, args) => {
+@@ -470,10 +476,108 @@ export const cleanupFinalizedOutbound = mutation({
+                 .take(PER_STATUS_LIMIT);
+             for (const row of rows) {
+                 if (row.finalizedAt && row.finalizedAt < cutoff) {
++                    if (row.agentmailMessageId) {
++                        const events = await ctx.db
++                            .query("events")
++                            .withIndex("by_message", (q) => q.eq("messageId", row.agentmailMessageId))
++                            .take(PURGE_PAGE);
++                        for (const event of events) {
++                            await ctx.db.delete(event._id);
++                        }
++                    }
+                     await ctx.db.delete(row._id);
+                 }
+             }
          }
      },
  });
@@ -160,14 +189,16 @@ index c245802..99ae5f0 100644
 +// T18.5 (D124 B1): single-outbound purge. See src/component/lib.ts for the
 +// full design note (why a shared "alerts" inbox cannot be purged wholesale).
 +// ---------------------------------------------------------------------------
++// B-9 (D129, checkpoint 6d): `outboundId` and `messageId` are both optional;
++// the row's own `agentmailMessageId` (when the row still exists) wins over a
++// caller-supplied `messageId`, which is the fallback for a row already
++// reclaimed by `cleanupFinalizedOutbound`'s own sweep. See src/component/lib.ts.
 +export const purgeOutbound = internalMutation({
-+    args: { outboundId: v.id("outboundMessages") },
++    args: { outboundId: v.optional(v.id("outboundMessages")), messageId: v.optional(v.string()) },
 +    returns: v.object({ remaining: v.boolean() }),
 +    handler: async (ctx, args) => {
-+        const row = await ctx.db.get(args.outboundId);
-+        if (!row)
-+            return { remaining: false };
-+        const messageId = row.agentmailMessageId;
++        const row = args.outboundId ? await ctx.db.get(args.outboundId) : null;
++        const messageId = row?.agentmailMessageId ?? args.messageId;
 +        if (messageId) {
 +            const page = await ctx.db
 +                .query("events")
@@ -179,7 +210,8 @@ index c245802..99ae5f0 100644
 +            if (page.length === PURGE_PAGE)
 +                return { remaining: true };
 +        }
-+        await ctx.db.delete(args.outboundId);
++        if (row)
++            await ctx.db.delete(row._id);
 +        return { remaining: false };
 +    },
 +});
@@ -230,7 +262,7 @@ index 5bf49d1..c620afd 100644
  //# sourceMappingURL=schema.js.map
 \ No newline at end of file
 diff --git a/node_modules/@agentmail/convex/src/component/_generated/component.d.ts b/node_modules/@agentmail/convex/src/component/_generated/component.d.ts
-index 6c2860c..acc5e62 100644
+index 6c2860c..fb54685 100644
 --- a/node_modules/@agentmail/convex/src/component/_generated/component.d.ts
 +++ b/node_modules/@agentmail/convex/src/component/_generated/component.d.ts
 @@ -162,5 +162,34 @@ export type ComponentApi<
@@ -262,7 +294,7 @@ index 6c2860c..acc5e62 100644
 +    purgeOutbound: FunctionReference<
 +      "mutation",
 +      "internal",
-+      { outboundId: GenericId<"outboundMessages"> },
++      { outboundId?: GenericId<"outboundMessages">; messageId?: string },
 +      { remaining: boolean },
 +      Name
 +    >;
@@ -287,10 +319,50 @@ index b1cc7f1..a61a50f 100644
  component.use(workpool, { name: "callbackPool" });
  
 diff --git a/node_modules/@agentmail/convex/src/component/lib.ts b/node_modules/@agentmail/convex/src/component/lib.ts
-index 121dd58..7b78c4b 100644
+index 121dd58..82a356c 100644
 --- a/node_modules/@agentmail/convex/src/component/lib.ts
 +++ b/node_modules/@agentmail/convex/src/component/lib.ts
-@@ -580,3 +580,156 @@ export const cleanupFinalizedOutbound = mutation({
+@@ -561,6 +561,26 @@ async function applyEventToOutbound(
+ // never delivers a follow-up delivery/bounce webhook.
+ const SWEEPABLE_STATUSES = ["sent", ...TERMINAL_STATUSES] as const;
+ 
++/**
++ * B-9 (D129, checkpoint 6d): this sweep used to delete a finalized row
++ * WITHOUT its `events` -- a delivery/bounce webhook that arrived before the
++ * 7-day cutoff (a completely ordinary alert, not a rare race) left its
++ * `events` rows permanently unreachable the moment the row they join
++ * against was gone: `purgeOutbound({ outboundId })` (called later, e.g. at
++ * account-deletion time) does a plain `ctx.db.get` on an id that no longer
++ * resolves to anything and returns `{ remaining: false }` having done
++ * nothing, even though the caller may still hold the row's
++ * `agentmailMessageId` as its own join key (Recoup's `mailLog`/`drafts`
++ * tables both do). Fixed by deleting this row's own events FIRST, via the
++ * same `by_message`/`PURGE_PAGE`-bounded query `purgeOutbound` uses, before
++ * the row itself goes -- one page per row per call (a single outbound
++ * message realistically has only a handful of events, so this converges in
++ * one pass in practice; the pathological row with more events than
++ * `PURGE_PAGE` still has its row reclaimed on this same cutoff, unchanged
++ * from before -- a caller who needs a hard guarantee for that edge case
++ * calls `purgeOutbound({ messageId })` again later with the id it already
++ * has on file, per that function's own docstring).
++ */
+ export const cleanupFinalizedOutbound = mutation({
+   args: { olderThan: v.optional(v.number()) },
+   handler: async (ctx, args) => {
+@@ -574,9 +594,182 @@ export const cleanupFinalizedOutbound = mutation({
+         .take(PER_STATUS_LIMIT);
+       for (const row of rows) {
+         if (row.finalizedAt && row.finalizedAt < cutoff) {
++          if (row.agentmailMessageId) {
++            const events = await ctx.db
++              .query("events")
++              .withIndex("by_message", (q) => q.eq("messageId", row.agentmailMessageId!))
++              .take(PURGE_PAGE);
++            for (const event of events) await ctx.db.delete(event._id);
++          }
+           await ctx.db.delete(row._id);
+         }
+       }
      }
    },
  });
@@ -421,19 +493,32 @@ index 121dd58..7b78c4b 100644
 + * outbound message realistically has a handful of events (sent, delivered,
 + * bounced...), so in practice this always converges in one call, but the
 + * row itself is deleted only once no more events remain -- `remaining: true`
-+ * tells the caller to invoke this again with the SAME `outboundId` (deleted
++ * tells the caller to invoke this again with the SAME arguments (deleted
 + * events never come back, so repeated calls always terminate). Idempotent:
 + * a second call for an already-purged id returns `{ remaining: false }`
 + * having done nothing.
++ *
++ * B-9 (D129, checkpoint 6d): `outboundId` and `messageId` are both optional
++ * now -- pass `outboundId` when the row might still exist (its OWN
++ * `agentmailMessageId`, once set, wins over a caller-supplied `messageId`,
++ * since the row is the more current source of truth for its own id), and/or
++ * `messageId` as a fallback for when the row is already gone (this
++ * component's own daily `cleanupFinalizedOutbound` sweep reclaims a
++ * finalized row after `FINALIZED_OUTBOUND_RETENTION_MS`, independent of
++ * whatever a caller here does days or weeks later): a caller with only the
++ * id it already had on file (Recoup's `mailLog`/`drafts` tables both store
++ * `agentmailMessageId` once a send is confirmed, regardless of whether this
++ * component still has a live row for it) can still finish purging that
++ * message's `events` with nothing else to go on. Neither argument given is
++ * a no-op, `{ remaining: false }`.
 + */
 +export const purgeOutbound = internalMutation({
-+  args: { outboundId: v.id("outboundMessages") },
++  args: { outboundId: v.optional(v.id("outboundMessages")), messageId: v.optional(v.string()) },
 +  returns: v.object({ remaining: v.boolean() }),
 +  handler: async (ctx, args) => {
-+    const row = await ctx.db.get(args.outboundId);
-+    if (!row) return { remaining: false };
++    const row = args.outboundId ? await ctx.db.get(args.outboundId) : null;
++    const messageId = row?.agentmailMessageId ?? args.messageId;
 +
-+    const messageId = row.agentmailMessageId;
 +    if (messageId) {
 +      const page = await ctx.db
 +        .query("events")
@@ -443,7 +528,7 @@ index 121dd58..7b78c4b 100644
 +      if (page.length === PURGE_PAGE) return { remaining: true };
 +    }
 +
-+    await ctx.db.delete(args.outboundId);
++    if (row) await ctx.db.delete(row._id);
 +    return { remaining: false };
 +  },
 +});

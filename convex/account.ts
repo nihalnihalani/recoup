@@ -603,25 +603,57 @@ const MAILLOG_PURGE_PAGE = 25;
  * `internal.*` call). Bounded to a handful of retries per row (a single
  * outbound message realistically has only a few events -- sent, delivered,
  * bounced -- so `remaining` almost never comes back `true` even once); a row
- * that still is not exhausted after that is left for the NEXT `purgeStep`
- * call to finish (it is not deleted from `mailLog` yet, so the page does not
- * advance past it and the same row is retried).
+ * that still is not exhausted after that is NOT deleted from `mailLog` (B-7,
+ * D129: aligning behaviour with this paragraph's own promise -- see
+ * `deleteMailLogPage`'s own comment for exactly what "not deleted" costs).
+ *
+ * B-9 (D129, checkpoint 6d): passes BOTH `outboundId` and the row's own
+ * `agentmailMessageId` -- the component's own daily `cleanupFinalizedOutbound`
+ * sweep (7-day retention) can reclaim the `outboundMessages` row long before
+ * THIS purge ever runs, at which point `outboundId` alone resolves to
+ * nothing; the row's `agentmailMessageId` (recorded once the send confirms,
+ * independent of the component's own row lifetime) is what still lets
+ * `mailPurge.purgeOutbound` find and delete that message's `events`.
  */
 const MAILLOG_OUTBOUND_PURGE_ATTEMPTS = 5;
 
+/**
+ * B-7 (D129, checkpoint 6d): this used to delete EVERY row in the page
+ * unconditionally, even one whose component purge above was still
+ * `remaining: true` after all `MAILLOG_OUTBOUND_PURGE_ATTEMPTS` -- silently
+ * discarding the only join key (`outboundId`/`agentmailMessageId`) anything
+ * could ever use to finish purging that message's still-live `events` in the
+ * shared alerts inbox, contradicting this function's own (and
+ * `MAILLOG_OUTBOUND_PURGE_ATTEMPTS`'s) documented "left for the next call"
+ * behaviour. Fixed the safe way the task calls for: a row still `remaining`
+ * after the attempt budget is skipped, not deleted, and not counted in
+ * `deleted`. Known gap (needs >1,000 events on ONE message to matter, an
+ * extreme volume no real alert approaches): this page's underlying
+ * `.paginate()` cursor still advances past a skipped row's position (Convex
+ * gives no mid-page cursor to stop it retrying the SAME row on the next
+ * call, only the whole-page `continueCursor`), so that one row is left
+ * permanently in `mailLog` once this table's step reaches `isDone` -- see
+ * the report's "known gaps" and RUNBOOK §12.
+ */
 async function deleteMailLogPage(ctx: MutationCtx, userId: Id<"users">, cursor: string | null, numItems: number): Promise<{ deleted: number; isDone: boolean; continueCursor: string }> {
   const page = await paginateByUser(ctx, "mailLog", "by_user", userId, cursor, numItems);
+  let deleted = 0;
   for (const row of page.page) {
     const outboundId = (row as Doc<"mailLog">).outboundId;
-    if (outboundId) {
+    const messageId = (row as Doc<"mailLog">).agentmailMessageId;
+    let remaining = false;
+    if (outboundId || messageId) {
       for (let i = 0; i < MAILLOG_OUTBOUND_PURGE_ATTEMPTS; i++) {
-        const result = await ctx.runMutation(internal.mailPurge.purgeOutbound, { outboundId });
-        if (!result.remaining) break;
+        const result = await ctx.runMutation(internal.mailPurge.purgeOutbound, { outboundId, messageId });
+        remaining = result.remaining;
+        if (!remaining) break;
       }
     }
+    if (remaining) continue; // B-7: leave it for a human/future pass rather than losing the join key.
     await deleteRow(ctx, row);
+    deleted++;
   }
-  return { deleted: page.page.length, isDone: page.isDone, continueCursor: page.continueCursor };
+  return { deleted, isDone: page.isDone, continueCursor: page.continueCursor };
 }
 
 /**

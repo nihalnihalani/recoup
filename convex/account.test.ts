@@ -1551,3 +1551,117 @@ describe("T18.5 (D124 B1): purgeStep's mailLog step purges the shared alerts inb
     expect(await t.run((ctx) => ctx.db.query("mailLog").withIndex("by_user", (q) => q.eq("userId", a.userId)).collect())).toHaveLength(0);
   });
 });
+
+describe("T18.6 (D129 B-9/B-7): checkpoint 6d remainder -- the component's own daily cleanupFinalizedOutbound sweep must not orphan events, and deleteMailLogPage must not delete a row purgeOutbound still reports remaining:true for", () => {
+  const RUNTIME_CONFIG = { retryAttempts: 1, initialBackoffMs: 10 };
+
+  async function purgeToCompletion(t: T, userId: Id<"users">) {
+    let done = false;
+    for (let i = 0; i < 100 && !done; i++) {
+      done = (await t.mutation(internal.account.purgeStep, { userId })).done;
+    }
+    expect(done).toBe(true);
+  }
+
+  async function driveSend(t: T, outboundId: GenericId<"outboundMessages">) {
+    let status: { status: string; agentmailMessageId: string | null } | null = null;
+    for (let i = 0; i < 60; i++) {
+      vi.advanceTimersByTime(50);
+      await t.finishInProgressScheduledFunctions();
+      status = await t.query(components.agentmail.lib.getOutboundStatus, { outboundId });
+      if (status && status.status !== "pending") return status;
+    }
+    throw new Error(`driveSend: outbound ${outboundId} never left pending (last: ${JSON.stringify(status)})`);
+  }
+
+  function stubSuccessfulSend(messageId: string, threadId: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ message_id: messageId, thread_id: threadId }), { status: 200, headers: { "content-type": "application/json" } })),
+    );
+  }
+
+  /** Drains the shared alerts inbox wholesale (destructive) via the component's own purgeInbox and reports how many rows were still there. */
+  async function alertsResidue(t: T, inboxId: string): Promise<number> {
+    let deleted = 0;
+    let cursor: string | undefined;
+    for (let i = 0; i < 10; i++) {
+      const r: { cursor: string | null; deleted: number } = await t.mutation(components.agentmail.lib.purgeInbox, { inboxId, cursor });
+      deleted += r.deleted;
+      if (r.cursor === null) break;
+      cursor = r.cursor;
+    }
+    return deleted;
+  }
+
+  it("B-9: an alert older than the component's own 7-day finalized-outbound retention is reclaimed by cleanupFinalizedOutbound at day 8 without orphaning its delivery event; account deletion at day 30 leaves nothing in the shared inbox", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const alertsInbox = "inbox_alerts_shared";
+    stubSuccessfulSend("mid-old", "th-old");
+
+    const outboundId = await t.mutation(components.agentmail.lib.enqueueSend, {
+      config: RUNTIME_CONFIG, inboxId: alertsInbox, kind: "send" as const,
+      payload: { to: "victim.personal@gmail.example", subject: "Price drop: Jacket", text: "now $70" },
+    });
+    await driveSend(t, outboundId);
+    await t.mutation(components.agentmail.lib.handleEvent, {
+      config: RUNTIME_CONFIG,
+      event: { type: "event", event_type: "message.delivered", event_id: "deliv-old", delivery: { inbox_id: alertsInbox, message_id: "mid-old", thread_id: "th-old", to: ["victim.personal@gmail.example"] } },
+    });
+    await t.run((ctx) =>
+      ctx.db.insert("mailLog", {
+        userId: a.userId, dedupeKey: "watch:w1:7000", kind: "price_drop", to: "victim.personal@gmail.example",
+        subject: "Price drop: Jacket", status: "sent", outboundId, agentmailMessageId: "mid-old", providerStatus: "delivered", sentAt: T0, attempt: 0,
+      }),
+    );
+
+    // Day 8: the component's own daily sweep reclaims the finalized row (crons.ts "agentmail outbound cleanup").
+    vi.setSystemTime(T0 + 8 * 86_400_000);
+    await t.mutation(internal.mailPurge.cleanupFinalizedOutbound, {});
+    expect(await t.query(components.agentmail.lib.getOutboundStatus, { outboundId })).toBeNull();
+
+    // Day 30: the user deletes their account -- well inside mailLog's own 90-day retention.
+    vi.setSystemTime(T0 + 30 * 86_400_000);
+    vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    await purgeToCompletion(t, a.userId);
+
+    const residue = await alertsResidue(t, alertsInbox);
+    console.log("[T18.6 B-9] shared-inbox rows left for the deleted user's >7-day-old alert:", residue);
+    expect(residue).toBe(0);
+  });
+
+  it("B-7: a mailLog row whose outbound has more events than one purgeStep call's attempt budget can clear is left in place, not silently deleted", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const alertsInbox = "inbox_alerts_shared";
+    stubSuccessfulSend("mid-flood", "th-flood");
+
+    const outboundId = await t.mutation(components.agentmail.lib.enqueueSend, {
+      config: RUNTIME_CONFIG, inboxId: alertsInbox, kind: "send" as const,
+      payload: { to: "a@x.example", subject: "Price drop", text: "t" },
+    });
+    await driveSend(t, outboundId);
+    for (let i = 0; i < 1001; i++) {
+      await t.mutation(components.agentmail.lib.handleEvent, {
+        config: RUNTIME_CONFIG,
+        event: { type: "event", event_type: "message.delivered", event_id: `fl-${i}`, delivery: { inbox_id: alertsInbox, message_id: "mid-flood", thread_id: "th-flood" } },
+      });
+    }
+    await t.run((ctx) =>
+      ctx.db.insert("mailLog", {
+        userId: a.userId, dedupeKey: "k-flood", kind: "price_drop", to: "a@x.example", subject: "Price drop",
+        status: "sent", outboundId, agentmailMessageId: "mid-flood", attempt: 0, nextCheckAt: T0,
+      }),
+    );
+
+    vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    await purgeToCompletion(t, a.userId);
+
+    const mailLogLeft = await t.run((ctx) => ctx.db.query("mailLog").withIndex("by_user", (q) => q.eq("userId", a.userId)).collect());
+    console.log("[T18.6 B-7] mailLog rows left after an outbound with 1001 events:", mailLogLeft.length);
+    expect(mailLogLeft).toHaveLength(1);
+  }, 60_000);
+});

@@ -123,15 +123,26 @@ export const cleanupFinalizedOutbound = internalMutation({
 // each `mailLog` row it is about to delete that carries one, mirroring
 // `cleanupFinalizedOutbound`'s wrapper-only-touches-`components`-here
 // convention so `account.ts` never imports `components` directly.
+//
+// B-9 (D129, checkpoint 6d): both `outboundId` and `messageId` are optional
+// and passed straight through to the (now widened) component mutation of
+// the same name -- see `node_modules/@agentmail/convex/src/component/lib.ts`
+// for the full contract. `account.ts`'s `deleteMailLogPage` passes BOTH: the
+// component's daily `cleanupFinalizedOutbound` sweep can reclaim a finalized
+// `outboundMessages` row (7-day retention) long before this user's account
+// is ever deleted, at which point `outboundId` alone resolves to nothing --
+// but the `mailLog` row's own `agentmailMessageId` (recorded once the send
+// confirms, independent of whether the component still has a row for it)
+// still lets this call finish purging that message's `events`.
 export const purgeOutbound = internalMutation({
-  args: { outboundId: vOutboundId },
+  args: { outboundId: v.optional(vOutboundId), messageId: v.optional(v.string()) },
   returns: v.object({ remaining: v.boolean() }),
-  handler: async (ctx, { outboundId }) => {
+  handler: async (ctx, { outboundId, messageId }) => {
     // `vOutboundId`'s TS type is `Id<"outboundMessages">` (the component's own
     // table, `@agentmail/convex`'s client index), the same branded id
     // `notify.ts`'s `agentmail.cancel`/`status` calls already pass straight
     // through -- no cast needed.
-    return await ctx.runMutation(components.agentmail.lib.purgeOutbound, { outboundId });
+    return await ctx.runMutation(components.agentmail.lib.purgeOutbound, { outboundId, messageId });
   },
 });
 
