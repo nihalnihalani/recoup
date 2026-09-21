@@ -525,6 +525,95 @@ describe("watches.checkWatch", () => {
     expect(vi.mocked(observePrice)).not.toHaveBeenCalled();
     expect(await checksFor(t, watchId)).toHaveLength(0);
   });
+
+  it("F5: schedules an offers recheck when a confirmed offer is overdue", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await t.run((ctx) =>
+      ctx.db.insert("offers", {
+        watchId,
+        userId,
+        storeDomain: "other.example",
+        productUrl: "https://other.example/p",
+        title: "Down Jacket",
+        status: "confirmed",
+        lastCents: 9_000,
+        currency: "USD",
+        lastCheckedAt: T0 - 7 * HOUR, // older than OFFER_FIND_COOLDOWN_MS (6h)
+      }),
+    );
+    vi.mocked(observePrice).mockResolvedValueOnce({
+      observedCents: 7_500,
+      currency: "USD",
+      confidence: 0.9,
+      isRange: false,
+      variantMatch: "exact",
+    });
+
+    await t.action(internal.watches.checkWatch, { watchId });
+
+    const jobs = await scheduled(t);
+    expect(jobs.some((j) => j.name.includes("offers"))).toBe(true);
+  });
+
+  it("F5: does not schedule an offers recheck when nothing is confirmed or overdue", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    // A confirmed offer that was just checked -- not overdue -- must not
+    // trigger a recheck on every 2h watch tick.
+    await t.run((ctx) =>
+      ctx.db.insert("offers", {
+        watchId,
+        userId,
+        storeDomain: "other.example",
+        productUrl: "https://other.example/p",
+        title: "Down Jacket",
+        status: "confirmed",
+        lastCents: 9_000,
+        currency: "USD",
+        lastCheckedAt: T0,
+      }),
+    );
+    vi.mocked(observePrice).mockResolvedValueOnce({
+      observedCents: 7_500,
+      currency: "USD",
+      confidence: 0.9,
+      isRange: false,
+      variantMatch: "exact",
+    });
+
+    await t.action(internal.watches.checkWatch, { watchId });
+
+    const jobs = await scheduled(t);
+    expect(jobs.some((j) => j.name.includes("offers"))).toBe(false);
+  });
+
+  it("F5: does not schedule an offers recheck when the check itself was rejected", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await t.run((ctx) =>
+      ctx.db.insert("offers", {
+        watchId,
+        userId,
+        storeDomain: "other.example",
+        productUrl: "https://other.example/p",
+        title: "Down Jacket",
+        status: "confirmed",
+        lastCents: 9_000,
+        currency: "USD",
+        lastCheckedAt: T0 - 7 * HOUR,
+      }),
+    );
+    vi.mocked(observePrice).mockResolvedValueOnce({ note: "The product page could not be read" });
+
+    await t.action(internal.watches.checkWatch, { watchId });
+
+    const jobs = await scheduled(t);
+    expect(jobs.some((j) => j.name.includes("offers"))).toBe(false);
+  });
 });
 
 describe("watches.sweep", () => {

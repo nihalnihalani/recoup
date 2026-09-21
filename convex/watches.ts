@@ -540,11 +540,23 @@ export const checkWatch = internalAction({
       console.error(`watches.checkWatch failed for ${watchId}`, err);
       observed = { note: errorNote("Price check failed", err) };
     }
-    await ctx.runMutation(internal.watches.recordWatchCheck, {
+    const result = await ctx.runMutation(internal.watches.recordWatchCheck, {
       watchId,
       sourceUrl: watch.productUrl,
       ...observed,
     });
+
+    // F5: a watch's confirmed "same item at another store" offers were never
+    // re-checked after the initial find, so "Cheapest confirmed" could go
+    // stale forever. Ride this successful check to also refresh them, but
+    // only when at least one is actually overdue (`dueForRecheck` reuses
+    // `OFFER_FIND_COOLDOWN_MS`, the same cadence `offers.find` already
+    // respects), so a watch with no confirmed offers -- the common case --
+    // costs nothing extra, and one with some is not re-scraped every 2h tick.
+    if (result.accepted) {
+      const due = await ctx.runQuery(internal.offers.dueForRecheck, { watchId });
+      if (due) await ctx.scheduler.runAfter(0, internal.offers.recheck, { watchId });
+    }
     return null;
   },
 });
