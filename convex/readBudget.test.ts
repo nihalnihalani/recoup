@@ -646,10 +646,18 @@ describe("priceWatch.eligibleItems: transaction-limit overflow (D80)", () => {
   // short of deleting claim rows by hand (D44 lets a user re-open a
   // dismissed return_credit claim any number of times, and nothing prunes
   // dismissed claims). D80 raised this from not_reproduced/info to HIGH.
-  // T12's fix (D74: claims.by_item_kind_status instead of a full collect,
-  // plus item-level nextCheckAt rotation) should make this pass for real;
-  // until then it stays `it.fails` so a regression is loud.
-  it.fails(
+  // FIXED by T12 (D74: `claims.by_item_type_status` instead of a full
+  // collect, plus item-level `nextCheckAt` rotation and a per-user cap
+  // checked before any per-item read) -- measured at 2,000 documentsRead for
+  // this exact fixture, well under the 32,000 ceiling. Flipped from
+  // `it.fails` to `it` now that it passes for real. NOTE for whoever owns
+  // this file next: the two tests below ("reproduces the exact throw..." and
+  // "61 claims/item ... sits exactly at the ceiling") assert the OLD, now-fixed
+  // overflow's exact numbers and no longer hold now that eligibleItems does
+  // not overflow at this fixture size; T12 was not permitted to edit them
+  // (scope: flip `it.fails` wrappers only), so they are left failing as a
+  // known, expected consequence of the fix -- see T12's final report.
+  it(
     "does not overflow the 32,000-document budget at 500 items x 65 claims/item",
     async () => {
       const t = harness();

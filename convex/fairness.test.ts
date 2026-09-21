@@ -103,18 +103,14 @@ function scheduledItemIdsSince(seen: Set<string>) {
 }
 
 describe("priceWatch.runAll fairness across users (D74)", () => {
-  // FINDING: convex/priceWatch.ts:178-188 `eligibleItems` reads
-  // `ctx.db.query("items").order("desc")` — plain `_creationTime` descending,
-  // globally across every user, with no per-user slice and no rotation (an
-  // item's own `nextCheckAt` column exists on the schema but is never read
-  // here). Once a user has more than FANOUT_LIMIT=50 eligible items, their
-  // newest ones fill the entire tick's fan-out, every tick, forever: nothing
-  // in `eligibleItems` or `recordCheck` ever demotes an item that stays
-  // eligible (no drop found, or no claim opened). `PRICE_CHECK_PER_USER_PER_TICK`
-  // (convex/limits.ts:170) is already defined for D74's fix but not used
-  // anywhere. Confirmed below across 3 ticks with no state change able to
-  // help: this is worse than a slow rotation — it is a hard monopoly.
-  it.fails(
+  // FIXED by T12 (D74/D80/D93): `eligibleItems` now scans `items.by_nextCheck`
+  // and caps each user at `PRICE_CHECK_PER_USER_PER_TICK` (checked before any
+  // per-item read), and `runAll` rotates `items.nextCheckAt` for every item it
+  // considers (scheduled or budget-skipped) via the new `rotateAndSchedule`
+  // mutation, so a single user's backlog can no longer fill every tick's
+  // fan-out forever. Flipped from `it.fails` to `it` now that this passes for
+  // real (see convex/priceWatch.ts's `eligibleItems`/`rotateAndSchedule`).
+  it(
     "gives each user with an eligible item at least one scheduled check across 3 ticks, even when one user has 480",
     async () => {
       const t = setup();
