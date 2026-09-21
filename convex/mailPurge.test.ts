@@ -187,4 +187,28 @@ describe("mailPurge", () => {
     const after = await t.query(components.agentmail.lib.getOutboundStatus, { outboundId });
     expect(after).toBeNull();
   });
+
+  test("B-9 (D129, checkpoint 6d): purgeOutbound wrapper accepts a bare messageId (no outboundId) and threads it through to the component's own by_message purge", async () => {
+    const t = setup();
+    const inboxId = "inbox_bare_message";
+    // A raw webhook event for a message id with no outboundMessages row at
+    // all -- the exact shape `mailPurge.deleteMailLogPage`/`account.ts` fall
+    // back to once the component's own daily `cleanupFinalizedOutbound`
+    // sweep has already reclaimed the row (see that function's own updated
+    // docstring): all the caller has left is the message id.
+    await t.mutation(components.agentmail.lib.handleEvent, {
+      config: RUNTIME_CONFIG,
+      event: { type: "event", event_type: "message.delivered", event_id: "evt-bare-1", delivery: { inbox_id: inboxId, message_id: "msg-bare-1" } },
+    });
+
+    const result = await t.mutation(internal.mailPurge.purgeOutbound, { messageId: "msg-bare-1" });
+    expect(result).toEqual({ remaining: false });
+
+    // Confirm the events row is actually gone (drain the inbox wholesale).
+    const drained = await t.mutation(components.agentmail.lib.purgeInbox, { inboxId });
+    expect(drained.deleted).toBe(0);
+
+    // Neither key given: a documented no-op, not a throw.
+    expect(await t.mutation(internal.mailPurge.purgeOutbound, {})).toEqual({ remaining: false });
+  });
 });
