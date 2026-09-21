@@ -339,6 +339,10 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 **Owner:** sonnet-backend-3 · **Phase:** 3 (fix) · **Status:** verified (10f9abf..c7e308c; lead re-ran 4 files 106/106; neutered-helper proof: all 4 resurrection tests fail with no-op helpers)
 **Files:** convex/priceWatch.test.ts, convex/purchases.ts (+test), convex/policies.ts (+test), convex/lib/schedule.ts (+test). Contract: D112 rows 6a-3..6a-6 verbatim.
 
+### T24b — Backend register items + structured-log sweep
+**Owner:** sonnet-backend-2 · **Phase:** 4 (fix) · **Status:** in_progress
+**Files:** convex/http.ts (+http.test.ts), convex/limits.ts, convex/ops.ts (+ops.test.ts), convex/insights.ts (+freshness.test.ts flip only), package.json (script only), docs/ops/RUNBOOK.md (two lines), and the `console.error` → `logEvent` sweep in notify.ts, priceWatch.ts, watches.ts, offers.ts, policies.ts, market.ts, inbound.ts. Contract: F-T22-1/2/3, F-T15-1, D112 RUNBOOK/ops lines, D109 sweep.
+
 ### T16 — P07 retention (bounded, resumable, audit-preserving) plus P08 backend fixes: returns validators and string bounds on cla
 **Owner:** sonnet-backend · **Phase:** 2 · **Blocks on:** T12 · **High-risk:** True
 **Files:** convex/retention.ts, convex/retention.test.ts, convex/claims.ts, convex/claims.test.ts, convex/purchases.ts, convex/purchases.test.ts, convex/intake.ts, convex/intake.test.ts, convex/replies.ts, convex/replies.test.ts, convex/profiles.ts, convex/profiles.test.ts, convex/crons.ts, convex/lib/errors.ts
