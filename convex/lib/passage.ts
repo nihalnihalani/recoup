@@ -22,7 +22,7 @@ export function normalizeForMatch(s: string): string {
     s
       .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
       .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-      .replace(/\\([\\`*_{}\[\]()#+\-.!|>~])/g, "$1")
+      .replace(/\\([\\`*_{}[\]()#+\-.!|>~])/g, "$1")
       .replace(/[*_`~]+/g, "")
       .replace(/^\s{0,3}(#{1,6}|>|[-+]|\d+\.)\s+/gm, "")
       .replace(/[\u2018\u2019\u201B\u2032]/g, "'")
