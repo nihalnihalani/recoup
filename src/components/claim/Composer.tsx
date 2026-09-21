@@ -1,8 +1,8 @@
 import { useAction, useMutation, useQuery } from "convex/react";
 import { useId, useState } from "react";
-import type { FunctionReturnType } from "convex/server";
 import { api } from "../../../convex/_generated/api";
 import type { Doc } from "../../../convex/_generated/dataModel";
+import { deliveryOf, type SendStatus } from "../../lib/delivery";
 import { ErrorBox } from "../States";
 import { ClaimIcon } from "./icons";
 import {
@@ -14,27 +14,17 @@ import {
   when,
 } from "../../lib/ui";
 
-type SendStatus = FunctionReturnType<typeof api.drafts.sendStatus>;
-
 function domainOf(email: string): string {
   const at = email.lastIndexOf("@");
   return at === -1 ? "" : email.slice(at + 1).toLowerCase();
 }
 
 // ---------------------------------------------------------------------------
-// Delivery progress: approved -> queued -> sent, as three nodes on a rail (D29)
+// Delivery progress: approved -> queued -> sent, as three nodes on a rail
+// (D29). The state -> label/tone mapping (`deliveryOf`, D13/D68) lives in
+// ../../lib/delivery so it stays a plain, unit-testable function and this
+// file only exports components (oxlint react/only-export-components).
 // ---------------------------------------------------------------------------
-
-type Delivery = { reached: 1 | 2 | 3; tone: "moving" | "done" | "failed" | "unknown"; note: string };
-
-function deliveryOf(sendStatus: SendStatus | undefined, sendUnknown: boolean): Delivery {
-  if (sendStatus === undefined) return { reached: 1, tone: "moving", note: "Checking" };
-  if (sendStatus === null) return { reached: 2, tone: "moving", note: "Queued" };
-  if (sendStatus.agentmailMessageId) return { reached: 3, tone: "done", note: "Sent" };
-  if (sendStatus.errorMessage) return { reached: 2, tone: "failed", note: sendStatus.errorMessage };
-  if (sendUnknown) return { reached: 2, tone: "unknown", note: "Delivery unknown" };
-  return { reached: 2, tone: "moving", note: sendStatus.status };
-}
 
 const STEPS = ["Approved", "Queued", "Sent"] as const;
 
@@ -100,7 +90,9 @@ function SendProgress({
         })}
       </ol>
       <p className={`min-w-0 break-words text-xs ${noteTone}`}>
-        {delivery.tone === "done" && approvedAt !== undefined ? when(approvedAt) : delivery.note}
+        {delivery.tone === "done" && delivery.note === "Sent" && approvedAt !== undefined
+          ? when(approvedAt)
+          : delivery.note}
       </p>
     </div>
   );
