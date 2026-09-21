@@ -3,7 +3,7 @@ import { mutation, query } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
 import { ownedItem, ownedPurchase, requireUserId } from "./lib/access";
 import { netRecovered } from "./lib/ledger";
-import { claimsWithBalance, balanceValidator } from "./lib/balance";
+import { claimsWithBalance, claimBalance, balanceValidator } from "./lib/balance";
 import { assertCents, assertCurrency, assertNonEmpty, assertQty, assertTimestamp } from "./lib/money";
 import { cancelPending } from "./followUps";
 import { normalizeDomain } from "./lib/policyText";
@@ -91,7 +91,6 @@ export const create = mutation({
     items: v.array(itemInput),
     sourceMessageId: v.optional(v.string()),
     status: v.optional(v.union(v.literal("needs_review"), v.literal("active"))),
-    isExample: v.optional(v.boolean()),
   },
   returns: v.id("purchases"),
   handler: async (ctx, args) => {
@@ -140,15 +139,18 @@ export const create = mutation({
       purchasedAt,
       currency: args.currency,
       sourceMessageId,
-      isExample: args.isExample,
       userId,
       status: resolvedStatus,
     });
     for (const it of cleanItems) {
       await ctx.db.insert("items", { ...it, purchaseId, userId, returned: false });
     }
-    // D27: an example store is not a real site; researching it would only burn credit.
-    if (resolvedStatus === "active" && !args.isExample) {
+    // F-AUD-9/D27: `isExample` is not a public argument here (examples are
+    // seeded only by `examples.ts`'s direct `db.insert`, D04) -- a client
+    // can no longer mark its own purchase as an example to dodge its own
+    // money totals/spend or block the example loader (regression test:
+    // "purchases.create refuses a client-supplied isExample").
+    if (resolvedStatus === "active") {
       await schedulePolicyFetch(ctx, userId, merchantDomain);
     }
     return purchaseId;
@@ -351,67 +353,159 @@ export const get = query({
   },
 });
 
+/**
+ * F-AUD-1 (opus-auditor's 36-connection audit; D107 C1 pattern): most
+ * purchases the board reads PER STATUS, newest first. The OLD query read
+ * every non-archived purchase via a single `by_user` `.collect()`, then, for
+ * EVERY item on EVERY purchase, issued a separate `by_item` claims range
+ * read (`claimsWithBalance`) -- `1 + purchases + items` index ranges before
+ * a single claim or ledger event was even found. At 100 purchases x 50
+ * items (inside `MAX_PURCHASES_PER_USER`=200 x `MAX_ITEMS_PER_PURCHASE`=50)
+ * that is already 5,100 ranges, over Convex's 4,096-per-transaction limit --
+ * `scratchpad/audit/repros/zz_audit_board.test.ts` reproduces the crash at
+ * exactly this shape (60x50 = 3,060 ranges still passes). The fix below
+ * replaces the per-item claims query with one per-PURCHASE query
+ * (`by_purchase_type`, mirroring `tracking.ts`'s C1 fix) and bounds both the
+ * purchase list and a shared per-call item budget, so a heavy account
+ * degrades to `truncated: true` instead of a platform error.
+ *
+ * Both statuses the board renders are read and capped independently: `active`
+ * for the money view, and `needs_review` for the "needs a look" banner
+ * (`src/pages/Board.tsx`'s `NeedsReview`, `intake.test.ts`'s board
+ * assertions) -- archived purchases stay hidden everywhere (D47) by simply
+ * never being queried.
+ */
+const MAX_BOARD_PURCHASES = 60;
+
+/**
+ * F-AUD-1: shared item-read budget across every purchase this call actually
+ * processes (both statuses combined, spent as items are actually read, not
+ * allotted per purchase up front) -- see `tracking.ts`'s `MAX_ITEMS_TOTAL`
+ * doc comment for the full rationale (an early purchase with few items must
+ * not starve a later one of budget it never used). Sized at
+ * `MAX_BOARD_PURCHASES * MAX_ITEMS_PER_PURCHASE` so a realistic account
+ * within the purchase cap is never truncated on items alone.
+ */
+const MAX_BOARD_ITEMS_TOTAL = MAX_BOARD_PURCHASES * MAX_ITEMS_PER_PURCHASE;
+
+/** F-AUD-1: `processedEvents` rows read per status (`failed`/`needs_review`) for the "needs attention" list; the merge below still renders at most 20 (D14). */
+const ATTENTION_SCAN_PER_STATUS = 20;
+
 export const board = query({
   args: {},
   returns: v.object({
     purchases: v.array(boardRow),
     totals: v.object({ owed: v.number(), asked: v.number(), confirmed: v.number() }),
     attention: v.array(boardAttentionRow),
+    /** F-AUD-1: true only on a REAL cut (more purchases or items exist than were read), never merely because a bound exists. */
+    truncated: v.boolean(),
   }),
   handler: async (ctx) => {
     const userId = await requireUserId(ctx);
-    // Archived purchases are hidden everywhere (D47).
-    const purchases = (
-      await ctx.db
+
+    // F-AUD-1: bounded per status via `by_user_status`, newest first -- one
+    // range read each, instead of the old single unbounded `by_user`
+    // `.collect()` filtered to non-archived in memory.
+    const [activePage, reviewPage] = await Promise.all([
+      ctx.db
         .query("purchases")
-        .withIndex("by_user", (q) => q.eq("userId", userId))
+        .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", "active"))
         .order("desc")
-        .collect()
-    ).filter((p) => p.status !== "archived");
+        .take(MAX_BOARD_PURCHASES + 1),
+      ctx.db
+        .query("purchases")
+        .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", "needs_review"))
+        .order("desc")
+        .take(MAX_BOARD_PURCHASES + 1),
+    ]);
+    let truncated = activePage.length > MAX_BOARD_PURCHASES || reviewPage.length > MAX_BOARD_PURCHASES;
+    const purchases = [...activePage.slice(0, MAX_BOARD_PURCHASES), ...reviewPage.slice(0, MAX_BOARD_PURCHASES)].sort(
+      (a, b) => b._creationTime - a._creationTime,
+    );
+
     let owed = 0,
       asked = 0,
       confirmed = 0;
-    const rows = await Promise.all(
-      purchases.map(async (p) => {
-        const items = await ctx.db
-          .query("items")
-          .withIndex("by_purchase", (q) => q.eq("purchaseId", p._id))
-          .collect();
-        const claims = (await Promise.all(items.map((it) => claimsWithBalance(ctx, it._id)))).flat();
-        // Example purchases and example claims never contribute to real
-        // money totals (D27, D48). `confirmed` is net recovered (D39).
-        if (!p.isExample) {
-          for (const c of claims) {
-            if (c.status === "dismissed" || c.isExample) continue;
-            confirmed += netRecovered(c.balance);
-            const unresolvedPositive = Math.max(0, c.balance.unresolved);
-            owed += unresolvedPositive;
-            if (["sent", "packet", "promised"].includes(c.status)) asked += unresolvedPositive;
-          }
+    // F-AUD-1: shared budget, spent as rows are actually read -- see
+    // MAX_BOARD_ITEMS_TOTAL's doc comment.
+    let itemsRoom = MAX_BOARD_ITEMS_TOTAL;
+    const rows: Array<{
+      purchase: Doc<"purchases">;
+      items: Doc<"items">[];
+      claims: Array<Doc<"claims"> & { balance: Awaited<ReturnType<typeof claimBalance>>; item: Doc<"items"> | undefined }>;
+    }> = [];
+    for (const p of purchases) {
+      if (itemsRoom <= 0) {
+        // F-AUD-1: the shared budget is spent; every purchase from here on
+        // is cut ENTIRELY (a real truncation) rather than read-and-discarded.
+        truncated = true;
+        break;
+      }
+      const cap = Math.min(MAX_ITEMS_PER_PURCHASE, itemsRoom);
+      // Read one row past the cap so `truncated` reflects a REAL cut, not
+      // merely a tight shared budget (mirrors tracking.ts's C1 fix).
+      const probe = await ctx.db
+        .query("items")
+        .withIndex("by_purchase", (q) => q.eq("purchaseId", p._id))
+        .take(cap + 1);
+      const overflow = probe.length > cap;
+      if (overflow) truncated = true;
+      const items = overflow ? probe.slice(0, cap) : probe;
+      itemsRoom -= items.length;
+
+      // F-AUD-1: ONE range read for every claim on this whole purchase
+      // (`by_purchase_type`, every type/status -- unlike `tracking.overview`,
+      // the board needs both `price_adjustment` and `return_credit`, so the
+      // query stops at the `purchaseId` equality and does not narrow by
+      // `type`), instead of a `by_item` range read PER ITEM. This is what
+      // turns the range count from O(items) into O(purchases) -- the
+      // dominant fix for the "too many index ranges read" crash.
+      const purchaseClaims = await ctx.db
+        .query("claims")
+        .withIndex("by_purchase_type", (q) => q.eq("purchaseId", p._id))
+        .collect();
+      const claims = await Promise.all(
+        purchaseClaims.map(async (c) => ({ ...c, balance: await claimBalance(ctx, c) })),
+      );
+
+      // Example purchases and example claims never contribute to real
+      // money totals (D27, D48). `confirmed` is net recovered (D39).
+      if (!p.isExample) {
+        for (const c of claims) {
+          if (c.status === "dismissed" || c.isExample) continue;
+          confirmed += netRecovered(c.balance);
+          const unresolvedPositive = Math.max(0, c.balance.unresolved);
+          owed += unresolvedPositive;
+          if (["sent", "packet", "promised"].includes(c.status)) asked += unresolvedPositive;
         }
-        return {
-          purchase: p,
-          items,
-          claims: claims.map((c) => ({ ...c, item: items.find((i) => i._id === c.itemId) })),
-        };
-      }),
-    );
+      }
+
+      rows.push({
+        purchase: p,
+        items,
+        claims: claims.map((c) => ({ ...c, item: items.find((i) => i._id === c.itemId) })),
+      });
+    }
 
     // Needs-attention list: failed or needs_review processedEvents for this
-    // user, newest first, capped at 20 (D14). Two equality queries (one per
-    // status) merged in memory, since the by_user_status index only sorts
-    // by _creationTime within a fixed status value.
+    // user, newest first, capped at 20 (D14). F-AUD-1: bounded READ via
+    // `take` (instead of an unbounded `.collect()` per status) -- a flooded
+    // inbox of failed/needs_review rows, never pruned by retention (only
+    // payloads are), must not blow the range/document budget just to surface
+    // the newest 20. Two equality queries (one per status) merged in memory,
+    // since the by_user_status index only sorts by _creationTime within a
+    // fixed status value.
     const [failed, needsReview] = await Promise.all([
       ctx.db
         .query("processedEvents")
         .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", "failed"))
         .order("desc")
-        .collect(),
+        .take(ATTENTION_SCAN_PER_STATUS),
       ctx.db
         .query("processedEvents")
         .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", "needs_review"))
         .order("desc")
-        .collect(),
+        .take(ATTENTION_SCAN_PER_STATUS),
     ]);
     const attention = [...failed, ...needsReview]
       .sort((a, b) => b._creationTime - a._creationTime)
@@ -427,6 +521,6 @@ export const board = query({
         errorSummary: e.errorSummary ?? (e.lastError !== undefined ? "Processing failed" : undefined),
       }));
 
-    return { purchases: rows, totals: { owed, asked, confirmed }, attention };
+    return { purchases: rows, totals: { owed, asked, confirmed }, attention, truncated };
   },
 });

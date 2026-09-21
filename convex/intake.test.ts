@@ -384,9 +384,12 @@ describe("intake.applyExtraction — refunds (D15)", () => {
       purchasedAt: Date.parse("2026-09-01"),
       currency: "USD",
       status: "active",
-      isExample: true,
       items: [{ name: "Wool scarf", unitCents: 4_000, qty: 1 }],
     });
+    // F-AUD-9: `purchases.create` no longer accepts a client `isExample` arg
+    // (examples are seeded only by `examples.ts`'s direct `db.insert`) -- set
+    // it directly in the DB here, the same way that loader does.
+    await t.run((ctx) => ctx.db.patch(purchaseId, { isExample: true }));
     const detail = await as.query(api.purchases.get, { purchaseId });
     await as.mutation(api.purchases.setReturned, { itemId: detail.items[0]._id, returned: true });
 

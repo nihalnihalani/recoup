@@ -1,5 +1,14 @@
+/// <reference types="vite/client" />
 import { describe, it, expect, vi } from "vitest";
+import { convexTest } from "convex-test";
+import agentmail from "@agentmail/convex/test";
+import firecrawl from "@firecrawl/firecrawl-convex/test";
+import workpool from "@convex-dev/workpool/test";
+import rl from "@convex-dev/rate-limiter/test";
+import bw from "@convex-dev/batch-worker/test";
 import { api } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
+import schema from "./schema";
 import { DAILY_BUDGETS } from "./limits";
 import { setup, signedIn } from "./test.setup";
 
@@ -239,10 +248,10 @@ describe("purchases", () => {
       });
     });
 
-    const exampleId = await as.mutation(api.purchases.create, {
-      ...basePurchase,
-      isExample: true,
-    });
+    // F-AUD-9: `purchases.create` no longer accepts a client `isExample` arg
+    // (examples are seeded only by `examples.ts`'s direct `db.insert`) -- set
+    // it directly in the DB here, the same way that loader does.
+    const exampleId = await as.mutation(api.purchases.create, basePurchase);
     const exampleGot = await as.query(api.purchases.get, { purchaseId: exampleId });
     await t.run(async (ctx) => {
       await ctx.db.patch(exampleId, { isExample: true });
@@ -351,6 +360,28 @@ describe("purchases", () => {
     }));
     expect(kept.purchase?.status).toBe("archived");
     expect(kept.events).toHaveLength(1);
+  });
+
+  it("purchases.create refuses a client-supplied isExample (F-AUD-9)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    // Examples are seeded only by `examples.ts`'s direct `db.insert` (D04);
+    // `isExample` is not a public argument on `create` any more, so a client
+    // cannot mark its own purchase as an example to dodge its own money
+    // totals/spend or block the example loader (register: F-AUD-9).
+    await expect(
+      as.mutation(api.purchases.create, { ...basePurchase, isExample: true } as unknown as typeof basePurchase),
+    ).rejects.toThrow(/isExample/);
+    // Nothing was written by the rejected call.
+    const board = await as.query(api.purchases.board, {});
+    expect(board.purchases).toHaveLength(0);
+    const mine = await t.run((ctx) =>
+      ctx.db
+        .query("purchases")
+        .withIndex("by_user", (q) => q.eq("userId", userId))
+        .collect(),
+    );
+    expect(mine).toHaveLength(0);
   });
 
   it("board confirmed is net recovered and skips example claims (D39, D48)", async () => {
@@ -536,9 +567,14 @@ describe("input bounds and the policy-research budget (pre-launch review B4, M1)
       expect(await scheduledFetches(t)).toBe(DAILY_BUDGETS.policy_fetch.max);
       const board = await as.query(api.purchases.board, {});
       expect(board.purchases).toHaveLength(DAILY_BUDGETS.policy_fetch.max + 3);
-      // Example purchases and needs_review purchases never research anything.
+      // needs_review purchases never research anything (F-AUD-9: an example
+      // purchase can no longer reach `create` at all -- `isExample` is not a
+      // public argument any more, and `examples.ts`'s own loader inserts
+      // directly, bypassing `schedulePolicyFetch` entirely -- so that half of
+      // this invariant is now structural rather than something `create` must
+      // refuse at runtime; see "purchases.create refuses a client-supplied
+      // isExample" below for the regression on the removed argument itself).
       const other = await signedIn(t, "Other");
-      await other.as.mutation(api.purchases.create, { ...basePurchase, isExample: true });
       await other.as.mutation(api.purchases.create, { ...basePurchase, status: "needs_review" });
       expect(await scheduledFetches(t)).toBe(DAILY_BUDGETS.policy_fetch.max);
     } finally {
@@ -568,5 +604,121 @@ describe("input bounds and the policy-research budget (pre-launch review B4, M1)
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * F-AUD-1 (opus-auditor's 36-connection audit; D107 C1 pattern). Ported from
+ * the auditor's repro at
+ * `scratchpad/audit/repros/zz_audit_board.test.ts`, which only asserted "no
+ * throw" -- this block additionally measures real transaction metrics
+ * (`convex-test`'s `ctx.meta.getTransactionMetrics()`, the same mechanism
+ * `readBudget.test.ts` uses) so the range/document numbers are reported, not
+ * guessed.
+ *
+ * BEFORE the fix: `purchases.board` issued one `by_item` claims range read
+ * PER ITEM (`claimsWithBalance`, called once per item across every
+ * non-archived purchase) on top of one `by_purchase` items range per
+ * purchase -- `1 + purchases + items` index ranges before a single claim was
+ * even found. At 100 purchases x 50 items (half `MAX_PURCHASES_PER_USER`=200,
+ * at `MAX_ITEMS_PER_PURCHASE`=50) that is 5,100 ranges, over Convex's
+ * 4,096-per-transaction limit; the Board page rendered nothing but the error
+ * boundary for that account (60x50 = 3,060 ranges still passed, which is why
+ * the bug shipped unnoticed). This block's two size cases FAIL with that
+ * platform error on the pre-fix `board` and PASS after (verified by running
+ * this exact file against the unfixed handler before landing the fix).
+ *
+ * AFTER the fix: claims are read once per PURCHASE (`by_purchase_type`,
+ * mirroring `tracking.ts`'s C1 fix) and both the purchase list and a shared
+ * per-call item budget are capped (`MAX_BOARD_PURCHASES`,
+ * `MAX_BOARD_ITEMS_TOTAL` in `purchases.ts`), so a heavy account degrades to
+ * `truncated: true` instead of a platform error.
+ */
+describe("purchases.board bounded reads (F-AUD-1)", () => {
+  const modules = import.meta.glob("./**/*.*s");
+  const agentmailModules = import.meta.glob("../node_modules/@agentmail/convex/src/component/**/*.ts", { exhaustive: true });
+  const workpoolModules = import.meta.glob("../node_modules/@convex-dev/workpool/src/component/**/*.ts", { exhaustive: true });
+  const rlModules = import.meta.glob("../node_modules/@convex-dev/rate-limiter/src/component/**/*.ts", { exhaustive: true });
+  const bwModules = import.meta.glob("../node_modules/@convex-dev/batch-worker/src/component/**/*.ts", { exhaustive: true });
+
+  /**
+   * Inlined rather than imported from `test.setup.ts` (owned by another
+   * lane): `setup()`'s positional `convexTest(schema, modules)` form
+   * silently ignores `transactionLimits` -- only the options-object form
+   * used here turns platform-limit enforcement on (same finding
+   * `readBudget.test.ts`'s file docstring records).
+   */
+  function harness() {
+    process.env.FIRECRAWL_API_KEY = "fc-test";
+    process.env.AGENTMAIL_API_KEY = "am-test";
+    process.env.AGENTMAIL_WEBHOOK_SECRET = "whsec_test";
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    t.registerComponent("agentmail", agentmail.schema, agentmailModules);
+    t.registerComponent("agentmail/sendPool", workpool.schema, workpoolModules);
+    t.registerComponent("agentmail/callbackPool", workpool.schema, workpoolModules);
+    firecrawl.register(t);
+    t.registerComponent("rateLimiter", rl.schema, rlModules);
+    t.registerComponent("rateLimiter/batchWorker", bw.schema, bwModules);
+    return t;
+  }
+  type T = ReturnType<typeof harness>;
+
+  async function heavySignedIn(t: T, name: string) {
+    const userId: Id<"users"> = await t.run((ctx) => ctx.db.insert("users", { name }));
+    return { userId, as: t.withIdentity({ subject: `${userId}|session` }) };
+  }
+
+  /** `purchases` purchases x `items` items each, active, no claims -- matches the auditor's repro fixture exactly. */
+  async function heavyAccount(t: T, userId: Id<"users">, purchaseCount: number, itemCount: number) {
+    for (let p = 0; p < purchaseCount; p++) {
+      await t.run(async (ctx) => {
+        const purchaseId = await ctx.db.insert("purchases", {
+          userId, merchant: "M", merchantDomain: `m${p}.example`, purchasedAt: Date.now() - 1000, currency: "USD", status: "active",
+        });
+        for (let i = 0; i < itemCount; i++) {
+          await ctx.db.insert("items", { purchaseId, userId, name: `i${i}`, unitCents: 1000, qty: 1, returned: false });
+        }
+      });
+    }
+  }
+
+  /** Runs `purchases.board` inside one transaction and reads convex-test's real metrics for it (mirrors `readBudget.test.ts`'s `measure`). */
+  async function measureBoard(t: T, as: ReturnType<T["withIdentity"]>) {
+    const { result, metrics } = await as.run(async (ctx) => {
+      const result = await ctx.runQuery(api.purchases.board, {});
+      const metrics = await ctx.meta.getTransactionMetrics();
+      return { result, metrics };
+    });
+    return { result, documentsRead: metrics.documentsRead.used, databaseQueries: metrics.databaseQueries.used };
+  }
+
+  for (const [purchaseCount, itemCount] of [[100, 50], [200, 50]] as const) {
+    it(
+      `${purchaseCount} purchases x ${itemCount} items stays under the index-range and document limits (caps: 200 x 50)`,
+      async () => {
+        const t = harness();
+        const { userId, as } = await heavySignedIn(t, "Heavy");
+        await heavyAccount(t, userId, purchaseCount, itemCount);
+        const { result, documentsRead, databaseQueries } = await measureBoard(t, as);
+        // eslint-disable-next-line no-console
+        console.log("[F-AUD-1]", JSON.stringify({ purchaseCount, itemCount, documentsRead, databaseQueries }));
+        expect(databaseQueries).toBeLessThan(4096);
+        expect(documentsRead).toBeLessThan(32_000);
+        // The board's own per-status cap (MAX_BOARD_PURCHASES=60) is what
+        // kept this under the limits, not a lucky fit -- confirm it actually
+        // engaged rather than merely happening to stay small.
+        expect(result.truncated).toBe(true);
+      },
+      60_000,
+    );
+  }
+
+  it("renders every purchase when nowhere near the cap: 6 purchases x 1 item, truncated:false", async () => {
+    const t = harness();
+    const { userId, as } = await heavySignedIn(t, "Light");
+    await heavyAccount(t, userId, 6, 1);
+    const board = await as.query(api.purchases.board, {});
+    expect(board.purchases).toHaveLength(6);
+    expect(board.truncated).toBe(false);
   });
 });
