@@ -156,6 +156,27 @@ describe("watches.create", () => {
     expect((await watchRow(t, watchId)).name).toBe("Blue jacket, M");
   });
 
+  it("F1: strips a control character (subject/header injection) from a given name", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const watchId = await as.mutation(api.watches.create, {
+      productUrl: URL,
+      name: "Jacket\r\nBcc: evil@example.com",
+    });
+    expect((await watchRow(t, watchId)).name).not.toMatch(/[\r\n]/);
+  });
+
+  it("F1: rejects a name over the 200-char cap", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    await expect(
+      as.mutation(api.watches.create, { productUrl: URL, name: "x".repeat(201) }),
+    ).rejects.toThrow(/200 characters/);
+    await expect(
+      as.mutation(api.watches.create, { productUrl: URL, name: "x".repeat(200) }),
+    ).resolves.toBeTruthy();
+  });
+
   it("is not double-scheduled by a sweep that lands right after it", async () => {
     const t = setup();
     const { as } = await signedIn(t);
@@ -235,6 +256,34 @@ describe("watches ownership", () => {
     expect(await t.query(api.watches.get, { watchId })).toBeNull();
     await expect(t.mutation(api.watches.checkNow, { watchId })).rejects.toThrow(ConvexError);
     await expect(t.mutation(api.watches.archive, { watchId })).rejects.toThrow(ConvexError);
+  });
+});
+
+describe("watches.rename (F1)", () => {
+  it("trims and keeps a safe name", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await as.mutation(api.watches.rename, { watchId, name: "  Blue jacket, M  " });
+    expect((await watchRow(t, watchId)).name).toBe("Blue jacket, M");
+  });
+
+  it("F1: strips a control character (subject/header injection) from a renamed watch", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await as.mutation(api.watches.rename, { watchId, name: "Jacket\r\nBcc: evil@example.com" });
+    expect((await watchRow(t, watchId)).name).not.toMatch(/[\r\n]/);
+  });
+
+  it("rejects a name over the 200-char cap", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await expect(as.mutation(api.watches.rename, { watchId, name: "x".repeat(201) })).rejects.toThrow(
+      /200 characters/,
+    );
+    await expect(as.mutation(api.watches.rename, { watchId, name: "x".repeat(200) })).resolves.toBeNull();
   });
 });
 

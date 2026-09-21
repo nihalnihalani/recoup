@@ -282,7 +282,7 @@ export const create = mutation({
     const userId = await requireUserId(ctx);
     const parsed = parseProductUrl(args.productUrl);
     if (!parsed) throw new ConvexError("Paste a full product link starting with http:// or https://");
-    // Control characters never reach a stored name (review LOW, subject injection).
+    // Control characters never reach a stored name (review LOW, subject injection; F1).
     const givenName = args.name === undefined ? undefined : cleanLine(args.name);
     if (givenName !== undefined && givenName.length > MAX_NAME_CHARS) {
       throw new ConvexError(`name must be at most ${MAX_NAME_CHARS} characters`);

@@ -153,6 +153,10 @@ describe("claiming a drop inside recordWatchCheck", () => {
     ]) {
       expect(message.text).toContain(part);
     }
+    // F1: the productUrl is never embedded -- Recoup's own mail must not
+    // carry an arbitrary, user-supplied link.
+    expect(message.text).not.toContain(URL);
+    expect(message.text).not.toContain("Link:");
     const [sent] = await mailRows(t);
     expect(sent.status).toBe("sent");
     expect(sent.sentAt).toBe(Date.now());
