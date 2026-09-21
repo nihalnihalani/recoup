@@ -402,17 +402,23 @@ export async function searchOffers(
     });
     const hits = (res.web ?? []).flatMap((raw) => toHit(raw) ?? []);
     const pages = selectStorePages(hits, watch.merchantDomain, MAX_OFFER_PAGES_PER_FIND);
-    for (const page of pages) {
-      let obs: PageObservation;
-      try {
-        obs = await deps.observe(ctx as ActionCtx, watch.name, page.productUrl);
-      } catch (err) {
-        console.error(`offers.search could not read ${page.storeDomain} for ${watchId}`, err);
-        continue; // a failure stores nothing
-      }
+    // The reads are independent and each takes 15-30s (full-page scrape, then extraction), so run them
+    // together: a find is as slow as its slowest store, not the sum. At most MAX_OFFER_PAGES_PER_FIND at once.
+    const observed = await Promise.all(
+      pages.map(async (page) => {
+        try {
+          return { page, obs: await deps.observe(ctx as ActionCtx, watch.name, page.productUrl) };
+        } catch (err) {
+          console.error(`offers.search could not read ${page.storeDomain} for ${watchId}`, err);
+          return null; // a failure stores nothing
+        }
+      }),
+    );
+    for (const entry of observed) {
+      if (!entry) continue;
       // No verdict on the variant means the page was never read as a product; "none" means it is another product.
-      if (obs.variantMatch !== "exact" && obs.variantMatch !== "unsure") continue;
-      candidates.push({ ...page, ...pickObservation(obs) });
+      if (entry.obs.variantMatch !== "exact" && entry.obs.variantMatch !== "unsure") continue;
+      candidates.push({ ...entry.page, ...pickObservation(entry.obs) });
     }
   } catch (err) {
     console.error(`offers.search failed for ${watchId}`, err);
@@ -538,14 +544,19 @@ export async function recheckConfirmedOffers(
     if (!watch) return 0;
     const offers = await ctx.runQuery(internal.offers.confirmedForWatch, { watchId });
     const results: Array<{ offerId: Id<"offers"> } & ReturnType<typeof pickObservation>> = [];
-    for (const offer of offers) {
-      try {
-        const obs = await deps.observe(ctx as ActionCtx, watch.name, offer.productUrl);
-        results.push({ offerId: offer.offerId, ...pickObservation(obs) });
-      } catch (err) {
-        console.error(`offers.recheck could not read offer ${offer.offerId}`, err);
-      }
-    }
+    // Same reasoning as searchOffers: independent reads run together (bounded by MAX_OFFER_RECHECKS).
+    const reads = await Promise.all(
+      offers.map(async (offer) => {
+        try {
+          const obs = await deps.observe(ctx as ActionCtx, watch.name, offer.productUrl);
+          return { offerId: offer.offerId, ...pickObservation(obs) };
+        } catch (err) {
+          console.error(`offers.recheck could not read offer ${offer.offerId}`, err);
+          return null;
+        }
+      }),
+    );
+    for (const read of reads) if (read) results.push(read);
     if (results.length === 0) return 0;
     return await ctx.runMutation(internal.offers.recordRechecks, { watchId, results });
   } catch (err) {

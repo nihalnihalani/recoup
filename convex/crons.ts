@@ -20,4 +20,10 @@ crons.interval("price watch", { hours: 2 }, internal.priceWatch.runAll, {});
  */
 crons.interval("watch sweep", { hours: 1 }, internal.watches.sweep, {});
 
+/**
+ * Inbound mail safety net: unstick rows whose action died and re-run failed ones that still
+ * have attempts left. A tick with nothing to do costs two bounded indexed reads.
+ */
+crons.interval("retry failed inbound", { hours: 1 }, internal.intake.retryFailed, {});
+
 export default crons;

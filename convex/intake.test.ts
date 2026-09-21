@@ -411,3 +411,56 @@ describe("intake.beginEvent", () => {
     expect(row.lastError).toBe("openai: 500");
   });
 });
+
+describe("intake.retryFailed (hourly safety net)", () => {
+  it("re-queues a failed intake row that has attempts left and leaves an exhausted one alone", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const retryable = await queueEvent(t, userId, "evt-retry");
+    const exhausted = await queueEvent(t, userId, "evt-done");
+    await t.run(async (ctx) => {
+      await ctx.db.patch(retryable, { status: "failed", attempts: 1, lastError: "OpenAI 429" });
+      await ctx.db.patch(exhausted, { status: "failed", attempts: 5, lastError: "Gave up after 5 attempts" });
+    });
+
+    const res = await t.mutation(internal.intake.retryFailed, {});
+    expect(res).toEqual({ unstuck: 0, retried: 1 });
+
+    const again = await eventRow(t, retryable);
+    expect(again.status).toBe("received");
+    expect(again.lastError).toBeUndefined();
+    const still = await eventRow(t, exhausted);
+    expect(still.status).toBe("failed");
+  });
+
+  it("marks a row stuck in processing as failed so it becomes visible and retryable", async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const fresh = await queueEvent(t, userId, "evt-fresh");
+    await t.run(async (ctx) => await ctx.db.patch(fresh, { status: "processing", attempts: 1 }));
+
+    // Inside the grace period nothing happens.
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+
+    vi.advanceTimersByTime(16 * 60_000);
+    const res = await t.mutation(internal.intake.retryFailed, {});
+    // Unstuck and, having attempts left, re-queued in the same tick.
+    expect(res).toEqual({ unstuck: 1, retried: 1 });
+    const row = await eventRow(t, fresh);
+    expect(row.status).toBe("received");
+  });
+
+  it("ignores rows that belong to nobody", async () => {
+    const t = setup();
+    await t.run(async (ctx) => {
+      await ctx.db.insert("processedEvents", {
+        externalId: "evt-orphan",
+        kind: "agentmail.message.received",
+        status: "failed",
+        attempts: 0,
+      });
+    });
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+  });
+});

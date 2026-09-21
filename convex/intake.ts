@@ -603,6 +603,67 @@ export const retryEvent = mutation({
   },
 });
 
+/** How many failed or stuck rows one tick looks at; the rest wait for the next tick. */
+const RETRY_PAGE = 50;
+/** A row still `processing` after this long lost its action (timeout or redeploy); review M2. */
+const STUCK_AFTER_MS = 15 * 60_000;
+
+/**
+ * Hourly safety net for inbound mail (idea from origin's a2ceb98, rewritten for this pipeline).
+ * Unauthenticated on purpose: the only caller is the cron. Two jobs, both bounded and idempotent:
+ *  1. rows stuck in `processing` become `failed`, so they are visible and retryable;
+ *  2. `failed` rows with attempts left are re-run once. `beginEvent` counts intake attempts and
+ *     gives up at MAX_ATTEMPTS; reply re-runs are counted here. A row out of attempts stays
+ *     `failed` on the user's needs-attention list, where `retryEvent` can still re-run it by hand.
+ */
+export const retryFailed = internalMutation({
+  args: {},
+  returns: v.object({ unstuck: v.number(), retried: v.number() }),
+  handler: async (ctx) => {
+    const now = Date.now();
+    let unstuck = 0;
+    let retried = 0;
+
+    const processing = await ctx.db
+      .query("processedEvents")
+      .withIndex("by_status", (q) => q.eq("status", "processing"))
+      .take(RETRY_PAGE);
+    for (const row of processing) {
+      if (now - row._creationTime < STUCK_AFTER_MS) continue;
+      await ctx.db.patch(row._id, { status: "failed", lastError: "Timed out while being read" });
+      unstuck++;
+    }
+
+    const failed = await ctx.db
+      .query("processedEvents")
+      .withIndex("by_status", (q) => q.eq("status", "failed"))
+      .take(RETRY_PAGE);
+    for (const row of failed) {
+      if (!row.userId || row.attempts >= MAX_ATTEMPTS) continue;
+      if (row.route === "intake") {
+        await ctx.db.patch(row._id, { status: "received", lastError: undefined });
+        await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId: row._id });
+        retried++;
+      } else if (row.route === "reply" && row.claimId) {
+        const payload = (row.payload ?? {}) as Record<string, unknown>;
+        const read = (key: string) => (typeof payload[key] === "string" ? (payload[key] as string) : "");
+        if (!read("messageId")) continue;
+        await ctx.db.patch(row._id, { status: "processing", lastError: undefined, attempts: row.attempts + 1 });
+        await ctx.scheduler.runAfter(0, internal.replies.classify, {
+          processedEventId: row._id,
+          claimId: row.claimId,
+          messageId: read("messageId"),
+          from: read("from"),
+          subject: read("subject"),
+          text: read("text"),
+        });
+        retried++;
+      }
+    }
+    return { unstuck, retried };
+  },
+});
+
 /**
  * The board's "needs attention" list (D14): every inbound message or paste of
  * the caller's that could not be finished on its own.
