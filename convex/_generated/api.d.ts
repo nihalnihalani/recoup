@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as alerts from "../alerts.js";
 import type * as auth from "../auth.js";
 import type * as budget from "../budget.js";
 import type * as claims from "../claims.js";
@@ -20,6 +21,7 @@ import type * as inbound from "../inbound.js";
 import type * as insights from "../insights.js";
 import type * as intake from "../intake.js";
 import type * as lib_access from "../lib/access.js";
+import type * as lib_accountState from "../lib/accountState.js";
 import type * as lib_ai from "../lib/ai.js";
 import type * as lib_balance from "../lib/balance.js";
 import type * as lib_budget from "../lib/budget.js";
@@ -31,6 +33,7 @@ import type * as lib_money from "../lib/money.js";
 import type * as lib_offerMatch from "../lib/offerMatch.js";
 import type * as lib_passage from "../lib/passage.js";
 import type * as lib_policyText from "../lib/policyText.js";
+import type * as lib_rateLimits from "../lib/rateLimits.js";
 import type * as lib_schemas from "../lib/schemas.js";
 import type * as lib_shopsavvy from "../lib/shopsavvy.js";
 import type * as lib_text from "../lib/text.js";
@@ -56,6 +59,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  alerts: typeof alerts;
   auth: typeof auth;
   budget: typeof budget;
   claims: typeof claims;
@@ -68,6 +72,7 @@ declare const fullApi: ApiFromModules<{
   insights: typeof insights;
   intake: typeof intake;
   "lib/access": typeof lib_access;
+  "lib/accountState": typeof lib_accountState;
   "lib/ai": typeof lib_ai;
   "lib/balance": typeof lib_balance;
   "lib/budget": typeof lib_budget;
@@ -79,6 +84,7 @@ declare const fullApi: ApiFromModules<{
   "lib/offerMatch": typeof lib_offerMatch;
   "lib/passage": typeof lib_passage;
   "lib/policyText": typeof lib_policyText;
+  "lib/rateLimits": typeof lib_rateLimits;
   "lib/schemas": typeof lib_schemas;
   "lib/shopsavvy": typeof lib_shopsavvy;
   "lib/text": typeof lib_text;
