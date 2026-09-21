@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least-privilege default; no job here needs to write to the repo or open PRs.
+permissions:
+  contents: read
+
+# A second push to the same PR/branch cancels the still-running check for the
+# previous one instead of queuing behind it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Node version comes from .nvmrc (currently 22.x, see engines.node in
+      # package.json) so there is exactly one place to bump it.
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      # Full install, WITH scripts (default). This is the only supported
+      # install mode for this repo -- see docs/ops/INSTALL.md for why
+      # `--omit=dev` / `--ignore-scripts` are not supported: patch-package
+      # (which repairs a real production bug in @agentmail/convex, see
+      # patches/@agentmail+convex+0.1.0.patch) is a devDependency and runs
+      # from postinstall, and build tooling (tsc, vite) also lives in
+      # devDependencies.
+      - name: npm ci
+        run: npm ci
+
+      # Belt-and-suspenders on top of postinstall: assert the patch is
+      # actually present in node_modules, not just that patch-package ran.
+      # docs/team/VERIFICATION.md records this patch being silently unapplied
+      # once already.
+      - name: verify:patch
+        run: npm run verify:patch
+
+      - name: typecheck
+        run: npm run typecheck
+
+      # --max-warnings pinned to the CURRENT warning count, not 0: there is
+      # one pre-existing oxlint warning in convex/lib/passage.ts
+      # (eslint(no-useless-escape)), owned by another lane (T16 per
+      # docs/team/DECISIONS.md D88), which T17 must not touch or suppress.
+      # TODO(T16): fix convex/lib/passage.ts:25 and drop this to
+      # --max-warnings=0.
+      - name: lint
+        run: npm run lint -- --max-warnings=1
+
+      # Enforced test gate: runs vitest itself with --reporter=json and fails
+      # on any failing test, fewer than 600 total tests, or any file that
+      # collected 0 tests. Replaces the old `vitest run --passWithNoTests`,
+      # which would exit 0 on an empty/misconfigured suite.
+      - name: test (with minimum-count gate)
+        run: npm run test:ci
+
+      - name: build
+        run: npm run build
+
+      - name: dist size summary
+        run: |
+          echo "### dist/ size" >> "$GITHUB_STEP_SUMMARY"
+          du -sh dist >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          find dist -maxdepth 2 -type f -exec du -h {} \; | sort -rh >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # See scripts/check-codegen.mjs for the full explanation: `npx convex
+      # codegen` (dry-run or not) always requires a reachable, already-linked
+      # deployment and explicitly refuses a preview CONVEX_DEPLOY_KEY, so
+      # this can only run when a dedicated codegen deployment's admin key is
+      # provided as repo secrets. Without them, the script prints a skip
+      # notice and exits 0 -- it is informational here, not a required gate,
+      # until such a deployment is provisioned (see docs/ops/INSTALL.md).
+      - name: codegen:check
+        run: npm run codegen:check
+        env:
+          CONVEX_URL: ${{ secrets.CODEGEN_CHECK_CONVEX_URL }}
+          CONVEX_ADMIN_KEY: ${{ secrets.CODEGEN_CHECK_CONVEX_ADMIN_KEY }}
+
+  # T20 (P10 browser acceptance suite) has not landed yet, so this job is a
+  # no-op until an e2e/ directory exists in the tree it runs against. Once
+  # T20 adds it, this job installs Playwright and runs the suite, but only
+  # against E2E_* secrets pointing at a disposable Convex dev deployment --
+  # never against the shared dev deployment, and never printing secret
+  # values to the log.
+  e2e:
+    name: e2e
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: check for e2e/
+        id: e2e_dir
+        run: |
+          if [ -d "e2e" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "e2e/ does not exist yet (T20 pending) -- skipping this job's remaining steps."
+          fi
+
+      - uses: actions/setup-node@v5
+        if: steps.e2e_dir.outputs.present == 'true'
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: npm ci
+        if: steps.e2e_dir.outputs.present == 'true'
+        run: npm ci
+
+      - name: install Playwright browsers
+        if: steps.e2e_dir.outputs.present == 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: check for e2e secrets
+        id: e2e_secrets
+        if: steps.e2e_dir.outputs.present == 'true'
+        run: |
+          if [ -n "$HAS_URL" ] && [ -n "$HAS_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "E2E_CONVEX_URL / E2E_DEPLOY_KEY are not configured -- skipping the Playwright run. (Never echoing secret values.)"
+          fi
+        env:
+          HAS_URL: ${{ secrets.E2E_CONVEX_URL }}
+          HAS_KEY: ${{ secrets.E2E_DEPLOY_KEY }}
+
+      - name: run Playwright suite
+        if: steps.e2e_dir.outputs.present == 'true' && steps.e2e_secrets.outputs.present == 'true'
+        run: npx playwright test
+        env:
+          E2E_CONVEX_URL: ${{ secrets.E2E_CONVEX_URL }}
+          E2E_DEPLOY_KEY: ${{ secrets.E2E_DEPLOY_KEY }}
+          E2E_BASE_URL: ${{ secrets.E2E_BASE_URL }}
+
+      - name: upload playwright report
+        if: always() && steps.e2e_dir.outputs.present == 'true' && steps.e2e_secrets.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14
