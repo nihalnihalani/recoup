@@ -176,7 +176,13 @@ function safeCurrency(code: string): string | null {
 /** An ISO date the email actually stated, or undefined; `purchasedAt` is optional until confirm (D25). */
 function safeDate(iso: string | null): number | undefined {
   if (!iso) return undefined;
-  const ms = Date.parse(iso);
+  // A bare "2025-11-29" parses as midnight UTC, which is the evening of the 28th anywhere in the
+  // Americas, so the purchase rendered a day early (seen live on 2026-09-21). Anchor a date-only
+  // value at noon UTC instead: that is the same calendar day from UTC-11 to UTC+12. A timestamp
+  // that already carries a time or a zone is trusted as given. `fromDateInput` in src/lib/ui.ts
+  // does the same thing for dates the user picks.
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(iso.trim());
+  const ms = Date.parse(dateOnly ? `${iso.trim()}T12:00:00Z` : iso);
   if (!Number.isFinite(ms)) return undefined;
   // Reject a hallucinated year: anything before 2000 or more than a day ahead.
   if (ms < 946_684_800_000 || ms > Date.now() + 86_400_000) return undefined;

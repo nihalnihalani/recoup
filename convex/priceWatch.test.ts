@@ -4,6 +4,7 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { fetchBothImpl } from "./policies";
+import { MIN_PLAUSIBLE_FRACTION, implausiblyCheap } from "./priceWatch";
 import {
   DAILY_BUDGETS,
   GLOBAL_DAILY_BUDGETS,
@@ -1190,5 +1191,26 @@ describe("T18.5 (D124 B4): priceWatch.recordCheck is tombstone-gated, like every
     expect(res.accepted).toBe(true);
     expect(res.priceCheckId).not.toBeNull();
     expect(await checksFor(t, itemId)).toHaveLength(1);
+  });
+});
+
+describe("implausiblyCheap (live 2026-09-20: a $449.99 mixer read as $1.00)", () => {
+  it("rejects a reading far below what was paid", () => {
+    expect(implausiblyCheap(100, 44_999)).toMatch(/too far below/);
+    expect(implausiblyCheap(1, 44_999)).not.toBeNull();
+  });
+
+  it("allows a deep but real clearance, which must stay claimable", () => {
+    expect(implausiblyCheap(9_000, 44_999)).toBeNull();
+    expect(implausiblyCheap(4_500, 44_999)).toBeNull();
+  });
+
+  it("allows anything at or above the floor", () => {
+    expect(implausiblyCheap(Math.round(44_999 * MIN_PLAUSIBLE_FRACTION), 44_999)).toBeNull();
+  });
+
+  it("is quiet when there is nothing to judge", () => {
+    expect(implausiblyCheap(undefined, 44_999)).toBeNull();
+    expect(implausiblyCheap(100, 0)).toBeNull();
   });
 });

@@ -35,7 +35,7 @@ import { claimDrop } from "./notify";
 import { defaultWatchName, parseProductUrl } from "./lib/watchUrl";
 import { verdictWithQualifier, type QualifiedVerdict } from "./lib/verdict";
 import { imageUrlChange } from "./lib/imageUrl";
-import { cleanLine } from "./lib/text";
+import { cleanLine, meaningfulName } from "./lib/text";
 import { charge, consumeGlobalBudget, takeGlobalBudget } from "./lib/budget";
 import { schedulePolicyFetch } from "./policies";
 import { errorNote, observePrice, rejectionReason, truncate, type PageObservation } from "./priceWatch";
@@ -782,7 +782,9 @@ export const recordWatchCheck = internalMutation({
       if (watch.currency === undefined) patch.currency = args.currency;
     }
     // The page controls this string; it is stored as one clean line like a name the user typed.
-    const productName = args.productName === undefined ? undefined : cleanLine(args.productName);
+    // A page we could not read yields a name that is punctuation only ("."), which must not
+    // replace the readable default; `meaningfulName` returns null for those (seen live 2026-09-20).
+    const productName = meaningfulName(args.productName);
     if (
       productName &&
       args.variantMatch !== "none" &&

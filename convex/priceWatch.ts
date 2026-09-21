@@ -366,7 +366,9 @@ export const recordCheck = internalMutation({
     // A page that is "not that product" says nothing about what this item looks like.
     const imageUrl = args.variantMatch === "none" ? undefined : imageUrlChange(item.imageUrl, args.imageUrl);
     if (imageUrl !== undefined) await ctx.db.patch(item._id, { imageUrl });
-    const rejection = rejectionReason(args, purchase.currency, "the purchase was");
+    const rejection =
+      rejectionReason(args, purchase.currency, "the purchase was") ??
+      implausiblyCheap(args.observedCents, item.unitCents);
 
     const priceCheckId = await ctx.db.insert("priceChecks", {
       itemId: item._id,
@@ -429,6 +431,24 @@ export const recordCheck = internalMutation({
  * first accepted check): any stated currency passes. `expectedWas` finishes
  * the mismatch sentence ("the purchase was" / "this watch is tracked").
  */
+/**
+ * A price this far below what was paid is far more often a misread than a sale: an accessory, a
+ * deposit, a shipping line, or a financing row ("as low as $1/mo"). Seen live on 2026-09-20, a
+ * $449.99 mixer read as $1.00, which put $448.99 into "money on the table" and offered to ask
+ * Target for it.
+ *
+ * The floor is deliberately low (a real clearance can be 80% off and must stay claimable); it only
+ * catches readings that would embarrass a claim. A rejected reading is still stored, with this note,
+ * so the user sees that we looked and what we made of it.
+ */
+export const MIN_PLAUSIBLE_FRACTION = 0.1;
+
+export function implausiblyCheap(observedCents: number | undefined, paidCents: number): string | null {
+  if (observedCents === undefined || paidCents <= 0) return null;
+  if (observedCents >= Math.round(paidCents * MIN_PLAUSIBLE_FRACTION)) return null;
+  return "That price is too far below what you paid to be this product; it looks like an accessory, a deposit or a monthly payment";
+}
+
 export function rejectionReason(
   args: {
     observedCents?: number;

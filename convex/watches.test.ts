@@ -1293,3 +1293,36 @@ describe("D115 6b-3 / T18.3: watches.list/get see the signed-out shape once tomb
     expect(await as.query(api.watches.get, { watchId })).not.toBeNull();
   });
 });
+
+describe("the extracted product name never degrades the readable default", () => {
+  const DEFAULT_NAME = "acme.example: down jacket";
+
+  it("replaces the default with a real name the page gave", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId, { name: DEFAULT_NAME });
+
+    await t.mutation(internal.watches.recordWatchCheck, {
+      ...good(watchId, 10_000),
+      productName: "Acme Alpine Down Jacket, Mens Large",
+    });
+
+    const watch = await t.run((ctx) => ctx.db.get(watchId));
+    expect(watch?.name).toBe("Acme Alpine Down Jacket, Mens Large");
+  });
+
+  it("keeps the default when the page yielded punctuation only (live 2026-09-20: a card titled \".\")", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+
+    for (const junk of [".", " - ", "|", "()"]) {
+      const watchId = await seedWatch(t, userId, { name: DEFAULT_NAME });
+      await t.mutation(internal.watches.recordWatchCheck, {
+        ...good(watchId, 10_000),
+        productName: junk,
+      });
+      const watch = await t.run((ctx) => ctx.db.get(watchId));
+      expect(watch?.name).toBe(DEFAULT_NAME);
+    }
+  });
+});

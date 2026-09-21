@@ -222,6 +222,43 @@ describe("intake.applyExtraction — orders", () => {
     const board = await as.query(api.purchases.board, {});
     expect(board.purchases[0].purchase.purchasedAt).toBeUndefined();
   });
+
+  it("anchors a date-only order date at noon UTC, so it reads as the same day west of Greenwich", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-tz");
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: id,
+      parsed: orderEmail({ purchasedAt: "2026-09-01" }),
+    });
+    const board = await as.query(api.purchases.board, {});
+    const stored = board.purchases[0].purchase.purchasedAt as number;
+
+    // Midnight UTC would be Aug 31 in the Americas, which is what this fixes.
+    expect(new Date(stored).toISOString()).toBe("2026-09-01T12:00:00.000Z");
+    // Noon UTC holds the calendar day from UTC-12 to UTC+11, which covers every American and
+    // European zone. It still rolls a day forward at UTC+12 and beyond (New Zealand, Kiribati);
+    // no single instant can represent a bare date everywhere, and erring east of Greenwich is
+    // the right trade when the orders we read are overwhelmingly American.
+    for (const offsetHours of [-12, -11, -7, 0, 5.5, 11]) {
+      const local = new Date(stored + offsetHours * 3_600_000);
+      expect(local.toISOString().slice(0, 10)).toBe("2026-09-01");
+    }
+  });
+
+  it("trusts an order date that already states a time", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-tz-exact");
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: id,
+      parsed: orderEmail({ purchasedAt: "2026-09-01T03:30:00.000Z" }),
+    });
+    const board = await as.query(api.purchases.board, {});
+    expect(new Date(board.purchases[0].purchase.purchasedAt as number).toISOString()).toBe(
+      "2026-09-01T03:30:00.000Z",
+    );
+  });
 });
 
 describe("intake.applyExtraction — refunds (D15)", () => {

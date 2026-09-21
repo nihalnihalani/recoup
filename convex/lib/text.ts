@@ -15,6 +15,17 @@ export function cleanLine(s: string): string {
   return stripControl(s).trim();
 }
 
+/**
+ * A label a person would recognise, or null. A page we cannot read often yields a name that survives
+ * `cleanLine` but says nothing: ".", "-", "|", "()". Storing one of those over a readable default
+ * leaves a watch card titled "." (seen live on 2026-09-20), so a name needs a letter or a digit.
+ */
+export function meaningfulName(s: string | undefined): string | null {
+  if (s === undefined) return null;
+  const line = cleanLine(s);
+  return /[\p{L}\p{N}]/u.test(line) ? line : null;
+}
+
 /** `cleanLine`, refusing (not truncating) a value longer than `max`: the user typed it, so tell them. */
 export function boundedLine(s: string, label: string, max: number): string {
   const line = cleanLine(s);
