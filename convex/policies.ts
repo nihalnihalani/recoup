@@ -5,7 +5,6 @@ import { action, internalAction, internalMutation, internalQuery, mutation } fro
 import type { ActionCtx, MutationCtx, QueryCtx } from "./_generated/server";
 import { components, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { getAuthUserId } from "@convex-dev/auth/server";
 import { extract } from "./lib/ai";
 import { Policy } from "./lib/schemas";
 import type { PolicyT } from "./lib/schemas";
@@ -318,13 +317,26 @@ export const clearMerchantSchedule = internalMutation({
   },
 });
 
+/**
+ * Tombstone-aware resolution of the caller for `refresh`, which has no
+ * `ctx.db` of its own (D115 6b-3). `ctx.runQuery` from an action propagates
+ * the same request's `ctx.auth`, so this resolves the same user the bare
+ * `getAuthUserId` this action used to call would, but also refuses a
+ * deleting/deleted account before `beginRefresh` ever charges a budget or
+ * schedules paid Firecrawl/OpenAI work.
+ */
+export const requireActiveUserId = internalQuery({
+  args: {},
+  returns: v.id("users"),
+  handler: async (ctx) => requireUserId(ctx),
+});
+
 /** User-triggered re-research. Returns the id of the newly inserted snapshot. */
 export const refresh = action({
   args: { merchantDomain: v.string(), kind: policyKind },
   returns: v.id("policies"),
   handler: async (ctx, args): Promise<Id<"policies">> => {
-    const userId = await getAuthUserId(ctx);
-    if (!userId) throw new ConvexError("Not signed in");
+    const userId = await ctx.runQuery(internal.policies.requireActiveUserId, {});
     const merchantDomain = normalizeDomain(args.merchantDomain);
     if (!merchantDomain) throw new ConvexError("merchantDomain must be a domain like example.com");
     // Before anything paid: ownership and budget, in one transaction.

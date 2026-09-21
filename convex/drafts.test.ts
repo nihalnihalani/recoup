@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
@@ -1016,6 +1017,29 @@ describe("the send path is not a mail relay (pre-launch review B1)", () => {
         const closed = await seed(t, userId, { status });
         await expect(as.action(api.drafts.generate, { claimId: closed.claimId })).rejects.toThrow("This claim is closed");
       }
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(await t.run(async (ctx) => (await ctx.db.query("usage").collect()).length)).toBe(0);
+      expect(await t.run(async (ctx) => (await ctx.db.query("drafts").collect()).length)).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // D115 6b-3 (T18.2): `generate` used to resolve its caller with a bare
+  // `getAuthUserId`, so a tombstoned account could still spend the
+  // draft_generate budget and call the model. Now gated the same way the
+  // "refuses closed claims" case above proves for a closed claim.
+  it("refuses a tombstoned caller before charging or calling the model", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const { claimId } = await seed(t, userId);
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }),
+    );
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      await expect(as.action(api.drafts.generate, { claimId })).rejects.toThrow(ConvexError);
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(await t.run(async (ctx) => (await ctx.db.query("usage").collect()).length)).toBe(0);
       expect(await t.run(async (ctx) => (await ctx.db.query("drafts").collect()).length)).toBe(0);

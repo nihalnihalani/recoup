@@ -280,6 +280,27 @@ describe("refresh is gated before anything is paid for (pre-launch review B3)", 
     expect(await t.run(async (ctx) => (await ctx.db.query("policies").collect()).length)).toBe(0);
   });
 
+  // D115 6b-3 (T18.2): `refresh` used to resolve its caller with a bare
+  // `getAuthUserId`, so a tombstoned account could still charge the
+  // policy_refresh/policy_fetch budgets and trigger a Firecrawl search.
+  it("refuses a tombstoned caller before charging or fetching anything", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    await purchaseAt(t, userId, "bought.example");
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }),
+    );
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(as.action(api.policies.refresh, { merchantDomain: "bought.example", kind: "returns" })).rejects.toThrow(
+      ConvexError,
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await usage(t)).toHaveLength(0);
+    expect(await t.run(async (ctx) => (await ctx.db.query("policies").collect()).length)).toBe(0);
+  });
+
   it("accepts a store the caller bought from or watches, normalised, up to 10 a day", async () => {
     const t = setup();
     const { userId } = await signedIn(t);

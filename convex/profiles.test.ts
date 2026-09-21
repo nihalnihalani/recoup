@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import { setup, signedIn } from "./test.setup";
 
@@ -76,5 +77,41 @@ describe("profiles", () => {
     });
     const mine = await b.as.query(api.profiles.me, {});
     expect(mine?.inboxEmail).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D115 6b-3 (checkpoint 6b F3b, ported from the reviewer's scratchpad
+// da6b.test.ts): `ensureInbox` for a tombstoned account must not call out to
+// AgentMail at all, let alone create a fresh, unreachable-by-purge profile
+// row. Fails against the pre-T18.2 code (which resolved the caller with a
+// bare `getAuthUserId`, so a deleted account got a brand new inbox
+// provisioned for it) and passes once `ensureInbox` resolves through the
+// tombstone-aware `requireActiveUserId` first.
+// ---------------------------------------------------------------------------
+describe("profiles.ensureInbox tombstone gate (D115 6b-3, checkpoint 6b F3b)", () => {
+  it("provisions nothing for a tombstoned account: no fetch, no profile row", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }),
+    );
+
+    const fetchSpy = vi.fn(
+      async () => new Response(JSON.stringify({ inbox_id: "inbox-new", email: "new@agentmail.to" }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(as.action(api.profiles.ensureInbox, {})).rejects.toThrow(ConvexError);
+    // The real POST /inboxes call `createInboxRemote` would have made is
+    // never reached: the tombstone check throws before it.
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    const profile = await t.run(async (ctx) =>
+      ctx.db.query("profiles").withIndex("by_user", (q) => q.eq("userId", userId)).unique(),
+    );
+    expect(profile).toBeNull();
+
+    vi.unstubAllGlobals();
   });
 });

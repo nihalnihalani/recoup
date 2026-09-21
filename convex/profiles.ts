@@ -3,6 +3,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import { action, internalMutation, internalQuery, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import schema from "./schema";
+import { requireUserId } from "./lib/access";
 
 /** Shown in the UI as "forward your order emails here". */
 const DISPLAY_NAME = "Recoup";
@@ -135,6 +136,21 @@ async function createInboxRemote(): Promise<{ inboxId: string; inboxEmail: strin
 }
 
 /**
+ * Tombstone-aware resolution of the caller for `ensureInbox`, which has no
+ * `ctx.db` of its own (D115 6b-3). `ctx.runQuery` from an action propagates
+ * the same request's `ctx.auth`, so this resolves the same user the bare
+ * `getAuthUserId` this action used to call would, but also refuses a
+ * deleting/deleted account before `createInboxRemote`'s `fetch` is ever
+ * reached (checkpoint 6b F3b: a deleted account used to still get a brand
+ * new AgentMail inbox provisioned for it, forever unreachable by any purge).
+ */
+export const requireActiveUserId = internalQuery({
+  args: {},
+  returns: v.id("users"),
+  handler: async (ctx) => requireUserId(ctx),
+});
+
+/**
  * Provisions the caller's AgentMail inbox on first use and returns its
  * address. Idempotent: a second call returns the stored address without
  * touching AgentMail, so the UI can call it on every sign-in.
@@ -143,8 +159,7 @@ export const ensureInbox = action({
   args: {},
   returns: v.string(),
   handler: async (ctx): Promise<string> => {
-    const userId = await getAuthUserId(ctx);
-    if (!userId) throw new ConvexError("Not signed in");
+    const userId = await ctx.runQuery(internal.profiles.requireActiveUserId, {});
 
     const existing = await ctx.runQuery(internal.profiles.byUser, { userId });
     if (existing) return existing.inboxEmail;

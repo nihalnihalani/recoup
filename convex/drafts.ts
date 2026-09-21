@@ -1,5 +1,4 @@
 import { ConvexError, v } from "convex/values";
-import { getAuthUserId } from "@convex-dev/auth/server";
 import { vOutboundId, vOutboundStatus } from "@agentmail/convex";
 import {
   action,
@@ -203,6 +202,19 @@ const SYSTEM = [
 ].join(" ");
 
 /**
+ * Tombstone-aware resolution of the caller for `generate`, which has no
+ * `ctx.db` of its own (D115 6b-3). `ctx.runQuery` from an action propagates
+ * the same request's `ctx.auth`, so this resolves the same user the bare
+ * `getAuthUserId` this action used to call would, but also refuses a
+ * deleting/deleted account before the model is ever asked to write anything.
+ */
+export const requireActiveUserId = internalQuery({
+  args: {},
+  returns: v.id("users"),
+  handler: async (ctx) => requireUserId(ctx),
+});
+
+/**
  * Drafts one message with the model and stores it as a new version (D18).
  * `to` is prefilled only from a policy contact the user has confirmed;
  * otherwise the recipient stays empty and the user must supply and tick it
@@ -212,8 +224,7 @@ export const generate = action({
   args: { claimId: v.id("claims") },
   returns: v.id("drafts"),
   handler: async (ctx, { claimId }) => {
-    const userId = await getAuthUserId(ctx);
-    if (!userId) throw new ConvexError("Not signed in");
+    const userId = await ctx.runQuery(internal.drafts.requireActiveUserId, {});
     const c = await ctx.runQuery(internal.drafts.context, { claimId });
     if (!c || c.claim.userId !== userId) throw new ConvexError("Claim not found");
     const { claim, item, purchase } = c;
