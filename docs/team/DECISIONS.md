@@ -61,3 +61,4 @@ Format: D## · date · decision · rationale · affects
 - D48 · R11/R12 · Ledger events use `assertPositiveCents`; board skips claims with `isExample` even on real purchases; `dismiss` refuses `confirmed`.
 - D49 · **T10 guard:** `reconcileSend` must not overwrite `confirmed`/`dismissed` (a claim can be confirmed while `queued`); it only transitions from `queued`.
 - Drift noted, accepted: `processedEvents.kind` stays `v.string()` (tests use free-form kinds).
+- D50 · **Generated API is committed with its module.** Whoever adds or renames a Convex module runs `npx convex codegen` and includes `convex/_generated/api.d.ts` in the same commit. Regenerating is not hand-editing. Found because HEAD failed typecheck in an isolated worktree while every lane's local tree passed.
