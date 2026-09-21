@@ -288,6 +288,36 @@ export default defineSchema({
     userId: v.id("users"), status: accountStateStatus, requestedAt: v.number(), completedAt: v.optional(v.number()),
     attempts: v.number(), lastError: v.optional(v.string()), inboxDeleted: v.optional(v.boolean()),
     progress: v.optional(v.object({ table: v.string(), cursor: v.optional(v.string()) })),
+    /**
+     * 6b-4c (D115, T18.1): the AgentMail inbox id captured once by
+     * `requestDeletion` (mirrors `account.ts`'s `purge` docstring: `profiles`
+     * is the LAST table `purgeStep` drains, so re-reading it back after the
+     * app-data purge completes would find nothing). Persisting it here
+     * instead of only threading it as a `purge` action argument means a
+     * daily re-drive (`account.reDriveStuckDeletions`) can recover it for a
+     * row whose in-flight scheduled call was lost, without depending on
+     * `profiles` still existing.
+     */
+    inboxId: v.optional(v.string()),
+    /**
+     * 6b-4c (D115, T18.1): the `_scheduled_functions` id of the currently
+     * in-flight `account.purge` invocation for this row (the return value of
+     * whichever `ctx.scheduler.runAfter` call most recently (re)armed it),
+     * so the daily re-drive cron can tell "still running" from "chain died"
+     * with a single indexed `ctx.db.system.get` instead of an unbounded scan
+     * of the whole `_scheduled_functions` table (the pattern this codebase's
+     * own N2/N3 finding, D99, already flagged as wrong for a materially
+     * identical problem in `drafts.ts`'s `reconcileSend`).
+     */
+    activePurgeJobId: v.optional(v.id("_scheduled_functions")),
+    /**
+     * T18.4 (D115 6b-5), wired by T18.1: whether the AgentMail component's
+     * own per-inbox rows (`inboundMessages`/`outboundMessages`/`events`) were
+     * fully drained by `mailPurge.purgeInboxData`. `true` vacuously when the
+     * user never provisioned an inbox; `false` (not hidden/coerced) if that
+     * action's own bounded loop reported `complete: false`.
+     */
+    mailDataPurged: v.optional(v.boolean()),
   }).index("by_user", ["userId"]).index("by_status", ["status"]),
 
   /** Named cursors for resumable background jobs (e.g. retention sweeps, D75), one row per `key`. */
