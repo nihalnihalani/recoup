@@ -4,21 +4,21 @@
  * the AI/scrape providers are placeholders on this deployment), and the
  * tracked item's price table: paid vs current vs lowest, and a real plotted
  * price history rather than a "no price seen yet" placeholder.
+ *
+ * Uses the shared `leadPage` fixture (one real sign-in per worker, see
+ * `e2e/fixtures.ts`) rather than a fresh `signInSeeded` per test.
  */
-import { expect, seedLead, signInSeeded, test, type SeedFixturesResult } from "./fixtures";
+import { expect, leadEmailFor, seedLead, test, type SeedFixturesResult } from "./fixtures";
 
 test.describe("purchases", () => {
   let seeded: SeedFixturesResult;
 
-  test.beforeAll(() => {
-    seeded = seedLead();
+  // eslint-disable-next-line no-empty-pattern
+  test.beforeAll(({}, workerInfo) => {
+    seeded = seedLead(leadEmailFor(workerInfo.project.name));
   });
 
-  test.beforeEach(async ({ page }) => {
-    await signInSeeded(page);
-  });
-
-  test("the price-adjustment policy card shows the confirmed, retrieved rule", async ({ page }) => {
+  test("the price-adjustment policy card shows the confirmed, retrieved rule", async ({ leadPage: page }) => {
     await page.goto(`/purchases/${seeded.claimPurchaseId}`);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
 
@@ -31,17 +31,21 @@ test.describe("purchases", () => {
     await expect(policy.getByText("Confirmed", { exact: true })).toBeVisible();
     // Confidence 1 -> the meter reads 100%, not a live re-scrape spinner.
     await expect(policy.getByText("100%")).toBeVisible();
-    // The retrieval date is shown (a snapshot that was actually read), not "not looked up yet".
-    await expect(policy.getByText(/^Read /)).toBeVisible();
+    // The retrieval date is shown (a snapshot that was actually read), not
+    // "not looked up yet". Scoped to a <span>: "Read the rule"/"Read the
+    // site again" (a <summary>/<button>) also start with "Read ".
+    await expect(policy.locator("span").filter({ hasText: /^Read / })).toBeVisible();
     await expect(policy.getByText("Not looked up yet")).toHaveCount(0);
 
-    // The rule text itself, behind its own disclosure.
+    // The rule text itself, behind its own disclosure. Scoped to the
+    // blockquote: the "Correct this" textarea below is pre-filled with the
+    // same passage as an editable starting value and would also match.
     await policy.getByText("Read the rule").click();
-    await expect(policy.getByText(/price adjustments honored within 14 days/i)).toBeVisible();
+    await expect(policy.getByRole("blockquote")).toContainText(/price adjustments honored within 14 days/i);
   });
 
   test("the tracked item's table shows paid vs current vs lowest and a real plotted price history", async ({
-    page,
+    leadPage: page,
   }) => {
     await page.goto(`/purchases/${seeded.boughtPurchaseId}`);
 

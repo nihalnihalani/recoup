@@ -6,28 +6,30 @@
  * with the same neutral notice either way; sign-out; a direct route survives
  * a hard reload.
  */
-import { expect, lastCodeFor, seedLead, signInFresh, signInSeeded, signOut, test } from "./fixtures";
+import { expect, lastCodeFor, leadEmailFor, seedLead, signInFresh, signOut, test } from "./fixtures";
 
 const WRONG_CREDENTIALS_MESSAGE = "Wrong email or password";
 const RESET_NOTICE = "If that address has an account, a code is on its way.";
 
 test.describe("auth", () => {
   // Only the "existing account, wrong password" and "direct-route reload"
-  // cases below need the seeded lead account; seeding it once up front is
-  // simpler than conditionally seeding per test, and workers:1 means every
-  // other test in this file runs strictly after it either way.
-  test.beforeAll(() => {
-    seedLead();
+  // cases below need the seeded lead account; seeding it once up front for
+  // every test in this file is simpler than conditionally seeding per test.
+  let leadEmail: string;
+  // eslint-disable-next-line no-empty-pattern
+  test.beforeAll(({}, workerInfo) => {
+    leadEmail = leadEmailFor(workerInfo.project.name);
+    seedLead(leadEmail);
   });
 
   test("sign-up through the real UI reaches a verified, authenticated session", async ({ page, newEmail }) => {
     const email = newEmail();
     await signInFresh(page, { email, name: "Fresh Signup" });
 
-    // Authenticated shell: sidebar nav item, not the sign-in screen. (The
-    // sidebar's own logo link is ALSO named "Recoup dashboard", so this must
-    // be exact to avoid matching both.)
-    await expect(page.getByRole("link", { name: "Dashboard", exact: true })).toBeVisible();
+    // Authenticated shell (the top bar breadcrumb, not the sidebar -- the
+    // sidebar is an off-canvas drawer on the `mobile` project and would not
+    // be visible without an extra "Open menu" click), not the sign-in screen.
+    await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toContainText("Dashboard");
     await expect(page.getByRole("heading", { name: "Welcome back" })).toHaveCount(0);
   });
 
@@ -35,7 +37,7 @@ test.describe("auth", () => {
     await page.goto("/");
 
     // Existing (seeded) account, wrong password.
-    await page.getByLabel("Email").fill("e2e.lead@example.com");
+    await page.getByLabel("Email").fill(leadEmail);
     await page.getByLabel("Password", { exact: true }).fill("DefinitelyWrongPassword123!");
     await page.getByRole("button", { name: "Sign in" }).click();
     const existingError = page.getByRole("alert");
@@ -86,8 +88,7 @@ test.describe("auth", () => {
     await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible();
   });
 
-  test("a direct route survives a hard reload (session persists)", async ({ page }) => {
-    await signInSeeded(page);
+  test("a direct route survives a hard reload (session persists)", async ({ leadPage: page }) => {
     await page.goto("/watching");
     await expect(page.getByRole("heading", { name: "Watching" })).toBeVisible();
 

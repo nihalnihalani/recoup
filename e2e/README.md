@@ -139,6 +139,51 @@ rather than the shared read-mostly fixture set.
   URL and sees none of A's data; A's board/watchlist never surfaces
   something B created.
 
+## Test triage: `test.fixme` vs a truthful pass
+
+- A test that fails because of a **real product defect** stays in the suite,
+  written correctly, and is marked `test.fixme("...reason...", async (...) =>
+  {...})` — Playwright reports it as skipped (not a false green, not a red
+  CI run) and the reason string carries the finding. Six tests in
+  `resilience.spec.ts`'s axe describe block are `test.fixme` right now (see
+  "Known findings" below) — they are not weakened assertions, they are the
+  real `expect(serious).toEqual([])` check, just not required to pass until
+  the defect they found is fixed.
+- A step that is **provider-dependent** (calls OpenAI/Firecrawl/AgentMail
+  with this deployment's placeholder keys) is never skipped: the spec
+  asserts the truthful failure state instead (see "Why provider-dependent
+  steps..." above). `claims.spec.ts`'s draft-generation test is the
+  clearest example — it is written to pass either way (truthful failure, or
+  the real recipient-confirm gate if a live key is ever configured), never
+  `test.skip`.
+
+## Known findings (real product defects the suite found)
+
+- **Color contrast, WCAG 2 AA (axe `color-contrast`, impact "serious").**
+  Every authenticated page shares `Shell`/`Sidebar.tsx`/`TopBar.tsx`/
+  `UserCard.tsx`, and several of their fixed `text-gray-400`-on-white labels
+  measure 2.6:1 contrast against the 4.5:1 WCAG AA minimum for normal-size
+  text: Sidebar's "Main menu" heading, TopBar's breadcrumb "Main Menu" item
+  and command-palette "Search anything…" placeholder, and UserCard's "Inbox
+  not set up yet" placeholder subtitle. `NotificationBell`'s unread-count
+  badge (white on `bg-red-500`) measures 3.76:1, also below 4.5:1.
+  Reproduced identically on Board, Watching, Settings, a Purchase page and a
+  Claim page, on both the `desktop-chromium` and `mobile` projects. Five
+  `test.fixme` tests in `resilience.spec.ts` (the `Board`/`Watching`/
+  `Settings` loop plus the Purchase and Claim axe tests) carry this finding
+  and the exact selectors/colors.
+- **Color contrast, `src/App.tsx`'s `<AuthLoading>` splash.** The plain
+  "Loading…" screen shown while Convex is still resolving the session
+  (`<div className="flex min-h-screen items-center justify-center bg-paper
+  text-sm text-ink/50">Loading…</div>`) measures 3.4:1 (`text-ink/50` on
+  `bg-paper`), also below 4.5:1. Reachable any time a signed-in tab does a
+  full navigation (not just first load), so it is real, hit-able markup, not
+  a cold-start-only artifact. Its own dedicated `test.fixme` in
+  `resilience.spec.ts`.
+- None of the four files above (`Shell.tsx`, `Sidebar.tsx`, `TopBar.tsx`,
+  `UserCard.tsx`, `NotificationBell.tsx`, `App.tsx`) are `e2e/**`'s to fix;
+  these are flagged for the frontend owner rather than patched here.
+
 ## Known gaps
 
 - No lifecycle (export/delete) specs yet — D104: those land once T18/T19
@@ -153,3 +198,11 @@ rather than the shared read-mostly fixture set.
   axe; it does not scan the sign-in screen itself (unauthenticated) or the
   error-boundary fallback screens — both are small enough surfaces that a
   manual pass covered them, but they are not automated here.
+- Running the **full** suite (all six files, both projects) back-to-back
+  during active development shares one deployment-wide, per-email
+  `authAttempt` rate limit (10 per 10 minutes, `convex/auth.ts`) across
+  every file's own real sign-ins; in a clean run (CI, or any run not
+  preceded by many manual iterations against the same seeded addresses in a
+  short window) this is not an issue — `leadPage` signs in at most once per
+  worker for the whole run (see `e2e/fixtures.ts`) — but be aware of it if
+  you are iterating locally file-by-file in a tight loop.

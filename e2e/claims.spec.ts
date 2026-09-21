@@ -6,23 +6,28 @@
  * (D83 item 3) -- that step is asserted as a truthful failure, and the
  * recipient-confirm-checkbox / approve-without-confirming flow is only
  * exercised for real if generation happens to succeed (never faked).
+ *
+ * Uses the shared `leadPage` fixture (one real sign-in per worker, see
+ * `e2e/fixtures.ts`) rather than a fresh `signInSeeded` per test; the three
+ * tests below run in this declared order deliberately (the ledger test
+ * mutates the claim, and must run after the two read-only ones).
  */
-import { expect, seedLead, signInSeeded, test, type SeedFixturesResult } from "./fixtures";
+import { expect, leadEmailFor, seedLead, test, type SeedFixturesResult } from "./fixtures";
 
 test.describe("claims", () => {
   let seeded: SeedFixturesResult;
 
-  test.beforeAll(() => {
-    seeded = seedLead();
+  // eslint-disable-next-line no-empty-pattern
+  test.beforeAll(({}, workerInfo) => {
+    seeded = seedLead(leadEmailFor(workerInfo.project.name));
   });
 
-  test.beforeEach(async ({ page }) => {
-    await signInSeeded(page);
-    await page.goto(`/claims/${seeded.claimId}`);
-    await expect(page.getByRole("heading", { name: "E2E claim item", level: 1 })).toBeVisible();
+  test.beforeEach(async ({ leadPage }) => {
+    await leadPage.goto(`/claims/${seeded.claimId}`);
+    await expect(leadPage.getByRole("heading", { name: "E2E claim item", level: 1 })).toBeVisible();
   });
 
-  test("the claim page shows what is owed and no draft has been written yet", async ({ page }) => {
+  test("the claim page shows what is owed and no draft has been written yet", async ({ leadPage: page }) => {
     await expect(page.getByText("Owed to you")).toBeVisible();
     await expect(page.getByText("$25.00").first()).toBeVisible();
 
@@ -32,7 +37,7 @@ test.describe("claims", () => {
   });
 
   test("writing the message: a truthful provider failure, or (if it succeeds) a real recipient-confirm gate", async ({
-    page,
+    leadPage: page,
   }) => {
     const messageCard = page.locator("section").filter({ has: page.getByRole("heading", { name: "Message to the store", level: 2 }) });
     await messageCard.getByRole("button", { name: "Write the message" }).click();
@@ -64,7 +69,7 @@ test.describe("claims", () => {
   });
 
   test("ledger: confirming a credit updates the unresolved balance, and a later charge shows as \"Charged again\"", async ({
-    page,
+    leadPage: page,
   }) => {
     const ledgerCard = page.locator("section").filter({ has: page.getByRole("heading", { name: "Ledger", level: 2 }) });
     // The Figure row is the ledger card's second <dl> (the first is LedgerBar's

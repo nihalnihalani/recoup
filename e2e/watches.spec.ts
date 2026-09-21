@@ -7,28 +7,31 @@
  * for real. "I bought it" is exercised on a fresh watch created in-test
  * (never the shared seeded fixture) so this file cannot destructively
  * convert a row another spec file's own beforeAll re-seeds independently.
+ *
+ * Uses the shared `leadPage` fixture (one real sign-in per worker, see
+ * `e2e/fixtures.ts`) rather than a fresh `signInSeeded` per test.
  */
-import { expect, seedLead, signInSeeded, test } from "./fixtures";
+import { expect, leadEmailFor, seedLead, test } from "./fixtures";
 
 test.describe("watches", () => {
-  test.beforeAll(() => {
-    seedLead();
+  // eslint-disable-next-line no-empty-pattern
+  test.beforeAll(({}, workerInfo) => {
+    seedLead(leadEmailFor(workerInfo.project.name));
   });
 
-  test.beforeEach(async ({ page }) => {
-    await signInSeeded(page);
-    await page.goto("/watching");
-    await expect(page.getByRole("heading", { name: "Watching", exact: true })).toBeVisible();
+  test.beforeEach(async ({ leadPage }) => {
+    await leadPage.goto("/watching");
+    await expect(leadPage.getByRole("heading", { name: "Watching", exact: true })).toBeVisible();
   });
 
   test("creating a watch from a URL shows the truthful check-failed state, never a fabricated price", async ({
-    page,
+    leadPage: page,
   }) => {
     const token = `wt${Date.now()}`;
     const url = `https://${token}.example/p/truthful-check-item`;
 
     await page.getByLabel("Product link").fill(url);
-    await page.getByRole("button", { name: "Watch" }).click();
+    await page.getByRole("button", { name: "Watch", exact: true }).click();
 
     const card = page.locator("li").filter({ has: page.getByRole("heading", { name: new RegExp(token) }) });
     await expect(card).toBeVisible();
@@ -37,11 +40,14 @@ test.describe("watches", () => {
     // never silently skipped, never a made-up number.
     await expect(card.getByText(/No price last time/i)).toBeVisible({ timeout: 45_000 });
     await expect(card.getByText("Watching", { exact: true })).toBeVisible();
-    await expect(card.getByText("No price read yet")).toBeVisible();
+    // Scoped to a <p>: the chart's own empty-state placeholder ("No price
+    // read yet. The chart starts with the first one.") is a <div> and would
+    // otherwise also match this same substring.
+    await expect(card.locator("p").filter({ hasText: "No price read yet" })).toBeVisible();
     await expect(card.getByText(/^\$/)).toHaveCount(0);
   });
 
-  test("pause and resume toggle the watch's status", async ({ page }) => {
+  test("pause and resume toggle the watch's status", async ({ leadPage: page }) => {
     const card = page.locator("li").filter({ has: page.getByRole("heading", { name: "E2E active watch" }) });
     await expect(card).toBeVisible();
 
@@ -54,11 +60,11 @@ test.describe("watches", () => {
     await expect(card.getByRole("button", { name: "Pause" })).toBeVisible();
   });
 
-  test("\"I bought it\" converts a fresh watch to a purchase with a claim window", async ({ page }) => {
+  test("\"I bought it\" converts a fresh watch to a purchase with a claim window", async ({ leadPage: page }) => {
     const token = `bought${Date.now()}`;
     const url = `https://${token}.example/p/buy-me`;
     await page.getByLabel("Product link").fill(url);
-    await page.getByRole("button", { name: "Watch" }).click();
+    await page.getByRole("button", { name: "Watch", exact: true }).click();
 
     const card = page.locator("li").filter({ has: page.getByRole("heading", { name: new RegExp(token) }) });
     await expect(card).toBeVisible();

@@ -2,14 +2,20 @@
  * T20 isolation.spec (D104): two fresh users. User B opening user A's
  * purchase/claim/watch data by URL sees the error boundary and none of A's
  * strings; A's own board/watchlist never surfaces anything B created.
+ *
+ * User A is the shared `leadPage` fixture (one real sign-in per worker, see
+ * `e2e/fixtures.ts`); user B is always a genuinely separate, freshly
+ * signed-up browser context (`signInFresh` on the per-test `page` fixture)
+ * -- two independent sessions, the most realistic model of "two users".
  */
-import { expect, seedLead, signInFresh, signInSeeded, signOut, test, type SeedFixturesResult } from "./fixtures";
+import { expect, leadEmailFor, seedLead, signInFresh, test, type SeedFixturesResult } from "./fixtures";
 
 test.describe("isolation", () => {
   let userA: SeedFixturesResult;
 
-  test.beforeAll(() => {
-    userA = seedLead();
+  // eslint-disable-next-line no-empty-pattern
+  test.beforeAll(({}, workerInfo) => {
+    userA = seedLead(leadEmailFor(workerInfo.project.name));
   });
 
   test("user B cannot open user A's purchase or claim by URL, and none of A's data appears", async ({
@@ -34,25 +40,25 @@ test.describe("isolation", () => {
     // Watches have no per-id route; the equivalent check is that B's own
     // (empty) watchlist never surfaces A's watch.
     await page.goto("/watching");
-    await expect(page.getByRole("heading", { name: "Nothing watched yet" })).toBeVisible();
+    await expect(page.getByText("Nothing watched yet")).toBeVisible();
     await expect(page.getByText("E2E active watch")).toHaveCount(0);
   });
 
-  test("user A's board and watchlist never show something user B created", async ({ page, newEmail }) => {
+  test("user A's board and watchlist never show something user B created", async ({ page, newEmail, leadPage }) => {
     const bToken = `isob${Date.now()}`;
     await signInFresh(page, { email: newEmail(), name: "User B Creator" });
-    await page.getByLabel("Product link").fill(`https://${bToken}.example/p/private-to-b`);
-    await page.getByRole("button", { name: "Watch" }).click();
-    await expect(page.getByRole("heading", { name: new RegExp(bToken) })).toBeVisible();
-    await signOut(page);
-
-    await signInSeeded(page); // back to user A (the lead fixture)
     await page.goto("/watching");
-    await expect(page.getByText(new RegExp(bToken))).toHaveCount(0);
-    // Sanity: this really is A's own populated watchlist, not an empty account.
-    await expect(page.getByText("E2E active watch")).toBeVisible();
+    await page.getByLabel("Product link").fill(`https://${bToken}.example/p/private-to-b`);
+    await page.getByRole("button", { name: "Watch", exact: true }).click();
+    await expect(page.getByRole("heading", { name: new RegExp(bToken) })).toBeVisible();
 
-    await page.goto("/");
-    await expect(page.getByText(new RegExp(bToken))).toHaveCount(0);
+    // A genuinely separate session (leadPage), never touched by user B's page above.
+    await leadPage.goto("/watching");
+    await expect(leadPage.getByText(new RegExp(bToken))).toHaveCount(0);
+    // Sanity: this really is A's own populated watchlist, not an empty account.
+    await expect(leadPage.getByText("E2E active watch").first()).toBeVisible();
+
+    await leadPage.goto("/");
+    await expect(leadPage.getByText(new RegExp(bToken))).toHaveCount(0);
   });
 });

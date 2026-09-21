@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, expect, type BrowserContext, type Page } from "@playwright/test";
 
 export { expect };
 
@@ -154,12 +154,29 @@ export function resetUser(email: string): { deleted: boolean } {
   return runConvex<{ deleted: boolean }>("testing:resetUser", { email });
 }
 
-/** Seeds (after a clean reset) a fresh copy of the shared, read-mostly `e2e.lead@example.com` fixture set. */
-export function seedLead(): SeedFixturesResult & { userId: string } {
-  resetUser(SEEDED_EMAIL);
-  const { userId } = seedUser(SEEDED_EMAIL, SEEDED_PASSWORD);
+/**
+ * `e2e.lead@example.com` scoped to one Playwright project (`desktop-chromium`
+ * vs `mobile`), e.g. `e2e.lead.mobile@example.com`. Running two projects with
+ * more than one worker means two OS processes can each be mid-`seedLead()`
+ * for the "same" lead account at once; sharing a literal single address
+ * across them is a genuine race (one project's `resetUser` can delete the
+ * account out from under the other's still-running `seedUser`/`seedFixtures`
+ * -- observed directly: a `RateLimited`/re-verification error on `leadPage`'s
+ * sign-in when both projects ran concurrently against one shared address).
+ * Scoping the address per project gives each one its own row and removes
+ * the race outright, at the cost of one extra seeded account per project.
+ */
+export function leadEmailFor(projectName: string): string {
+  const slug = projectName.replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase();
+  return slug.length === 0 ? SEEDED_EMAIL : `e2e.lead.${slug}@example.com`;
+}
+
+/** Seeds (after a clean reset) a fresh copy of the read-mostly lead fixture set at `email` (default `e2e.lead@example.com`; see `leadEmailFor` for the per-project address actually used by specs/fixtures below). */
+export function seedLead(email: string = SEEDED_EMAIL): SeedFixturesResult & { userId: string; email: string } {
+  resetUser(email);
+  const { userId } = seedUser(email, SEEDED_PASSWORD);
   const fixtures = seedFixtures(userId);
-  return { userId, ...fixtures };
+  return { userId, email, ...fixtures };
 }
 
 // ---------------------------------------------------------------------------
@@ -179,9 +196,25 @@ export function newE2EEmail(): string {
 // UI-driving helpers
 // ---------------------------------------------------------------------------
 
-/** Visible once `<Authenticated>` has swapped the sign-in screen out for the app shell. */
+/**
+ * Visible once `<Authenticated>` has swapped the sign-in screen out for the
+ * app shell. Deliberately NOT the sidebar's "Sign out" button: the sidebar
+ * is an off-canvas drawer under the `lg` breakpoint (`Shell`/`Sidebar.tsx`,
+ * closed by default), so on the `mobile` project that button exists in the
+ * DOM but is not visible until "Open menu" is clicked. The top bar's
+ * breadcrumb landmark (`TopBar.tsx`) is part of the same authenticated
+ * shell but is never viewport-gated, so it is a signal both projects agree on.
+ */
 async function expectAuthenticated(page: Page): Promise<void> {
-  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toBeVisible({ timeout: 20_000 });
+}
+
+/** Opens the mobile off-canvas sidebar drawer if it is not already open (a no-op on the desktop project, where the sidebar is always visible). */
+async function ensureSidebarOpen(page: Page): Promise<void> {
+  const signOutButton = page.getByRole("button", { name: "Sign out" });
+  if (await signOutButton.isVisible().catch(() => false)) return;
+  await page.getByRole("button", { name: "Open menu" }).click();
+  await expect(signOutButton).toBeVisible();
 }
 
 /**
@@ -233,6 +266,7 @@ export async function signInSeeded(page: Page, email = SEEDED_EMAIL, password = 
 }
 
 export async function signOut(page: Page): Promise<void> {
+  await ensureSidebarOpen(page);
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible({ timeout: 15_000 });
 }
@@ -245,9 +279,27 @@ export async function signOut(page: Page): Promise<void> {
 
 type Fixtures = {
   newEmail: () => string;
+  /**
+   * A page already signed in as the seeded `e2e.lead@example.com` fixture
+   * account, shared across every test in the run. `convex/auth.ts`'s
+   * `authAttempt` rate limit (10 per 10 minutes, PER EMAIL) is deliberately
+   * shared by every spec that reads/mutates the lead fixture -- if each of
+   * the dozen or so tests that only need "signed in as lead" performed its
+   * own real interactive sign-in, a single full-suite run could trip that
+   * limiter on its own, or an already-used refresh token could get rotated
+   * out from under a second freshly-signed-in context (`authRefreshTokens`'
+   * "any invalid reuse invalidates the whole chain" rule). Signing in
+   * exactly ONCE per worker and reusing the same `page` for every test that
+   * needs it avoids both: it is also just what a real user does (one login,
+   * many page views), which is closer to "real acceptance testing" than
+   * spinning up a fresh session per assertion. `workers: 1` means this is
+   * one sign-in for the ENTIRE suite. Tests using it must leave it on a
+   * sane, authenticated URL (every spec here starts with its own `goto`).
+   */
+  leadPage: Page;
 };
 
-export const test = base.extend<Fixtures>({
+export const test = base.extend<Fixtures, { leadContext: BrowserContext }>({
   // Playwright requires the first parameter to be an object-destructuring
   // pattern (it statically parses the function source to infer fixture
   // dependencies), hence the empty `{}` despite depending on nothing. The
@@ -271,5 +323,41 @@ export const test = base.extend<Fixtures>({
         console.warn(`[e2e] resetUser(${email}) cleanup failed:`, err);
       }
     }
+  },
+
+  // Worker-scoped: created once, reused by every test (and every spec file,
+  // since workers:1 means one worker runs the whole suite) that asks for
+  // `leadPage`. `browser.newContext()` does NOT pick up a project's `use`
+  // block on its own (that only happens for the built-in `context`/`page`
+  // fixtures) -- passing `testInfo.project.use` explicitly is what makes
+  // this context actually get the `mobile` project's Pixel 5 emulation
+  // (viewport, isMobile, userAgent, …) instead of silently falling back to
+  // desktop defaults on every project.
+  leadContext: [
+    async ({ browser }, provide, testInfo) => {
+      const context = await browser.newContext(testInfo.project.use);
+      await provide(context);
+      await context.close();
+    },
+    { scope: "worker" },
+  ],
+
+  leadPage: async ({ leadContext }, provide, testInfo) => {
+    // Sign in exactly once: a second `signInSeeded` on an already-authenticated
+    // page would just redundantly consume the rate limit, so only do it the
+    // first time this worker asks for the fixture. The breadcrumb landmark
+    // (see `expectAuthenticated`) is used rather than the sidebar's "Sign
+    // out" button because the latter is not visible until the mobile
+    // drawer is opened.
+    const alreadySignedIn = await leadContext
+      .pages()[0]
+      ?.getByRole("navigation", { name: "Breadcrumb" })
+      .isVisible()
+      .catch(() => false);
+    const page = leadContext.pages()[0] ?? (await leadContext.newPage());
+    // Same project-scoped address every spec file's own `beforeAll` seeds
+    // via `seedLead(leadEmailFor(...))` -- see `leadEmailFor`'s doc comment.
+    if (!alreadySignedIn) await signInSeeded(page, leadEmailFor(testInfo.project.name));
+    await provide(page);
   },
 });
