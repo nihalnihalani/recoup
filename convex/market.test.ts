@@ -149,7 +149,7 @@ describe("missing key", () => {
 });
 
 describe("retryable failures and backoff", () => {
-  it("schedules an automatic retry after each 429, incrementing attempts, and gives up after 3", async () => {
+  it(`schedules an automatic retry after each 429, incrementing attempts, and gives up after ${MARKET_MAX_ATTEMPTS}`, async () => {
     const t = setup();
     const { userId } = await signedIn(t);
     const watchId = await seedWatch(t, userId);
@@ -169,12 +169,16 @@ describe("retryable failures and backoff", () => {
     expect(row.marketNote).toBe("Market history is unavailable for this product");
     expect(row.marketNextRetryAt).toBeUndefined();
     expect(await marketRows(t, watchId)).toHaveLength(0);
-    // The initial manual charge, and each of the two auto-scheduled retries (after the 1st and 2nd
-    // failures — the 3rd goes straight to terminal), all go through `tryCharge`: every one of the 3
-    // draws from BOTH the user's daily cap and the shared global cap (F7/D103 — the auto path used to
-    // draw only from the global one, see "one user cannot exhaust the global switch" below).
-    expect(await usageCount(t, userId, "market_lookup")).toBe(3);
-    expect(await usageCount(t, undefined, "market_lookup")).toBe(3);
+    // D105: MARKET_MAX_ATTEMPTS is now 4, so all three MARKET_RETRY_BACKOFF_MS
+    // steps are exercised (after the 1st, 2nd and 3rd failures — the 4th
+    // goes straight to terminal). The initial manual charge plus each of the
+    // MARKET_MAX_ATTEMPTS-1 auto-scheduled retries all go through
+    // `tryCharge`: every one of the MARKET_MAX_ATTEMPTS draws from BOTH the
+    // user's daily cap and the shared global cap (F7/D103 — the auto path
+    // used to draw only from the global one, see "one user cannot exhaust
+    // the global switch" below).
+    expect(await usageCount(t, userId, "market_lookup")).toBe(MARKET_MAX_ATTEMPTS);
+    expect(await usageCount(t, undefined, "market_lookup")).toBe(MARKET_MAX_ATTEMPTS);
   });
 
   it("computes the first retry's nextRetryAt from MARKET_RETRY_BACKOFF_MS[0]", async () => {
