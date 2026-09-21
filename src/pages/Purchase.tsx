@@ -10,9 +10,6 @@ import { Countdown } from "../components/Countdown";
 import { StatusPill } from "../components/StatusPill";
 import { Empty, Loading, QueryBoundary } from "../components/States";
 
-// T11b-2 will replace this once priceWatch lands.
-const PRICE_WATCH_NOTE = "manual re-check arrives with priceWatch";
-
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof ConvexError && typeof err.data === "string" ? err.data : fallback;
 }
@@ -322,7 +319,11 @@ function OpenReturnCreditForm({ item }: { item: PurchaseItem }) {
 
 function ItemRow({ purchase, item }: { purchase: Doc<"purchases">; item: PurchaseItem }) {
   const setReturned = useMutation(api.purchases.setReturned);
+  const checkPriceNow = useAction(api.priceWatch.checkNow);
   const [toggling, setToggling] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [justChecked, setJustChecked] = useState(false);
 
   const latestPriceCheck = item.priceChecks[0];
   const hasOpenReturnCredit = item.claims.some(
@@ -335,6 +336,19 @@ function ItemRow({ purchase, item }: { purchase: Doc<"purchases">; item: Purchas
       await setReturned({ itemId: item._id, returned: checked });
     } finally {
       setToggling(false);
+    }
+  }
+
+  async function handleCheckPriceNow() {
+    setCheckError(null);
+    setChecking(true);
+    try {
+      await checkPriceNow({ itemId: item._id });
+      setJustChecked(true);
+    } catch (err) {
+      setCheckError(errorMessage(err, "Couldn't check the price."));
+    } finally {
+      setChecking(false);
     }
   }
 
@@ -358,12 +372,28 @@ function ItemRow({ purchase, item }: { purchase: Doc<"purchases">; item: Purchas
         <div>
           <button
             type="button"
-            disabled
-            title={PRICE_WATCH_NOTE}
-            className="mt-1 rounded-md border border-line px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-ink/40 opacity-60"
+            onClick={() => void handleCheckPriceNow()}
+            disabled={checking}
+            className="mt-1 rounded-md border border-line px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-ink/70 transition hover:border-harbor/40 hover:text-harbor disabled:opacity-60"
           >
-            Check price now
+            {checking ? "Checking…" : "Check price now"}
           </button>
+          {justChecked && !checking && (
+            <p className="mt-1 text-[11px] text-ink/60">
+              {latestPriceCheck?.observedCents !== undefined ? (
+                <>
+                  Latest: <Money cents={latestPriceCheck.observedCents} currency={purchase.currency} />
+                </>
+              ) : (
+                latestPriceCheck?.note ?? "No price found"
+              )}
+            </p>
+          )}
+          {checkError && (
+            <p role="alert" className="mt-1 text-[11px] text-rust">
+              {checkError}
+            </p>
+          )}
         </div>
       </td>
       <td className="py-3 pr-4">
