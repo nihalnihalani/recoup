@@ -37,7 +37,7 @@ import { extract } from "./lib/ai";
 import { imageUrlChange, pageImageUrl } from "./lib/imageUrl";
 import { charge } from "./lib/budget";
 import { parseProductUrl } from "./lib/watchUrl";
-import { PRICE_CHECK_PER_USER_PER_TICK, WATCH_CHECK_INTERVAL_MS, WATCH_SWEEP_BUMP_MS } from "./limits";
+import { INELIGIBLE_REST_MS, PRICE_CHECK_PER_USER_PER_TICK, WATCH_CHECK_INTERVAL_MS, WATCH_SWEEP_BUMP_MS } from "./limits";
 
 const firecrawl = new FirecrawlClient(components.firecrawl);
 
@@ -152,50 +152,77 @@ async function settledPriceClaimCents(ctx: QueryCtx, itemId: Id<"items">): Promi
 }
 
 /**
- * The window a claim would be opened against, or null when this item is not
- * watchable right now. Shared by `eligibleItems` (which decides what to
- * scrape) and `recordCheck` (which re-decides at write time, because the cron
- * fan-out and the scrape happen minutes apart and a window can close in
- * between).
+ * The window a claim would be opened against, or a reason it is closed.
+ * Shared by `eligibleItems` (which decides what to scrape, and how long to
+ * rest an ineligible item, F1/D103) and `recordCheck` (which re-decides at
+ * write time, because the cron fan-out and the scrape happen minutes apart
+ * and a window can close in between).
+ *
+ * `permanent` tells `eligibleItems` whether this item's ineligibility is
+ * expected to clear on its own soon (an unconfirmed purchase can be
+ * confirmed by the user; a policy fetch still in flight will land within
+ * minutes) or not (the item was returned, the purchase is an example or
+ * archived, or the window has actually closed) -- see `INELIGIBLE_REST_MS`.
  */
-async function watchWindow(
-  ctx: QueryCtx,
-  item: Doc<"items">,
-  now: number,
-): Promise<{ policy: Doc<"policies">; endsAt: number } | null> {
-  if (item.returned) return null;
+type WatchWindow =
+  | { ok: true; policy: Doc<"policies">; endsAt: number }
+  | { ok: false; permanent: boolean };
+
+async function watchWindow(ctx: QueryCtx, item: Doc<"items">, now: number): Promise<WatchWindow> {
+  if (item.returned) return { ok: false, permanent: true };
   const purchase = await ctx.db.get(item.purchaseId);
-  if (!purchase || purchase.userId !== item.userId) return null;
-  // D25: an unconfirmed purchase has no trustworthy date; D27: examples never scrape.
-  if (purchase.status !== "active") return null;
-  if (purchase.isExample) return null;
-  if (purchase.purchasedAt === undefined) return null;
+  if (!purchase || purchase.userId !== item.userId) return { ok: false, permanent: true };
+  // D27: examples never scrape. Archived is terminal (D47: no unarchive path).
+  if (purchase.isExample) return { ok: false, permanent: true };
+  if (purchase.status === "archived") return { ok: false, permanent: true };
+  // D25: needs_review has no trustworthy purchasedAt yet, but confirming it
+  // is a normal, soon user action -- not permanent.
+  if (purchase.status !== "active" || purchase.purchasedAt === undefined) {
+    return { ok: false, permanent: false };
+  }
 
   const policy = await latestPricePolicy(ctx, item.userId, purchase.merchantDomain);
-  if (!policy || policy.windowDays === undefined) return null;
+  // No policy yet (still researching) is not permanent; it typically lands
+  // within minutes of the purchase being confirmed.
+  if (!policy || policy.windowDays === undefined) return { ok: false, permanent: false };
   const endsAt = windowEndsAt(purchase.purchasedAt, policy.windowDays);
-  if (endsAt < now) return null;
-  return { policy, endsAt };
+  if (endsAt < now) return { ok: false, permanent: true }; // the window itself never reopens
+  return { ok: true, policy, endsAt };
 }
 
 /**
- * Items the cron should scrape this tick. Unauthenticated on purpose: the only
- * caller is `runAll`, which runs from the cron with no identity at all.
+ * Items the cron should scrape this tick. A mutation (not a query, F1/D103):
+ * every scanned-but-ineligible item is stamped out of the `by_nextCheck`
+ * head in the same pass, or it would sort right back to the front on the
+ * very next tick, forever -- a backlog of such items (say 500 with no
+ * `productUrl`, or 500 past a closed window) could then starve every other
+ * item behind them out of the scan indefinitely, however many ticks run. The
+ * only caller is `runAll`, which runs from the cron with no identity at all,
+ * so this stays unauthenticated.
  *
- * D74/D93 fairness: scans `items.by_nextCheck` ascending (items never yet
- * stamped sort first, then the most-overdue-by-rotation ones) instead of a
- * table-wide `order("desc")` scan, and caps each user at
+ * Two bump lengths (`INELIGIBLE_REST_MS` vs `WATCH_CHECK_INTERVAL_MS`) per
+ * `watchWindow`'s `permanent` flag: a genuinely closed door (returned,
+ * example, archived, closed window) rests a long time; a merely over-cap,
+ * tombstoned, transiently-blocked (an open claim), or not-yet-ready item
+ * (unconfirmed purchase, policy still in flight) is retried at the normal
+ * cadence instead, since it may resolve on its own soon. Per-user-capped
+ * items are rotated the same way `watches.sweep` rotates its own per-user-
+ * capped bucket: bumped, not scheduled, so the scan can still reach a
+ * quieter user's item within a bounded number of ticks.
+ *
+ * D74/D93 fairness otherwise unchanged: scans `items.by_nextCheck` ascending
+ * (items never yet stamped sort first, then the most-overdue-by-rotation
+ * ones) instead of a table-wide `order("desc")` scan, and caps each user at
  * `PRICE_CHECK_PER_USER_PER_TICK` eligible items -- checked BEFORE any of the
- * per-item reads below, so a user already at their cap costs nothing further
- * this tick, however many more of their items remain in the scanned page.
- * That ordering is also what keeps this bounded under D80's reproduced
- * overflow (500 items x 65 claims each): `hasOpenPriceClaim` now reads only
- * the item's own `price_adjustment` claims (see its docstring), so even
- * scanning the full SCAN_LIMIT page costs a small, fixed multiple of
- * SCAN_LIMIT reads, never the old O(claims-per-item) blowup. D87: a
- * tombstoned owner's items are skipped.
+ * per-item reads below, so a user already at their cap costs one write (the
+ * rotation stamp) and no further reads this tick. That ordering is also what
+ * keeps this bounded under D80's reproduced overflow (500 items x 65 claims
+ * each): `hasOpenPriceClaim` now reads only the item's own `price_adjustment`
+ * claims (see its docstring), so even scanning the full SCAN_LIMIT page
+ * costs a small, fixed multiple of SCAN_LIMIT reads, never the old
+ * O(claims-per-item) blowup.
  */
-export const eligibleItems = internalQuery({
+export const eligibleItems = internalMutation({
   args: {},
   returns: v.array(v.id("items")),
   handler: async (ctx) => {
@@ -205,12 +232,41 @@ export const eligibleItems = internalQuery({
     const out: Id<"items">[] = [];
     for (const item of items) {
       if (out.length >= FANOUT_LIMIT) break;
-      if (!item.productUrl) continue;
+
+      if (!item.productUrl) {
+        await ctx.db.patch(item._id, { nextCheckAt: now + INELIGIBLE_REST_MS });
+        continue;
+      }
+
       const count = perUser.get(item.userId) ?? 0;
-      if (count >= PRICE_CHECK_PER_USER_PER_TICK) continue; // no DB read spent on an over-cap user
-      if (await isTombstoned(ctx, item.userId)) continue;
-      if (!(await watchWindow(ctx, item, now))) continue;
-      if (await hasOpenPriceClaim(ctx, item._id)) continue;
+      if (count >= PRICE_CHECK_PER_USER_PER_TICK) {
+        // F1: rotate like watches.sweep's per-user-capped bucket, instead of
+        // leaving this row's nextCheckAt untouched at the head of the scan.
+        await ctx.db.patch(item._id, { nextCheckAt: now + WATCH_CHECK_INTERVAL_MS });
+        continue;
+      }
+
+      if (await isTombstoned(ctx, item.userId)) {
+        // F2: far enough that a tombstoned owner's items leave the due set;
+        // the account purge, not this sweep, is what will remove them for good.
+        await ctx.db.patch(item._id, { nextCheckAt: now + INELIGIBLE_REST_MS });
+        continue;
+      }
+
+      const window = await watchWindow(ctx, item, now);
+      if (!window.ok) {
+        await ctx.db.patch(item._id, {
+          nextCheckAt: now + (window.permanent ? INELIGIBLE_REST_MS : WATCH_CHECK_INTERVAL_MS),
+        });
+        continue;
+      }
+
+      if (await hasOpenPriceClaim(ctx, item._id)) {
+        // Transient: the claim will eventually settle or be dismissed.
+        await ctx.db.patch(item._id, { nextCheckAt: now + WATCH_CHECK_INTERVAL_MS });
+        continue;
+      }
+
       perUser.set(item.userId, count + 1);
       out.push(item._id);
     }
@@ -301,7 +357,7 @@ export const recordCheck = internalMutation({
     // Re-decide the window at write time: the cron scheduled this scrape
     // minutes ago and a window can close, or a purchase be archived, between.
     const window = await watchWindow(ctx, item, now);
-    if (!window) {
+    if (!window.ok) {
       return { priceCheckId, claimId: null, accepted: true, note: "No open price window" };
     }
     const drop = priceDropCents(item.unitCents, args.observedCents, item.qty);
@@ -534,7 +590,8 @@ export const runAll = internalAction({
   args: {},
   returns: v.number(),
   handler: async (ctx) => {
-    const eligible: Id<"items">[] = await ctx.runQuery(internal.priceWatch.eligibleItems, {});
+    // F1/D103: eligibleItems is now a mutation (it stamps ineligible items as it scans).
+    const eligible: Id<"items">[] = await ctx.runMutation(internal.priceWatch.eligibleItems, {});
     // H3: every check is paid, so the tick schedules only what the deployment-wide daily switch still allows.
     const allowed: number = await ctx.runMutation(internal.budget.takeGlobalPriceChecks, { want: eligible.length });
     const scheduled: number = await ctx.runMutation(internal.priceWatch.rotateAndSchedule, {

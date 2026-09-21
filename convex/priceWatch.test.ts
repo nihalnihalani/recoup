@@ -3,7 +3,14 @@ import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
-import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS, PRICE_CHECK_PER_USER_PER_TICK, WATCH_CHECK_INTERVAL_MS, WATCH_SWEEP_BUMP_MS } from "./limits";
+import {
+  DAILY_BUDGETS,
+  GLOBAL_DAILY_BUDGETS,
+  INELIGIBLE_REST_MS,
+  PRICE_CHECK_PER_USER_PER_TICK,
+  WATCH_CHECK_INTERVAL_MS,
+  WATCH_SWEEP_BUMP_MS,
+} from "./limits";
 
 /**
  * Price watch (T09). These tests exercise `eligibleItems`, `recordCheck` and
@@ -367,7 +374,7 @@ describe("priceWatch.eligibleItems", () => {
     const { userId } = await signedIn(t);
     const { itemId } = await world(t, userId);
 
-    expect(await t.query(internal.priceWatch.eligibleItems, {})).toEqual([itemId]);
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([itemId]);
   });
 
   it("skips example purchases (D27)", async () => {
@@ -375,7 +382,7 @@ describe("priceWatch.eligibleItems", () => {
     const { userId } = await signedIn(t);
     await world(t, userId, { isExample: true });
 
-    expect(await t.query(internal.priceWatch.eligibleItems, {})).toEqual([]);
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([]);
   });
 
   it("skips purchases that are not active or have no purchasedAt (D25)", async () => {
@@ -384,7 +391,7 @@ describe("priceWatch.eligibleItems", () => {
     await world(t, userId, { status: "needs_review", purchasedAt: undefined });
     await world(t, userId, { status: "archived" });
 
-    expect(await t.query(internal.priceWatch.eligibleItems, {})).toEqual([]);
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([]);
   });
 
   it("skips items with no product URL and items the user returned", async () => {
@@ -393,7 +400,7 @@ describe("priceWatch.eligibleItems", () => {
     await world(t, userId, { productUrl: undefined });
     await world(t, userId, { returned: true });
 
-    expect(await t.query(internal.priceWatch.eligibleItems, {})).toEqual([]);
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([]);
   });
 
   it("skips a merchant whose policy states no price-adjustment window", async () => {
@@ -401,7 +408,7 @@ describe("priceWatch.eligibleItems", () => {
     const { userId } = await signedIn(t);
     await world(t, userId, { windowDays: undefined });
 
-    expect(await t.query(internal.priceWatch.eligibleItems, {})).toEqual([]);
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([]);
   });
 
   it("skips an item whose price-adjustment window has closed", async () => {
@@ -409,7 +416,7 @@ describe("priceWatch.eligibleItems", () => {
     const { userId } = await signedIn(t);
     await world(t, userId, { purchasedAt: Date.now() - 30 * DAY });
 
-    expect(await t.query(internal.priceWatch.eligibleItems, {})).toEqual([]);
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([]);
   });
 
   it("skips an item that already has an open price claim", async () => {
@@ -418,7 +425,7 @@ describe("priceWatch.eligibleItems", () => {
     const { itemId } = await world(t, userId);
     await t.mutation(internal.priceWatch.recordCheck, good(itemId, 9_500));
 
-    expect(await t.query(internal.priceWatch.eligibleItems, {})).toEqual([]);
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([]);
   });
 
   it("uses the newest policy snapshot for the merchant (D17)", async () => {
@@ -442,7 +449,7 @@ describe("priceWatch.eligibleItems", () => {
       }),
     );
 
-    expect(await t.query(internal.priceWatch.eligibleItems, {})).toEqual([itemId]);
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([itemId]);
   });
 
   it("does not list another user's item as belonging to this sweep twice", async () => {
@@ -452,7 +459,7 @@ describe("priceWatch.eligibleItems", () => {
     const one = await world(t, a.userId);
     const two = await world(t, b.userId);
 
-    const ids = await t.query(internal.priceWatch.eligibleItems, {});
+    const ids = await t.mutation(internal.priceWatch.eligibleItems, {});
     expect(new Set(ids)).toEqual(new Set([one.itemId, two.itemId]));
   });
 
@@ -467,10 +474,22 @@ describe("priceWatch.eligibleItems", () => {
     }
     const { itemId: lightItemId } = await world(t, light.userId);
 
-    const ids = await t.query(internal.priceWatch.eligibleItems, {});
+    const before = Date.now();
+    const ids = await t.mutation(internal.priceWatch.eligibleItems, {});
     const heavyCount = ids.filter((id) => heavyItems.includes(id)).length;
     expect(heavyCount).toBe(PRICE_CHECK_PER_USER_PER_TICK);
     expect(ids).toContain(lightItemId);
+
+    // F1 (D103): the 5 over-cap items are rotated (bumped WATCH_CHECK_INTERVAL_MS,
+    // like watches.sweep's per-user-capped bucket), not left untouched at the
+    // head of the next tick's scan.
+    const rotated = heavyItems.filter((id) => !ids.includes(id));
+    expect(rotated).toHaveLength(5);
+    for (const id of rotated) {
+      const row = await t.run((ctx) => ctx.db.get(id));
+      expect(row!.nextCheckAt).toBeGreaterThanOrEqual(before + WATCH_CHECK_INTERVAL_MS);
+      expect(row!.nextCheckAt).toBeLessThan(before + WATCH_CHECK_INTERVAL_MS + INELIGIBLE_REST_MS);
+    }
   });
 
   it("items.by_nextCheck ascending: never-stamped items (undefined) sort before a stamped future one", async () => {
@@ -480,7 +499,7 @@ describe("priceWatch.eligibleItems", () => {
     await t.run((ctx) => ctx.db.patch(stamped, { nextCheckAt: Date.now() + 999_999 }));
     const { itemId: fresh } = await world(t, userId, { productUrl: `${URL}?fresh` });
 
-    const ids = await t.query(internal.priceWatch.eligibleItems, {});
+    const ids = await t.mutation(internal.priceWatch.eligibleItems, {});
     expect(ids.indexOf(fresh)).toBeLessThan(ids.indexOf(stamped));
   });
 
@@ -490,9 +509,118 @@ describe("priceWatch.eligibleItems", () => {
     const { itemId } = await world(t, userId);
     await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }));
 
-    expect(await t.query(internal.priceWatch.eligibleItems, {})).toEqual([]);
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([]);
     expect(await t.query(internal.priceWatch.itemForCheck, { itemId })).toBeNull();
   });
+});
+
+/** Inserts a purchase and its price-adjustment policy, without an item. Cheap bulk fixture for the F1 tests below. */
+async function purchaseAndPolicy(
+  t: ReturnType<typeof setup>,
+  userId: Id<"users">,
+  o: { purchasedAt?: number } = {},
+): Promise<Id<"purchases">> {
+  return await t.run(async (ctx) => {
+    const purchaseId = await ctx.db.insert("purchases", {
+      userId,
+      merchant: "Acme",
+      merchantDomain: DOMAIN,
+      purchasedAt: "purchasedAt" in o ? o.purchasedAt : Date.now() - 2 * DAY,
+      currency: "USD",
+      status: "active",
+    });
+    await ctx.db.insert("policies", {
+      userId,
+      merchantDomain: DOMAIN,
+      kind: "price_adjustment",
+      windowDays: 14,
+      channel: "email",
+      contactEmail: "help@acme.example",
+      passage: "We adjust the price within 14 days of purchase.",
+      sourceUrl: `https://${DOMAIN}/policy`,
+      retrievedAt: Date.now(),
+      confidence: 0.9,
+      confirmedByUser: false,
+    });
+    return purchaseId;
+  });
+}
+
+describe("priceWatch.eligibleItems — F1 starvation regressions (D103)", () => {
+  it("500 no-productUrl items, older than one eligible item, never permanently block it: it is found once the backlog is stamped out of the way", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const purchaseId = await purchaseAndPolicy(t, userId);
+    const noUrlIds: Id<"items">[] = await t.run(async (ctx) => {
+      const ids: Id<"items">[] = [];
+      for (let i = 0; i < 500; i++) {
+        ids.push(
+          await ctx.db.insert("items", {
+            purchaseId,
+            userId,
+            name: `No URL ${i}`,
+            unitCents: 1_000,
+            qty: 1,
+            returned: false,
+          }),
+        );
+      }
+      return ids;
+    });
+    // Created after the backlog, so it is newer in `by_nextCheck`'s tied
+    // (all-undefined) ordering and sorts behind all 500 of them.
+    const { itemId: eligibleId } = await world(t, userId, { productUrl: `${URL}?eligible` });
+
+    // The whole SCAN_LIMIT (500) page is the backlog on this call; before
+    // this fix, none of it was ever stamped, so it would occupy the exact
+    // same page on every subsequent tick forever, and the eligible item
+    // (positioned 501st) would never be reached. Now every scanned item is
+    // stamped, whether or not it was eligible.
+    const before = Date.now();
+    const firstPage = await t.mutation(internal.priceWatch.eligibleItems, {});
+    expect(firstPage).not.toContain(eligibleId);
+    for (const id of noUrlIds) {
+      const row = await t.run((ctx) => ctx.db.get(id));
+      expect(row!.nextCheckAt).toBeGreaterThanOrEqual(before + INELIGIBLE_REST_MS);
+    }
+
+    // The backlog has left the head of the index; the eligible item is found.
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([eligibleId]);
+  }, 30_000);
+
+  it("500 items whose price-adjustment window has closed, older than one eligible item, are recovered the same way", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const purchaseId = await purchaseAndPolicy(t, userId, { purchasedAt: Date.now() - 30 * DAY });
+    const closedIds: Id<"items">[] = await t.run(async (ctx) => {
+      const ids: Id<"items">[] = [];
+      for (let i = 0; i < 500; i++) {
+        ids.push(
+          await ctx.db.insert("items", {
+            purchaseId,
+            userId,
+            name: `Closed window ${i}`,
+            unitCents: 1_000,
+            qty: 1,
+            productUrl: `${URL}?closed=${i}`,
+            returned: false,
+          }),
+        );
+      }
+      return ids;
+    });
+    const { itemId: eligibleId } = await world(t, userId, { productUrl: `${URL}?eligible-closed` });
+
+    const before = Date.now();
+    const firstPage = await t.mutation(internal.priceWatch.eligibleItems, {});
+    expect(firstPage).not.toContain(eligibleId);
+    for (const id of closedIds) {
+      const row = await t.run((ctx) => ctx.db.get(id));
+      expect(row!.nextCheckAt).toBeGreaterThanOrEqual(before + INELIGIBLE_REST_MS);
+    }
+
+    expect(await t.mutation(internal.priceWatch.eligibleItems, {})).toEqual([eligibleId]);
+  }, 30_000);
 });
 
 describe("priceWatch.runAll rotation (D74)", () => {
