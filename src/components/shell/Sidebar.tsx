@@ -83,7 +83,11 @@ export function Sidebar({ open, onClose, collapsed, onToggleCollapsed }: Props) 
         </div>
 
         <nav aria-label="Primary" className={`min-h-0 flex-1 overflow-y-auto px-4 pt-5 ${collapsed ? "lg:px-3" : ""}`}>
-          <h2 className={`px-3 text-xs font-medium uppercase tracking-wide text-gray-400 ${hideWhenRail}`}>Main menu</h2>
+          {/* F-T20-1: text-gray-400 on white measured 2.6:1 (WCAG AA needs 4.5:1 for
+              normal text); text-gray-600 measures 7.56:1 here (#4a5565 on #ffffff),
+              still visibly lighter than the gray-700/900 used for active/emphasised
+              text below so the hierarchy is unchanged. */}
+          <h2 className={`px-3 text-xs font-medium uppercase tracking-wide text-gray-600 ${hideWhenRail}`}>Main menu</h2>
           <ul className="mt-3 space-y-1">
             {NAV.map((item) => (
               <li key={item.to}>

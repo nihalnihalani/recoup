@@ -30,7 +30,9 @@ export function TopBar({ sidebarOpen, onOpenSidebar, paletteOpen, onOpenPalette 
 
         <nav aria-label="Breadcrumb" className="min-w-0">
           <ol className="flex items-center gap-2 text-sm">
-            <li className="hidden text-gray-400 sm:block">Main Menu</li>
+            {/* F-T20-1: text-gray-400 on white measured 2.6:1 (WCAG AA needs 4.5:1);
+                text-gray-600 measures 7.56:1 here. */}
+            <li className="hidden text-gray-600 sm:block">Main Menu</li>
             <li aria-hidden="true" className="hidden text-gray-300 sm:block">
               /
             </li>
@@ -42,14 +44,18 @@ export function TopBar({ sidebarOpen, onOpenSidebar, paletteOpen, onOpenPalette 
         </nav>
 
         <div className="ml-auto flex items-center gap-2 sm:gap-3">
-          {/* Not a real input: it opens the palette, which owns the text field. */}
+          {/*
+            Not a real input: it opens the palette, which owns the text field.
+            F-T20-1: the placeholder's text-gray-400 on white measured 2.6:1
+            (WCAG AA needs 4.5:1); text-gray-600 measures 7.56:1 here.
+          */}
           <button
             type="button"
             onClick={onOpenPalette}
             aria-haspopup="dialog"
             aria-expanded={paletteOpen}
             aria-keyshortcuts="Meta+K Control+K"
-            className="hidden h-10 w-64 items-center gap-2.5 rounded-xl border border-gray-200 bg-white px-3 text-left text-sm text-gray-400 outline-none transition hover:border-gray-300 focus-visible:ring-2 focus-visible:ring-violet-500 md:flex xl:w-80"
+            className="hidden h-10 w-64 items-center gap-2.5 rounded-xl border border-gray-200 bg-white px-3 text-left text-sm text-gray-600 outline-none transition hover:border-gray-300 focus-visible:ring-2 focus-visible:ring-violet-500 md:flex xl:w-80"
           >
             <SearchIcon className="size-[18px] text-gray-500" />
             <span className="flex-1 truncate">Search anything…</span>

@@ -36,7 +36,10 @@ export default function App() {
   return (
     <>
       <AuthLoading>
-        <div className="flex min-h-screen items-center justify-center bg-paper text-sm text-ink/50">
+        {/* F-T20-1: text-ink/50 on bg-paper measured 3.4:1 (WCAG AA needs 4.5:1);
+            text-ink/70 (#111827 at 70% over #ffffff, effectively #585d68)
+            measures 6.60:1. */}
+        <div className="flex min-h-screen items-center justify-center bg-paper text-sm text-ink/70">
           Loading…
         </div>
       </AuthLoading>

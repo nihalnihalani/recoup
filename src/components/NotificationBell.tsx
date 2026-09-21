@@ -212,9 +212,13 @@ export function NotificationBell() {
           <path d="M10 20a2 2 0 0 0 4 0" />
         </svg>
         {unseen > 0 && (
+          // F-T20-1: white text on bg-red-500 (#ef4444) measured 3.76:1 (WCAG AA
+          // needs 4.5:1 for normal text); bg-red-700 (#b91c1c, already the app's
+          // "strong red" tone -- see the charged_again TINTS entry above) gives
+          // white text 6.47:1.
           <span
             aria-hidden="true"
-            className="absolute -right-2 -top-2 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-white bg-red-500 px-1 text-[10px] font-bold leading-none text-on-accent tabular-nums"
+            className="absolute -right-2 -top-2 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-white bg-red-700 px-1 text-[10px] font-bold leading-none text-on-accent tabular-nums"
           >
             {unseen > 99 ? "99+" : unseen}
           </span>

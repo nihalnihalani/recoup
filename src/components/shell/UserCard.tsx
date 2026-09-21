@@ -41,7 +41,9 @@ export function UserCard({ collapsed }: { collapsed: boolean }) {
       </span>
       <div className={`min-w-0 flex-1 ${collapsed ? "lg:hidden" : ""}`}>
         <p className="truncate text-sm font-semibold text-gray-900">Your account</p>
-        <p className="truncate text-xs text-gray-400" title={inbox}>
+        {/* F-T20-1: text-gray-400 on white measured 2.6:1 (WCAG AA needs 4.5:1);
+            text-gray-600 measures 7.56:1 here. */}
+        <p className="truncate text-xs text-gray-600" title={inbox}>
           {inbox ?? (me === undefined ? "Loading…" : "Inbox not set up yet")}
         </p>
       </div>
