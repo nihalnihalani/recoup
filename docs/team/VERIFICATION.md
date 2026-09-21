@@ -83,3 +83,9 @@ All 15 rows in the table above: **VERIFIED_LOCAL** via `convex/scenarios.test.ts
 - Playwright (T20/T24a/T24c-frontend runs against dev:adorable-lion-138 + local Vite): 6 spec files × 2 projects; all 12 axe page checks real and passing; resilience 23 pass + 1 flaky (mobile sign-up, shared-deployment concurrency, D113).
 - Checkpoints: 5 (Phase 1 accepted), 6a (Phase 2 + T16 accepted with conditions → conditions closed by T16.1/T12.3), 6b (T18 withheld → T18.1–T18.4 landed), 6c in progress.
 - Live integrations: OpenAI/AgentMail keys on the dev deployment are placeholders; webhook secret unset there (route now answers 401). Static site not deployed to adorable-lion-138 (smoke 2/7 by design).
+
+## 2026-09-21 · wave 12 close · 357dc37 (rc-2026-09-21.2 candidate)
+- `npm test`: 65 files, 1337 passed, 1 expected fail (F-D74-1).
+- `npm run typecheck`, `npm run lint`, `node scripts/check-patch.mjs`: clean. `npx convex codegen`: no diff.
+- `npx convex dev --once` → adorable-lion-138 ready. `SITE_URL=https://adorable-lion-138.convex.site npm run smoke`: 7/7 (static site = 3f5f739 build until T25 re-uploads the .2 dist).
+- Opus checkpoints: 6d accepted T18 with conditions (D129) → closed by T18.6; 6e in progress.

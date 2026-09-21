@@ -362,7 +362,7 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 **Owner:** sonnet-backend-2 · **Status:** verified (f9cba83, e25096b, 21d0fe5; lead re-ran 4 files 185/185; board at 100×50 and 200×50 = 125 ranges / 3,061 docs; `isExample` no longer client-settable) · **Files:** convex/purchases.ts (+test), convex/lib/authMigrate.ts (+test), convex/boundary.test.ts (byte strip), src/pages/Board.tsx only if the shape changes.
 
 ### T18.6 — Checkpoint 6d remainder (D129 B-9 + LOWs)
-**Owner:** sonnet-backend · **Status:** in_progress · **Files:** patches/@agentmail+convex+0.1.0.patch, convex/mailPurge.ts (+test), convex/account.ts (+test), convex/mailEvents.ts (+test), convex/policies.ts (+test), convex/purchases.ts (+test), convex/profiles.ts (+test), docs/ops/RUNBOOK.md §12.
+**Owner:** sonnet-backend · **Status:** done (9 commits through 357dc37; B-9/B-8/B-1/B-6/B-3/B-2/B-4/B-5/B-7 + F-T25-1; lead gates 65 files 1337+1, typecheck/lint/patch/codegen clean, smoke 7/7 live; awaiting Opus checkpoint 6e) · **Files:** patches/@agentmail+convex+0.1.0.patch, convex/mailPurge.ts (+test), convex/account.ts (+test), convex/mailEvents.ts (+test), convex/policies.ts (+test), convex/purchases.ts (+test), convex/profiles.ts (+test), docs/ops/RUNBOOK.md §12, scripts/smoke.mjs.
 
 ### T16 — P07 retention (bounded, resumable, audit-preserving) plus P08 backend fixes: returns validators and string bounds on cla
 **Owner:** sonnet-backend · **Phase:** 2 · **Blocks on:** T12 · **High-risk:** True
