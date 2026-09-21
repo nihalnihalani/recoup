@@ -50,6 +50,7 @@ import type * as lib_watchUrl from "../lib/watchUrl.js";
 import type * as limits from "../limits.js";
 import type * as mail from "../mail.js";
 import type * as mailEvents from "../mailEvents.js";
+import type * as mailPurge from "../mailPurge.js";
 import type * as market from "../market.js";
 import type * as notify from "../notify.js";
 import type * as offers from "../offers.js";
@@ -113,6 +114,7 @@ declare const fullApi: ApiFromModules<{
   limits: typeof limits;
   mail: typeof mail;
   mailEvents: typeof mailEvents;
+  mailPurge: typeof mailPurge;
   market: typeof market;
   notify: typeof notify;
   offers: typeof offers;

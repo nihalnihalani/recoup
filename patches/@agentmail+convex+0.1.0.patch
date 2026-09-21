@@ -1,3 +1,29 @@
+diff --git a/node_modules/@agentmail/convex/dist/component/_generated/component.d.ts b/node_modules/@agentmail/convex/dist/component/_generated/component.d.ts
+index 6c2860c..39473aa 100644
+--- a/node_modules/@agentmail/convex/dist/component/_generated/component.d.ts
++++ b/node_modules/@agentmail/convex/dist/component/_generated/component.d.ts
+@@ -162,5 +162,21 @@ export type ComponentApi<
+       null,
+       Name
+     >;
++
++    // ---- Purge (T18.4 / D115 6b-5) --------------------------------------
++    // Deletes <= 200 rows from ONE of inboundMessages/outboundMessages/events
++    // per call, scoped to `inboxId` via that table's `by_inbox` index. Call
++    // repeatedly with the returned `cursor` until it is `null` -- that's the
++    // only correct "this inbox is fully purged" signal (a `cursor` can still
++    // come back with `deleted: 0`, when a call only advances past an empty
++    // table). See `convex/mailPurge.ts`'s `purgeInboxData` for the driving
++    // loop and `src/component/lib.ts` for the full design note.
++    purgeInbox: FunctionReference<
++      "mutation",
++      "internal",
++      { inboxId: string; cursor?: string },
++      { cursor: string | null; deleted: number },
++      Name
++    >;
+   };
+ };
 diff --git a/node_modules/@agentmail/convex/dist/component/convex.config.d.ts b/node_modules/@agentmail/convex/dist/component/convex.config.d.ts
 index 08c43c3..0355466 100644
 --- a/node_modules/@agentmail/convex/dist/component/convex.config.d.ts
@@ -27,6 +53,163 @@ index 3d15ed6..6e45e2a 100644
  component.use(workpool, { name: "sendPool" });
  component.use(workpool, { name: "callbackPool" });
  export default component;
+diff --git a/node_modules/@agentmail/convex/dist/component/lib.d.ts b/node_modules/@agentmail/convex/dist/component/lib.d.ts
+index 2db242a..20e52ca 100644
+--- a/node_modules/@agentmail/convex/dist/component/lib.d.ts
++++ b/node_modules/@agentmail/convex/dist/component/lib.d.ts
+@@ -181,5 +181,12 @@ export declare const handleEvent: import("convex/server").RegisteredMutation<"pu
+ export declare const cleanupFinalizedOutbound: import("convex/server").RegisteredMutation<"public", {
+     olderThan?: number | undefined;
+ }, Promise<void>>;
++export declare const purgeInbox: import("convex/server").RegisteredMutation<"internal", {
++    inboxId: string;
++    cursor?: string | undefined;
++}, Promise<{
++    cursor: string | null;
++    deleted: number;
++}>>;
+ export {};
+ //# sourceMappingURL=lib.d.ts.map
+\ No newline at end of file
+diff --git a/node_modules/@agentmail/convex/dist/component/lib.js b/node_modules/@agentmail/convex/dist/component/lib.js
+index c245802..c3ba38c 100644
+--- a/node_modules/@agentmail/convex/dist/component/lib.js
++++ b/node_modules/@agentmail/convex/dist/component/lib.js
+@@ -476,4 +476,63 @@ export const cleanupFinalizedOutbound = mutation({
+         }
+     },
+ });
++// ---------------------------------------------------------------------------
++// T18.4 (D115 6b-5): account-deletion purge. See src/component/lib.ts for
++// the full design note (one `.paginate()` call per execution; per-table
++// `by_inbox` index scoping so one inbox's purge can never touch another's
++// rows).
++// ---------------------------------------------------------------------------
++const PURGE_PAGE = 200;
++const PURGE_PHASES = ["inbound", "outbound", "events", "done"];
++const PURGE_PHASE_TABLE = {
++    inbound: "inboundMessages",
++    outbound: "outboundMessages",
++    events: "events",
++};
++function decodePurgeCursor(raw) {
++    if (raw) {
++        try {
++            const parsed = JSON.parse(raw);
++            if ((parsed.phase === "inbound" || parsed.phase === "outbound" || parsed.phase === "events" || parsed.phase === "done") &&
++                (parsed.sub === null || typeof parsed.sub === "string")) {
++                return { phase: parsed.phase, sub: parsed.sub ?? null };
++            }
++        }
++        catch {
++            // Malformed/foreign cursor: restart the walk from the first phase.
++        }
++    }
++    return { phase: "inbound", sub: null };
++}
++function nextPurgePhase(phase) {
++    const idx = PURGE_PHASES.indexOf(phase);
++    return PURGE_PHASES[Math.min(idx + 1, PURGE_PHASES.length - 1)];
++}
++export const purgeInbox = internalMutation({
++    args: { inboxId: v.string(), cursor: v.optional(v.string()) },
++    returns: v.object({
++        cursor: v.union(v.string(), v.null()),
++        deleted: v.number(),
++    }),
++    handler: async (ctx, args) => {
++        const state = decodePurgeCursor(args.cursor);
++        if (state.phase === "done")
++            return { cursor: null, deleted: 0 };
++        const table = PURGE_PHASE_TABLE[state.phase];
++        const page = await ctx.db
++            .query(table)
++            .withIndex("by_inbox", (q) => q.eq("inboxId", args.inboxId))
++            .paginate({ cursor: state.sub, numItems: PURGE_PAGE });
++        for (const row of page.page) {
++            await ctx.db.delete(row._id);
++        }
++        const next = page.isDone
++            ? { phase: nextPurgePhase(state.phase), sub: null }
++            : { phase: state.phase, sub: page.continueCursor };
++        return {
++            cursor: next.phase === "done" ? null : JSON.stringify(next),
++            deleted: page.page.length,
++        };
++    },
++});
+ //# sourceMappingURL=lib.js.map
+\ No newline at end of file
+diff --git a/node_modules/@agentmail/convex/dist/component/schema.d.ts b/node_modules/@agentmail/convex/dist/component/schema.d.ts
+index 88c7aa7..836a374 100644
+--- a/node_modules/@agentmail/convex/dist/component/schema.d.ts
++++ b/node_modules/@agentmail/convex/dist/component/schema.d.ts
+@@ -22,6 +22,7 @@ declare const _default: import("convex/server").SchemaDefinition<{
+     }, "required", "status" | "inboxId" | "parentMessageId" | "payload" | "agentmailMessageId" | "threadId" | "errorMessage" | "finalizedAt" | "kind" | `payload.${string}`>, {
+         by_status: ["status", "_creationTime"];
+         by_agentmailMessageId: ["agentmailMessageId", "_creationTime"];
++        by_inbox: ["inboxId", "_creationTime"];
+     }, {}, {}>;
+     inboxes: import("convex/server").TableDefinition<import("convex/values").VObject<{
+         podId?: string | undefined;
+@@ -102,6 +103,7 @@ declare const _default: import("convex/server").SchemaDefinition<{
+     }, "required", "inboxId" | "threadId" | "messageId" | "eventId" | "raw" | `raw.${string}` | "eventType" | "receivedAt">, {
+         by_eventId: ["eventId", "_creationTime"];
+         by_message: ["messageId", "_creationTime"];
++        by_inbox: ["inboxId", "_creationTime"];
+     }, {}, {}>;
+ }, true>;
+ export default _default;
+diff --git a/node_modules/@agentmail/convex/dist/component/schema.js b/node_modules/@agentmail/convex/dist/component/schema.js
+index 5bf49d1..c620afd 100644
+--- a/node_modules/@agentmail/convex/dist/component/schema.js
++++ b/node_modules/@agentmail/convex/dist/component/schema.js
+@@ -19,7 +19,8 @@ export default defineSchema({
+         finalizedAt: v.optional(v.number()),
+     })
+         .index("by_status", ["status"])
+-        .index("by_agentmailMessageId", ["agentmailMessageId"]),
++        .index("by_agentmailMessageId", ["agentmailMessageId"])
++        .index("by_inbox", ["inboxId"]),
+     // Cached inbox metadata. Populated on createInbox or via getInbox.
+     inboxes: defineTable({
+         inboxId: v.string(),
+@@ -64,6 +65,7 @@ export default defineSchema({
+         raw: v.any(),
+     })
+         .index("by_eventId", ["eventId"])
+-        .index("by_message", ["messageId"]),
++        .index("by_message", ["messageId"])
++        .index("by_inbox", ["inboxId"]),
+ });
+ //# sourceMappingURL=schema.js.map
+\ No newline at end of file
+diff --git a/node_modules/@agentmail/convex/src/component/_generated/component.d.ts b/node_modules/@agentmail/convex/src/component/_generated/component.d.ts
+index 6c2860c..39473aa 100644
+--- a/node_modules/@agentmail/convex/src/component/_generated/component.d.ts
++++ b/node_modules/@agentmail/convex/src/component/_generated/component.d.ts
+@@ -162,5 +162,21 @@ export type ComponentApi<
+       null,
+       Name
+     >;
++
++    // ---- Purge (T18.4 / D115 6b-5) --------------------------------------
++    // Deletes <= 200 rows from ONE of inboundMessages/outboundMessages/events
++    // per call, scoped to `inboxId` via that table's `by_inbox` index. Call
++    // repeatedly with the returned `cursor` until it is `null` -- that's the
++    // only correct "this inbox is fully purged" signal (a `cursor` can still
++    // come back with `deleted: 0`, when a call only advances past an empty
++    // table). See `convex/mailPurge.ts`'s `purgeInboxData` for the driving
++    // loop and `src/component/lib.ts` for the full design note.
++    purgeInbox: FunctionReference<
++      "mutation",
++      "internal",
++      { inboxId: string; cursor?: string },
++      { cursor: string | null; deleted: number },
++      Name
++    >;
+   };
+ };
 diff --git a/node_modules/@agentmail/convex/src/component/convex.config.ts b/node_modules/@agentmail/convex/src/component/convex.config.ts
 index b1cc7f1..a61a50f 100644
 --- a/node_modules/@agentmail/convex/src/component/convex.config.ts
@@ -45,3 +228,144 @@ index b1cc7f1..a61a50f 100644
  component.use(workpool, { name: "sendPool" });
  component.use(workpool, { name: "callbackPool" });
  
+diff --git a/node_modules/@agentmail/convex/src/component/lib.ts b/node_modules/@agentmail/convex/src/component/lib.ts
+index 121dd58..4c7e4cd 100644
+--- a/node_modules/@agentmail/convex/src/component/lib.ts
++++ b/node_modules/@agentmail/convex/src/component/lib.ts
+@@ -580,3 +580,107 @@ export const cleanupFinalizedOutbound = mutation({
+     }
+   },
+ });
++
++// ---------------------------------------------------------------------------
++// T18.4 (D115 6b-5): account-deletion purge.
++//
++// The component previously had no way to remove a single inbox's data --
++// `inboundMessages`/`outboundMessages`/`events` retained mail content and
++// webhook payloads forever, so the app's account-deletion purge
++// (`convex/account.ts`'s `purge`) had nothing to call before it deletes the
++// remote AgentMail inbox over REST. `purgeInbox` fixes that.
++//
++// Platform constraint (see `convex/account.ts`'s own `purgeStep` for the
++// prior art this mirrors): a single Convex function execution may issue at
++// most ONE `.paginate()` call. A purge that needs to drain three tables
++// therefore cannot loop through all three in one call -- each call drains
++// one page of ONE table (<= `PURGE_PAGE` rows), and the returned cursor
++// encodes which table is current so the caller (`convex/mailPurge.ts`'s
++// `purgeInboxData`) can keep calling until every table is empty.
++//
++// Every query below goes through that table's `by_inbox` index and an exact
++// `.eq("inboxId", inboxId)` match, so a call for one inbox can structurally
++// never observe -- let alone delete -- another inbox's rows.
++// ---------------------------------------------------------------------------
++
++const PURGE_PAGE = 200;
++
++/** `purgeInbox`'s table order: cheapest/most-numerous first, no ordering
++ * dependency between them (unlike `account.ts`'s child-before-parent
++ * requirement -- these three tables don't reference each other). */
++const PURGE_PHASES = ["inbound", "outbound", "events", "done"] as const;
++type PurgePhase = (typeof PURGE_PHASES)[number];
++
++const PURGE_PHASE_TABLE: Record<Exclude<PurgePhase, "done">, "inboundMessages" | "outboundMessages" | "events"> = {
++  inbound: "inboundMessages",
++  outbound: "outboundMessages",
++  events: "events",
++};
++
++type PurgeCursorState = { phase: PurgePhase; sub: string | null };
++
++function decodePurgeCursor(raw: string | undefined): PurgeCursorState {
++  if (raw) {
++    try {
++      const parsed = JSON.parse(raw) as Partial<PurgeCursorState>;
++      if (
++        (parsed.phase === "inbound" || parsed.phase === "outbound" || parsed.phase === "events" || parsed.phase === "done") &&
++        (parsed.sub === null || typeof parsed.sub === "string")
++      ) {
++        return { phase: parsed.phase, sub: parsed.sub ?? null };
++      }
++    } catch {
++      // Malformed/foreign cursor: restart the walk from the first phase
++      // rather than throwing -- same tolerance `account.ts`'s `purgeStep`
++      // applies to an unrecognized `progress.table`.
++    }
++  }
++  return { phase: "inbound", sub: null };
++}
++
++function nextPurgePhase(phase: PurgePhase): PurgePhase {
++  const idx = PURGE_PHASES.indexOf(phase);
++  return PURGE_PHASES[Math.min(idx + 1, PURGE_PHASES.length - 1)];
++}
++
++/**
++ * Deletes at most `PURGE_PAGE` rows from ONE table, scoped to `inboxId` via
++ * that table's `by_inbox` index. Call repeatedly, feeding back the returned
++ * `cursor`, until it comes back `null` -- that's the only signal that every
++ * `inboundMessages`/`outboundMessages`/`events` row for this inbox is gone
++ * ("purgeInboxComplete"). A `cursor` still comes back when the current
++ * table's page merely advances to the next table, even if this call deleted
++ * 0 rows (an inbox with, say, no `outboundMessages` still spends one call
++ * moving past that phase) -- callers must loop on `cursor !== null`, not on
++ * `deleted > 0`.
++ */
++export const purgeInbox = internalMutation({
++  args: { inboxId: v.string(), cursor: v.optional(v.string()) },
++  returns: v.object({
++    cursor: v.union(v.string(), v.null()),
++    deleted: v.number(),
++  }),
++  handler: async (ctx, args) => {
++    const state = decodePurgeCursor(args.cursor);
++    if (state.phase === "done") return { cursor: null, deleted: 0 };
++
++    const table = PURGE_PHASE_TABLE[state.phase];
++    // The one `.paginate()` call this execution is allowed to make.
++    const page = await (ctx.db.query(table) as any)
++      .withIndex("by_inbox", (q: any) => q.eq("inboxId", args.inboxId))
++      .paginate({ cursor: state.sub, numItems: PURGE_PAGE });
++
++    for (const row of page.page) {
++      await ctx.db.delete(row._id);
++    }
++
++    const next: PurgeCursorState = page.isDone
++      ? { phase: nextPurgePhase(state.phase), sub: null }
++      : { phase: state.phase, sub: page.continueCursor };
++
++    return {
++      cursor: next.phase === "done" ? null : JSON.stringify(next),
++      deleted: page.page.length,
++    };
++  },
++});
+diff --git a/node_modules/@agentmail/convex/src/component/schema.ts b/node_modules/@agentmail/convex/src/component/schema.ts
+index c9b2b3e..8c97810 100644
+--- a/node_modules/@agentmail/convex/src/component/schema.ts
++++ b/node_modules/@agentmail/convex/src/component/schema.ts
+@@ -20,7 +20,10 @@ export default defineSchema({
+     finalizedAt: v.optional(v.number()),
+   })
+     .index("by_status", ["status"])
+-    .index("by_agentmailMessageId", ["agentmailMessageId"]),
++    .index("by_agentmailMessageId", ["agentmailMessageId"])
++    // T18.4: lets `purgeInbox` page this table scoped to one inbox instead
++    // of scanning `by_status` across every status.
++    .index("by_inbox", ["inboxId"]),
+ 
+   // Cached inbox metadata. Populated on createInbox or via getInbox.
+   inboxes: defineTable({
+@@ -68,5 +71,11 @@ export default defineSchema({
+     raw: v.any(),
+   })
+     .index("by_eventId", ["eventId"])
+-    .index("by_message", ["messageId"]),
++    .index("by_message", ["messageId"])
++    // T18.4: `inboxId` was already stored (via `extractIndexFields`) but had
++    // no index, so `purgeInbox` could not bound its scan to one inbox. Events
++    // whose payload carries no `inbox_id` (e.g. `domain.verified`) keep
++    // `inboxId: undefined` and are not matched by this index -- they are not
++    // per-inbox data and are out of scope for an inbox purge.
++    .index("by_inbox", ["inboxId"]),
+ });
