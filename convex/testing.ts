@@ -100,7 +100,27 @@ export const seedUser = internalAction({
   },
 });
 
-/** Action-only split: `createAccount` needs an action ctx, but patching a row needs `ctx.db`. Not part of the public T20a surface; still gated. */
+/**
+ * Action-only split: `createAccount` needs an action ctx, but patching a row
+ * needs `ctx.db`. Not part of the public T20a surface; still gated.
+ *
+ * T20 fix: patching `users.emailVerificationTime` alone is NOT enough to make
+ * a seeded account behave like a really-verified one at sign-in. `Password()`
+ * from `@convex-dev/auth` (`dist/providers/Password.js`) gates `flow ===
+ * "signIn"` on the *authAccounts* row's own `emailVerified` field (`if
+ * (config.verify && !account.emailVerified) { return
+ * signInViaProvider(config.verify, ...) }` -- send a fresh code instead of a
+ * session), which is a *different* field the library sets itself, on the
+ * account row, only once a real verification code is completed
+ * (`createOrUpdateAccount` in `dist/server/implementation/users.js`:
+ * `emailVerified: args.profile.email`). Without this, `seedUser` produced an
+ * account `convex/auth.ts`'s real sign-in flow still treated as unverified --
+ * `signInSeeded` would land back on the "Check your email" screen instead of
+ * a session, discovered by T20's browser suite (`e2e/auth.spec.ts`), never
+ * caught by T20a's own tests because they read `users.emailVerificationTime`
+ * directly rather than driving the real `auth:signIn` flow end to end. Mirror
+ * the library's own field/shape exactly, on the "password" account only.
+ */
 export const markVerified = internalMutation({
   args: { userId: v.id("users") },
   returns: v.id("users"),
@@ -110,6 +130,13 @@ export const markVerified = internalMutation({
     if (!user) throw new ConvexError("seedUser: created user row not found");
     if (user.emailVerificationTime === undefined) {
       await ctx.db.patch(userId, { emailVerificationTime: Date.now() });
+    }
+    const account = await ctx.db
+      .query("authAccounts")
+      .withIndex("userIdAndProvider", (q) => q.eq("userId", userId).eq("provider", PASSWORD_PROVIDER_ID))
+      .unique();
+    if (account && !account.emailVerified && user.email) {
+      await ctx.db.patch(account._id, { emailVerified: user.email });
     }
     return userId;
   },

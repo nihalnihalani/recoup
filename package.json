@@ -15,9 +15,11 @@
     "test:watch": "vitest",
     "test:ci": "node scripts/check-test-count.mjs 600",
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p convex/tsconfig.json --noEmit",
+    "typecheck:e2e": "tsc -p e2e/tsconfig.json --noEmit",
     "postinstall": "patch-package --error-on-fail",
     "verify:patch": "node scripts/check-patch.mjs",
     "codegen:check": "node scripts/check-codegen.mjs",
+    "e2e": "playwright test",
     "deploy": "npx @convex-dev/static-hosting deploy"
   },
   "dependencies": {
@@ -37,8 +39,10 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
     "@convex-dev/workpool": "^0.3.2",
     "@edge-runtime/vm": "^5.0.0",
+    "@playwright/test": "1.63.0",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",

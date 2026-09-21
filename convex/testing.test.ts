@@ -10,8 +10,9 @@
  * everything seeded for an email, children first; `lastCodeFor` reads a
  * manually written `opsState` row.
  */
-import { afterEach, describe, expect, it } from "vitest";
-import { internal } from "./_generated/api";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { exportPKCS8, generateKeyPair } from "jose";
+import { api, internal } from "./_generated/api";
 import { setup } from "./test.setup";
 import type { Id } from "./_generated/dataModel";
 
@@ -140,6 +141,11 @@ describe("convex/testing.ts — seedUser", () => {
     expect(authAccounts[0]?.provider).toBe("password");
     expect(authAccounts[0]?.providerAccountId).toBe("e2e.lead@example.com");
     expect(authAccounts[0]?.secret).toBeTruthy();
+    // Regression (T20, discovered by the browser suite): `Password()`'s real
+    // sign-in gate reads THIS field on the authAccounts row (`!account.emailVerified`,
+    // dist/providers/Password.js), not `users.emailVerificationTime` -- both
+    // must be set for a seeded account to behave like a really-verified one.
+    expect(authAccounts[0]?.emailVerified).toBe("e2e.lead@example.com");
   });
 
   it("defaults the password when none is supplied", async () => {
@@ -258,6 +264,43 @@ describe("convex/testing.ts — lastCodeFor", () => {
     const t = setup();
     const missing = await t.query(internal.testing.lastCodeFor, { email: "never-sent@example.com" });
     expect(missing).toBeNull();
+  });
+});
+
+/**
+ * T20 regression: `seedUser` must produce an account the REAL sign-in flow
+ * (`convex/auth.ts`, `@convex-dev/auth`'s `Password()`) treats as verified,
+ * not just one whose `users.emailVerificationTime` looks right. Drives
+ * `api.auth.signIn` directly (same pattern as `convex/auth.test.ts`) rather
+ * than reading `ctx.db` afterward, so this exercises the exact gate
+ * `signInSeeded` (`e2e/fixtures.ts`) depends on in the browser suite.
+ */
+describe("convex/testing.ts — seedUser is really verified at real sign-in (not just in the db)", () => {
+  beforeAll(async () => {
+    process.env.SITE_URL = "https://recoup.example";
+    process.env.CONVEX_SITE_URL = "https://recoup-test.convex.site";
+    const { privateKey } = await generateKeyPair("RS256", { extractable: true });
+    process.env.JWT_PRIVATE_KEY = await exportPKCS8(privateKey);
+    process.env.ALERTS_INBOX_ID = "inbox_test";
+  });
+  afterEach(restoreEnv);
+
+  it("signs in with a session (no verification code needed) right after seedUser", async () => {
+    saveEnv();
+    process.env.E2E_SEED_ENABLED = "true";
+    // Deliberately NOT overwriting CONVEX_SITE_URL here: the outer beforeAll's
+    // value ("recoup-test.convex.site") already does not match the production
+    // host marker, so `assertE2EEnabled` passes with it as-is.
+    const t = setup();
+    const email = "e2e.real-signin-check@example.com";
+    const password = "E2ePassword123!";
+    await t.action(internal.testing.seedUser, { email, password });
+
+    const result = await t.action(api.auth.signIn, {
+      provider: "password",
+      params: { flow: "signIn", email, password },
+    });
+    expect(result.tokens).not.toBeNull();
   });
 });
 
