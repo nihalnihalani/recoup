@@ -5,7 +5,14 @@ import { ProductThumb } from "../ProductThumb";
 import { cardClass, cardTitleClass } from "../../lib/ui";
 import { storeInfo } from "../../lib/stores";
 import type { Item } from "./model";
-import { Bone, ExampleChip, PctChange, VerdictChip, focusRing } from "./parts";
+import { Bone, ExampleChip, PctChange, RecentNote, VerdictChip, focusRing } from "./parts";
+
+/**
+ * `tracking.overview` has no `windowNote` of its own (unlike `insights.activity`/`sources`), since
+ * `truncated` there can come from either the 60-purchase cap or a single purchase's own
+ * `MAX_ITEMS_PER_PURCHASE` cap (D93/P07) -- this note covers both without claiming which one fired.
+ */
+const PURCHASES_WINDOW_NOTE = "recent purchases (up to 60) and each purchase's most recent items";
 
 function changePct(item: Item): number | null {
   if (item.latestCents === undefined || item.paidCents <= 0) return null;
@@ -46,12 +53,15 @@ function NowPrice({ item }: { item: Item }) {
   );
 }
 
-export function PurchasesTable({ items, now, capped }: { items: Item[]; now: number; capped: boolean }) {
+export function PurchasesTable({ items, now, truncated }: { items: Item[]; now: number; truncated: boolean }) {
   return (
     <section className={`${cardClass} p-5 lg:col-span-2`} aria-labelledby="purchases-title">
-      <h2 id="purchases-title" className={cardTitleClass}>
-        Purchases in their price window
-      </h2>
+      <div className="flex min-w-0 items-center gap-2">
+        <h2 id="purchases-title" className={cardTitleClass}>
+          Purchases in their price window
+        </h2>
+        {truncated && <RecentNote windowNote={PURCHASES_WINDOW_NOTE} />}
+      </div>
 
       {items.length === 0 ? (
         <p className="py-10 text-center text-sm text-gray-500">
@@ -136,7 +146,6 @@ export function PurchasesTable({ items, now, capped }: { items: Item[]; now: num
           </ul>
         </>
       )}
-      {capped && <p className="mt-3 text-xs text-gray-400">Showing your 60 most recent purchases.</p>}
     </section>
   );
 }

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { Link } from "react-router-dom";
 import { api } from "../../convex/_generated/api";
+import { BudgetBanner } from "../components/BudgetBanner";
 import { ActivitySkeleton, ActivityTimeline } from "../components/dashboard/ActivityTimeline";
 import { PriceHistoryCard } from "../components/dashboard/PriceHistoryCard";
 import { PurchasesTable, PurchasesTableSkeleton } from "../components/dashboard/PurchasesTable";
@@ -13,6 +14,7 @@ import { byUrgency } from "../components/dashboard/model";
 import type { BoardData } from "../components/dashboard/model";
 import { ExampleChip, focusRing } from "../components/dashboard/parts";
 import { cardClass, day, errorText, primaryButtonClass, secondaryButtonClass, useNow } from "../lib/ui";
+import { useCoarseNow } from "../lib/time";
 
 function NeedsReview({ purchases }: { purchases: BoardData["purchases"] }) {
   const pending = purchases.filter((row) => row.purchase.status === "needs_review");
@@ -44,8 +46,13 @@ function NeedsReview({ purchases }: { purchases: BoardData["purchases"] }) {
 }
 
 export default function Board() {
-  const overview = useQuery(api.tracking.overview);
-  const watches = useQuery(api.watches.list);
+  // `coarseNow` (P06/D73, 5-minute steps) feeds every reactive query that
+  // takes one, so this page's own re-render cadence never resubscribes them;
+  // `now` stays the page's existing 1-minute display clock for relative
+  // day/window text elsewhere on the dashboard.
+  const coarseNow = useCoarseNow();
+  const overview = useQuery(api.tracking.overview, { now: coarseNow });
+  const watches = useQuery(api.watches.list, { now: coarseNow });
   const activity = useQuery(api.insights.activity);
   const sources = useQuery(api.insights.sources);
   const board = useQuery(api.purchases.board);
@@ -102,6 +109,8 @@ export default function Board() {
         </p>
       )}
 
+      <BudgetBanner />
+
       {board !== undefined && <NeedsReview purchases={board.purchases} />}
 
       {nothingYet ? (
@@ -152,7 +161,7 @@ export default function Board() {
             {items === undefined || overview === undefined ? (
               <PurchasesTableSkeleton />
             ) : (
-              <PurchasesTable items={items} now={now} capped={overview.capped} />
+              <PurchasesTable items={items} now={now} truncated={overview.truncated} />
             )}
             {sources === undefined ? (
               <SourcesSkeleton />
