@@ -20,9 +20,9 @@ import { sanitizeError } from "./lib/errors";
 import { applyEvent, openClaim } from "./claims";
 import { parseProductUrl } from "./lib/watchUrl";
 import { cleanLine } from "./lib/text";
-import { charge } from "./lib/budget";
+import { charge, tryConsumeGlobalBudget } from "./lib/budget";
 import { isTombstoned } from "./lib/accountState";
-import { MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER } from "./limits";
+import { GLOBAL_DAILY_BUDGETS, MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER } from "./limits";
 
 /**
  * What the model is told. The email itself is untrusted content and goes in
@@ -49,6 +49,44 @@ const MAX_PASTE_CHARS = 60_000;
 
 /** One day: an ownerless failed row older than this will never find its inbox. */
 const OWNERLESS_AFTER_MS = 86_400_000;
+
+/**
+ * D76/Invariant 10: a global-budget refusal is `needs_review` (retryable),
+ * never `failed`/dropped, and never counts as one of `MAX_ATTEMPTS`. Written
+ * only by `beginEvent`/`replies.pauseForBudget` below and read back by
+ * `retryFailed`'s dedicated pass, so the two stay in lockstep without a
+ * schema flag.
+ */
+export const BUDGET_PAUSED_SUMMARY = "Paused: daily extraction budget reached; will retry";
+
+/**
+ * D76: the shared `inbound_extract` global switch -- one unit per model call
+ * that reads an inbound email, whether from `processEvent` (a fresh order/
+ * refund) or `replies.classify` (a merchant reply). Global-only (no per-user
+ * counterpart in `DAILY_BUDGETS`): `GLOBAL_DAILY_BUDGETS.inbound_extract`.
+ */
+export async function reserveInboundExtractBudget(ctx: MutationCtx, now: number = Date.now()): Promise<boolean> {
+  return tryConsumeGlobalBudget(ctx, "inbound_extract", GLOBAL_DAILY_BUDGETS.inbound_extract.max, 1, now);
+}
+
+/** `replies.classify` runs in an action and has no `ctx.db` of its own; this is its way to call the helper above. */
+export const reserveInboundExtract = internalMutation({
+  args: {},
+  returns: v.boolean(),
+  handler: async (ctx) => reserveInboundExtractBudget(ctx),
+});
+
+/** Moves a `processing` reply-classification row back to `needs_review` after a budget refusal, for `replies.classify`. */
+export const pauseForBudget = internalMutation({
+  args: { processedEventId: v.id("processedEvents") },
+  returns: v.null(),
+  handler: async (ctx, { processedEventId }) => {
+    const row = await ctx.db.get(processedEventId);
+    if (!row) return null;
+    await ctx.db.patch(processedEventId, { status: "needs_review", summary: BUDGET_PAUSED_SUMMARY, lastError: undefined });
+    return null;
+  },
+});
 
 // ---------------------------------------------------------------------------
 // Normalisation. Model output is proposed data, never authority
@@ -126,6 +164,14 @@ export const beginEvent = internalMutation({
         lastError,
         errorSummary: sanitizeError(lastError), // D58
       });
+      return null;
+    }
+    // D76/Invariant 10: checked BEFORE `processing`/attempts, so a day the
+    // deployment-wide switch is out never counts against this row's own
+    // MAX_ATTEMPTS -- it is not this email's fault. `needs_review`, not
+    // `failed`: `retryFailed`'s dedicated pass below picks it back up hourly.
+    if (!(await reserveInboundExtractBudget(ctx))) {
+      await ctx.db.patch(processedEventId, { status: "needs_review", summary: BUDGET_PAUSED_SUMMARY });
       return null;
     }
     await ctx.db.patch(processedEventId, {
@@ -763,6 +809,9 @@ const STUCK_AFTER_MS = 15 * 60_000;
  *     oldest 50 and rows that stay in it forever end up hiding every newer failure: a row out of attempts, or
  *     one with nothing to re-run, moves to `needs_review` (still on the owner's needs-attention list, where
  *     `retryEvent` can re-run it by hand); an ownerless row older than a day is closed as ignored.
+ *  4. D76/Invariant 10: `needs_review` rows `beginEvent`/`replies.classify` paused for the day (marked with
+ *     `BUDGET_PAUSED_SUMMARY`, never `failed`) are re-run the same way, but WITHOUT touching `attempts` -- a
+ *     global-budget refusal is never counted as this row's own failed attempt to read the email.
  */
 export const retryFailed = internalMutation({
   args: {},
@@ -840,6 +889,44 @@ export const retryFailed = internalMutation({
         });
       }
     }
+
+    // D76/Invariant 10, point 4 above: budget-paused rows, picked up hourly
+    // and NOT charged against `attempts`. Newest first: a refusal is a
+    // same-day event, so the rows worth unblocking first are the freshest.
+    const budgetPaused = await ctx.db
+      .query("processedEvents")
+      .withIndex("by_status", (q) => q.eq("status", "needs_review"))
+      .order("desc")
+      .take(RETRY_PAGE);
+    for (const row of budgetPaused) {
+      if (row.summary !== BUDGET_PAUSED_SUMMARY || !row.userId) continue;
+      if (await isTombstoned(ctx, row.userId)) {
+        await ctx.db.patch(row._id, { status: "succeeded", summary: "Ignored: account deleted" });
+        continue;
+      }
+      const payload = (row.payload ?? {}) as Record<string, unknown>;
+      const read = (key: string) => (typeof payload[key] === "string" ? (payload[key] as string) : "");
+      if (row.route === "intake") {
+        await ctx.db.patch(row._id, { status: "received", summary: undefined });
+        await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId: row._id });
+        retried++;
+      } else if (row.route === "reply" && row.claimId && read("messageId")) {
+        await ctx.db.patch(row._id, { status: "processing", processingStartedAt: now, summary: undefined });
+        await ctx.scheduler.runAfter(0, internal.replies.classify, {
+          processedEventId: row._id,
+          claimId: row.claimId,
+          messageId: read("messageId"),
+          from: read("from"),
+          subject: read("subject"),
+          text: read("text"),
+        });
+        retried++;
+      }
+      // Else: nothing to re-run. Neither writer of BUDGET_PAUSED_SUMMARY marks a
+      // row this way without a runnable route/payload, so this is unreached in
+      // practice; left as a no-op rather than an assertion.
+    }
+
     return { unstuck, retried };
   },
 });
@@ -847,6 +934,13 @@ export const retryFailed = internalMutation({
 /**
  * One row of the needs-attention list: the `processedEvents` document WITHOUT `payload` (review M5). The payload
  * holds the whole email, up to 60 KB a row, and nothing on screen reads it.
+ *
+ * T16 (docs/reviews/2026-09-21-phase0-reproduction.md's phase-0 finding,
+ * convex/intake.ts:847/877, convex/intake.test.ts:900-913): `lastError` was
+ * ALSO still in this shape and the handler spread it straight through --
+ * the payload-only redaction below never actually stripped it. `lastError`
+ * is server-side only from here on; `errorSummary` (D58's `sanitizeError`)
+ * is the only thing a caller ever sees.
  */
 const attentionRow = v.object({
   _id: v.id("processedEvents"),
@@ -855,6 +949,12 @@ const attentionRow = v.object({
   kind: v.string(),
   status: processedStatus,
   attempts: v.number(),
+  /**
+   * T16: kept in the shape (frontend code reads `event.lastError` as a
+   * fallback display string, out of this task's `src/**` scope to touch)
+   * but the handler below never populates it any more -- always `undefined`
+   * on the wire, never the raw error. `errorSummary` is the real field now.
+   */
   lastError: v.optional(v.string()),
   errorSummary: v.optional(v.string()),
   userId: v.optional(v.id("users")),
@@ -885,6 +985,17 @@ export const needsAttention = query({
     return pages
       .flat()
       .sort((a, b) => b._creationTime - a._creationTime)
-      .map(({ payload: _payload, processingStartedAt: _startedAt, ...row }) => row);
+      .map(({ payload: _payload, processingStartedAt: _startedAt, lastError, errorSummary, ...row }) => ({
+        ...row,
+        // T16: never the raw `lastError` -- a row written before D58 (or by
+        // a direct db.patch, e.g. in a test) may carry a `lastError` with no
+        // `errorSummary` yet; sanitize it here rather than let it through.
+        // `lastError` is spelled out (always `undefined`) only so the
+        // `attentionRow` validator's field is reflected in this query's
+        // inferred client type -- Convex drops `undefined`-valued keys on
+        // the wire, so it never actually serializes.
+        lastError: undefined,
+        errorSummary: errorSummary ?? (lastError !== undefined ? sanitizeError(lastError) : undefined),
+      }));
   },
 });

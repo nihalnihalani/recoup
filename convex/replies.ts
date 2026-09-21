@@ -13,6 +13,7 @@ import { ownedClaim, requireUserId } from "./lib/access";
 import { extract } from "./lib/ai";
 import { ReplyClass } from "./lib/schemas";
 import { toCents } from "./lib/money";
+import { sanitizeError } from "./lib/errors";
 import { applyEvent } from "./claims";
 import { scheduleClaimReminder } from "./followUps";
 import { emailDomain } from "./drafts";
@@ -81,6 +82,18 @@ export const classify = internalAction({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    // D76/Invariant 10: checked before the model call, the same gate
+    // `intake.beginEvent` applies on the inbound-email path -- a day the
+    // deployment-wide `inbound_extract` switch is out is never this
+    // particular reply's fault, so it goes to `needs_review` (never
+    // `failed`) and `intake.retryFailed` retries it hourly, without
+    // spending one of this action's own backoff attempts.
+    if (!(await ctx.runMutation(internal.intake.reserveInboundExtract, {}))) {
+      if (args.processedEventId) {
+        await ctx.runMutation(internal.intake.pauseForBudget, { processedEventId: args.processedEventId });
+      }
+      return null;
+    }
     // Scheduled actions are not retried by Convex, so a model hiccup would lose the
     // merchant's reply for good (review H2): retry with backoff, then park the
     // event as `failed` where the user can see it and re-run it.
@@ -95,9 +108,12 @@ export const classify = internalAction({
           attempt: attempt + 1,
         });
       } else if (args.processedEventId) {
+        // T16 (phase-0 finding: raw OpenAI/provider text was written straight
+        // into `lastError`): sanitized through the same `lib/errors` category
+        // buckets the rest of the app uses, never the raw provider message.
         await ctx.runMutation(internal.intake.failEvent, {
           processedEventId: args.processedEventId,
-          lastError: `Could not read the reply: ${message}`,
+          lastError: `Could not read the reply: ${sanitizeError(message)}`,
         });
       }
       return null;

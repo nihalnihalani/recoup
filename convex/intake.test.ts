@@ -3,7 +3,8 @@ import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
-import { DAILY_BUDGETS } from "./limits";
+import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS } from "./limits";
+import { BUDGET_PAUSED_SUMMARY } from "./intake";
 
 // `createPasteEvent` and `retryEvent` schedule `processEvent`, which would
 // call OpenAI. Fake timers keep convex-test from running it (D31).
@@ -646,6 +647,42 @@ describe("intake.beginEvent", () => {
   });
 });
 
+/** Exhausts the deployment-wide `inbound_extract` switch (D76) for "today," however the current test's clock reads it. */
+async function exhaustInboundExtractBudget(t: T) {
+  await t.run(async (ctx) => {
+    const day = new Date(Date.now()).toISOString().slice(0, 10);
+    await ctx.db.insert("usage", { day, kind: "inbound_extract", count: GLOBAL_DAILY_BUDGETS.inbound_extract.max });
+  });
+}
+
+describe("intake.beginEvent — D76 global inbound_extract budget (Invariant 10)", () => {
+  it("a refused global budget parks the row needs_review, never failed, and spends no attempt", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-budget");
+    await exhaustInboundExtractBudget(t);
+
+    expect(await t.mutation(internal.intake.beginEvent, { processedEventId: id })).toBeNull();
+    const row = await eventRow(t, id);
+    expect(row.status).toBe("needs_review");
+    expect(row.summary).toBe(BUDGET_PAUSED_SUMMARY);
+    expect(row.attempts).toBe(0);
+    expect(row.lastError).toBeUndefined();
+  });
+
+  it("does not touch the budget-paused row's own board-facing errorSummary or lastError", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-budget-board");
+    await exhaustInboundExtractBudget(t);
+    await t.mutation(internal.intake.beginEvent, { processedEventId: id });
+
+    const [row] = await as.query(api.intake.needsAttention, {});
+    expect(row.summary).toBe(BUDGET_PAUSED_SUMMARY);
+    expect(row.errorSummary).toBeUndefined();
+  });
+});
+
 describe("intake.retryFailed (hourly safety net)", () => {
   it("re-queues a failed intake row that has attempts left and parks an exhausted one for review (H4)", async () => {
     const t = setup();
@@ -669,6 +706,31 @@ describe("intake.retryFailed (hourly safety net)", () => {
     expect(parked.summary).toContain("5 attempts");
     expect(parked.attempts).toBe(5);
     expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+  });
+
+  it("D76: picks up a budget-paused needs_review row hourly, without spending one of its attempts", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-budget-retry");
+    await exhaustInboundExtractBudget(t);
+    expect(await t.mutation(internal.intake.beginEvent, { processedEventId: id })).toBeNull();
+    expect((await eventRow(t, id)).status).toBe("needs_review");
+
+    const res = await t.mutation(internal.intake.retryFailed, {});
+    expect(res.retried).toBe(1);
+    const row = await eventRow(t, id);
+    expect(row.status).toBe("received");
+    expect(row.attempts).toBe(0); // a budget refusal is never counted as a failed attempt (Invariant 10)
+    expect(row.summary).toBeUndefined();
+  });
+
+  it("D76: a needs_review row from an ordinary (non-budget) reason is left alone", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-ordinary-review");
+    await t.run(async (ctx) => await ctx.db.patch(id, { status: "needs_review", summary: "Duplicate of an existing purchase." }));
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect((await eventRow(t, id)).status).toBe("needs_review");
   });
 
   it("dead rows do not block newer failures behind them (H4)", async () => {
@@ -879,8 +941,14 @@ describe("intake spend caps (pre-launch review B5, M1, M5)", () => {
     await t.mutation(internal.intake.applyExtraction, { processedEventId: id, parsed: orderEmail({ orderRef: null }) });
     expect((await eventRow(t, id)).status).toBe("needs_review");
 
+    // T16: `beginEvent` above already drew one unit of the global
+    // `inbound_extract` switch (D76) for the extraction that ran -- that is
+    // the correct, expected charge for real work done, not what this test
+    // guards. What matters here is that the REJECTED retry below charges
+    // nothing ON TOP of that.
+    const before = await t.run(async (ctx) => (await ctx.db.query("usage").collect()).length);
     await expect(as.mutation(api.intake.retryEvent, { processedEventId: id })).rejects.toThrow(/already on your board/);
-    expect(await t.run(async (ctx) => (await ctx.db.query("usage").collect()).length)).toBe(0);
+    expect(await t.run(async (ctx) => (await ctx.db.query("usage").collect()).length)).toBe(before);
   });
 
   it("applying the same order email twice inserts one purchase even with no orderRef (H5 race)", async () => {
@@ -942,7 +1010,30 @@ describe("intake spend caps (pre-launch review B5, M1, M5)", () => {
     expect(row).not.toHaveProperty("payload");
     expect(row).not.toHaveProperty("processingStartedAt");
     expect(Object.keys(row).sort()).toEqual(
-      ["_creationTime", "_id", "attempts", "externalId", "kind", "lastError", "route", "status", "userId"].sort(),
+      ["_creationTime", "_id", "attempts", "errorSummary", "externalId", "kind", "route", "status", "userId"].sort(),
     );
+  });
+
+  /**
+   * T16 (docs/reviews/2026-09-21-phase0-reproduction.md's phase-0 finding,
+   * convex/intake.ts:847/877): `needsAttention` used to spread the raw
+   * `lastError` straight through the wire -- the payload-only redaction
+   * never actually stripped it. It is now never present in the response
+   * (kept `v.optional` only so unrelated frontend code that reads it as a
+   * fallback keeps typechecking), and a row with a raw `lastError` but no
+   * `errorSummary` yet (e.g. one written directly, bypassing `failEvent`'s
+   * own D58 sanitization) is sanitized here instead of ever going out raw.
+   */
+  it("needsAttention never exposes the raw lastError, even for a row missing errorSummary (T16)", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-raw-error");
+    await t.run(
+      async (ctx) => await ctx.db.patch(id, { status: "failed", lastError: "openai: 500 something exploded" }),
+    );
+    const [row] = await as.query(api.intake.needsAttention, {});
+    expect(row._id).toBe(id);
+    expect(row.lastError).toBeUndefined();
+    expect(row.errorSummary).toBe("Provider error");
   });
 });
