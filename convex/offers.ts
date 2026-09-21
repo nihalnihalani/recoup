@@ -32,10 +32,21 @@ import {
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { components, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { offerStatus, variantMatch } from "./schema";
+import { offerStatus, priceSource, variantMatch } from "./schema";
 import { ownedWatch, requireUserId } from "./lib/access";
+import { assertTimestamp } from "./lib/money";
+import { isTombstoned } from "./lib/accountState";
 import { defaultWatchName } from "./lib/watchUrl";
-import { EXCLUDED_HOSTS, matchConfidence, selectStorePages, type SearchHit } from "./lib/offerMatch";
+import {
+  EXCLUDED_HOSTS,
+  FIND_MARKER,
+  matchConfidence,
+  sameStore,
+  selectStorePages,
+  titleSimilarity,
+  TITLE_DRIFT_THRESHOLD,
+  type SearchHit,
+} from "./lib/offerMatch";
 import { observePrice, rejectionReason, truncate, type Observation, type PageObservation } from "./priceWatch";
 import {
   MAX_OFFER_FINDS_PER_DAY,
@@ -49,10 +60,22 @@ import {
 
 const firecrawl = new FirecrawlClient(components.firecrawl);
 
-/** Not a hostname, so it can never collide with a real store's row. */
-const FIND_MARKER = "~find";
 /** A marker still unfinished after this long belongs to a search that died; stop saying "searching". */
 const SEARCH_PENDING_MS = 5 * 60_000;
+/**
+ * Fixed marker on `note` when a recheck/refresh found the confirmed URL
+ * showing a different product than the one the user vouched for (P04:
+ * "confirmed offer matching may silently authorize later variants"). The
+ * OLD price/currency are left as they were -- still shown, just no longer
+ * refreshed -- until the user looks again and re-confirms or rejects it.
+ * Not an `offerStatus` literal: that enum is schema-owned outside this
+ * task's file set (see the task report's "known gaps"), so this is the
+ * in-scope equivalent -- a fixed, matchable string on the existing `note`
+ * field, which the UI already renders and which `listForWatch`'s `best`
+ * computation already skips (see `needsReconfirm` below).
+ */
+export const NEEDS_RECONFIRM_NOTE =
+  "This store's listing may have changed since you confirmed it; check it before trusting this price.";
 /** `listForWatch` page size. */
 const LIST_LIMIT = 20;
 /**
@@ -85,6 +108,8 @@ const offerView = v.object({
   currency: v.union(v.string(), v.null()),
   lastCheckedAt: v.union(v.number(), v.null()),
   note: v.union(v.string(), v.null()),
+  /** Where this row's data came from (T13/P04): never presented as a Recoup read when it is not one. Defaults to "recoup" for rows written before this field existed. */
+  source: priceSource,
 });
 
 const bestView = v.object({
@@ -97,15 +122,24 @@ const bestView = v.object({
 const offersForWatch = v.object({
   /** Confirmed (cheapest first, unknown price last), then candidates (most trusted first). Rejected omitted. At most 20. */
   offers: v.array(offerView),
-  /** The cheapest CONFIRMED offer that beats the watch's own latest price, else null. */
+  /** The cheapest CONFIRMED, in-stock, non-flagged offer that beats the watch's own latest price, else null. */
   best: v.union(bestView, v.null()),
-  /** True while a scheduled search has not recorded yet. */
-  searching: v.boolean(),
-  /** When `find` may be called again for this watch; null when it may be called now. */
-  nextFindAt: v.union(v.number(), v.null()),
+  /**
+   * Raw deadline of the pending search marker, or undefined when none is
+   * pending (T13/P06: no wall-clock read in this query). The client derives
+   * "searching" by comparing this to its own clock: `now < searchingUntil`.
+   */
+  searchingUntil: v.optional(v.number()),
+  /**
+   * Raw time `find` may be called again, or undefined when it has never been
+   * called (or its cooldown window has rolled off the read window). Never
+   * nulled once past: the client compares it to its own clock the same way
+   * (`nextFindAt === undefined || nextFindAt <= now`).
+   */
+  nextFindAt: v.optional(v.number()),
 });
 
-const EMPTY: Infer<typeof offersForWatch> = { offers: [], best: null, searching: false, nextFindAt: null };
+const EMPTY: Infer<typeof offersForWatch> = { offers: [], best: null, searchingUntil: undefined, nextFindAt: undefined };
 
 /** What the extractor saw on one page. Cents are integer minor units. */
 const observation = {
@@ -115,6 +149,8 @@ const observation = {
   isRange: v.optional(v.boolean()),
   variantMatch: v.optional(variantMatch),
   note: v.optional(v.string()),
+  /** The extractor's own read of the product's name, when it returned one (T13: the recheck-side drift signal -- a recheck has no fresh `title` the way a search hit does, only this). */
+  productName: v.optional(v.string()),
 };
 
 const candidate = v.object({
@@ -130,6 +166,11 @@ const candidate = v.object({
 
 function isMarker(row: Doc<"offers">): boolean {
   return row.storeDomain === FIND_MARKER;
+}
+
+/** True when a later read found a different product at this offer's URL (T13/P04): its price is untrusted until the user looks again. */
+function needsReconfirm(row: Pick<Doc<"offers">, "note">): boolean {
+  return row.note === NEEDS_RECONFIRM_NOTE;
 }
 
 /** When a find happened, in whole ms (`_creationTime` can carry a fraction). */
@@ -211,6 +252,7 @@ async function appendOfferCheck(
   offer: { offerId: Id<"offers">; watchId: Id<"watches">; userId: Id<"users"> },
   price: { lastCents?: number; currency?: string },
   observedAt: number,
+  source: Infer<typeof priceSource>,
 ): Promise<void> {
   if (price.lastCents === undefined) return;
   const newest = await ctx.db
@@ -232,6 +274,7 @@ async function appendOfferCheck(
     observedCents: price.lastCents,
     currency: price.currency,
     observedAt,
+    source,
   });
 }
 
@@ -310,11 +353,15 @@ async function decide(ctx: MutationCtx, offerId: Id<"offers">, status: "confirme
       .withIndex("by_offer", (q) => q.eq("offerId", offerId))
       .first();
     if (!any) {
+      // `offer.lastCheckedAt` is the provider's own observation time for a ShopSavvy candidate
+      // (market.ts stamps it from `store.observedAt`), so this also satisfies "observedAt = the
+      // provider observation time" for a shopsavvy candidate's first history point (T13).
       await appendOfferCheck(
         ctx,
         { offerId, watchId: offer.watchId, userId: offer.userId },
         offer,
         offer.lastCheckedAt ?? Math.floor(offer._creationTime),
+        offer.source ?? "recoup",
       );
     }
   }
@@ -345,17 +392,25 @@ function byCentsThenUnknown(a: Doc<"offers">, b: Doc<"offers">): number {
   return a.lastCents - b.lastCents;
 }
 
-/** Offers for one watch. The empty shape when signed out, not the owner, or the watch is archived. */
+/**
+ * Offers for one watch. The empty shape when signed out, not the owner, or
+ * the watch is archived. No wall clock is read here (T13/P06): `now` is an
+ * optional coarse, display-only client clock (same 5-minute-step, ±1-day
+ * convention as T12's watches.list/get) that this query does not need for
+ * anything it computes -- accepted and validated only so every list-shaped
+ * query takes the argument uniformly -- and every timestamp returned is raw
+ * server state the client compares against its own clock.
+ */
 export const listForWatch = query({
-  args: { watchId: v.id("watches") },
+  args: { watchId: v.id("watches"), now: v.optional(v.number()) },
   returns: offersForWatch,
-  handler: async (ctx, { watchId }) => {
+  handler: async (ctx, { watchId, now }) => {
+    if (now !== undefined) assertTimestamp(now, "now");
     const userId = await getAuthUserId(ctx);
     if (!userId) return EMPTY;
     const watch = await ctx.db.get(watchId);
     if (!watch || watch.userId !== userId || watch.status === "archived") return EMPTY;
 
-    const now = Date.now();
     const rows = await watchRows(ctx, watchId);
     const marker = rows.find(isMarker);
     const offers = rows.filter((r) => !isMarker(r) && r.userId === userId);
@@ -364,11 +419,14 @@ export const listForWatch = query({
       .filter((o) => o.status === "candidate")
       .sort((a, b) => (b.matchConfidence ?? 0) - (a.matchConfidence ?? 0));
 
-    // `confirmed` is sorted cheapest first, so the first comparable row is the best one.
+    // `confirmed` is sorted cheapest first, so the first comparable, trustworthy row is the best one.
     let best: Infer<typeof bestView> | null = null;
     if (watch.lastCents !== undefined) {
       for (const o of confirmed) {
         if (o.lastCents === undefined || o.currency === undefined) continue;
+        // A price flagged for reconfirmation (variant drift, T13/P04) never drives "best": keep
+        // looking past it rather than stopping here, the same way an unpriced row is skipped above.
+        if (needsReconfirm(o)) continue;
         if (watch.currency !== undefined && o.currency !== watch.currency) continue;
         if (o.lastCents < watch.lastCents) {
           best = { storeDomain: o.storeDomain, cents: o.lastCents, currency: o.currency, productUrl: o.productUrl };
@@ -377,7 +435,6 @@ export const listForWatch = query({
       }
     }
 
-    const nextFindAt = marker ? foundAt(marker) + OFFER_FIND_COOLDOWN_MS : null;
     return {
       offers: [...confirmed, ...candidates].slice(0, LIST_LIMIT).map((o) => ({
         _id: o._id,
@@ -391,11 +448,11 @@ export const listForWatch = query({
         currency: o.currency ?? null,
         lastCheckedAt: o.lastCheckedAt ?? null,
         note: o.note ?? null,
+        source: o.source ?? "recoup",
       })),
       best,
-      searching:
-        marker !== undefined && marker.lastCheckedAt === undefined && now - foundAt(marker) < SEARCH_PENDING_MS,
-      nextFindAt: nextFindAt !== null && nextFindAt > now ? nextFindAt : null,
+      searchingUntil: marker !== undefined && marker.lastCheckedAt === undefined ? foundAt(marker) + SEARCH_PENDING_MS : undefined,
+      nextFindAt: marker !== undefined ? foundAt(marker) + OFFER_FIND_COOLDOWN_MS : undefined,
     };
   },
 });
@@ -528,6 +585,8 @@ export const recordCandidates = internalMutation({
   handler: async (ctx, { watchId, candidates, failure }) => {
     const watch = await ctx.db.get(watchId);
     if (!watch) return 0;
+    // D87: a scheduled path (searchOffers -> here) never writes a tombstoned owner's rows.
+    if (await isTombstoned(ctx, watch.userId)) return 0;
     const now = Date.now();
     const rows = await watchRows(ctx, watchId);
 
@@ -544,14 +603,22 @@ export const recordCandidates = internalMutation({
     let written = 0;
     for (const c of candidates.slice(0, MAX_OFFER_PAGES_PER_FIND)) {
       if (c.variantMatch !== "exact" && c.variantMatch !== "unsure") continue; // "none" is never stored
-      if (c.storeDomain === FIND_MARKER || c.storeDomain === watch.merchantDomain) continue;
+      if (c.storeDomain === FIND_MARKER || sameStore(c.storeDomain, watch.merchantDomain)) continue;
       const price = priceFields(c, watch.currency, now);
       const existing = byStore.get(c.storeDomain);
       if (existing?.status === "rejected") continue;
       if (existing?.status === "confirmed") {
         if (existing.productUrl !== c.productUrl) continue;
+        // P04: the URL the user confirmed can start showing a different product. A title that no
+        // longer resembles the one they vouched for is drift: flag it and leave the price as it
+        // was, rather than silently authorizing whatever this read happens to be.
+        if (titleSimilarity(existing.title, c.title) < TITLE_DRIFT_THRESHOLD) {
+          await ctx.db.patch(existing._id, { lastCheckedAt: now, note: NEEDS_RECONFIRM_NOTE });
+          written++;
+          continue;
+        }
         await ctx.db.patch(existing._id, price);
-        await appendOfferCheck(ctx, { offerId: existing._id, watchId, userId: existing.userId }, price, now);
+        await appendOfferCheck(ctx, { offerId: existing._id, watchId, userId: existing.userId }, price, now, "recoup");
         written++;
         continue;
       }
@@ -560,6 +627,7 @@ export const recordCandidates = internalMutation({
         title: c.title.slice(0, MAX_TITLE_CHARS),
         variantMatch: c.variantMatch,
         matchConfidence: matchConfidence(c.variantMatch, c.confidence),
+        source: "recoup" as const,
         ...price,
       };
       if (existing) {
@@ -572,7 +640,7 @@ export const recordCandidates = internalMutation({
             .take(STALE_CHECKS_PAGE);
           for (const row of stale) await ctx.db.delete(row._id);
         }
-        await appendOfferCheck(ctx, { offerId: existing._id, watchId, userId: existing.userId }, price, now);
+        await appendOfferCheck(ctx, { offerId: existing._id, watchId, userId: existing.userId }, price, now, "recoup");
       } else {
         if (stores >= MAX_OFFERS_PER_WATCH || inserted.has(c.storeDomain)) continue;
         const offerId = await ctx.db.insert("offers", {
@@ -582,7 +650,7 @@ export const recordCandidates = internalMutation({
           status: "candidate",
           ...fields,
         });
-        await appendOfferCheck(ctx, { offerId, watchId, userId: watch.userId }, price, now);
+        await appendOfferCheck(ctx, { offerId, watchId, userId: watch.userId }, price, now, "recoup");
         inserted.add(c.storeDomain);
         stores++;
       }
@@ -647,13 +715,16 @@ export async function recheckConfirmedOffers(
     const watch = await ctx.runQuery(internal.offers.watchForSearch, { watchId });
     if (!watch) return 0;
     const offers = await ctx.runQuery(internal.offers.confirmedForWatch, { watchId });
-    const results: Array<{ offerId: Id<"offers"> } & ReturnType<typeof pickObservation>> = [];
+    const results: Array<{ offerId: Id<"offers"> } & ReturnType<typeof pickObservation> & { productName?: string }> = [];
     // Same reasoning as searchOffers: independent reads run together (bounded by MAX_OFFER_RECHECKS).
     const reads = await Promise.all(
       offers.map(async (offer) => {
         try {
           const obs = await deps.observe(ctx as ActionCtx, watch.name, offer.productUrl);
-          return { offerId: offer.offerId, ...pickObservation(obs) };
+          // `productName` rides along outside `pickObservation` (T13): it is the drift signal
+          // `recordRechecks` compares against the confirmed offer's stored title -- a recheck has
+          // no freshly-searched page title the way `searchOffers`'s candidates do.
+          return { offerId: offer.offerId, ...pickObservation(obs), productName: obs.productName };
         } catch (err) {
           console.error(`offers.recheck could not read offer ${offer.offerId}`, err);
           return null;
@@ -692,14 +763,27 @@ export const recordRechecks = internalMutation({
   handler: async (ctx, { watchId, results }) => {
     const watch = await ctx.db.get(watchId);
     if (!watch) return 0;
+    // D87: a scheduled path (recheckConfirmedOffers -> here) never writes a tombstoned owner's rows.
+    if (await isTombstoned(ctx, watch.userId)) return 0;
     const now = Date.now();
     let written = 0;
     for (const r of results.slice(0, MAX_OFFER_RECHECKS)) {
       const offer = await ctx.db.get(r.offerId);
       if (!offer || offer.watchId !== watchId || offer.status !== "confirmed" || isMarker(offer)) continue;
+      // P04: a recheck that no longer looks like the confirmed product -- "none" variant, or a
+      // freshly-read product name that does not resemble the stored title -- must not silently
+      // authorize whatever price it saw. Flag it instead of updating the price.
+      const drift =
+        r.variantMatch === "none" ||
+        (r.productName !== undefined && titleSimilarity(offer.title, r.productName) < TITLE_DRIFT_THRESHOLD);
+      if (drift) {
+        await ctx.db.patch(offer._id, { lastCheckedAt: now, note: NEEDS_RECONFIRM_NOTE });
+        written++;
+        continue;
+      }
       const price = priceFields(r, watch.currency, now);
       await ctx.db.patch(offer._id, price);
-      await appendOfferCheck(ctx, { offerId: offer._id, watchId, userId: offer.userId }, price, now);
+      await appendOfferCheck(ctx, { offerId: offer._id, watchId, userId: offer.userId }, price, now, "recoup");
       written++;
     }
     return written;

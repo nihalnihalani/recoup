@@ -317,7 +317,7 @@ describe("listForWatch", () => {
     const [row] = await rows(t, watchId);
     await as.mutation(api.offers.confirm, { offerId: row._id });
 
-    const empty = { offers: [], best: null, searching: false, nextFindAt: null };
+    const empty = { offers: [], best: null, searchingUntil: undefined, nextFindAt: undefined };
     expect(await asOther.query(api.offers.listForWatch, { watchId })).toEqual(empty);
     expect(await t.query(api.offers.listForWatch, { watchId })).toEqual(empty);
 
@@ -342,18 +342,29 @@ describe("find", () => {
     await as.mutation(api.offers.find, { watchId });
     expect(await scheduled(t)).toHaveLength(1);
     let listed = await as.query(api.offers.listForWatch, { watchId });
-    expect(listed).toEqual({ offers: [], best: null, searching: true, nextFindAt: T0 + OFFER_FIND_COOLDOWN_MS });
+    expect(listed).toEqual({
+      offers: [],
+      best: null,
+      searchingUntil: T0 + 5 * 60_000,
+      nextFindAt: T0 + OFFER_FIND_COOLDOWN_MS,
+    });
 
     await expect(as.mutation(api.offers.find, { watchId })).rejects.toThrow(/recently/);
     vi.setSystemTime(T0 + OFFER_FIND_COOLDOWN_MS - 1);
     await expect(as.mutation(api.offers.find, { watchId })).rejects.toThrow(/recently/);
     expect(await scheduled(t)).toHaveLength(1);
 
-    // The search records (even an empty one): no longer searching, still cooling down.
+    // The search records (even an empty one): no longer searching (searchingUntil undefined), still
+    // cooling down; nextFindAt is raw and stays populated (never nulled) at every later `now` too.
     await searchOffers(runner(t), watchId, deps([], {}).d);
     listed = await as.query(api.offers.listForWatch, { watchId });
-    expect(listed.searching).toBe(false);
+    expect(listed.searchingUntil).toBeUndefined();
     expect(listed.nextFindAt).toBe(T0 + OFFER_FIND_COOLDOWN_MS);
+
+    // Raw, so it reads the same past the cooldown too -- the client decides staleness, not this query
+    // (T13/P06: no query result here is derived from server time).
+    const past = await as.query(api.offers.listForWatch, { watchId, now: T0 + OFFER_FIND_COOLDOWN_MS + 3_600_000 });
+    expect(past.nextFindAt).toBe(T0 + OFFER_FIND_COOLDOWN_MS);
 
     vi.setSystemTime(T0 + OFFER_FIND_COOLDOWN_MS);
     await as.mutation(api.offers.find, { watchId });
@@ -599,5 +610,256 @@ describe("dueForRecheck (F5)", () => {
     vi.setSystemTime(T0 + OFFER_FIND_COOLDOWN_MS);
 
     expect(await t.query(internal.offers.dueForRecheck, { watchId })).toBe(false);
+  });
+});
+
+describe("listForWatch: now argument (T13/P06)", () => {
+  it("returns the identical result for two different `now` values -- nothing here is derived from server time", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    await as.mutation(api.offers.find, { watchId }); // leaves a pending marker, the one time-shaped bit of state
+
+    const a = await as.query(api.offers.listForWatch, { watchId, now: T0 });
+    const b = await as.query(api.offers.listForWatch, { watchId, now: T0 + 6 * 3_600_000 });
+    expect(a).toEqual(b);
+    const withoutNow = await as.query(api.offers.listForWatch, { watchId });
+    expect(withoutNow).toEqual(a);
+  });
+
+  it("still validates `now`: rejects a non-finite or far-future value", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    await expect(as.query(api.offers.listForWatch, { watchId, now: Number.NaN })).rejects.toThrow();
+    await expect(as.query(api.offers.listForWatch, { watchId, now: -1 })).rejects.toThrow();
+    await expect(as.query(api.offers.listForWatch, { watchId, now: T0 + 2 * 86_400_000 })).rejects.toThrow();
+  });
+});
+
+describe("provenance (T13/P04)", () => {
+  it("a Firecrawl-found candidate is labelled source 'recoup'", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    await searchOffers(runner(t), watchId, deps(["https://a.example/p"], { "a.example": exact(18_000) }).d);
+    const listed = await as.query(api.offers.listForWatch, { watchId });
+    expect(listed.offers[0].source).toBe("recoup");
+  });
+
+  it("a ShopSavvy candidate is labelled source 'shopsavvy', never drives best unconfirmed, and confirm seeds its history at the provider's own observed time", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId, { lastCents: 20_000 });
+    await t.run((ctx) => ctx.db.patch(watchId, { marketState: "running" }));
+    const providerObservedAt = T0 - 86_400_000; // the provider's own timestamp, distinct from "now" (retrieval time)
+    await t.mutation(internal.market.recordSnapshot, {
+      watchId,
+      outcome: "success",
+      points: [],
+      stores: [
+        {
+          retailer: "Cheap Store",
+          storeDomain: "cheap.example",
+          productUrl: "https://cheap.example/p",
+          cents: 15_000,
+          currency: "USD",
+          observedAt: providerObservedAt,
+        },
+      ],
+    });
+
+    let listed = await as.query(api.offers.listForWatch, { watchId });
+    expect(listed.offers[0].source).toBe("shopsavvy");
+    expect(listed.best).toBeNull(); // unconfirmed: source alone never authorizes "best"
+
+    const offerId = listed.offers[0]._id;
+    await as.mutation(api.offers.confirm, { offerId });
+
+    listed = await as.query(api.offers.listForWatch, { watchId });
+    expect(listed.best).toEqual({
+      storeDomain: "cheap.example",
+      cents: 15_000,
+      currency: "USD",
+      productUrl: "https://cheap.example/p",
+    });
+
+    const checks = await t.run((ctx) =>
+      ctx.db.query("offerChecks").withIndex("by_offer", (q) => q.eq("offerId", offerId)).collect(),
+    );
+    expect(checks).toHaveLength(1);
+    expect(checks[0]).toMatchObject({ source: "shopsavvy", observedAt: providerObservedAt, observedCents: 15_000 });
+  });
+});
+
+describe("availability: out-of-stock never best (T13/P04)", () => {
+  it("a confirmed out-of-stock ShopSavvy candidate stays unpriced and cannot become best, and is shown qualified", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId, { lastCents: 30_000 });
+    await t.run((ctx) => ctx.db.patch(watchId, { marketState: "running" }));
+    await t.mutation(internal.market.recordSnapshot, {
+      watchId,
+      outcome: "success",
+      points: [],
+      stores: [
+        {
+          retailer: "OOS Store",
+          storeDomain: "oos.example",
+          productUrl: "https://oos.example/p",
+          cents: 5_000,
+          currency: "USD",
+          observedAt: T0,
+          inStock: false,
+        },
+      ],
+    });
+
+    const listed = await as.query(api.offers.listForWatch, { watchId });
+    expect(listed.offers[0].lastCents).toBeNull();
+    expect(listed.offers[0].note).toMatch(/out of stock/i);
+
+    await as.mutation(api.offers.confirm, { offerId: listed.offers[0]._id });
+    const after = await as.query(api.offers.listForWatch, { watchId });
+    expect(after.best).toBeNull();
+  });
+});
+
+describe("confirmed-offer variant drift -> needs_reconfirm (T13/P04)", () => {
+  const candWithTitle = (store: string, obs: PageObservation, title: string, path = "p/1") => ({
+    storeDomain: store,
+    productUrl: `https://${store}/${path}`,
+    title,
+    observedCents: obs.observedCents,
+    currency: obs.currency,
+    confidence: obs.confidence,
+    isRange: obs.isRange,
+    variantMatch: obs.variantMatch,
+    note: obs.note,
+  });
+
+  it("recordCandidates flags drift instead of updating price when the same URL's title no longer resembles the confirmed one", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId, { lastCents: 25_000 });
+    await t.mutation(internal.offers.recordCandidates, {
+      watchId,
+      candidates: [candWithTitle("drift.example", exact(18_000), "Acme Down Jacket, Blue, M")],
+    });
+    const [offer] = await rows(t, watchId);
+    await as.mutation(api.offers.confirm, { offerId: offer._id });
+
+    // Same URL, a completely different product the second time -- the store swapped the listing.
+    await t.mutation(internal.offers.recordCandidates, {
+      watchId,
+      candidates: [candWithTitle("drift.example", exact(9_000), "Sony WH-1000XM5 Wireless Headphones")],
+    });
+
+    const after = (await rows(t, watchId)).find((r) => r._id === offer._id)!;
+    expect(after.lastCents).toBe(18_000); // unchanged, not silently overwritten
+    expect(after.note).toBe("This store's listing may have changed since you confirmed it; check it before trusting this price.");
+
+    const listed = await as.query(api.offers.listForWatch, { watchId });
+    expect(listed.best).toBeNull(); // the only confirmed offer is flagged, so it cannot drive best
+  });
+
+  it("recordRechecks flags drift from a 'none' variant match or a drifted product name, without appending an offerChecks row", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    await searchOffers(runner(t), watchId, deps(["https://a.example/p"], { "a.example": exact(18_000) }).d);
+    const [offer] = await rows(t, watchId);
+    await as.mutation(api.offers.confirm, { offerId: offer._id });
+    const before = await t.run((ctx) =>
+      ctx.db.query("offerChecks").withIndex("by_offer", (q) => q.eq("offerId", offer._id)).collect(),
+    );
+
+    await t.mutation(internal.offers.recordRechecks, {
+      watchId,
+      results: [{ offerId: offer._id, observedCents: 5_000, currency: "USD", confidence: 0.9, isRange: false, variantMatch: "none" }],
+    });
+
+    const afterNone = (await rows(t, watchId)).find((r) => r._id === offer._id)!;
+    expect(afterNone.lastCents).toBe(18_000);
+    expect(afterNone.note).toMatch(/changed/);
+
+    await t.mutation(internal.offers.recordRechecks, {
+      watchId,
+      results: [
+        {
+          offerId: offer._id,
+          observedCents: 4_000,
+          currency: "USD",
+          confidence: 0.9,
+          isRange: false,
+          variantMatch: "exact",
+          productName: "Totally Different Espresso Machine",
+        },
+      ],
+    });
+    const afterDrift = (await rows(t, watchId)).find((r) => r._id === offer._id)!;
+    expect(afterDrift.lastCents).toBe(18_000);
+
+    const checksAfter = await t.run((ctx) =>
+      ctx.db.query("offerChecks").withIndex("by_offer", (q) => q.eq("offerId", offer._id)).collect(),
+    );
+    expect(checksAfter).toHaveLength(before.length); // no new (untrusted) price point recorded
+
+    // A later read that DOES still look like the confirmed product resumes trusting the price.
+    await t.mutation(internal.offers.recordRechecks, {
+      watchId,
+      results: [
+        {
+          offerId: offer._id,
+          observedCents: 16_000,
+          currency: "USD",
+          confidence: 0.9,
+          isRange: false,
+          variantMatch: "exact",
+          productName: offer.title, // resembles the offer's own stored title, not the watch's name
+        },
+      ],
+    });
+    const resumed = (await rows(t, watchId)).find((r) => r._id === offer._id)!;
+    expect(resumed.lastCents).toBe(16_000);
+    expect(resumed.note).toBeUndefined();
+  });
+});
+
+describe("tombstoned owner: scheduled offers work writes nothing (D87)", () => {
+  it("recordCandidates and recordRechecks are no-ops once the owner is tombstoned", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    await searchOffers(runner(t), watchId, deps(["https://a.example/p"], { "a.example": exact(18_000) }).d);
+    const [offer] = await rows(t, watchId);
+    await as.mutation(api.offers.confirm, { offerId: offer._id });
+
+    await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: T0, attempts: 0 }));
+
+    const cand = (store: string, obs: PageObservation, path = "p/1") => ({
+      storeDomain: store,
+      productUrl: `https://${store}/${path}`,
+      title: NAME,
+      observedCents: obs.observedCents,
+      currency: obs.currency,
+      confidence: obs.confidence,
+      isRange: obs.isRange,
+      variantMatch: obs.variantMatch,
+      note: obs.note,
+    });
+    const writtenCandidates = await t.mutation(internal.offers.recordCandidates, {
+      watchId,
+      candidates: [cand("new-store.example", exact(9_999))],
+    });
+    expect(writtenCandidates).toBe(0);
+    expect((await rows(t, watchId)).some((r) => r.storeDomain === "new-store.example")).toBe(false);
+
+    const writtenRechecks = await t.mutation(internal.offers.recordRechecks, {
+      watchId,
+      results: [{ offerId: offer._id, observedCents: 1_234, currency: "USD", confidence: 0.9, isRange: false, variantMatch: "exact" }],
+    });
+    expect(writtenRechecks).toBe(0);
+    expect((await rows(t, watchId)).find((r) => r._id === offer._id)?.lastCents).toBe(18_000);
   });
 });
