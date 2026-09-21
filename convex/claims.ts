@@ -183,12 +183,48 @@ export const open = mutation({
 });
 
 /**
+ * D112 6a-1 migration safety: an internal caller that derives its
+ * idempotency key through `lib/idempotency.ts`'s `internalKey` (a fixed
+ * 32-hex-char hash of an external, unbounded input such as an RFC
+ * Message-ID) also passes the OLD raw key it used to write before this
+ * change (`legacyIdempotencyKey`), so a ledger row written under the old,
+ * unhashed format is still found and deduped rather than double-applied
+ * under the new hashed key. One extra indexed `by_claim_key` read, only
+ * when a legacy key is supplied and differs from the primary one.
+ */
+async function findLedgerDuplicate(
+  ctx: MutationCtx,
+  claimId: Id<"claims">,
+  idempotencyKey: string,
+  legacyIdempotencyKey?: string,
+): Promise<Doc<"ledgerEvents"> | null> {
+  const primary = await ctx.db
+    .query("ledgerEvents")
+    .withIndex("by_claim_key", (q) => q.eq("claimId", claimId).eq("idempotencyKey", idempotencyKey))
+    .first();
+  if (primary) return primary;
+  if (!legacyIdempotencyKey || legacyIdempotencyKey === idempotencyKey) return null;
+  return await ctx.db
+    .query("ledgerEvents")
+    .withIndex("by_claim_key", (q) => q.eq("claimId", claimId).eq("idempotencyKey", legacyIdempotencyKey))
+    .first();
+}
+
+/**
  * Appends one ledger event and recomputes claim status from the full
  * ledger (ARCHITECTURE_PATTERNS: derived sums are never stored). Refuses a
  * dismissed claim, which is terminal. Idempotency keys are scoped to the
  * claim (D38): the same key with the same kind and cents is a no-op, the
  * same key with different facts is a conflict. A later debit can never
  * exceed the net confirmed credit (D40).
+ *
+ * D112 6a-1: `MAX_IDEMPOTENCY_KEY_CHARS` is NOT enforced here any more --
+ * only on the client-supplied keys the public mutations below take
+ * directly. An internal caller (`replies.apply`, `intake.applyRefund`)
+ * derives a fixed-length key through `lib/idempotency.ts` instead, so no
+ * length bound is meaningful for it; `legacyIdempotencyKey`, when passed, is
+ * the pre-migration raw key the same caller used to write (see
+ * `findLedgerDuplicate` above).
  */
 export async function applyEvent(
   ctx: MutationCtx,
@@ -197,17 +233,14 @@ export async function applyEvent(
   cents: number,
   evidence: string,
   idempotencyKey: string,
+  legacyIdempotencyKey?: string,
 ) {
   if (claim.status === "dismissed") throw new ConvexError("Claim is dismissed");
   assertPositiveCents(cents, "cents");
   assertMaxChars(evidence, "evidence", MAX_EVIDENCE_CHARS);
   if (idempotencyKey.trim().length === 0) throw new ConvexError("idempotencyKey must not be empty");
-  assertMaxChars(idempotencyKey, "idempotencyKey", MAX_IDEMPOTENCY_KEY_CHARS);
 
-  const dup = await ctx.db
-    .query("ledgerEvents")
-    .withIndex("by_claim_key", (q) => q.eq("claimId", claim._id).eq("idempotencyKey", idempotencyKey))
-    .first();
+  const dup = await findLedgerDuplicate(ctx, claim._id, idempotencyKey, legacyIdempotencyKey);
   if (dup) {
     if (dup.kind !== kind || dup.cents !== cents) throw new ConvexError("idempotency conflict");
     return { deduped: true as const, status: claim.status };
@@ -260,6 +293,9 @@ export const confirmCredit = mutation({
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, args.claimId, userId);
+    // D112 6a-1: the 128-char bound is enforced HERE, at the public
+    // mutation that takes a client-supplied key, not inside `applyEvent`.
+    assertMaxChars(args.idempotencyKey, "idempotencyKey", MAX_IDEMPOTENCY_KEY_CHARS);
     return applyEvent(ctx, claim, "confirmed_credit", args.cents, args.evidence, args.idempotencyKey);
   },
 });
@@ -270,6 +306,7 @@ export const recordLaterDebit = mutation({
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, args.claimId, userId);
+    assertMaxChars(args.idempotencyKey, "idempotencyKey", MAX_IDEMPOTENCY_KEY_CHARS);
     return applyEvent(ctx, claim, "later_debit", args.cents, args.evidence, args.idempotencyKey);
   },
 });

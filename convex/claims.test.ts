@@ -304,6 +304,46 @@ describe("claims", () => {
       await expect(credit(as, a, 0, "k1")).rejects.toThrow(/positive/);
     });
 
+    describe("D112 6a-1: MAX_IDEMPOTENCY_KEY_CHARS bounds only the public, client-supplied key", () => {
+      it("confirmCredit and recordLaterDebit refuse a 129-char idempotencyKey", async () => {
+        const t = setup();
+        const { as } = await signedIn(t);
+        const { scarf } = await purchaseWithItems(as);
+        const claimId = await openReturnClaim(as, scarf);
+        const tooLong = "k".repeat(129);
+        await expect(credit(as, claimId, 500, tooLong)).rejects.toThrow(/idempotencyKey/);
+        await expect(debit(as, claimId, 100, tooLong)).rejects.toThrow(/idempotencyKey/);
+      });
+
+      it("a 128-char idempotencyKey (the boundary itself) is accepted", async () => {
+        const t = setup();
+        const { as } = await signedIn(t);
+        const { scarf } = await purchaseWithItems(as);
+        const claimId = await openReturnClaim(as, scarf);
+        const exact = "k".repeat(128);
+        expect((await credit(as, claimId, 500, exact)).deduped).toBe(false);
+      });
+
+      it("the internal path (applyEventInternal -> applyEvent) accepts a key far longer than 128 chars -- the bound moved to the public mutations only", async () => {
+        const t = setup();
+        const { as, userId } = await signedIn(t);
+        const { scarf } = await purchaseWithItems(as);
+        const claimId = await openReturnClaim(as, scarf);
+        const longKey = "m".repeat(500);
+        const result = await t.mutation(internal.claims.applyEventInternal, {
+          claimId,
+          userId,
+          kind: "promised_credit",
+          cents: 500,
+          evidence: "long internal key",
+          idempotencyKey: longKey,
+        });
+        expect(result.deduped).toBe(false);
+        const detail = await as.query(api.claims.get, { claimId });
+        expect(detail!.events.some((e) => e.idempotencyKey === longKey)).toBe(true);
+      });
+    });
+
     it("D40: a later debit cannot exceed net confirmed credit", async () => {
       const t = setup();
       const { as } = await signedIn(t);
