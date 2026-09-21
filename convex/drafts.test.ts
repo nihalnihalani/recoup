@@ -458,12 +458,13 @@ describe("drafts.reconcileSend transitions (D13)", () => {
     const { claimId, draftId } = await sentDraft(t, userId);
 
     const outcome = await t.run((ctx) =>
-      applySendOutcome(ctx, draftId, 1, {
-        status: "sent",
-        agentmailMessageId: "msg-1",
-        threadId: "thread-1",
-        errorMessage: null,
-      }),
+      applySendOutcome(
+        ctx,
+        draftId,
+        1,
+        { status: "sent", agentmailMessageId: "msg-1", threadId: "thread-1", errorMessage: null },
+        true,
+      ),
     );
     expect(outcome).toBe("sent");
 
@@ -490,12 +491,13 @@ describe("drafts.reconcileSend transitions (D13)", () => {
     const { claimId, draftId } = await sentDraft(t, userId);
 
     const outcome = await t.run((ctx) =>
-      applySendOutcome(ctx, draftId, 1, {
-        status: "bounced",
-        agentmailMessageId: null,
-        threadId: null,
-        errorMessage: "mailbox does not exist",
-      }),
+      applySendOutcome(
+        ctx,
+        draftId,
+        1,
+        { status: "bounced", agentmailMessageId: null, threadId: null, errorMessage: "mailbox does not exist" },
+        true,
+      ),
     );
     expect(outcome).toBe("failed");
 
@@ -523,12 +525,13 @@ describe("drafts.reconcileSend transitions (D13)", () => {
     const { claimId, draftId } = await sentDraft(t, userId);
 
     const outcome = await t.run((ctx) =>
-      applySendOutcome(ctx, draftId, 1, {
-        status: "bounced",
-        agentmailMessageId: "msg-bounced-1",
-        threadId: "thread-1",
-        errorMessage: "mailbox does not exist",
-      }),
+      applySendOutcome(
+        ctx,
+        draftId,
+        1,
+        { status: "bounced", agentmailMessageId: "msg-bounced-1", threadId: "thread-1", errorMessage: "mailbox does not exist" },
+        true,
+      ),
     );
     expect(outcome).toBe("failed");
     const claim = await t.run((ctx) => ctx.db.get(claimId));
@@ -548,15 +551,15 @@ describe("drafts.reconcileSend transitions (D13)", () => {
     };
 
     // Five checks total: attempts 1-4 reschedule, the fifth gives up.
-    expect(await t.run((ctx) => applySendOutcome(ctx, draftId, 1, pending))).toBe("retrying");
-    expect(await t.run((ctx) => applySendOutcome(ctx, draftId, 2, pending))).toBe("retrying");
-    expect(await t.run((ctx) => applySendOutcome(ctx, draftId, 4, pending))).toBe("retrying");
+    expect(await t.run((ctx) => applySendOutcome(ctx, draftId, 1, pending, true))).toBe("retrying");
+    expect(await t.run((ctx) => applySendOutcome(ctx, draftId, 2, pending, true))).toBe("retrying");
+    expect(await t.run((ctx) => applySendOutcome(ctx, draftId, 4, pending, true))).toBe("retrying");
 
     const claimMidway = await t.run((ctx) => ctx.db.get(claimId));
     expect(claimMidway?.status).toBe("queued");
     expect(claimMidway?.sendUnknown).toBeUndefined();
 
-    expect(await t.run((ctx) => applySendOutcome(ctx, draftId, 5, null))).toBe("unknown");
+    expect(await t.run((ctx) => applySendOutcome(ctx, draftId, 5, null, true))).toBe("unknown");
     const claim = await t.run((ctx) => ctx.db.get(claimId));
     expect(claim?.status).toBe("queued");
     expect(claim?.sendUnknown).toBe(true);
@@ -569,12 +572,13 @@ describe("drafts.reconcileSend transitions (D13)", () => {
     const draftId = await newDraft(t, claimId, userId);
 
     const outcome = await t.run((ctx) =>
-      applySendOutcome(ctx, draftId, 1, {
-        status: "sent",
-        agentmailMessageId: "msg-2",
-        threadId: "thread-2",
-        errorMessage: null,
-      }),
+      applySendOutcome(
+        ctx,
+        draftId,
+        1,
+        { status: "sent", agentmailMessageId: "msg-2", threadId: "thread-2", errorMessage: null },
+        true,
+      ),
     );
     expect(outcome).toBe("gone");
     const claim = await t.run((ctx) => ctx.db.get(claimId));
@@ -592,8 +596,8 @@ describe("drafts.reconcileSend transitions (D13)", () => {
       errorMessage: null,
     };
 
-    await t.run((ctx) => applySendOutcome(ctx, draftId, 1, observation));
-    await t.run((ctx) => applySendOutcome(ctx, draftId, 2, observation));
+    await t.run((ctx) => applySendOutcome(ctx, draftId, 1, observation, true));
+    await t.run((ctx) => applySendOutcome(ctx, draftId, 2, observation, true));
 
     const followUps = await t.run((ctx) =>
       ctx.db
@@ -611,7 +615,7 @@ describe("drafts.reconcileSend transitions (D13)", () => {
     const { claimId, draftId } = await sentDraft(t, userId);
     const pending = { status: "pending", agentmailMessageId: null, threadId: null, errorMessage: null };
 
-    const outcome = await t.run((ctx) => applySendOutcome(ctx, draftId, 5, pending));
+    const outcome = await t.run((ctx) => applySendOutcome(ctx, draftId, 5, pending, true));
     expect(outcome).toBe("unknown");
 
     const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
@@ -651,14 +655,140 @@ describe("drafts.reconcileSend transitions (D13)", () => {
     const { userId } = await signedIn(t);
     const { draftId } = await sentDraft(t, userId);
 
-    const outcome = await t.run((ctx) => applySendOutcome(ctx, draftId, BACKOFF_MS.length, null));
+    const outcome = await t.run((ctx) => applySendOutcome(ctx, draftId, BACKOFF_MS.length, null, true));
     expect(outcome).toBe("unknown");
 
     const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
     expect(scheduled.filter((j) => j.name.includes("reconcileSend"))).toHaveLength(0);
   });
 
-  it("F9: repeated recheckSend clicks on a still-pending draft leave at most one reconcileSend pending", async () => {
+  it("checkpoint-4 N2/N3: a genuinely SCHEDULED reconcileSend (not a direct call) still re-arms once exhausted", async () => {
+    // The bug (N2, HIGH): the old guard scanned `_scheduled_functions` for an
+    // already-pending `reconcileSend` for this draft to avoid `recheckSend`
+    // piling up reschedules -- but when `reconcileSend` itself is the one
+    // reaching the exhausted branch, ITS OWN row is "inProgress" in that same
+    // table while it runs, so the scan always matched itself and concluded a
+    // reconcile was already armed. A direct `applySendOutcome(...)` call (as
+    // every other test in this file uses) never creates that row at all, so
+    // it could never have caught this -- this test goes through the real
+    // scheduler on purpose.
+    vi.useFakeTimers();
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { claimId, draftId } = await sentDraft(t, userId);
+    vi.spyOn(agentmail, "status").mockResolvedValue({
+      status: "pending",
+      agentmailMessageId: null,
+      threadId: null,
+      errorMessage: null,
+    } as never);
+
+    await t.run((ctx) =>
+      ctx.scheduler.runAfter(0, internal.drafts.reconcileSend, { draftId, attempt: BACKOFF_MS.length }),
+    );
+    // A bounded driver, not `vi.runAllTimers` (which fires every due timer
+    // however far out, so it would cascade into the freshly re-armed
+    // MAIL_RECONCILE_STALL_MS job too, and then the one after that, forever,
+    // under a status that never resolves -- an accurate reflection of the
+    // real "still durable" behaviour, but not what this assertion needs to
+    // observe). One millisecond is enough to fire the immediately-due job;
+    // `finishAllScheduledFunctions` then idles out gracefully (its own
+    // maxIdleTurns) once nothing more becomes due within that budget, well
+    // short of the stall interval.
+    await t.finishAllScheduledFunctions(() => vi.advanceTimersByTime(1));
+
+    const claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).toBe("queued");
+    expect(claim?.sendUnknown).toBe(true); // unchanged from before the fix
+
+    const pending = (await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect())).filter(
+      (j) => j.state.kind === "pending" || j.state.kind === "inProgress",
+    );
+    expect(pending).toHaveLength(1); // the re-armed stall-interval check -- 0 under the old bug
+    expect(pending[0].name).toMatch(/reconcileSend/);
+  });
+
+  it("checkpoint-4 N6: a bounce webhook that beats the poll (arrives before the message id is known) is applied instead of silently marking the claim sent", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { claimId, draftId } = await sentDraft(t, userId);
+
+    // The webhook beats the poll: neither a mailLog nor a drafts row recognizes this id yet, so
+    // mailEvents.onEvent stashes it (F8).
+    await t.mutation(internal.mailEvents.onEvent, {
+      event: { type: "event", event_type: "message.bounced", event_id: "evt-fast-1", bounce: { message_id: "msg-fast-1" } },
+    });
+
+    const outcome = await t.run((ctx) =>
+      applySendOutcome(
+        ctx,
+        draftId,
+        1,
+        { status: "sent", agentmailMessageId: "msg-fast-1", threadId: "thread-x", errorMessage: null },
+        true,
+      ),
+    );
+    expect(outcome).toBe("failed"); // not "sent": the stashed bounce wins over this poll's own "sent" reading
+
+    const claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).toBe("drafted");
+    const draft = await t.run((ctx) => ctx.db.get(draftId));
+    expect(draft?.sendError).toMatch(/bounced/);
+    expect(draft?.outboundId).toBeUndefined();
+    expect(draft?.agentmailMessageId).toBeUndefined(); // same shape as an ordinary bounce (TERMINAL_FAILURES branch)
+
+    const stash = await t.run((ctx) =>
+      ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", "mailEvent:msg-fast-1")).unique(),
+    );
+    expect(stash).toBeNull(); // consumed, not left behind (N7)
+
+    const followUps = await t.run((ctx) =>
+      ctx.db.query("followUps").withIndex("by_claim", (q) => q.eq("claimId", claimId)).collect(),
+    );
+    expect(followUps).toHaveLength(0); // no reminder for a send that never really succeeded
+  });
+
+  it("checkpoint-4 N6: a complaint webhook that beats the poll still leaves the claim sent (it was delivered), flagged with a claim note", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { claimId, draftId } = await sentDraft(t, userId);
+
+    await t.mutation(internal.mailEvents.onEvent, {
+      event: { type: "event", event_type: "message.complained", event_id: "evt-fast-2", complaint: { message_id: "msg-fast-2" } },
+    });
+
+    const outcome = await t.run((ctx) =>
+      applySendOutcome(
+        ctx,
+        draftId,
+        1,
+        { status: "sent", agentmailMessageId: "msg-fast-2", threadId: null, errorMessage: null },
+        true,
+      ),
+    );
+    expect(outcome).toBe("sent");
+
+    const claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).toBe("sent");
+    const draft = await t.run((ctx) => ctx.db.get(draftId));
+    expect(draft?.agentmailMessageId).toBe("msg-fast-2");
+    expect(draft?.sendError).toMatch(/spam/i);
+    const notes = await t.run((ctx) =>
+      ctx.db.query("claimNotes").withIndex("by_claim", (q) => q.eq("claimId", claimId)).collect(),
+    );
+    expect(notes).toHaveLength(1);
+    const stash = await t.run((ctx) =>
+      ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", "mailEvent:msg-fast-2")).unique(),
+    );
+    expect(stash).toBeNull();
+  });
+
+  it("F9/N2/N3: repeated recheckSend clicks on a still-pending draft leave at most one reconcileSend pending (now zero: recheckSend never schedules)", async () => {
+    // Superseded expectation (checkpoint-4 N2/N3): the old F9 guard let the FIRST recheckSend
+    // schedule a reconcile (nothing pending yet) and suppressed the 2nd/3rd via the (buggy)
+    // `_scheduled_functions` scan. That scan is gone; `recheckSend` now passes `reschedule: false`
+    // unconditionally, so it never schedules anything -- 0 pending after any number of clicks is
+    // the correct "at most one" bound, achieved structurally rather than by a runtime scan.
     const t = setup();
     const { userId, as } = await signedIn(t);
     const { draftId } = await sentDraft(t, userId);
@@ -677,7 +807,7 @@ describe("drafts.reconcileSend transitions (D13)", () => {
     const pending = scheduled.filter(
       (j) => j.name.includes("reconcileSend") && (j.state.kind === "pending" || j.state.kind === "inProgress"),
     );
-    expect(pending).toHaveLength(1);
+    expect(pending).toHaveLength(0);
   });
 });
 
@@ -964,7 +1094,13 @@ describe("the send path is not a mail relay (pre-launch review B1)", () => {
     await first.result;
     // It bounced: the binding is cleared, the claim is back to drafted, and the send is not held against the claim.
     await t.run((ctx) =>
-      applySendOutcome(ctx, first.draftId, 1, { status: "bounced", agentmailMessageId: null, threadId: null, errorMessage: "no such user" }),
+      applySendOutcome(
+        ctx,
+        first.draftId,
+        1,
+        { status: "bounced", agentmailMessageId: null, threadId: null, errorMessage: "no such user" },
+        true,
+      ),
     );
     for (let v = 2; v <= MAX_SENDS_PER_CLAIM + 1; v++) {
       await (await sendNext(v)).result;

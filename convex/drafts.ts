@@ -22,6 +22,7 @@ import { scheduleClaimReminder } from "./followUps";
 import { charge } from "./lib/budget";
 import { stripControl } from "./lib/text";
 import { isTombstoned } from "./lib/accountState";
+import { clearPendingMailEvent, getPendingMailEvent } from "./mailEvents";
 import { MAIL_RECONCILE_STALL_MS, MAX_SENDS_PER_CLAIM } from "./limits";
 
 // ---------------------------------------------------------------------------
@@ -495,14 +496,23 @@ export type SendOutcome = "sent" | "failed" | "retrying" | "unknown" | "gone";
 
 /**
  * Applies one AgentMail delivery observation to the draft and its claim
- * (D13). Exported as a plain function, not registered: `reconcileSend` is
- * the only production caller, and tests drive the transitions directly
- * without needing the component to have talked to the network.
+ * (D13). Exported as a plain function, not registered: `reconcileSend` and
+ * `recheckSend` are the only production callers, and tests drive the
+ * transitions directly without needing the component to have talked to the
+ * network.
  *
  * - a real `agentmailMessageId` → claim `sent`, thread captured, reminder set
+ *   (unless N6's stash below says this id already bounced/complained)
  * - `failed | bounced | rejected` → claim back to `drafted` with `sendError`
  * - still pending, attempts left → reschedule on the backoff
  * - still pending, attempts spent → claim stays `queued`, `sendUnknown: true`
+ *
+ * `reschedule` says whether THIS call may arm the next stall-interval check
+ * once backoff is exhausted (checkpoint-4 N2/N3, superseding the F9 scan
+ * below): `reconcileSend`, the scheduled path, passes `true`; `recheckSend`,
+ * a user click that must never independently grow the schedule, passes
+ * `false`. See the exhausted branch for why the old scan was wrong, not just
+ * unbounded.
  */
 export async function applySendOutcome(
   ctx: MutationCtx,
@@ -514,6 +524,7 @@ export async function applySendOutcome(
     threadId: string | null;
     errorMessage: string | null;
   } | null,
+  reschedule: boolean,
 ): Promise<SendOutcome> {
   const draft = await ctx.db.get(draftId);
   if (!draft || !draft.outboundId) return "gone";
@@ -536,6 +547,26 @@ export async function applySendOutcome(
   }
 
   if (status && status.agentmailMessageId) {
+    // N6 (checkpoint-4 recheck): `mailEvents.onEvent` can see a bounce or
+    // complaint webhook for this message id before this poll ever learns it
+    // (the id is only recorded here) -- that event was stashed
+    // (`mailEvents.storePendingMailEvent`, F8) rather than lost. Consume it
+    // now, before a fast bounce gets silently recorded as "sent" the way
+    // `notify.applyDropOutcome` already does for price-drop alerts.
+    const pending = await getPendingMailEvent(ctx, status.agentmailMessageId, Date.now());
+    if (pending?.reason === "bounced") {
+      await ctx.db.patch(draft._id, {
+        sendError: `Merchant email ${pending.providerStatus} after it was marked sent.`.slice(0, MAX_ERROR_CHARS),
+        outboundId: undefined,
+        approvedAt: undefined,
+      });
+      if (claim.status === "queued") {
+        await ctx.db.patch(claim._id, { status: "drafted", sendUnknown: undefined });
+      }
+      await clearPendingMailEvent(ctx, status.agentmailMessageId);
+      return "failed";
+    }
+
     await ctx.db.patch(draft._id, {
       agentmailMessageId: status.agentmailMessageId,
       sendError: undefined,
@@ -550,6 +581,14 @@ export async function applySendOutcome(
       if (fresh) await scheduleClaimReminder(ctx, fresh);
     } else if (!claim.threadId && status.threadId) {
       await ctx.db.patch(claim._id, { threadId: status.threadId });
+    }
+    if (pending?.reason === "complained") {
+      // Delivered, so the claim stays `sent` (mirrors mailEvents.onEvent's own late-complaint
+      // treatment for a merchant draft) -- flagged for a human, not auto-resent.
+      const note = "The merchant's mail provider marked this email as spam after it was sent.";
+      await ctx.db.patch(draft._id, { sendError: note.slice(0, MAX_ERROR_CHARS) });
+      await ctx.db.insert("claimNotes", { claimId: claim._id, userId: claim.userId, kind: "status", text: note });
+      await clearPendingMailEvent(ctx, status.agentmailMessageId);
     }
     return "sent";
   }
@@ -574,36 +613,29 @@ export async function applySendOutcome(
   // `mailLog`, at the same "attempts exhausted" attempt number, until a
   // definite outcome (the `sent`/`failed` branches above) stops it.
   //
-  // F9 (checkpoint 4): this exhausted branch is also entered synchronously
-  // by `recheckSend` (the owner's manual "check again"), which forces
-  // `attempt = BACKOFF_MS.length` on every call. Without a guard, several
-  // clicks in a row each schedule their own stall-interval reconcile, and
-  // they pile up. Two conditions gate the reschedule:
-  //  - `status !== null`: `null` means the component no longer recognizes
-  //    this outbound id at all -- polling again can never resolve it, so
-  //    stop rather than reschedule forever (the owner can still force one
-  //    more check via `recheckSend`).
-  //  - no `reconcileSend` already pending/in-progress for this draft, read
-  //    off `ctx.db.system`'s `_scheduled_functions` -- so repeated manual
-  //    rechecks leave at most one reconcile scheduled.
-  if (status !== null && !(await hasPendingReconcileSend(ctx, draft._id))) {
+  // N2/N3 (checkpoint-4 recheck): this exhausted branch used to gate the
+  // reschedule on a scan of `ctx.db.system.query("_scheduled_functions")`
+  // (F9) looking for an already-pending `reconcileSend` for this draft, to
+  // stop repeated manual `recheckSend` clicks from piling up reschedules.
+  // That scan was wrong, not just unbounded (N3): when `reconcileSend`
+  // itself reaches this branch, ITS OWN scheduled-function row is still
+  // "inProgress" (it is what is currently running), so the scan always
+  // found a "pending" job -- itself -- and concluded a reconcile was
+  // already armed, so a SCHEDULED exhaustion never re-armed the next
+  // stall-interval check at all: `sendUnknown` stuck forever with nothing
+  // left in the scheduler (N2, HIGH). The fix is structural instead of a
+  // runtime scan: the caller says explicitly whether it may arm the next
+  // hop. `status !== null` still stops it in either case -- `null` means
+  // the component no longer recognizes this outbound id, so polling again
+  // can never resolve it (the owner can still force one more check via
+  // `recheckSend`).
+  if (reschedule && status !== null) {
     await ctx.scheduler.runAfter(MAIL_RECONCILE_STALL_MS, internal.drafts.reconcileSend, {
       draftId: draft._id,
       attempt: BACKOFF_MS.length,
     });
   }
   return "unknown";
-}
-
-/** F9: true when a `reconcileSend` job for this draft is already pending or in progress. */
-async function hasPendingReconcileSend(ctx: MutationCtx, draftId: Id<"drafts">): Promise<boolean> {
-  const jobs = await ctx.db.system.query("_scheduled_functions").collect();
-  return jobs.some((j) => {
-    if (j.state.kind !== "pending" && j.state.kind !== "inProgress") return false;
-    if (!j.name.includes("reconcileSend")) return false;
-    const args = j.args[0] as { draftId?: Id<"drafts"> } | undefined;
-    return args?.draftId === draftId;
-  });
 }
 
 /**
@@ -620,7 +652,8 @@ export const reconcileSend = internalMutation({
     if (!draft || !draft.outboundId) return null;
     if (await isTombstoned(ctx, draft.userId)) return null;
     const status = await agentmail.status(statusCtx(ctx), draft.outboundId);
-    await applySendOutcome(ctx, args.draftId, args.attempt, status);
+    // Scheduled path: may arm the next stall-interval hop if delivery is still unresolved (N2).
+    await applySendOutcome(ctx, args.draftId, args.attempt, status, true);
     return null;
   },
 });
@@ -640,7 +673,8 @@ export const recheckSend = mutation({
     const draft = await ownedDraft(ctx, args.draftId, userId);
     if (!draft.outboundId) throw new ConvexError("This draft has not been sent");
     const status = await agentmail.status(statusCtx(ctx), draft.outboundId);
-    await applySendOutcome(ctx, draft._id, BACKOFF_MS.length, status);
+    // A user click never independently grows the schedule (N2/N3 supersede the old F9 scan).
+    await applySendOutcome(ctx, draft._id, BACKOFF_MS.length, status, false);
     return null;
   },
 });
