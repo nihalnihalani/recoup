@@ -1,9 +1,47 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, internal } from "./_generated/api";
+import { convexTest } from "convex-test";
+import { exportPKCS8, generateKeyPair } from "jose";
+import { ConvexError } from "convex/values";
+import { api, internal, components } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { inboxTransport } from "./account";
-import { RETENTION_PAGE } from "./limits";
+import { WRONG_CREDENTIALS_MESSAGE } from "./auth";
+import { rateLimiter } from "./lib/rateLimits";
+import { RETENTION_PAGE, PROCESSED_EVENTS_PAGE, STUCK_DELETION_AGE_MS, STUCK_DELETION_REDRIVE_PAGE } from "./limits";
+import schema from "./schema";
+import agentmail from "@agentmail/convex/test";
+import workpool from "@convex-dev/workpool/test";
+import rl from "@convex-dev/rate-limiter/test";
+import bw from "@convex-dev/batch-worker/test";
+import firecrawl from "@firecrawl/firecrawl-convex/test";
+
+/**
+ * Checkpoint 6b (D115) byte-budget tests need `transactionLimits: true` (to
+ * actually enforce the 16 MiB read cap `convex-test` otherwise ignores),
+ * which `test.setup.ts`'s own `setup()` does not pass. Duplicated locally
+ * rather than changing that shared harness (out of this task's file
+ * ownership) -- same helper shape the checkpoint 6b reviewer's own repro
+ * file (`da6b.test.ts`) used.
+ */
+function setupWithLimits() {
+  process.env.FIRECRAWL_API_KEY = "fc-test";
+  process.env.AGENTMAIL_API_KEY = "am-test";
+  process.env.AGENTMAIL_WEBHOOK_SECRET = "whsec_test";
+  const modules = import.meta.glob("./**/*.*s");
+  const agentmailModules = import.meta.glob("../node_modules/@agentmail/convex/src/component/**/*.ts", { exhaustive: true });
+  const workpoolModules = import.meta.glob("../node_modules/@convex-dev/workpool/src/component/**/*.ts", { exhaustive: true });
+  const rlModules = import.meta.glob("../node_modules/@convex-dev/rate-limiter/src/component/**/*.ts", { exhaustive: true });
+  const bwModules = import.meta.glob("../node_modules/@convex-dev/batch-worker/src/component/**/*.ts", { exhaustive: true });
+  const t = convexTest({ schema, modules, transactionLimits: true });
+  t.registerComponent("agentmail", agentmail.schema, agentmailModules);
+  t.registerComponent("agentmail/sendPool", workpool.schema, workpoolModules);
+  t.registerComponent("agentmail/callbackPool", workpool.schema, workpoolModules);
+  firecrawl.register(t);
+  t.registerComponent("rateLimiter", rl.schema, rlModules);
+  t.registerComponent("rateLimiter/batchWorker", bw.schema, bwModules);
+  return t;
+}
 
 const T0 = Date.UTC(2026, 8, 21, 12);
 
@@ -305,6 +343,22 @@ describe("account.requestDeletion", () => {
     const rowAfter = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first());
     expect(rowAfter?._id).toBe(row?._id);
     expect(rowAfter?.requestedAt).toBe(row?.requestedAt);
+
+    // 6b-8 (D115): idempotency asserted by ROW COUNT and PENDING-JOB COUNT,
+    // not just field equality -- exactly one tombstone row, and exactly one
+    // still-pending `account.purge` job, even after two `requestDeletion`
+    // calls.
+    const allTombstones = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).collect());
+    expect(allTombstones).toHaveLength(1);
+    const pending = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    // "purge" alone (not "purgeStep"/"purgeAuth") is the only scheduled job at
+    // this point: `purgeStep`/`purgeAuth` are invoked via `ctx.runMutation`
+    // from inside the `purge` action, never independently scheduled.
+    const pendingPurgeJobs = pending.filter(
+      (r) => (r.state.kind === "pending" || r.state.kind === "inProgress") && r.name.includes("purge") && !r.name.includes("purgeStep") && !r.name.includes("purgeAuth"),
+    );
+    expect(pendingPurgeJobs).toHaveLength(1);
+    expect(rowAfter?.activePurgeJobId).toBe(pendingPurgeJobs[0]!._id);
   });
 
   it("revokes every session (and its refresh tokens) in the same transaction", async () => {
@@ -455,7 +509,7 @@ describe("account.purge — end to end", () => {
     expect(finalWatches).toHaveLength(0);
   });
 
-  it("provider failure on inbox deletion leaves the tombstone deleting with a truthful inboxDeleted:false, retries with backoff, and never reaches deleted", async () => {
+  it("provider failure on inbox deletion leaves the tombstone deleting with a truthful inboxDeleted:false, retries with backoff, and (6b-4b, D115) purges auth anyway once exhausted", async () => {
     const t = setup();
     const a = await signedIn(t, "A");
     await seedFullAccount(t, a.userId, "a@example.com");
@@ -491,13 +545,26 @@ describe("account.purge — end to end", () => {
       await t.finishInProgressScheduledFunctions();
     }
     state = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first());
-    expect(state?.status).toBe("deleting"); // never "deleted"
+    // 6b-4b (D115): the retry chain is now exhausted -- `purgeAuth` ran
+    // anyway (auth rows are not provider-dependent), so `status` is
+    // `"deleted"`, but `inboxDeleted` STAYS `false`: truthful reporting,
+    // never rounded up just because Recoup's own side finished. Before this
+    // fix (checkpoint 6b's F2b), this row stayed `"deleting"` forever with
+    // its auth rows intact -- a permanent zombie account, reachable by
+    // sign-in with the correct password (closed separately by 6b-4a's
+    // `beforeSessionCreation` gate, but the account was never actually
+    // FINISHED being deleted either way until this fix).
+    expect(state?.status).toBe("deleted");
     expect(state?.inboxDeleted).toBe(false);
     expect(state?.attempts).toBe(5);
+    expect(state?.lastError).toBeDefined();
     expect(failing).toHaveBeenCalledTimes(5);
+    expect(state?.activePurgeJobId).toBeUndefined(); // nothing left scheduled for this row.
 
     const user = await t.run((ctx) => ctx.db.get(a.userId));
-    expect(user).not.toBeNull(); // purgeAuth never ran -- the user row survives a permanently-failing inbox delete.
+    expect(user).toBeNull(); // purgeAuth DID run: the user row is gone despite the permanently-failing inbox delete.
+    const accounts = await t.run((ctx) => ctx.db.query("authAccounts").collect());
+    expect(accounts.filter((row) => row.userId === a.userId)).toHaveLength(0);
   });
 
   it("succeeds after a transient provider failure (retry recovers)", async () => {
@@ -556,5 +623,721 @@ describe("account.deletionStatus", () => {
     const done = await a.as.query(api.account.deletionStatus, {});
     expect(done?.status).toBe("deleted");
     expect(done?.inboxDeleted).toBe(true);
+  });
+});
+
+// =============================================================================
+// Checkpoint 6b (D115) regressions, ported from the reviewer's repro file
+// (`da6b.test.ts`) per the task contract. Each block names which finding and
+// which repro it ports, and states explicitly whether it was confirmed to
+// FAIL against the pre-fix code (via `git stash` on the implementation
+// files only, tests kept in place) and PASS after.
+// =============================================================================
+
+/** Seeds one user's full claim/ledger/draft tree, exactly like the reviewer's `seedClaimTree` helper, for the IDOR tests below. */
+async function seedClaimTree(t: T, userId: Id<"users">) {
+  return await t.run(async (ctx) => {
+    const purchaseId = await ctx.db.insert("purchases", { userId, merchant: "Acme", merchantDomain: "acme.example", currency: "USD", status: "active" });
+    const itemId = await ctx.db.insert("items", { purchaseId, userId, name: "Jacket", unitCents: 8000, qty: 1, returned: false });
+    const claimId = await ctx.db.insert("claims", { purchaseId, itemId, userId, type: "price_adjustment", expectedCents: 500, status: "sent", token: `tok-${userId}`, version: 1 });
+    const ledgerId = await ctx.db.insert("ledgerEvents", { claimId, userId, kind: "promised_credit", cents: 500, evidence: "SECRET merchant email for this user" });
+    const draftId = await ctx.db.insert("drafts", { claimId, userId, version: 1, claimVersion: 1, to: "merchant@acme.example", subject: "Price match", body: "SECRET draft body" });
+    return { purchaseId, itemId, claimId, ledgerId, draftId };
+  });
+}
+
+describe("checkpoint 6b (D115) 6b-1 HIGH IDOR — exportPage via-parent cursor trust (F1)", () => {
+  it("user A cannot export user B's ledgerEvents/drafts by placing B's claim id in a forged cursor's `queue` or `pid`", async () => {
+    // Ported from da6b.test.ts's F1 ("user A exports user B's ledgerEvents
+    // and drafts by placing B's claim id in the cursor queue"). CONFIRMED
+    // (git stash on convex/account.ts only, this test kept in place): before
+    // the fix, `ledger.rows` had length 1 and carried B's SECRET evidence
+    // string, and the `drafts` page carried B's SECRET draft body -- this
+    // test's assertions (zero rows, no leak) FAILED. After the fix (the
+    // `isOwnedParent` check in `readParentTable`), it PASSES.
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    const bTree = await seedClaimTree(t, b.userId);
+
+    const forged = JSON.stringify({ p: null, parentsDone: true, queue: [bTree.claimId], pid: null, skip: 0 });
+    const ledger = await a.as.query(api.account.exportPage, { table: "ledgerEvents", cursor: forged });
+    expect(ledger.rows).toHaveLength(0);
+    expect(ledger.cursor).toBeNull();
+
+    const drafts = await a.as.query(api.account.exportPage, { table: "drafts", cursor: forged });
+    expect(drafts.rows).toHaveLength(0);
+
+    // Same via `pid` (the resume-a-parent path) -- also forged.
+    const forgedPid = JSON.stringify({ p: null, parentsDone: true, queue: [], pid: bTree.claimId, skip: 0 });
+    const viaPid = await a.as.query(api.account.exportPage, { table: "ledgerEvents", cursor: forgedPid });
+    expect(viaPid.rows).toHaveLength(0);
+    expect(viaPid.cursor).toBeNull();
+
+    // No oracle: a forged id naming a row that does not exist at all behaves
+    // identically (also zero rows, also a null cursor) to one naming B's
+    // real, unowned claim -- the response shape never distinguishes them.
+    const nonexistentId = bTree.claimId.slice(0, -1) + (bTree.claimId.endsWith("0") ? "1" : "0");
+    const forgedNonexistent = JSON.stringify({ p: null, parentsDone: true, queue: [nonexistentId], pid: null, skip: 0 });
+    const viaNonexistent = await a.as.query(api.account.exportPage, { table: "ledgerEvents", cursor: forgedNonexistent });
+    expect(viaNonexistent.rows).toHaveLength(0);
+    expect(viaNonexistent.cursor).toBeNull();
+
+    // A's own real claim tree is completely unaffected by any of the above.
+    const aTree = await seedClaimTree(t, a.userId);
+    const ownPage = await a.as.query(api.account.exportPage, { table: "ledgerEvents" });
+    expect(ownPage.rows).toHaveLength(1);
+    expect((ownPage.rows[0] as { _id: unknown })._id).toBe(aTree.ledgerId);
+  });
+
+  it("the same forged-parent-id protection applies to purgeStep's delete-side twin (drainParentTable), even though its cursor is server-controlled", async () => {
+    // Not itself exploitable (purgeStep's cursor is never client-supplied),
+    // but the fix is shared code (`isOwnedParent`) -- this proves B's rows
+    // truly survive even if a malicious/foreign id ever ended up in A's
+    // progress cursor (defense in depth, documented in account.ts's module
+    // docstring).
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    const bTree = await seedClaimTree(t, b.userId);
+
+    // Directly seed a tombstone for A whose progress cursor (server-only in
+    // real life; hand-crafted here to prove the ownership check, not the
+    // trust boundary, is what protects B) names B's claim in the `queue`.
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", {
+        userId: a.userId, status: "deleting", requestedAt: T0, attempts: 0,
+        progress: { table: "ledgerEvents", cursor: JSON.stringify({ p: null, parentsDone: true, queue: [bTree.claimId], pid: null }) },
+      }),
+    );
+    await t.mutation(internal.account.purgeStep, { userId: a.userId });
+
+    // B's ledgerEvents/draft rows are untouched.
+    const bLedger = await t.run((ctx) => ctx.db.get(bTree.ledgerId));
+    expect(bLedger).not.toBeNull();
+    const bDraft = await t.run((ctx) => ctx.db.get(bTree.draftId));
+    expect(bDraft).not.toBeNull();
+  });
+});
+
+describe("checkpoint 6b (D115) 6b-2 HIGH — via-parent queue always advances past an exhausted parent (F7)", () => {
+  it("1 watch x 250 watchChecks: exportPage completes with exactly 250 unique rows and a null cursor within <= 3 pages", async () => {
+    // Ported from da6b.test.ts's F7 first repro. CONFIRMED (git stash on
+    // convex/account.ts only): before the fix, this loop hit its own 30-page
+    // safety bound with MORE than 250 rows returned (duplicates) and a
+    // cursor that never reached `null` -- `pages` was 30, `seen.size` was
+    // 250 but `rowsReturned` exceeded it. After the fix, it converges in 2
+    // pages (200 + 50).
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const TOTAL = 250;
+    await t.run(async (ctx) => {
+      const watchId = await ctx.db.insert("watches", { userId: a.userId, name: "W", productUrl: "https://acme.example/p", merchantDomain: "acme.example", status: "active", nextCheckAt: T0 });
+      for (let i = 0; i < TOTAL; i++) {
+        await ctx.db.insert("watchChecks", { watchId, userId: a.userId, observedCents: 100 + i, observedAt: T0 + i, sourceUrl: "https://acme.example/p" });
+      }
+    });
+
+    const seen = new Set<string>();
+    let cursor: string | null | undefined = undefined;
+    let pages = 0;
+    let rowsReturned = 0;
+    do {
+      const page: { rows: any[]; cursor: string | null } = await a.as.query(api.account.exportPage, { table: "watchChecks", cursor: cursor ?? undefined });
+      for (const row of page.rows) seen.add(row._id);
+      rowsReturned += page.rows.length;
+      cursor = page.cursor;
+      pages++;
+      expect(pages).toBeLessThanOrEqual(3);
+    } while (cursor !== null);
+
+    expect(pages).toBeLessThanOrEqual(3);
+    expect(cursor).toBeNull();
+    expect(seen.size).toBe(TOTAL);
+    expect(rowsReturned).toBe(TOTAL); // no duplicates
+  });
+
+  it("purgeStep on the same shape still converges (unaffected by the fix -- a deleted row never comes back)", async () => {
+    // Ported from da6b.test.ts's F7 second repro. This one ALREADY PASSED
+    // before the fix (the module docstring calls out the read/delete
+    // asymmetry explicitly) -- included as a no-regression check on the
+    // shared `isOwnedParent`/pop-before-read refactor applied to
+    // `drainParentTable` too.
+    const t = setup();
+    const a = await signedIn(t, "A");
+    await t.run(async (ctx) => {
+      const watchId = await ctx.db.insert("watches", { userId: a.userId, name: "W", productUrl: "https://acme.example/p", merchantDomain: "acme.example", status: "active", nextCheckAt: T0 });
+      for (let i = 0; i < 250; i++) {
+        await ctx.db.insert("watchChecks", { watchId, userId: a.userId, observedCents: 100 + i, observedAt: T0 + i, sourceUrl: "https://acme.example/p" });
+      }
+    });
+    vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    let done = false;
+    let calls = 0;
+    while (!done && calls < 100) {
+      done = (await t.mutation(internal.account.purgeStep, { userId: a.userId })).done;
+      calls++;
+    }
+    expect(done).toBe(true);
+    expect(await t.run((ctx) => ctx.db.query("watchChecks").collect())).toHaveLength(0);
+  });
+});
+
+/** Minimal real-auth env, matching the reviewer's `realAuthEnv()` and `authFlow.test.ts`'s `beforeAll` (SITE_URL/CONVEX_SITE_URL/JWT_PRIVATE_KEY/ALERTS_INBOX_ID/E2E_SEED_ENABLED, so `internal.testing.seedUser` and a real `auth.signIn` action both work end to end). */
+async function realAuthEnv() {
+  process.env.SITE_URL = "https://recoup.example";
+  process.env.CONVEX_SITE_URL = "https://recoup-test.convex.site";
+  process.env.E2E_SEED_ENABLED = "true";
+  process.env.ALERTS_INBOX_ID = "inbox_test";
+  const { privateKey } = await generateKeyPair("RS256", { extractable: true });
+  process.env.JWT_PRIVATE_KEY = await exportPKCS8(privateKey);
+}
+
+describe("checkpoint 6b (D115) 6b-4 HIGH — sign-in is gated on the tombstone (F2a/F2b)", () => {
+  afterEach(() => {
+    delete process.env.E2E_SEED_ENABLED;
+  });
+
+  it("F2a: a user who just called requestDeletion cannot sign in again -- same ConvexError a wrong password gets", async () => {
+    // Ported from da6b.test.ts's F2, first repro ("a tombstoned (deleting)
+    // user signs in again with the password and gets a brand-new session").
+    // CONFIRMED (git-history-baseline swap on convex/auth.ts + convex/account.ts
+    // only, tests kept in place -- see the task report for the exact method
+    // used after a `git stash` collision with a concurrent teammate's own
+    // stash operation on this shared working tree made that tool unsafe to
+    // use again this session): before the fix, `result.tokens` was
+    // non-null and a brand-new `authSessions` row existed, so this test's
+    // assertions FAILED. After 6b-4a's `beforeSessionCreation` gate, it PASSES.
+    await realAuthEnv();
+    const t = setup();
+    const email = "victim@example.com";
+    const password = "E2ePassword123!";
+    const { userId } = await t.action(internal.testing.seedUser, { email, password });
+    const as = t.withIdentity({ subject: `${userId}|session` });
+
+    await as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    expect((await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", userId)).first()))?.status).toBe("deleting");
+
+    let caught: unknown;
+    try {
+      await t.action(api.auth.signIn, { provider: "password", params: { flow: "signIn", email, password } });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ConvexError);
+    expect((caught as ConvexError<string>).data).toBe(WRONG_CREDENTIALS_MESSAGE);
+
+    // No new session was minted (the pre-fix repro asserted exactly one,
+    // proving a fresh sign-in succeeded THROUGH the revoke).
+    const sessions = await t.run((ctx) => ctx.db.query("authSessions").withIndex("userId", (q) => q.eq("userId", userId)).collect());
+    expect(sessions).toHaveLength(0);
+  });
+
+  it("F2b: after the inbox-delete retry chain is exhausted, the account is fully gone (not a sign-in-forever zombie) -- old creds fail, the SAME email can sign up fresh", async () => {
+    // Ported from da6b.test.ts's F2, second repro ("after 5 failed inbox
+    // deletes the auth rows stay forever: sign-in still works, sign-up with
+    // the same email is refused"). CONFIRMED (same swap method as F2a):
+    // before either fix, `signIn.tokens` was non-null (sign-in still
+    // worked) and the sign-up attempt threw `ACCOUNT_EXISTS_MESSAGE` (the
+    // stale account blocked a fresh one forever) -- both assertions below
+    // FAILED. After 6b-4a (sign-in gated) AND 6b-4b (`purgeAuth` runs once
+    // the retry chain exhausts, not just on success), sign-in fails the
+    // ORDINARY way (no such account -- `purgeAuth` really did delete it,
+    // not merely "sign-in refused for a tombstoned row that still exists")
+    // and a fresh sign-up at the same address succeeds.
+    await realAuthEnv();
+    const t = setup();
+    const email = "stuck@example.com";
+    const password = "E2ePassword123!";
+    const { userId } = await t.action(internal.testing.seedUser, { email, password });
+    await t.run((ctx) => ctx.db.insert("profiles", { userId, inboxId: "inbox-stuck", inboxEmail: "x@agentmail.to" }));
+    vi.spyOn(inboxTransport, "deleteInbox").mockRejectedValue(new Error("502"));
+    const as = t.withIdentity({ subject: `${userId}|session` });
+    await as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    vi.advanceTimersByTime(1);
+    await t.finishInProgressScheduledFunctions();
+    for (let i = 0; i < 4; i++) {
+      vi.advanceTimersByTime(25 * 3_600_000);
+      await t.finishInProgressScheduledFunctions();
+    }
+
+    const row = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", userId)).first());
+    expect(row?.attempts).toBe(5);
+    // 6b-4b: "deleted", not "deleting" -- the retry chain is dead, but
+    // Recoup's own side (auth rows included) is fully wound down anyway.
+    expect(row?.status).toBe("deleted");
+    expect(row?.inboxDeleted).toBe(false); // never silently rounded up.
+
+    expect(await t.run((ctx) => ctx.db.get(userId))).toBeNull(); // purgeAuth really ran.
+
+    let signInErr: unknown;
+    try {
+      await t.action(api.auth.signIn, { provider: "password", params: { flow: "signIn", email, password } });
+    } catch (err) {
+      signInErr = err;
+    }
+    expect(signInErr).toBeInstanceOf(ConvexError);
+    expect((signInErr as ConvexError<string>).data).toBe(WRONG_CREDENTIALS_MESSAGE);
+
+    const signUp = await t.action(api.auth.signIn, { provider: "password", params: { flow: "signUp", email, password } });
+    expect(signUp.tokens).toBeNull(); // verification flow started, not an ACCOUNT_EXISTS_MESSAGE throw.
+    const users = await t.run((ctx) => ctx.db.query("users").withIndex("email", (q) => q.eq("email", email)).collect());
+    expect(users).toHaveLength(1);
+    expect(users[0]!._id).not.toBe(userId); // a genuinely new account, not a resurrection of the old one.
+  }, 20_000);
+
+  it("a non-tombstoned user's sign-in is unaffected by the gate", async () => {
+    await realAuthEnv();
+    const t = setup();
+    const email = "fine@example.com";
+    const password = "E2ePassword123!";
+    await t.action(internal.testing.seedUser, { email, password });
+    const result = await t.action(api.auth.signIn, { provider: "password", params: { flow: "signIn", email, password } });
+    expect(result.tokens).not.toBeNull();
+  });
+});
+
+describe("checkpoint 6b (D115) 6b-6 MEDIUM — byte-aware paging for processedEvents (F6b/F6c)", () => {
+  /** 3-byte-per-char CJK payloads at `inbound.ts`'s `MAX_TEXT_CHARS` (60,000), matching da6b.test.ts's `seedEvents`. */
+  async function seedCjkEvents(t: ReturnType<typeof setupWithLimits>, userId: Id<"users">, count: number) {
+    const text = "語".repeat(60_000);
+    for (let batch = 0; batch * 25 < count; batch++) {
+      await t.run(async (ctx) => {
+        for (let i = batch * 25; i < Math.min(count, batch * 25 + 25); i++) {
+          await ctx.db.insert("processedEvents", { externalId: `e-${i}`, kind: "agentmail.message.received", status: "succeeded", attempts: 1, userId, payload: { subject: "s", from: "f", text } });
+        }
+      });
+    }
+  }
+
+  it("F6b: a 3-byte UTF-8 (CJK) processedEvents page no longer exceeds the 16 MiB transaction read limit for exportPage", async () => {
+    // Ported from da6b.test.ts's F6, second repro ("3-byte UTF-8 text (CJK):
+    // the same page exceeds the 16 MiB transaction read limit"). CONFIRMED
+    // (git-history-baseline swap on convex/account.ts + convex/limits.ts
+    // only): before the fix (`EXPORT_PAGE` = 200 used for this table too),
+    // this call THREW with a message matching /bytes|limit|16/i -- this
+    // test's `expect(...).resolves` below FAILED (it threw). After the fix
+    // (`PROCESSED_EVENTS_PAGE` = 25), it resolves normally.
+    const t = setupWithLimits();
+    const a = await signedIn(t, "A");
+    await seedCjkEvents(t, a.userId, 200);
+
+    const page = await a.as.query(api.account.exportPage, { table: "processedEvents", cursor: JSON.stringify({ s: 2, c: null }) });
+    expect(page.rows.length).toBeLessThanOrEqual(PROCESSED_EVENTS_PAGE);
+    expect(page.rows.length).toBeGreaterThan(0);
+
+    // Walk every remaining page for this status; must converge (no throw) and collect every seeded row.
+    const seen = new Set<string>();
+    for (const row of page.rows) seen.add((row as { _id: string })._id);
+    let cursor = page.cursor;
+    let pages = 1;
+    while (cursor !== null) {
+      const next: { rows: any[]; cursor: string | null } = await a.as.query(api.account.exportPage, { table: "processedEvents", cursor });
+      for (const row of next.rows) seen.add(row._id);
+      expect(next.rows.length).toBeLessThanOrEqual(PROCESSED_EVENTS_PAGE);
+      cursor = next.cursor;
+      pages++;
+      expect(pages).toBeLessThan(30); // safety bound
+    }
+    expect(seen.size).toBe(200);
+  });
+
+  it("F6c: purgeStep on the same CJK shape also stays under the read limit and converges (purge no longer stalls on this table)", async () => {
+    // Ported from da6b.test.ts's F6, third repro ("purgeStep on the same CJK
+    // shape also exceeds the read limit (purge stalls on this table
+    // forever)"). CONFIRMED (same swap method): before the fix, the
+    // `t.mutation(internal.account.purgeStep, ...)` call below THREW
+    // matching /bytes|limit|16/i -- this test's success-path assertions
+    // FAILED. After the fix, it converges.
+    const t = setupWithLimits();
+    const a = await signedIn(t, "A");
+    await seedCjkEvents(t, a.userId, 200);
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    await t.run(async (ctx) => {
+      const row = await ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first();
+      await ctx.db.patch(row!._id, { progress: { table: "processedEvents", cursor: JSON.stringify({ s: 2, c: null }) } });
+    });
+
+    let done = false;
+    let calls = 0;
+    while (!done && calls < 30) {
+      done = (await t.mutation(internal.account.purgeStep, { userId: a.userId })).done;
+      calls++;
+    }
+    expect(done).toBe(true);
+    expect(calls).toBeGreaterThan(1); // proves it genuinely paged (200 rows / 25-per-page)
+    const remaining = await t.run((ctx) => ctx.db.query("processedEvents").withIndex("by_user_status", (q) => q.eq("userId", a.userId).eq("status", "succeeded")).collect());
+    expect(remaining).toHaveLength(0);
+  });
+});
+
+describe("checkpoint 6b (D115) 6b-4c — reDriveStuckDeletions cron re-drive", () => {
+  it("a `deleting` row older than STUCK_DELETION_AGE_MS with no live scheduled purge job gets re-driven and finishes", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    await seedFullAccount(t, a.userId, "a@example.com");
+    vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+
+    // Simulate a chain that died: a tombstone with no scheduled job at all
+    // (e.g. a crash between `recordPurgeFailure` and its own retry's
+    // `ctx.scheduler.runAfter` call) -- `activePurgeJobId` absent, `inboxId`
+    // persisted (as `requestDeletion` would have left it), `requestedAt` well
+    // past the age threshold.
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", {
+        userId: a.userId, status: "deleting", requestedAt: T0 - STUCK_DELETION_AGE_MS - 1, attempts: 0, inboxId: `inbox-${a.userId}`,
+      }),
+    );
+
+    const before = await t.query(internal.account.stuckDeletions, {});
+    expect(before).toEqual({ stuck: 1, deleting: 1 });
+
+    const result = await t.mutation(internal.account.reDriveStuckDeletions, {});
+    expect(result.rescheduled).toBe(1);
+
+    const row = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first());
+    expect(row?.activePurgeJobId).toBeDefined();
+
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const finished = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first());
+    expect(finished?.status).toBe("deleted");
+    expect(await t.run((ctx) => ctx.db.query("watches").withIndex("by_user", (q) => q.eq("userId", a.userId)).collect())).toHaveLength(0);
+
+    const after = await t.query(internal.account.stuckDeletions, {});
+    expect(after).toEqual({ stuck: 0, deleting: 0 });
+  });
+
+  it("a live chain (a genuinely pending purge job) is not double-scheduled", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+
+    // Force the row old enough to be a re-drive CANDIDATE by age, but its
+    // `activePurgeJobId` (set by `requestDeletion` itself) still points at
+    // the genuinely-pending `purge` job requestDeletion just scheduled.
+    await t.run(async (ctx) => {
+      const row = await ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first();
+      await ctx.db.patch(row!._id, { requestedAt: T0 - STUCK_DELETION_AGE_MS - 1 });
+    });
+
+    const result = await t.mutation(internal.account.reDriveStuckDeletions, {});
+    expect(result.rescheduled).toBe(0); // the live chain is left alone.
+
+    const pending = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    const pendingPurgeJobs = pending.filter(
+      (r) => (r.state.kind === "pending" || r.state.kind === "inProgress") && r.name.includes("purge") && !r.name.includes("purgeStep") && !r.name.includes("purgeAuth"),
+    );
+    expect(pendingPurgeJobs).toHaveLength(1); // still exactly one -- not doubled.
+  });
+
+  it("reschedules at most STUCK_DELETION_REDRIVE_PAGE stuck rows per run", async () => {
+    const t = setup();
+    const count = STUCK_DELETION_REDRIVE_PAGE + 5;
+    await t.run(async (ctx) => {
+      for (let i = 0; i < count; i++) {
+        const userId = await ctx.db.insert("users", { name: `Stuck ${i}` });
+        await ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: T0 - STUCK_DELETION_AGE_MS - 1, attempts: 0 });
+      }
+    });
+
+    const result = await t.mutation(internal.account.reDriveStuckDeletions, {});
+    expect(result.rescheduled).toBe(STUCK_DELETION_REDRIVE_PAGE);
+  });
+});
+
+describe("checkpoint 6b (D115) 6b-8 MEDIUM (tests) — guards previously untested", () => {
+  it("purgeAuth re-revokes a session minted between requestDeletion and purge (through some path other than the guarded signIn)", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+
+    // A session inserted directly bypasses `beforeSessionCreation` entirely
+    // -- exactly the "some other route this app does not control" case
+    // `purgeAuth`'s defensive re-sweep exists for.
+    const lateSessionId = await t.run((ctx) => ctx.db.insert("authSessions", { userId: a.userId, expirationTime: T0 + 999_999 }));
+    await t.run((ctx) => ctx.db.insert("authRefreshTokens", { sessionId: lateSessionId, expirationTime: T0 + 999_999 }));
+
+    await t.mutation(internal.account.purgeAuth, { userId: a.userId });
+
+    const sessions = await t.run((ctx) => ctx.db.query("authSessions").withIndex("userId", (q) => q.eq("userId", a.userId)).collect());
+    expect(sessions).toHaveLength(0);
+    const tokens = await t.run((ctx) => ctx.db.query("authRefreshTokens").withIndex("sessionId", (q) => q.eq("sessionId", lateSessionId)).collect());
+    expect(tokens).toHaveLength(0);
+  });
+
+  it("purgeAuth deletes authRateLimits rows keyed by both the authAccounts id and the raw email", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    await t.run((ctx) => ctx.db.patch(a.userId, { email: "rl@example.com" }));
+    const accountId = await t.run((ctx) => ctx.db.insert("authAccounts", { userId: a.userId, provider: "password", providerAccountId: "rl@example.com", secret: "hash" }));
+    const byAccountId = await t.run((ctx) => ctx.db.insert("authRateLimits", { identifier: accountId, attemptsLeft: 0, lastAttemptTime: T0 }));
+    const byEmailId = await t.run((ctx) => ctx.db.insert("authRateLimits", { identifier: "rl@example.com", attemptsLeft: 0, lastAttemptTime: T0 }));
+
+    await t.mutation(internal.account.purgeAuth, { userId: a.userId });
+
+    expect(await t.run((ctx) => ctx.db.get(byAccountId))).toBeNull();
+    expect(await t.run((ctx) => ctx.db.get(byEmailId))).toBeNull();
+  });
+
+  it("inbox-delete backoff timings match the contract exactly (1m, 10m, 1h, 6h, 24h), asserted from each retry's own _scheduled_functions.scheduledTime", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    await seedFullAccount(t, a.userId, "a@example.com");
+    vi.spyOn(inboxTransport, "deleteInbox").mockRejectedValue(new Error("network unreachable"));
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+
+    const expectedDeltas = [60_000, 600_000, 3_600_000, 21_600_000, 86_400_000];
+
+    function findPurgeJob(jobs: Awaited<ReturnType<typeof t.run<any>>>) {
+      return (jobs as any[]).find(
+        (r) => (r.state.kind === "pending" || r.state.kind === "inProgress") && r.name.includes("purge") && !r.name.includes("purgeStep") && !r.name.includes("purgeAuth"),
+      );
+    }
+
+    // Attempt 1: the initial `requestDeletion`-scheduled job (runAfter 0) fires; its OWN failure schedules the first retry at T0 + 1 + 60,000.
+    vi.advanceTimersByTime(1);
+    await t.finishInProgressScheduledFunctions();
+    let jobs = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    let retry = findPurgeJob(jobs);
+    expect(retry, "retry 1").toBeDefined();
+    expect(retry.scheduledTime).toBe(T0 + 1 + expectedDeltas[0]!);
+
+    // Attempts 2-5: each retry, once it fires (and fails again), schedules the NEXT one at its own firing time + the next backoff step.
+    let firedAt = T0 + 1 + expectedDeltas[0]!;
+    for (let i = 1; i < 5; i++) {
+      vi.advanceTimersByTime(expectedDeltas[i - 1]!);
+      await t.finishInProgressScheduledFunctions();
+      if (i < 4) {
+        jobs = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+        retry = findPurgeJob(jobs);
+        expect(retry, `retry ${i + 1}`).toBeDefined();
+        expect(retry.scheduledTime).toBe(firedAt + expectedDeltas[i]!);
+      }
+      firedAt += expectedDeltas[i]!;
+    }
+
+    // After the 5th attempt, no retry is scheduled -- the chain is exhausted and purgeAuth/finishPurge already ran.
+    const finalJobs = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    expect(findPurgeJob(finalJobs)).toBeUndefined();
+    const state = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first());
+    expect(state?.attempts).toBe(5);
+    expect(state?.status).toBe("deleted");
+  }, 20_000);
+});
+
+// =============================================================================
+// T18.4 (D115 6b-5) wiring: `purge` also drains the AgentMail component's own
+// per-inbox rows via `mailPurge.purgeInboxData`, wired here per that module's
+// own "Call site" instruction. Seeding reuses `mailPurge.test.ts`'s approach
+// (component rows are seeded through the component's own public/internal
+// functions, not `t.run`, since a registered component's tables are a
+// separate mock backend invisible to `ctx.db` here).
+// =============================================================================
+
+describe("T18.4 (D115 6b-5) wiring — purge drains the AgentMail component's mail data too", () => {
+  const RUNTIME_CONFIG = { retryAttempts: 1, initialBackoffMs: 10 };
+
+  async function seedInboundAndEvents(t: T, inboxId: string, count: number) {
+    for (let i = 0; i < count; i++) {
+      await t.mutation(components.agentmail.lib.handleEvent, {
+        config: RUNTIME_CONFIG,
+        event: {
+          type: "event",
+          event_type: "message.received",
+          event_id: `${inboxId}-evt-${i}`,
+          message: {
+            inbox_id: inboxId,
+            thread_id: `${inboxId}-thread-${i}`,
+            message_id: `${inboxId}-msg-${i}`,
+            from: "sender@example.com",
+            to: ["recipient@example.com"],
+            subject: `Test ${i}`,
+            text: "hello",
+            timestamp: new Date().toISOString(),
+          },
+        },
+      });
+    }
+  }
+
+  async function seedOutbound(t: T, inboxId: string, count: number) {
+    for (let i = 0; i < count; i++) {
+      await t.mutation(components.agentmail.lib.enqueueSend, {
+        config: RUNTIME_CONFIG,
+        inboxId,
+        kind: "send" as const,
+        payload: { to: "dest@example.com", subject: `out ${i}`, text: "hi" },
+      });
+    }
+  }
+
+  it("a purged user's AgentMail component rows (inboundMessages/outboundMessages/events) are gone, and mailDataPurged is reported true", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const inboxId = `inbox-${a.userId}`;
+    await t.run((ctx) => ctx.db.insert("profiles", { userId: a.userId, inboxId, inboxEmail: "a@example.com" }));
+    await seedInboundAndEvents(t, inboxId, 5); // 5 inboundMessages + 5 events
+    await seedOutbound(t, inboxId, 2); // 2 outboundMessages
+
+    // A second, unrelated inbox must be left untouched.
+    const otherInboxId = "inbox-other";
+    await seedInboundAndEvents(t, otherInboxId, 3);
+
+    vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const remainingA = await t.query(components.agentmail.lib.listInboundMessages, { inboxId });
+    expect(remainingA).toHaveLength(0);
+    const remainingOther = await t.query(components.agentmail.lib.listInboundMessages, { inboxId: otherInboxId });
+    expect(remainingOther).toHaveLength(3); // untouched.
+
+    const state = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first());
+    expect(state?.status).toBe("deleted");
+    expect(state?.mailDataPurged).toBe(true);
+    // `deletionStatus` (still-open-tab path, `getAuthUserId` not `requireUserId`) surfaces the same field.
+    const status = await a.as.query(api.account.deletionStatus, {});
+    expect(status?.status).toBe("deleted");
+    expect(status?.mailDataPurged).toBe(true);
+  });
+
+  it("skips the component purge entirely when the user never provisioned an inbox (no inboxId)", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const state = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first());
+    expect(state?.status).toBe("deleted");
+    expect(state?.mailDataPurged).toBeUndefined(); // never set -- there was nothing to purge, and nothing claims otherwise.
+  });
+
+  it("a purge run's mail-data result is reported truthfully, not hidden, when complete:false (recordMailDataPurged wiring, tested directly)", async () => {
+    // Directly exercises the wiring's own recording step (`complete: false`)
+    // without needing to actually exhaust `mailPurge.purgeInboxData`'s
+    // internal MAX_ITERATIONS bound (tens of thousands of rows -- impractical
+    // for a unit test): the wiring in `account.ts`'s `purge` calls
+    // `internal.account.recordMailDataPurged` with exactly whatever
+    // `purgeInboxData` returned, so testing that recording step in isolation
+    // proves the "not hidden" contract for both outcomes.
+    const t = setup();
+    const a = await signedIn(t, "A");
+    await t.run((ctx) => ctx.db.insert("accountState", { userId: a.userId, status: "deleting", requestedAt: T0, attempts: 0 }));
+
+    await t.mutation(internal.account.recordMailDataPurged, { userId: a.userId, complete: false });
+    let row = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first());
+    expect(row?.mailDataPurged).toBe(false); // not coerced to true, not left undefined.
+
+    await t.mutation(internal.account.recordMailDataPurged, { userId: a.userId, complete: true });
+    row = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first());
+    expect(row?.mailDataPurged).toBe(true);
+  });
+});
+
+describe("checkpoint 6b (D115) 6b-8 — inboxTransport.deleteInbox (full unit coverage, real fetch stubbed)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.AGENTMAIL_API_KEY;
+    delete process.env.AGENTMAIL_BASE_URL;
+  });
+
+  it("a 404 response is treated as success (already gone)", async () => {
+    process.env.AGENTMAIL_API_KEY = "am-test";
+    const fetchSpy = vi.fn(async () => new Response("", { status: 404 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(inboxTransport.deleteInbox("inbox-1")).resolves.toBeUndefined();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a 5xx response throws (failure), and the response body never appears in the thrown message", async () => {
+    process.env.AGENTMAIL_API_KEY = "am-test";
+    const fetchSpy = vi.fn(async () => new Response("SECRET body: leaked-detail", { status: 502 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    let caught: unknown;
+    try {
+      await inboxTransport.deleteInbox("inbox-1");
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const message = (caught as Error).message;
+    expect(message).not.toContain("SECRET");
+    expect(message).not.toContain("leaked-detail");
+    expect(message).toContain("502");
+  });
+
+  it("sends an Authorization header (checked by NAME only -- the value is never asserted/printed)", async () => {
+    process.env.AGENTMAIL_API_KEY = "am-super-secret-key";
+    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.has("Authorization")).toBe(true);
+      return new Response("", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(inboxTransport.deleteInbox("inbox-1")).resolves.toBeUndefined();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("missing AGENTMAIL_API_KEY fails WITHOUT making any network call", async () => {
+    delete process.env.AGENTMAIL_API_KEY;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(inboxTransport.deleteInbox("inbox-1")).rejects.toThrow();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("a permanent (non-404) failure's sanitized lastError on the accountState row never echoes the raw response body", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    await seedFullAccount(t, a.userId, "a@example.com");
+    process.env.AGENTMAIL_API_KEY = "am-test";
+    const fetchSpy = vi.fn(async () => new Response("SECRET body: leaked-detail, auth-header-abc123", { status: 502 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    vi.spyOn(inboxTransport, "deleteInbox"); // keep the real implementation but track calls (fetch itself is stubbed above).
+
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    vi.advanceTimersByTime(1);
+    await t.finishInProgressScheduledFunctions();
+
+    const state = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first());
+    expect(state?.lastError).toBeDefined();
+    expect(state?.lastError).not.toContain("SECRET");
+    expect(state?.lastError).not.toContain("leaked-detail");
+    expect(state?.lastError).not.toContain("auth-header-abc123");
+  });
+});
+
+describe("checkpoint 6b (D115) LOW — purgeAuth resets the deleted email's named rate limits", () => {
+  it("authAttempt/authSignUp/authMailPerEmail are all back at full capacity for the deleted email after purgeAuth", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const email = "ratelimited@example.com";
+    await t.run((ctx) => ctx.db.patch(a.userId, { email }));
+
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 10; i++) await rateLimiter.limit(ctx, "authAttempt", { key: email });
+      for (let i = 0; i < 20; i++) await rateLimiter.limit(ctx, "authSignUp", { key: email });
+      for (let i = 0; i < 3; i++) await rateLimiter.limit(ctx, "authMailPerEmail", { key: email });
+    });
+    const before = await t.run(async (ctx) => ({
+      authAttempt: await rateLimiter.check(ctx, "authAttempt", { key: email }),
+      authSignUp: await rateLimiter.check(ctx, "authSignUp", { key: email }),
+      authMailPerEmail: await rateLimiter.check(ctx, "authMailPerEmail", { key: email }),
+    }));
+    expect(before.authAttempt.ok).toBe(false);
+    expect(before.authSignUp.ok).toBe(false);
+    expect(before.authMailPerEmail.ok).toBe(false);
+
+    await t.mutation(internal.account.purgeAuth, { userId: a.userId });
+
+    const after = await t.run(async (ctx) => ({
+      authAttempt: await rateLimiter.check(ctx, "authAttempt", { key: email }),
+      authSignUp: await rateLimiter.check(ctx, "authSignUp", { key: email }),
+      authMailPerEmail: await rateLimiter.check(ctx, "authMailPerEmail", { key: email }),
+    }));
+    expect(after.authAttempt.ok).toBe(true);
+    expect(after.authSignUp.ok).toBe(true);
+    expect(after.authMailPerEmail.ok).toBe(true);
   });
 });

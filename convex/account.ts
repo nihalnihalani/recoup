@@ -9,24 +9,88 @@
  *     `requireUserId` refuses any tombstoned user everywhere else in the
  *     app) even if `purge` itself never runs.
  *  2. `purge` (internalAction) repeatedly calls `purgeStep` (internalMutation)
- *     until every owned row is gone, then deletes the AgentMail inbox over
- *     REST, then calls `purgeAuth` (internalMutation) to remove the
- *     Convex Auth rows and the `users` row itself, then marks the tombstone
+ *     until every owned row is gone, then attempts the AgentMail inbox
+ *     delete over REST (bounded retry/backoff), then calls `purgeAuth`
+ *     (internalMutation) to remove the Convex Auth rows and the `users` row
+ *     itself REGARDLESS of whether the inbox delete ever succeeded (6b-4b,
+ *     D115: auth rows are not provider-dependent, and leaving them forever
+ *     just because a third-party DELETE call keeps failing is its own bug --
+ *     see `purge`'s own docstring for the exact `deleting`/`deleted`/
+ *     `inboxDeleted` semantics this produces), then marks the tombstone
  *     `deleted`. `accountState` itself is never deleted -- it IS the
  *     tombstone (D77).
  *  3. `purgeStep` deletes at most `RETENTION_PAGE` rows from ONE table per
- *     call, in the contract's fixed child-before-parent order, storing its
- *     position in `accountState.progress` so a crash/redeploy mid-purge
- *     resumes exactly where it left off (same resumable-cursor shape as
- *     `retention.ts`'s `sweep`, reused here per instruction).
+ *     call (a smaller, byte-budgeted `PROCESSED_EVENTS_PAGE` for
+ *     `processedEvents` specifically -- 6b-6, D115: see the module's
+ *     "byte-aware paging" note below), in the contract's fixed
+ *     child-before-parent order, storing its position in
+ *     `accountState.progress` so a crash/redeploy mid-purge resumes exactly
+ *     where it left off (same resumable-cursor shape as `retention.ts`'s
+ *     `sweep`, reused here per instruction).
+ *  4. `reDriveStuckDeletions` (internalMutation, cron-driven, 6b-4c/D115)
+ *     re-schedules `purge` for any `deleting` row whose chain died (no live
+ *     `_scheduled_functions` job) more than `STUCK_DELETION_AGE_MS` ago --
+ *     the failure mode `beforeSessionCreation` (see `convex/auth.ts`) alone
+ *     cannot fix: blocking sign-in stops a zombie account from being used,
+ *     but does nothing to actually finish deleting it.
  *
- * `exportPage` is the read side: one table's rows, 200 at a time, always
- * scoped to the caller's own id (never accepted as an argument) via a
- * `by_user`-family index, or -- for the handful of tables that carry a
- * `userId` field but no index on it -- by iterating the user's own parent
- * rows (also index-scoped) and reading each parent's children. It refuses
- * once deletion has started: a paged export racing a purge could otherwise
- * observe a table that is only partially gone.
+ * Sign-in itself is gated on the tombstone too (6b-4a, D115): `convex/auth.ts`'s
+ * `callbacks.beforeSessionCreation` throws the same error a wrong password
+ * gets for any `deleting` or `deleted` user, closing the gap where every
+ * app-level query/mutation refused a tombstoned caller (via
+ * `requireUserId`) but a fresh sign-in itself did not.
+ *
+ * `exportPage` is the read side: one table's rows, 200 at a time (25 for
+ * `processedEvents`), always scoped to the caller's own id (never accepted
+ * as an argument) via a `by_user`-family index, or -- for the handful of
+ * tables that carry a `userId` field but no index on it -- by iterating the
+ * user's own parent rows (also index-scoped) and reading each parent's
+ * children. It refuses once deletion has started: a paged export racing a
+ * purge could otherwise observe a table that is only partially gone.
+ *
+ * **Cursor trust (6b-1, D115):** `exportPage`'s `cursor` argument is a plain
+ * client-supplied string with no signature -- a caller can hand-craft any
+ * JSON they like. For the "direct" and "status" table kinds this is
+ * harmless (the cursor only ever resumes a `.paginate()` call that is
+ * ITSELF re-scoped to `userId` on every call). For the "via-parent" kind,
+ * though, the decoded cursor's `queue`/`pid` are parent-table ids read
+ * directly by `takeByField` with NO ownership check of their own -- so
+ * without a guard, a forged cursor naming another user's `claims`/`items`/
+ * `watches`/`offers` id would read that user's `ledgerEvents`/`drafts`/
+ * `priceChecks`/etc. straight through (an IDOR, not merely a bug). Every
+ * parent id taken from the cursor is therefore re-verified with
+ * `isOwnedParent` before its children are ever read; an unowned or
+ * nonexistent id is dropped silently and advances the cursor exactly the
+ * way an exhausted OWNED parent with zero children would, so the response
+ * shape never becomes an existence oracle for another user's rows. Child
+ * rows are additionally filtered by `userId` as defense in depth. The same
+ * check is applied to `purgeStep`'s delete-side twin (`drainParentTable`)
+ * even though its cursor is never client-supplied (`purgeStep` takes only
+ * `{ userId }`; its cursor lives server-side in `accountState.progress`) --
+ * cheap insurance, and it happens to also fix a structural bug (6b-2,
+ * D115): the original code left an in-progress parent's id sitting in
+ * `queue[0]` even after it was promoted to `pid`, so once that parent's
+ * children were exhausted, `queue` was never advanced past it and the very
+ * same parent was re-entered from the queue on the next call. On the
+ * read side (`exportPage`) that produced duplicate rows and a cursor that
+ * never reached `null` for any parent with more than one page of children;
+ * on the delete side it was merely a single wasted re-read (a deleted row
+ * never comes back), which is why only the read side counted as a bug.
+ *
+ * **Byte-aware paging (6b-6, D115):** `processedEvents` rows can each hold
+ * up to `inbound.ts`'s `MAX_TEXT_CHARS` (60,000) characters of mail text;
+ * at worst-case multibyte UTF-8 (~3 bytes/char) 200 rows -- the page size
+ * every other table uses -- can read ~36 MB in one `.paginate()` call,
+ * comfortably over Convex's 16 MiB per-transaction read limit, so both
+ * `exportPage` and `purgeStep` would throw deterministically (and purge
+ * would stall on this table forever) the moment a user's mail happened to
+ * be CJK or similarly multibyte. Both call sites use the smaller,
+ * budget-derived `PROCESSED_EVENTS_PAGE` (see `limits.ts`) for this one
+ * table instead of `EXPORT_PAGE`/`RETENTION_PAGE`. Convex allows only a
+ * single `.paginate()` call per function execution (documented in detail
+ * below, on `ParentCursor`), so the page size has to be chosen up front --
+ * there is no way to start a `.paginate()` call and abort it partway
+ * through once a running byte estimate crosses the budget.
  *
  * **Session revocation, and the exported name used (report requirement):**
  * `@convex-dev/auth/server` exports `invalidateSessions(ctx, { userId })`,
@@ -46,19 +110,21 @@
  * `ctx.db`, using the library's own documented table/index names
  * (`authSessions.userId`, `authRefreshTokens.sessionId`). `purgeAuth` calls
  * the same helper again defensively (a session minted between
- * `requestDeletion` and `purgeAuth` -- sign-in itself is not gated on
- * `isTombstoned`, only every app-level query/mutation is, via
- * `requireUserId` -- would otherwise survive purge).
+ * `requestDeletion` and `purgeAuth` -- through some path other than the
+ * guarded `signIn`, which is now ALSO gated on the tombstone directly via
+ * `convex/auth.ts`'s `callbacks.beforeSessionCreation`, 6b-4a/D115 -- would
+ * otherwise survive purge).
  */
 import { ConvexError, v } from "convex/values";
 import { getAuthUserId } from "@convex-dev/auth/server";
-import { internalAction, internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internalAction, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id, TableNames } from "./_generated/dataModel";
 import { accountStateStatus } from "./schema";
 import { requireUserId } from "./lib/access";
 import { sanitizeError } from "./lib/errors";
-import { RETENTION_PAGE } from "./limits";
+import { rateLimiter } from "./lib/rateLimits";
+import { RETENTION_PAGE, PROCESSED_EVENTS_PAGE, STUCK_DELETION_AGE_MS, STUCK_DELETION_REDRIVE_PAGE } from "./limits";
 
 const CONFIRMATION_PHRASE = "delete my account";
 
@@ -235,24 +301,64 @@ async function refillParentQueue(ctx: QueryCtx | MutationCtx, spec: ParentSpec, 
 }
 
 /**
+ * 6b-1 (D115): true only if `id` names a row that actually exists in
+ * `table` AND is owned by `userId`. Every parent id a "via-parent"
+ * read/delete takes off a resumable cursor (`queue[i]`/`pid`) must pass
+ * this before its children are read -- see the module docstring's "Cursor
+ * trust" note for why (`exportPage`'s cursor is a client-supplied string
+ * with no signature; the child-table reads below it are scoped only by
+ * parent id, not by owner). A malformed/foreign id string (wrong table,
+ * garbage encoding) is treated the same as "not found", not as an error --
+ * a forged cursor must never behave observably differently from one naming
+ * a real, unowned row, or the difference becomes an existence oracle.
+ */
+async function isOwnedParent(ctx: QueryCtx | MutationCtx, table: TableNames, id: string, userId: Id<"users">): Promise<boolean> {
+  try {
+    // Same dynamic-table-name cast `paginateByUser`/`takeByField` above already use: `table` is a
+    // runtime union of literal table names, not the single literal `ctx.db.get`'s overload wants.
+    const doc: Doc<any> | null = await (ctx.db as any).get(table, id);
+    return doc !== null && (doc as { userId?: Id<"users"> }).userId === userId;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Read-only walk of a "via-parent" table, `numItems` rows at a time,
  * resumable via `cursorRaw`. `purgeStep`'s `drainParentTable` below is the
  * delete-and-resume twin (simpler: deleting a row is itself the "advance"
  * step, so it needs no `skip`).
+ *
+ * 6b-1/6b-2 (D115): `queue[0]` is popped the moment this function commits to
+ * reading it (whether that read finishes in this call or spills into `pid`
+ * for the next one) -- `pid` and `queue` are therefore always disjoint. The
+ * previous shape left a parent's id sitting in BOTH `pid` and `queue[0]`
+ * while it was being drained across multiple calls, so once that parent's
+ * children were exhausted (`pid` cleared) the very same id was still at
+ * `queue[0]` and got re-entered from scratch by the loop below -- the
+ * "never terminates for a parent with > `numItems` children" bug (6b-2):
+ * every subsequent call re-read the same parent's children from the start,
+ * returning duplicates forever and never advancing the cursor to `null`.
  */
 async function readParentTable(ctx: QueryCtx, spec: ParentSpec, userId: Id<"users">, cursorRaw: string | null, numItems: number): Promise<{ rows: Doc<any>[]; cursor: string | null }> {
   let { p, parentsDone, queue, pid, skip } = decodeReadParentCursor(cursorRaw);
   const rows: Doc<any>[] = [];
 
-  // Resume a parent a previous call stopped partway through.
+  // Resume a parent a previous call stopped partway through. `pid` is never
+  // also present in `queue` (see this function's docstring), so there is
+  // nothing to pop here -- just verify ownership before reading again.
   if (pid !== null) {
-    const need = numItems - rows.length;
-    const batch = await takeByField(ctx, spec.childTable, spec.childIndex, spec.childField, pid, skip + need + 1);
-    const slice = batch.slice(skip, skip + need);
-    rows.push(...slice);
-    if (batch.length > skip + need) {
-      return { rows, cursor: JSON.stringify({ p, parentsDone, queue, pid, skip: skip + slice.length } satisfies ReadParentCursor) };
+    if (await isOwnedParent(ctx, spec.parentTable, pid, userId)) {
+      const need = numItems - rows.length;
+      const batch = (await takeByField(ctx, spec.childTable, spec.childIndex, spec.childField, pid, skip + need + 1))
+        .filter((row) => (row as { userId?: Id<"users"> }).userId === userId);
+      const slice = batch.slice(skip, skip + need);
+      rows.push(...slice);
+      if (batch.length > skip + need) {
+        return { rows, cursor: JSON.stringify({ p, parentsDone, queue, pid, skip: skip + slice.length } satisfies ReadParentCursor) };
+      }
     }
+    // Exhausted, OR the id was unowned/nonexistent (6b-1: treated identically -- zero children either way): advance past it.
     pid = null;
     skip = 0;
   }
@@ -261,14 +367,16 @@ async function readParentTable(ctx: QueryCtx, spec: ParentSpec, userId: Id<"user
 
   while (rows.length < numItems && queue.length > 0) {
     const parentId = queue[0];
+    queue = queue.slice(1); // 6b-2: pop before reading, so a parent spanning multiple calls is never re-entered via the queue.
+    if (!(await isOwnedParent(ctx, spec.parentTable, parentId, userId))) continue; // 6b-1: forged/foreign id -- silently zero children.
     const need = numItems - rows.length;
-    const batch = await takeByField(ctx, spec.childTable, spec.childIndex, spec.childField, parentId, need + 1);
+    const batch = (await takeByField(ctx, spec.childTable, spec.childIndex, spec.childField, parentId, need + 1))
+      .filter((row) => (row as { userId?: Id<"users"> }).userId === userId);
     const slice = batch.slice(0, need);
     rows.push(...slice);
     if (batch.length > need) {
       return { rows, cursor: JSON.stringify({ p, parentsDone, queue, pid: parentId, skip: slice.length } satisfies ReadParentCursor) };
     }
-    queue = queue.slice(1);
   }
 
   if (queue.length === 0 && parentsDone) return { rows, cursor: null };
@@ -296,13 +404,15 @@ export const exportPage = query({
       // One status's page per call (never a second `.paginate()` here, the
       // platform's hard per-execution limit -- see `ParentCursor`'s
       // docstring above for the same constraint on the "parent" branch): a
-      // status with fewer than `EXPORT_PAGE` remaining rows still just
-      // advances `s` for the NEXT call rather than looking further here.
+      // status with fewer than `PROCESSED_EVENTS_PAGE` remaining rows still
+      // just advances `s` for the NEXT call rather than looking further
+      // here. `PROCESSED_EVENTS_PAGE` (25), not `EXPORT_PAGE` (200): 6b-6,
+      // D115 -- see the module docstring's "Byte-aware paging" note.
       const { s, c } = decodeStatusCursor(cursorIn);
       if (s >= PROCESSED_EVENT_STATUSES.length) return { rows: [], cursor: null };
       const page = await (ctx.db.query(spec.table) as any)
         .withIndex("by_user_status", (q: any) => q.eq("userId", userId).eq("status", PROCESSED_EVENT_STATUSES[s]))
-        .paginate({ cursor: c, numItems: EXPORT_PAGE });
+        .paginate({ cursor: c, numItems: PROCESSED_EVENTS_PAGE });
       if (!page.isDone) return { rows: page.page, cursor: JSON.stringify({ s, c: page.continueCursor }) };
       const nextS = s + 1;
       return { rows: page.page, cursor: nextS >= PROCESSED_EVENT_STATUSES.length ? null : JSON.stringify({ s: nextS, c: null }) };
@@ -400,17 +510,26 @@ export const requestDeletion = mutation({
 
     // Captured now (see `purge`'s docstring): `profiles` is the last table
     // `purgeStep` drains, so this is the only point where reading it back is
-    // guaranteed to still find the inbox id.
+    // guaranteed to still find the inbox id. Persisted on the tombstone row
+    // itself (`inboxId`, 6b-4c/D115), not only threaded as a `purge` action
+    // argument, so a later re-drive (`reDriveStuckDeletions`) can recover it
+    // even after the app-data purge (and `profiles` with it) is long gone.
     const profile = await ctx.db
       .query("profiles")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .first();
 
     const now = Date.now();
-    await ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: now, attempts: 0 });
+    const stateId = await ctx.db.insert("accountState", {
+      userId, status: "deleting", requestedAt: now, attempts: 0, inboxId: profile?.inboxId,
+    });
     await revokeAuthSessions(ctx, userId);
     await suppressQueuedMail(ctx, userId, now);
-    await ctx.scheduler.runAfter(0, internal.account.purge, { userId, inboxId: profile?.inboxId });
+    const jobId = await ctx.scheduler.runAfter(0, internal.account.purge, { userId });
+    // 6b-4c (D115): recorded so `reDriveStuckDeletions` can tell this chain
+    // is (still) alive with one indexed `ctx.db.system.get` instead of an
+    // unbounded scan of `_scheduled_functions`.
+    await ctx.db.patch(stateId, { activePurgeJobId: jobId });
     return null;
   },
 });
@@ -458,22 +577,37 @@ async function deleteDirectPage(ctx: MutationCtx, table: TableNames, index: stri
  * call design as `readParentTable`, but simpler: a deleted row never comes
  * back, so resuming mid-parent needs no `skip` -- `.take(need + 1)` against
  * the same parent id on the next call naturally returns the next batch.
+ *
+ * 6b-1/6b-2 (D115): mirrors `readParentTable`'s fix -- `queue[0]` is popped
+ * before it is drained (never left sitting in both `pid` and `queue[0]`),
+ * and every parent id is ownership-checked via `isOwnedParent` before its
+ * children are read. Neither defect was exploitable here (`purgeStep`'s
+ * cursor lives server-side in `accountState.progress`, never accepted from
+ * a caller), but the queue/pid overlap did cost one wasted re-read per
+ * multi-page parent (a deleted row simply returns nothing the second time,
+ * so it was never an infinite loop the way `readParentTable`'s was) --
+ * fixed as the same shared shape for both functions, and the ownership
+ * check is cheap insurance against this cursor ever becoming
+ * caller-influenced in the future.
  */
 async function drainParentTable(ctx: MutationCtx, spec: ParentSpec, userId: Id<"users">, cursorRaw: string | null, numItems: number): Promise<{ deleted: number; cursor: string | null }> {
   let { p, parentsDone, queue, pid } = decodeParentCursor(cursorRaw);
   let deleted = 0;
 
   async function drain(parentId: string, remaining: number): Promise<{ count: number; hasMore: boolean }> {
-    const batch = await takeByField(ctx, spec.childTable, spec.childIndex, spec.childField, parentId, remaining + 1);
+    const batch = (await takeByField(ctx, spec.childTable, spec.childIndex, spec.childField, parentId, remaining + 1))
+      .filter((row) => (row as { userId?: Id<"users"> }).userId === userId);
     const toDelete = batch.slice(0, remaining);
     for (const row of toDelete) await deleteRow(ctx, row);
     return { count: toDelete.length, hasMore: batch.length > remaining };
   }
 
   if (pid !== null) {
-    const result = await drain(pid, numItems - deleted);
-    deleted += result.count;
-    if (result.hasMore) return { deleted, cursor: JSON.stringify({ p, parentsDone, queue, pid } satisfies ParentCursor) };
+    if (await isOwnedParent(ctx, spec.parentTable, pid, userId)) {
+      const result = await drain(pid, numItems - deleted);
+      deleted += result.count;
+      if (result.hasMore) return { deleted, cursor: JSON.stringify({ p, parentsDone, queue, pid } satisfies ParentCursor) };
+    }
     pid = null;
   }
 
@@ -481,10 +615,11 @@ async function drainParentTable(ctx: MutationCtx, spec: ParentSpec, userId: Id<"
 
   while (deleted < numItems && queue.length > 0) {
     const parentId = queue[0];
+    queue = queue.slice(1); // 6b-2: pop before draining, matching `readParentTable`.
+    if (!(await isOwnedParent(ctx, spec.parentTable, parentId, userId))) continue; // 6b-1: forged/foreign id -- nothing to delete.
     const result = await drain(parentId, numItems - deleted);
     deleted += result.count;
     if (result.hasMore) return { deleted, cursor: JSON.stringify({ p, parentsDone, queue, pid: parentId } satisfies ParentCursor) };
-    queue = queue.slice(1);
   }
 
   if (queue.length === 0 && parentsDone) return { deleted, cursor: null };
@@ -535,7 +670,8 @@ export const purgeStep = internalMutation({
       stepDone = result.isDone;
       nextCursor = result.isDone ? null : result.continueCursor;
     } else if (spec.kind === "status") {
-      const result = await deleteStatusPage(ctx, userId, cursorIn, RETENTION_PAGE);
+      // PROCESSED_EVENTS_PAGE (25), not RETENTION_PAGE (200): 6b-6, D115 -- see the module docstring's "Byte-aware paging" note.
+      const result = await deleteStatusPage(ctx, userId, cursorIn, PROCESSED_EVENTS_PAGE);
       stepDone = result.cursor === null;
       nextCursor = result.cursor;
     } else {
@@ -575,9 +711,13 @@ export const purgeAuth = internalMutation({
   handler: async (ctx, { userId }) => {
     const user = await ctx.db.get(userId);
 
-    // Defensive re-sweep: sign-in itself is not gated on `isTombstoned` (only
-    // app-level queries/mutations are, via `requireUserId`), so a session
-    // could have been minted after `requestDeletion`'s own revoke.
+    // Defensive re-sweep: even though sign-in is now ALSO gated on the
+    // tombstone directly (6b-4a, D115: `convex/auth.ts`'s
+    // `callbacks.beforeSessionCreation`), that gate runs in the library's
+    // OWN mutation, a different code path than this one -- kept here too in
+    // case a session is ever minted through some other route this app does
+    // not control (or before that gate existed, for whatever tombstone rows
+    // predate the deploy that added it).
     await revokeAuthSessions(ctx, userId);
 
     const accounts = await ctx.db
@@ -612,6 +752,17 @@ export const purgeAuth = internalMutation({
         .unique();
       if (byEmail) await ctx.db.delete(byEmail._id);
 
+      // LOW (D115, checkpoint 6b): our OWN named rate limits (distinct from
+      // the library's `authRateLimits` table above) are also keyed by this
+      // email and otherwise persist forever -- e.g. blocking a legitimate
+      // future re-signup at the same address with a stale `authSignUp`
+      // bucket from the deleted account's own history. `authMailGlobal`/
+      // `authSignUpGlobal` are deployment-wide, not per-email, and stay
+      // untouched.
+      await rateLimiter.reset(ctx, "authAttempt", { key: user.email });
+      await rateLimiter.reset(ctx, "authSignUp", { key: user.email });
+      await rateLimiter.reset(ctx, "authMailPerEmail", { key: user.email });
+
       // D99 (N7): the E2E code-capture stash (`convex/lib/authMail.ts`'s
       // `recordE2ECode`, read back by `convex/testing.ts`'s `lastCodeFor`)
       // is keyed by email, not userId -- a dev/E2E-only row in practice
@@ -633,7 +784,7 @@ export const purgeAuth = internalMutation({
 // purge
 // ---------------------------------------------------------------------------
 
-/** Backoff schedule for AgentMail inbox-deletion retries (contract, verbatim): 1m, 10m, 1h, 6h, 24h. File-local: this module does not own `limits.ts` (T18's file list is `account.ts`/`account.test.ts`/`lib/accountState.ts` only), mirroring T04's precedent of keeping a task-scoped constant local to its own file. */
+/** Backoff schedule for AgentMail inbox-deletion retries (contract, verbatim): 1m, 10m, 1h, 6h, 24h. File-local (not `limits.ts`): task-scoped, mirroring T04's precedent of keeping a task-scoped constant local to its own file. */
 const INBOX_DELETE_BACKOFF_MS = [60_000, 600_000, 3_600_000, 21_600_000, 86_400_000];
 const INBOX_DELETE_MAX_ATTEMPTS = 5;
 const DEFAULT_AGENTMAIL_BASE_URL = "https://api.agentmail.to/v0";
@@ -664,18 +815,76 @@ export const inboxTransport = {
   },
 };
 
+/** `purge` action-ctx helper: records the just-armed retry/resume job on the tombstone row, so a stuck-chain check needs no scan (6b-4c, D115). No-op if the tombstone is already gone. */
+export const setActivePurgeJob = internalMutation({
+  args: { userId: v.id("users"), jobId: v.id("_scheduled_functions") },
+  returns: v.null(),
+  handler: async (ctx, { userId, jobId }) => {
+    const row = await ctx.db
+      .query("accountState")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .first();
+    if (row) await ctx.db.patch(row._id, { activePurgeJobId: jobId });
+    return null;
+  },
+});
+
+/** `purge` action-ctx helper: the durably-stored `inboxId` for this tombstone (see `requestDeletion`'s comment on why it lives on the row, not only threaded as an argument). `null` if the tombstone itself is gone. */
+export const getPurgeContext = internalQuery({
+  args: { userId: v.id("users") },
+  returns: v.union(v.null(), v.object({ inboxId: v.optional(v.string()) })),
+  handler: async (ctx, { userId }) => {
+    const row = await ctx.db
+      .query("accountState")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .first();
+    if (!row) return null;
+    return { inboxId: row.inboxId };
+  },
+});
+
 /**
  * Drives the whole purge to completion: bounded/resumable app-data deletion,
  * then the AgentMail inbox (bounded retry/backoff, truthful on failure),
- * then the auth rows and the tombstone's final `deleted` status.
+ * then the auth rows and the tombstone's final status.
  *
- * `inboxId` is captured ONCE by `requestDeletion` (before anything is
- * deleted) and threaded through every reschedule of this action as an
- * explicit argument, rather than re-read from the `profiles` table here:
- * `profiles` is itself the LAST table `purgeStep` drains, so by the time
- * this function's app-data loop reports `done`, the profile row (and the
- * inbox id it carried) is already gone. Passing it along is what lets the
- * inbox still be deleted afterward.
+ * **`deleting`/`deleted`/`inboxDeleted` semantics (6b-4b, D115 -- the exact
+ * contract, decided and documented here as instructed):**
+ *  - While the app-data purge (`purgeStep` loop below) is still running, or
+ *    while an inbox-delete retry remains (`attempts < INBOX_DELETE_MAX_ATTEMPTS`),
+ *    the row stays `status: "deleting"`, `inboxDeleted: false` (or unset).
+ *    The auth rows and `users` row are NOT yet touched: the retry chain is
+ *    still alive and might still succeed.
+ *  - On a successful inbox delete (or when there was never an inbox to
+ *    delete): `purgeAuth` runs, then `status: "deleted"`, `inboxDeleted: true`.
+ *  - On the FINAL failed attempt (`attempts === INBOX_DELETE_MAX_ATTEMPTS`,
+ *    i.e. the retry chain is now dead): `purgeAuth` STILL runs -- auth rows
+ *    are not provider-dependent, and the previous behaviour (leave the
+ *    tombstone `deleting` forever, auth rows intact) was exactly checkpoint
+ *    6b's F2b finding, a permanent zombie account reachable by sign-in
+ *    despite `requestDeletion` having been called. `status` becomes
+ *    `"deleted"` and `inboxDeleted` STAYS `false` -- `"deleted"` here means
+ *    "Recoup's side is fully gone", not "the provider confirmed the
+ *    mailbox is gone too"; `inboxDeleted` is the only field that answers
+ *    the second question, and it is never set `true` unless the DELETE
+ *    call actually returned success or 404. `lastError` (already
+ *    sanitized by `recordPurgeFailure`, never the raw provider body) is
+ *    left on the row as the reason. `deletionStatus`'s own docstring below
+ *    repeats this for the client-facing reader.
+ *
+ * `inboxId` is captured ONCE by `requestDeletion` and persisted on the
+ * `accountState` row itself (`getPurgeContext`) rather than only threaded as
+ * an argument through every reschedule of this action: `profiles` is itself
+ * the LAST table `purgeStep` drains, so by the time this function's
+ * app-data loop reports `done`, the profile row (and the inbox id it
+ * carried) is already gone -- and a `reDriveStuckDeletions` re-drive
+ * (6b-4c) may be resuming a chain whose own in-flight scheduled call, with
+ * whatever argument it carried, was lost entirely. `inboxId` stays as an
+ * OPTIONAL argument only for backward compatibility with an existing direct
+ * caller (`lifecycle.test.ts`, T21-owned, out of scope for this task to
+ * edit) that still passes it; the handler always prefers the persisted
+ * value and falls back to the argument only if the row somehow has none
+ * (should not happen for any tombstone created after this change).
  *
  * Never throws past the scheduler -- an inbox-deletion failure reschedules
  * itself instead, and the loop over `purgeStep` has no failure mode of its
@@ -687,7 +896,7 @@ export const inboxTransport = {
 export const purge = internalAction({
   args: { userId: v.id("users"), inboxId: v.optional(v.string()) },
   returns: v.null(),
-  handler: async (ctx, { userId, inboxId }) => {
+  handler: async (ctx, { userId, inboxId: argInboxId }) => {
     // Bounded: one action invocation cannot spin forever (platform execution
     // limits, and defense against an unforeseen non-converging cursor bug).
     // Real completion typically takes a handful of calls; if more remain
@@ -703,28 +912,73 @@ export const purge = internalAction({
       }
     }
     if (!done) {
-      await ctx.scheduler.runAfter(0, internal.account.purge, { userId, inboxId });
+      const jobId = await ctx.scheduler.runAfter(0, internal.account.purge, { userId });
+      await ctx.runMutation(internal.account.setActivePurgeJob, { userId, jobId });
       return null;
     }
 
-    try {
-      if (inboxId) await inboxTransport.deleteInbox(inboxId);
-    } catch (err) {
-      const attempts = await ctx.runMutation(internal.account.recordPurgeFailure, {
-        userId,
-        error: sanitizeError(err instanceof Error ? err.message : String(err)),
-      });
-      if (attempts < INBOX_DELETE_MAX_ATTEMPTS) {
-        const delay = INBOX_DELETE_BACKOFF_MS[Math.min(attempts - 1, INBOX_DELETE_BACKOFF_MS.length - 1)];
-        await ctx.scheduler.runAfter(delay, internal.account.purge, { userId, inboxId });
+    const context = await ctx.runQuery(internal.account.getPurgeContext, { userId });
+    if (!context) return null; // Tombstone gone (shouldn't happen -- `accountState` is never deleted): nothing left to do.
+    const inboxId = context.inboxId ?? argInboxId; // Prefer the durably-persisted value; the argument is only a backward-compat fallback (see this function's own docstring).
+
+    let inboxDeleted = true; // No inbox to delete (never provisioned one) counts as vacuously deleted, same as before 6b-4b.
+    if (inboxId) {
+      try {
+        await inboxTransport.deleteInbox(inboxId);
+      } catch (err) {
+        const attempts = await ctx.runMutation(internal.account.recordPurgeFailure, {
+          userId,
+          error: sanitizeError(err instanceof Error ? err.message : String(err)),
+        });
+        if (attempts < INBOX_DELETE_MAX_ATTEMPTS) {
+          const delay = INBOX_DELETE_BACKOFF_MS[Math.min(attempts - 1, INBOX_DELETE_BACKOFF_MS.length - 1)];
+          const jobId = await ctx.scheduler.runAfter(delay, internal.account.purge, { userId });
+          await ctx.runMutation(internal.account.setActivePurgeJob, { userId, jobId });
+          // Retry chain still alive: status stays "deleting"; purgeAuth NOT run yet (6b-4b).
+          return null;
+        }
+        // 6b-4b (D115): retry chain exhausted -- fall through to purgeAuth/finishPurge
+        // below anyway (auth rows are not provider-dependent), but truthfully
+        // record that the inbox itself was never confirmed deleted.
+        inboxDeleted = false;
       }
-      // 5th failure: `recordPurgeFailure` already left status `deleting` /
-      // `inboxDeleted: false` and stopped retrying -- truthful, not `deleted`.
-      return null;
+
+      // T18.4 (D115 6b-5), wired here per that module's own "Call site"
+      // note: drains the AgentMail component's own per-inbox rows
+      // (`inboundMessages`/`outboundMessages`/`events`), which the REST
+      // delete above never touches -- an independent system from the
+      // remote inbox resource, so this runs regardless of that REST call's
+      // outcome (including a retry that will run again later: the
+      // component purge is idempotent, so re-invoking it on a later retry
+      // just reports `{ complete: true, deleted: 0 }`).
+      const mailResult = await ctx.runAction(internal.mailPurge.purgeInboxData, { inboxId });
+      await ctx.runMutation(internal.account.recordMailDataPurged, { userId, complete: mailResult.complete });
     }
 
     await ctx.runMutation(internal.account.purgeAuth, { userId });
-    await ctx.runMutation(internal.account.finishPurge, { userId });
+    await ctx.runMutation(internal.account.finishPurge, { userId, inboxDeleted });
+    return null;
+  },
+});
+
+/**
+ * T18.4 (D115 6b-5): records whether `mailPurge.purgeInboxData` fully
+ * drained the AgentMail component's own rows for this user's inbox.
+ * `complete: false` is stored and surfaced exactly as reported -- never
+ * silently coerced to `true` -- so an operator (via `deletionStatus`) can
+ * tell a genuinely finished purge from one whose component-side cleanup is
+ * still incomplete, the same truthfulness `inboxDeleted` already gives the
+ * REST-side delete.
+ */
+export const recordMailDataPurged = internalMutation({
+  args: { userId: v.id("users"), complete: v.boolean() },
+  returns: v.null(),
+  handler: async (ctx, { userId, complete }) => {
+    const row = await ctx.db
+      .query("accountState")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .first();
+    if (row) await ctx.db.patch(row._id, { mailDataPurged: complete });
     return null;
   },
 });
@@ -745,16 +999,95 @@ export const recordPurgeFailure = internalMutation({
 });
 
 export const finishPurge = internalMutation({
-  args: { userId: v.id("users") },
+  args: { userId: v.id("users"), inboxDeleted: v.boolean() },
   returns: v.null(),
-  handler: async (ctx, { userId }) => {
+  handler: async (ctx, { userId, inboxDeleted }) => {
     const row = await ctx.db
       .query("accountState")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .first();
     if (!row) return null;
-    await ctx.db.patch(row._id, { status: "deleted", completedAt: Date.now(), inboxDeleted: true });
+    // `activePurgeJobId: undefined` clears the pointer: nothing is scheduled
+    // for this row anymore, so `reDriveStuckDeletions` must not act on it --
+    // it already won't (that cron only ever looks at `status: "deleting"`
+    // rows, and this row is now `"deleted"`), but clearing it too keeps the
+    // field truthful rather than pointing at a long-finished job.
+    await ctx.db.patch(row._id, { status: "deleted", completedAt: Date.now(), inboxDeleted, activePurgeJobId: undefined });
     return null;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// reDriveStuckDeletions (6b-4c, D115)
+// ---------------------------------------------------------------------------
+
+/** True if `jobId` names a `_scheduled_functions` row that is still `pending` or `inProgress`. `undefined`/a vanished row means no live job. */
+async function hasLiveJob(ctx: QueryCtx | MutationCtx, jobId: Id<"_scheduled_functions"> | undefined): Promise<boolean> {
+  if (!jobId) return false;
+  const job = await ctx.db.system.get("_scheduled_functions", jobId);
+  return job !== null && (job.state.kind === "pending" || job.state.kind === "inProgress");
+}
+
+/** `deleting` rows one `stuckDeletions`/`reDriveStuckDeletions` call ever inspects: generous headroom over `STUCK_DELETION_REDRIVE_PAGE` since not every scanned row is old enough or actually stuck, but still a bounded, indexed (`by_status`) read rather than an unbounded scan. */
+const STUCK_SCAN_CAP = 200;
+
+/**
+ * Ops-facing count of tombstones whose purge chain appears dead: `deleting`
+ * for more than `STUCK_DELETION_AGE_MS` with no live scheduled `purge` job.
+ * Read-only counterpart to `reDriveStuckDeletions` below (D115: "stuck rows
+ * surfaced via an internal query" -- wired into `ops.backlog` after T24b,
+ * per that lane's own file, not this one).
+ */
+export const stuckDeletions = internalQuery({
+  args: {},
+  returns: v.object({ stuck: v.number(), deleting: v.number() }),
+  handler: async (ctx) => {
+    const now = Date.now();
+    const rows = await ctx.db
+      .query("accountState")
+      .withIndex("by_status", (q) => q.eq("status", "deleting"))
+      .take(STUCK_SCAN_CAP);
+    let stuck = 0;
+    for (const row of rows) {
+      if (now - row.requestedAt < STUCK_DELETION_AGE_MS) continue;
+      if (!(await hasLiveJob(ctx, row.activePurgeJobId))) stuck++;
+    }
+    return { stuck, deleting: rows.length };
+  },
+});
+
+/**
+ * Daily cron-driven re-drive (`convex/crons.ts`): reschedules `purge` for
+ * every `deleting` row that is both older than `STUCK_DELETION_AGE_MS` AND
+ * has no live scheduled `purge` job (`activePurgeJobId` missing, or naming a
+ * `_scheduled_functions` row that is no longer `pending`/`inProgress` --
+ * e.g. a process crash between `recordPurgeFailure` and the retry's own
+ * `ctx.scheduler.runAfter` call, or between the app-data purge loop's
+ * `MAX_STEPS_PER_RUN` reschedule and ITS `setActivePurgeJob` call). Bounded
+ * to `STUCK_DELETION_REDRIVE_PAGE` reschedules per run (contract-fixed) so
+ * a bad day cannot flood the scheduler. A row with a genuinely live chain is
+ * never double-scheduled: `hasLiveJob` is checked for every candidate before
+ * rescheduling.
+ */
+export const reDriveStuckDeletions = internalMutation({
+  args: {},
+  returns: v.object({ rescheduled: v.number() }),
+  handler: async (ctx) => {
+    const now = Date.now();
+    const rows = await ctx.db
+      .query("accountState")
+      .withIndex("by_status", (q) => q.eq("status", "deleting"))
+      .take(STUCK_SCAN_CAP);
+    let rescheduled = 0;
+    for (const row of rows) {
+      if (rescheduled >= STUCK_DELETION_REDRIVE_PAGE) break;
+      if (now - row.requestedAt < STUCK_DELETION_AGE_MS) continue;
+      if (await hasLiveJob(ctx, row.activePurgeJobId)) continue; // A live chain is not double-scheduled.
+      const jobId = await ctx.scheduler.runAfter(0, internal.account.purge, { userId: row.userId });
+      await ctx.db.patch(row._id, { activePurgeJobId: jobId });
+      rescheduled++;
+    }
+    return { rescheduled };
   },
 });
 
@@ -765,11 +1098,32 @@ export const finishPurge = internalMutation({
 /**
  * Deliberately uses `getAuthUserId` (not `requireUserId`): this is read by a
  * still-open tab WHILE the account is tombstoned, so it must not throw for
- * the very state it exists to report.
+ * the very state it exists to report. (An already-open tab's JWT keeps
+ * validating for the rest of its own lifetime even after `requestDeletion`
+ * revokes the underlying session row; 6b-4a's `beforeSessionCreation` gate
+ * only blocks a brand-NEW sign-in, so this read stays reachable exactly
+ * when it needs to be.)
+ *
+ * `inboxDeleted` must be read literally, not inferred from `status`
+ * (6b-4b, D115): `status: "deleted"` means Recoup's own side (app data +
+ * auth rows) is fully gone, which now happens even when the AgentMail
+ * inbox delete permanently failed after its retry budget -- that case is
+ * reported as `status: "deleted", inboxDeleted: false`, never silently
+ * rounded up to `true`. See `purge`'s own docstring for the full state
+ * table.
  */
 export const deletionStatus = query({
   args: {},
-  returns: v.union(v.null(), v.object({ status: accountStateStatus, inboxDeleted: v.optional(v.boolean()), attempts: v.number() })),
+  returns: v.union(
+    v.null(),
+    v.object({
+      status: accountStateStatus,
+      inboxDeleted: v.optional(v.boolean()),
+      // T18.4 (D115 6b-5): reported literally, same truthfulness rule as `inboxDeleted` above -- never coerced to `true`.
+      mailDataPurged: v.optional(v.boolean()),
+      attempts: v.number(),
+    }),
+  ),
   handler: async (ctx) => {
     const userId = await getAuthUserId(ctx);
     if (!userId) return null;
@@ -778,6 +1132,6 @@ export const deletionStatus = query({
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .first();
     if (!row) return null; // Active account: no tombstone.
-    return { status: row.status, inboxDeleted: row.inboxDeleted, attempts: row.attempts };
+    return { status: row.status, inboxDeleted: row.inboxDeleted, mailDataPurged: row.mailDataPurged, attempts: row.attempts };
   },
 });
