@@ -4,7 +4,7 @@ import type { FunctionReturnType } from "convex/server";
 import { Link } from "react-router-dom";
 import { api } from "../../convex/_generated/api";
 import { useNow, when } from "../lib/ui";
-import { fmt } from "./Money";
+import { fmt } from "../lib/money";
 import { frameButtonClass } from "./shell/nav";
 
 type ActivityEvent = FunctionReturnType<typeof api.insights.activity>[number];

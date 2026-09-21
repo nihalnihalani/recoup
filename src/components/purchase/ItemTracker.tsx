@@ -7,7 +7,7 @@ import type { Id } from "../../../convex/_generated/dataModel";
 import { PriceChart } from "../charts/PriceChart";
 import { StatusSteps } from "../charts/StatusSteps";
 import { DeltaBadge } from "../DeltaBadge";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 import { ProductThumb } from "../ProductThumb";
 import { boughtVerdict, priceStats, type VerdictTone } from "../../lib/priceStats";
 import {

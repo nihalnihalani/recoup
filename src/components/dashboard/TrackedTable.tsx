@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 import { ProductThumb } from "../ProductThumb";
 import { StoreAvatar } from "../StoreAvatar";
 import { cardClass, cardTitleClass } from "../../lib/ui";

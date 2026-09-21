@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { AreaChart, type AreaTone } from "../charts/AreaChart";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 import { cardClass, shortDay } from "../../lib/ui";
 import { Icon, type IconName } from "./icons";
 import { claimableGapSeries, mainCurrency, openDropCents, perDay, startOfDay, watchedTotalSeries } from "./model";

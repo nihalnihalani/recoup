@@ -1,7 +1,7 @@
 import type { FunctionReturnType } from "convex/server";
 import type { api } from "../../../convex/_generated/api";
 import { AreaChart } from "../charts/AreaChart";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 import { day } from "../../lib/ui";
 import { Chip, IconTile, smallLabelClass } from "./parts";
 import { storeInfo } from "../../lib/stores";

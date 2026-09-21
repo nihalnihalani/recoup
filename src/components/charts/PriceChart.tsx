@@ -1,6 +1,6 @@
 import { useId, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 import { shortDay, useMeasuredWidth, useNow, when } from "../../lib/ui";
 
 type Point = { at: number; cents: number };

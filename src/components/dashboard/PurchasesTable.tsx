@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { WindowMeter } from "../charts/WindowMeter";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 import { ProductThumb } from "../ProductThumb";
 import { cardClass, cardTitleClass } from "../../lib/ui";
 import { storeInfo } from "../../lib/stores";

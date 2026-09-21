@@ -2,7 +2,7 @@ import { useId, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../../convex/_generated/api";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 import { ErrorBox } from "../States";
 import { StoreAvatar } from "../StoreAvatar";
 import { storeInfo } from "../../lib/stores";

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 import { cardClass, cardTitleClass, when } from "../../lib/ui";
 import { storeInfo } from "../../lib/stores";
 import { Icon, type IconName } from "./icons";

@@ -1,5 +1,5 @@
 import type { TrackedItem } from "./ItemTracker";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 import { cardClass, tableHeadClass } from "../../lib/ui";
 import { BoxIcon, CardHeading } from "./parts";
 

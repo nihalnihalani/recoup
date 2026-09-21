@@ -1,4 +1,4 @@
-import { fmt } from "./Money";
+import { fmt } from "../lib/money";
 import { percent, pillBadClass, pillGoodClass, pillMutedClass } from "../lib/ui";
 
 /**

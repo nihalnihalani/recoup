@@ -1,5 +1,5 @@
 import type { Doc } from "../../../convex/_generated/dataModel";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 import { when } from "../../lib/ui";
 import { ClaimIcon, type ClaimGlyph } from "./icons";
 

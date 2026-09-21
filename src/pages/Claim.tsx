@@ -13,7 +13,7 @@ import { Composer, PacketRow } from "../components/claim/Composer";
 import { MoneyForm } from "../components/claim/MoneyForm";
 import { ClaimTimeline } from "../components/claim/Timelines";
 import { DeltaBadge } from "../components/DeltaBadge";
-import { fmt } from "../components/Money";
+import { fmt } from "../lib/money";
 import { Empty, ErrorBox, Loading } from "../components/States";
 import { bigNumberClass, day, errorText, pageTitleClass, secondaryButtonClass, when } from "../lib/ui";
 

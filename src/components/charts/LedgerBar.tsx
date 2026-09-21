@@ -1,5 +1,5 @@
 import { useId } from "react";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 
 /**
  * One claim's money as a single stacked bar: confirmed (green, solid), promised but

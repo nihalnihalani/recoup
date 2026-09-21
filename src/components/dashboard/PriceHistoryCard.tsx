@@ -5,7 +5,7 @@ import { Link } from "react-router-dom";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { MultiLineChart } from "../charts/MultiLineChart";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 import { ProductThumb } from "../ProductThumb";
 import { StoreAvatar } from "../StoreAvatar";
 import { cardClass, cardTitleClass, primaryButtonClass } from "../../lib/ui";

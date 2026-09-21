@@ -5,7 +5,7 @@ import type { FunctionReturnType } from "convex/server";
 import { api } from "../../../convex/_generated/api";
 import { AreaChart } from "../charts/AreaChart";
 import { MarketHistory } from "./MarketHistory";
-import { fmt } from "../Money";
+import { fmt } from "../../lib/money";
 import { ProductThumb } from "../ProductThumb";
 import { ErrorBox } from "../States";
 import { StoreAvatar } from "../StoreAvatar";
