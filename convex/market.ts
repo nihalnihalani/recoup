@@ -35,7 +35,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { ownedWatch, requireUserId } from "./lib/access";
 import { isTombstoned } from "./lib/accountState";
 import { tryCharge, tryConsumeGlobalBudget } from "./lib/budget";
-import { cleanStoreUrl } from "./lib/offerMatch";
+import { cleanStoreUrl, FIND_MARKER, registrableHost, sameStore } from "./lib/offerMatch";
 import { parseSnapshot, flattenHistory, hostOf, type MarketSnapshot } from "./lib/shopsavvy";
 import { marketState } from "./schema";
 import {
@@ -192,7 +192,12 @@ const storeArg = v.object({
   cents: v.optional(v.number()),
   currency: v.optional(v.string()),
   observedAt: v.optional(v.number()),
+  /** From T04's `MarketOffer.availability` (T13): undefined when the provider did not state one, treated as in stock. */
+  inStock: v.optional(v.boolean()),
 });
+
+/** Fixed note on a ShopSavvy-sourced candidate the provider reports out of stock (T13/P04): never priced, so it can never become "best"; still shown, qualified. */
+const OUT_OF_STOCK_NOTE = "Out of stock according to ShopSavvy; confirm it is the same item";
 
 /**
  * The transactional claim (D71). Both the public `refresh` and the automatic
@@ -338,16 +343,29 @@ export const recordSnapshot = internalMutation({
     // across the watch's whole offer list, not just this call's additions.
     let added = 0;
     if (stores.length > 0) {
-      const existingOffers = await ctx.db
-        .query("offers")
-        .withIndex("by_watch", (q) => q.eq("watchId", watchId))
-        .take(MAX_OFFERS_PER_WATCH + MARKET_MAX_STORES);
+      // Own-store exclusion is enforced here too (not only by `lookup`'s pre-filtering, T13/P04):
+      // this mutation is the actual write path, so it is the authoritative gate. Reduced to a
+      // registrable host so a watch on `shop.acme.example` still excludes a "competitor" row that
+      // is really just `acme.example` under a different subdomain.
+      const ownDomain = registrableHost(hostOf(watch.productUrl) ?? watch.merchantDomain) ?? watch.merchantDomain;
+      // by_watch rows include the offers.ts find-marker (storeDomain "~find"); it must not count
+      // toward the per-watch cap or collide with a real store's dedupe key.
+      const existingOffers = (
+        await ctx.db
+          .query("offers")
+          .withIndex("by_watch", (q) => q.eq("watchId", watchId))
+          .take(MAX_OFFERS_PER_WATCH + MARKET_MAX_STORES)
+      ).filter((r) => r.storeDomain !== FIND_MARKER);
       const known = new Set(existingOffers.map((r) => r.storeDomain));
       let total = existingOffers.length;
       for (const store of stores.slice(0, MARKET_MAX_STORES)) {
         if (total >= MAX_OFFERS_PER_WATCH) break;
+        if (sameStore(store.storeDomain, ownDomain)) continue;
         if (known.has(store.storeDomain)) continue;
         known.add(store.storeDomain);
+        // A store ShopSavvy reports out of stock is never priced (T13/P04): it can never become
+        // "best" this way, and is still shown, qualified by the note.
+        const priced = store.inStock !== false;
         await ctx.db.insert("offers", {
           watchId,
           userId: watch.userId,
@@ -356,10 +374,10 @@ export const recordSnapshot = internalMutation({
           title: store.retailer,
           status: "candidate",
           source: "shopsavvy",
-          lastCents: store.cents,
-          currency: store.currency,
+          lastCents: priced ? store.cents : undefined,
+          currency: priced ? store.currency : undefined,
           lastCheckedAt: store.observedAt,
-          note: "Listed by ShopSavvy; confirm it is the same item",
+          note: priced ? "Listed by ShopSavvy; confirm it is the same item" : OUT_OF_STOCK_NOTE,
         });
         added++;
         total++;
@@ -440,7 +458,13 @@ export const lookup = internalAction({
       return null;
     }
 
-    const ownDomain = hostOf(watch.productUrl) ?? watch.merchantDomain;
+    // Reduced to a registrable host (T13/P04): `hostOf` alone returns the full hostname (e.g.
+    // `shop.acme.example`), which would never equal a candidate store's already-registrable
+    // `cleanStoreUrl().storeDomain` (`acme.example`) and so would let the watch's own store back in
+    // as a "competitor" whenever the watched product page sits on a subdomain. `recordSnapshot`
+    // re-applies this same exclusion as the authoritative gate; this pass just avoids fetching a
+    // needless own-store candidate in the common case.
+    const ownDomain = registrableHost(hostOf(watch.productUrl) ?? watch.merchantDomain) ?? watch.merchantDomain;
     const points = flattenHistory(snapshot, watch.currency)
       .slice(-MARKET_MAX_POINTS)
       .map((p) => {
@@ -464,12 +488,13 @@ export const lookup = internalAction({
       cents?: number;
       currency?: string;
       observedAt?: number;
+      inStock?: boolean;
     }> = [];
     for (const offer of snapshot.offers) {
       // A marketplace seller's listing is not the store's own price.
       if (offer.seller !== null || offer.productUrl === null) continue;
       const cleaned = cleanStoreUrl(offer.productUrl);
-      if (!cleaned || cleaned.storeDomain === ownDomain) continue;
+      if (!cleaned || sameStore(cleaned.storeDomain, ownDomain)) continue;
       stores.push({
         retailer: offer.retailer,
         storeDomain: cleaned.storeDomain,
@@ -477,6 +502,8 @@ export const lookup = internalAction({
         cents: offer.cents ?? undefined,
         currency: offer.currency ?? undefined,
         observedAt: offer.observedAt ?? undefined,
+        // `null`/"in" both mean in stock (shopsavvy.ts's own convention); anything else stated is out of stock.
+        inStock: offer.availability === null || offer.availability === "in",
       });
     }
 

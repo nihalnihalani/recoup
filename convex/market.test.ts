@@ -7,6 +7,7 @@ import {
   MARKET_MAX_ATTEMPTS,
   MARKET_REFRESH_MIN_AGE_MS,
   MARKET_RETRY_BACKOFF_MS,
+  MAX_OFFERS_PER_WATCH,
 } from "./limits";
 
 /**
@@ -387,6 +388,218 @@ describe("rows written on success", () => {
     const rows = await marketRows(t, watchId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ source: "shopsavvy", observedAt: T0, retrievedAt: T0 });
+  });
+});
+
+async function offerRows(t: T, watchId: Id<"watches">) {
+  return await t.run((ctx) => ctx.db.query("offers").withIndex("by_watch", (q) => q.eq("watchId", watchId)).collect());
+}
+
+describe("own-store exclusion (T13/P04)", () => {
+  /** A watch whose product page is on a DIFFERENT subdomain than "www" -- `seedWatch` always uses "www.acme.example". */
+  async function subdomainWatch(t: T, userId: Id<"users">) {
+    return await t.run((ctx) =>
+      ctx.db.insert("watches", {
+        userId,
+        name: "Acme Down Jacket",
+        productUrl: "https://shop.acme.example/p/down-jacket",
+        merchantDomain: "acme.example",
+        status: "active",
+        nextCheckAt: T0 + 3_600_000,
+        currency: "USD",
+      }),
+    );
+  }
+
+  it("recordSnapshot -- the authoritative write path -- excludes a store on the same registrable host as the product page, across subdomains", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await subdomainWatch(t, userId);
+    await t.run((ctx) => ctx.db.patch(watchId, { marketState: "running" }));
+
+    const result = await t.mutation(internal.market.recordSnapshot, {
+      watchId,
+      outcome: "success",
+      points: [],
+      stores: [
+        {
+          retailer: "Acme (own store, another subdomain)",
+          storeDomain: "acme.example",
+          productUrl: "https://acme.example/p/down-jacket",
+          cents: 19_999,
+          currency: "USD",
+          observedAt: T0,
+        },
+        {
+          retailer: "Other Store",
+          storeDomain: "other-store.example",
+          productUrl: "https://other-store.example/p/down-jacket",
+          cents: 17_999,
+          currency: "USD",
+          observedAt: T0,
+        },
+      ],
+    });
+
+    expect(result.stores).toBe(1);
+    expect((await offerRows(t, watchId)).map((o) => o.storeDomain)).toEqual(["other-store.example"]);
+  });
+
+  it("lookup() end to end also excludes an own-store offer found on a subdomain of the watched product's host", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await subdomainWatch(t, userId);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    const offer = (url: string, retailer: string, price: number) => ({
+      URL: url,
+      retailer,
+      price,
+      currency: "USD",
+      timestamp: new Date(T0).toISOString(),
+      availability: "in",
+      condition: null,
+      seller: null,
+      history: [],
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          success: true,
+          data: [
+            {
+              title_short: "Down Jacket",
+              offers: [
+                offer("https://outlet.acme.example/p/down-jacket", "Acme Outlet", 89.99),
+                offer("https://other-store.example/p/down-jacket", "Other Store", 79.99),
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+
+    await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
+    await t.action(internal.market.lookup, { watchId });
+
+    expect((await offerRows(t, watchId)).map((o) => o.storeDomain)).toEqual(["other-store.example"]);
+  });
+});
+
+describe("availability (T13/P04)", () => {
+  it("inserts an out-of-stock ShopSavvy store unpriced with a qualifying note; an in-stock one keeps its price", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await t.run((ctx) => ctx.db.patch(watchId, { marketState: "running" }));
+
+    const result = await t.mutation(internal.market.recordSnapshot, {
+      watchId,
+      outcome: "success",
+      points: [],
+      stores: [
+        {
+          retailer: "Out Of Stock Store",
+          storeDomain: "oos.example",
+          productUrl: "https://oos.example/p",
+          cents: 5_000,
+          currency: "USD",
+          observedAt: T0,
+          inStock: false,
+        },
+        {
+          retailer: "In Stock Store",
+          storeDomain: "instock.example",
+          productUrl: "https://instock.example/p",
+          cents: 6_000,
+          currency: "USD",
+          observedAt: T0,
+          inStock: true,
+        },
+      ],
+    });
+
+    expect(result.stores).toBe(2);
+    const rows = await offerRows(t, watchId);
+    const oos = rows.find((o) => o.storeDomain === "oos.example")!;
+    expect(oos.lastCents).toBeUndefined();
+    expect(oos.currency).toBeUndefined();
+    expect(oos.note).toMatch(/out of stock/i);
+    const inStock = rows.find((o) => o.storeDomain === "instock.example")!;
+    expect(inStock.lastCents).toBe(6_000);
+  });
+});
+
+describe("per-watch offer cap (T13)", () => {
+  it("holds under a burst of new candidates once the watch already has MAX_OFFERS_PER_WATCH stores", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await t.run(async (ctx) => {
+      await ctx.db.patch(watchId, { marketState: "running" });
+      for (let i = 0; i < MAX_OFFERS_PER_WATCH; i++) {
+        await ctx.db.insert("offers", {
+          watchId,
+          userId,
+          storeDomain: `store${i}.example`,
+          productUrl: `https://store${i}.example/p`,
+          title: `Store ${i}`,
+          status: "candidate",
+        });
+      }
+    });
+
+    const burst = Array.from({ length: 10 }, (_, i) => ({
+      retailer: `New Store ${i}`,
+      storeDomain: `newstore${i}.example`,
+      productUrl: `https://newstore${i}.example/p`,
+      cents: 1_000 + i,
+      currency: "USD",
+      observedAt: T0,
+    }));
+    const result = await t.mutation(internal.market.recordSnapshot, { watchId, outcome: "success", points: [], stores: burst });
+
+    expect(result.stores).toBe(0);
+    expect(await offerRows(t, watchId)).toHaveLength(MAX_OFFERS_PER_WATCH);
+  });
+
+  it("does not re-add a store the user rejected as a second candidate row", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    const rejectedId = await t.run(async (ctx) => {
+      await ctx.db.patch(watchId, { marketState: "running" });
+      return await ctx.db.insert("offers", {
+        watchId,
+        userId,
+        storeDomain: "rejected.example",
+        productUrl: "https://rejected.example/p",
+        title: "Rejected Store",
+        status: "rejected",
+      });
+    });
+
+    await t.mutation(internal.market.recordSnapshot, {
+      watchId,
+      outcome: "success",
+      points: [],
+      stores: [
+        {
+          retailer: "Rejected Store",
+          storeDomain: "rejected.example",
+          productUrl: "https://rejected.example/p",
+          cents: 4_000,
+          currency: "USD",
+          observedAt: T0,
+        },
+      ],
+    });
+
+    const rows = await offerRows(t, watchId);
+    const matches = rows.filter((o) => o.storeDomain === "rejected.example");
+    expect(matches).toHaveLength(1);
+    expect(matches[0]._id).toBe(rejectedId);
+    expect(matches[0].status).toBe("rejected");
   });
 });
 
