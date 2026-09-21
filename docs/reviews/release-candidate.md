@@ -31,13 +31,19 @@ Model (self-reported from my system prompt): Sonnet 5 (claude-sonnet-5)
 > moves to the commit after T18.6; T25's manifest is re-issued as
 > `rc-2026-09-21.2` (tags never move)."*
 >
-> **Everything below remains an accurate, truthful record of what was
-> verified against commit `3f5f739`** — every gate, hash, smoke result and
-> backup/restore proof is real and still holds for that exact commit. It is
-> `3f5f739` itself that is no longer the team's intended release candidate.
-> Do not act on §13's "single remaining action" until a `rc-2026-09-21.2`
-> tag/manifest exists. See §14 for exactly what changes and what carries
-> over unchanged when T18.6 lands.
+> **Everything below (§1–§14) remains an accurate, truthful record of what
+> was verified against commit `3f5f739`** — every gate, hash, smoke result
+> and backup/restore proof is real and still holds for that exact commit. It
+> is `3f5f739` itself that is no longer the team's intended release
+> candidate.
+
+## `rc-2026-09-21.2` is now the current candidate — read this first
+
+T18.6 (D131, wave 12 close) landed and is gated. Per §14's playbook below,
+the candidate is re-issued as **`rc-2026-09-21.2`** on commit **`357dc37`**.
+**§15 is the current manifest section — read it before anything below.**
+§1–§14 stay as the historical record for `rc-2026-09-21`/`3f5f739`; the tag
+`rc-2026-09-21` itself is untouched ("tags never move").
 
 ## 1. Candidate identity
 
@@ -442,3 +448,120 @@ outputs):**
   e.g. F-T25-1, F-T18.4-1, F-D74-1, F-T24d-1, F-T23-1, F-T18.1-1).
 - A fresh `git tag -a rc-2026-09-21.2 <new-hash> -m ...` — **never** move or
   force-update the existing `rc-2026-09-21` tag (D129: "tags never move").
+
+## 15. `rc-2026-09-21.2` — the current candidate (D131, wave 12 close)
+
+Produced by following §14's playbook against the hash the lead supplied.
+This section is the **current** manifest; §1–§14 above are historical for
+`rc-2026-09-21`/`3f5f739`.
+
+### 15.1 Candidate identity
+
+| | |
+|---|---|
+| Candidate SHA | `357dc373ced764ef59a14a785055663315d8d8ee` (short `357dc37`) — D131's "Candidate for `rc-2026-09-21.2`" |
+| Tag | `rc-2026-09-21.2` (annotated, pushed to `origin`); `rc-2026-09-21` is untouched and still points at `3f5f739` |
+| Verified code-tip | `git diff 357dc37 origin/main --stat -- convex src scripts patches package.json` → **empty**. The two commits after `357dc37` on `origin/main` at verification time (`23dbebb` "wave 12 close (D131)") touch only `docs/team/{DECISIONS,PLAN,VERIFICATION}.md` |
+| What changed since `3f5f739` | T18.6 (commits `a1d6670`…`357dc37`): B-9 (`purgeOutbound({outboundId?, messageId?})`; `cleanupFinalizedOutbound` deletes a purged message's events too), B-8 (`mailEvents.onEvent` purges orphaned raw events for an unmapped message id), B-1 (`policies.insertSnapshot` write-time tombstone gate), B-6 (`purchases.board` claims-read budget, `MAX_BOARD_CLAIMS_TOTAL`), B-2/B-3/B-4/B-5 (profiles provisioning gates/error handling/stale-reclaim), B-7 (`docs/ops/RUNBOOK.md` §12 bounds its own example query), and **F-T25-1** (`scripts/smoke.mjs` excludes `DOCUMENTED_EXAMPLE_HOST` — see 15.4). Full file list: `convex/{account,mailEvents,mailPurge,policies,profiles,purchases}.ts` + their `.test.ts` files, `patches/@agentmail+convex+0.1.0.patch`, `scripts/smoke.mjs`, `docs/ops/RUNBOOK.md`. `convex/schema.ts` — **unchanged** (`git diff 3f5f739 357dc37 -- convex/schema.ts` is empty) — this is why no backup/restore re-run was needed (15.3). `convex/crons.ts`, `convex/lib/authMigrate.ts`, `convex/market.ts` — also unchanged, so §8/§9 above still apply verbatim. |
+
+### 15.2 Toolchain and gates (fresh detached worktree at `357dc37`)
+
+| | |
+|---|---|
+| `node -v` / `npm -v` / `.nvmrc` | `v25.2.1` / `11.6.2` / `22` (same as §2; F-T23-1 unchanged) |
+| `sha256sum package-lock.json` | `36352508cb1419cd58f5aa4f7dfd6172547af6ca405d8d267589dbb1123ca719` — **identical** to `3f5f739`'s (T18.6 touched no dependency) |
+
+| Step | Result | Duration |
+|---|---|---|
+| `npm ci` | OK, same postinstall patch-package output as §3 | 2s |
+| `npm run verify:patch` | OK | 0s |
+| **Manual patch-completeness check** (F-T18.4-1, `docs/ops/RELEASE.md` §2) | `grep -c purgeInbox` → 1; `grep -c purgeOutbound` → 2 (widened signature confirmed — `messageId` parameter present, matches D131's B-9 description); `grep -c by_inbox` on `schema.js` → 4 | — |
+| `npm run typecheck` | OK, clean | 6s |
+| `npm run lint -- --max-warnings=1` | OK, clean | 0s |
+| `npm run test:ci` | `[test:ci] OK - 1338 tests passed across 65 file(s)` — matches D131's "1337 pass + 1 expected fail" (1338 total) | 45s |
+| `npm run codegen:check` | `[codegen:check] OK - convex/_generated matches` — no drift | 8s |
+| `npm run build` | OK, `dist/` 708K, 20 files | 3s |
+
+All gates PASS.
+
+### 15.3 `dist/` hashes — byte-identical to `rc-2026-09-21`
+
+T18.6 touched only `convex/**`, `patches/**`, `scripts/smoke.mjs`, and
+`docs/ops/RUNBOOK.md` — no `src/**` file changed, so the built frontend is
+**byte-for-byte identical** to §4's hashes (verified: every one of the 20
+`dist/` file hashes from this build matches §4 exactly, filename-for-filename,
+including `dist/index.html` = `e8721eff…70ed96`). Not re-listed here to
+avoid duplication — see §4 for the full table.
+
+### 15.4 Static deploy + smoke — **7/7**
+
+```sh
+CONVEX_DEPLOYMENT=dev:adorable-lion-138 npx @convex-dev/static-hosting upload --dist dist
+```
+(same command as §6, not `npm run deploy` — the reasoning in §6/`RELEASE.md`
+§0 is unchanged) → `✨ Upload complete!`, 16s.
+
+| # | Check | Result | Detail |
+|---|---|---|---|
+| 0 | `GET /` | PASS | `200 text/html; charset=utf-8` |
+| 1 | `GET /watching` | PASS | `200 text/html; charset=utf-8` |
+| 2 | `GET /settings` | PASS | `200 text/html; charset=utf-8` |
+| 3 | `GET /claims/x` | PASS | `200 text/html; charset=utf-8` |
+| 4 | bundle references exactly one `.convex.cloud` host | **PASS** | `adorable-lion-138.convex.cloud` |
+| 5 | `POST /agentmail/webhook {} -> 401` | PASS | `got 401` |
+| 6 | `GET /.well-known/openid-configuration -> 200` | PASS | `got 200` |
+
+**Result: 7/7.** Check 4 now passes: `scripts/smoke.mjs` (commit `2d3b816`,
+"fix(F-T25-1)") excludes `DOCUMENTED_EXAMPLE_HOST =
+"happy-otter-123.convex.cloud"` by name before judging host uniqueness,
+citing exactly the root cause this task diagnosed (`node_modules/convex/src/
+react/client.ts:358`). **F-T25-1 is CLOSED.**
+
+### 15.5 Backup/restore — not re-run, by design
+
+`convex/schema.ts` is unchanged since `3f5f739` (confirmed: empty diff).
+Per the lead's instruction and this document's own §14 guidance ("the
+export→import mechanism ... is not tied to any specific application
+commit"), the backup/restore proof was **not re-run**. §7's proof (export
+4s/70,690 bytes, import 21s/670 docs, identical `ops:backlog`/smoke
+before/after, E2E lead re-seeded) stands as current evidence for
+`adorable-lion-138`'s backup/restore mechanism.
+
+### 15.6 Environment presence matrix — unchanged
+
+Re-checked with `npx convex env list --deployment adorable-lion-138`
+(names only): identical set to §5 — `FIRECRAWL_API_KEY`, `AGENTMAIL_API_KEY`,
+`OPENAI_API_KEY`, `JWT_PRIVATE_KEY`, `JWKS`, `SITE_URL`, `E2E_SEED_ENABLED`
+present; `AGENTMAIL_WEBHOOK_SECRET`, `ALERTS_INBOX_ID`, `SHOPSAVVY_API_KEY`,
+`AGENTMAIL_BASE_URL`, `APP_URL` absent. T18.6 added no new env var. §5's
+table applies verbatim; `cool-oyster-399` remains unknown/not verified.
+
+### 15.7 Migrations and crons — unchanged
+
+`convex/lib/authMigrate.ts`, `convex/market.ts`, `convex/crons.ts` are all
+unchanged since `3f5f739` (confirmed by diff). §8's migration list and §9's
+7-cron table apply verbatim to `357dc37`.
+
+### 15.8 Findings register update
+
+| Finding | Was | Now |
+|---|---|---|
+| **F-T25-1** (smoke.mjs bundle-host false positive) | LOW, open | **CLOSED** — fixed in `scripts/smoke.mjs` (commit `2d3b816`); confirmed live, 15.4 |
+| **B-9** (D129, MEDIUM — alert webhook events surviving 7-day purge) | MEDIUM, open | **CLOSED** — `purgeOutbound` widened, `cleanupFinalizedOutbound` deletes events too (D131) |
+| **B-1, B-2, B-3, B-4, B-5, B-6, B-7** (D129 LOWs) | LOW, open | **CLOSED** — all landed in T18.6 per D131 |
+| **F-T18.6-1** (new, D131) | — | **OPEN, LOW.** A `mailLog` row whose message has > 1,000 events cannot be cleared in one page and stays un-purged; noted in RUNBOOK. Bounded-but-incomplete cleanup, not a correctness bug (no data leaks past `deleted`, just slower to fully drain for a message with an unusually large event count) |
+| **F-T18.6-2** (new, D131) | — | **OPEN, LOW.** The `inboxProvision` rate-limiter unit is not released with the placeholder after a failed provisioning POST — a deliberate secondary throttle (fails safe toward "provision less often" after an error), not a defect |
+| Every other §11 LOW (F-T18.4-1, F-T18.1-1, F-D74-1, F-T24d-1, F-T23-1, F-T18.5-1) | LOW, open | **Still open, unchanged** — T18.6 did not touch any of these areas |
+
+**Zero open HIGH or CRITICAL findings.** Every open item is LOW.
+
+### 15.9 Production deployment — still NOT authorized, NOT performed
+
+Unchanged from §13: D83 item 6 stands. **The single remaining action:**
+
+```sh
+deploy rc-2026-09-21.2 to cool-oyster-399 and run scripts/smoke.mjs against it
+```
+
+`docs/ops/RELEASE.md` §5 carries the same statement and the concrete command
+sequence (now naming `rc-2026-09-21.2`).

@@ -15,18 +15,19 @@ smoke + backup/restore, all against the disposable `adorable-lion-138`
 only). Production deploy to `cool-oyster-399` is not authorized in this
 mission (D83 item 6) — see "The single remaining action" below.
 
-> **The candidate tag this file was written against, `rc-2026-09-21`, is
-> superseded.** `docs/team/DECISIONS.md` D129 (Opus checkpoint 6d, found
-> while this document was being written) requires one more fix pass —
-> **T18.6** — before the candidate is release-ready; the new candidate will
-> be tagged `rc-2026-09-21.2` (tags never move — `rc-2026-09-21` keeps
-> pointing at `3f5f739` permanently as a historical record). **The procedure
-> below is unchanged by this** — deploy order, the `CONVEX_DEPLOYMENT`
-> footgun, rollback limits, the manual patch check, and the four missing CI
-> secrets are all process documentation, independent of which commit is the
-> current candidate. Only the tag name in §5's final command changes. See
-> `docs/reviews/release-candidate.md`'s banner and §14 for the exact delta
-> once T18.6 lands.
+> **Update: `rc-2026-09-21.2` is now the current candidate.** T18.6 (D131,
+> commit `357dc37`) landed and closed the MEDIUM (B-9) and LOWs checkpoint
+> 6d found against `rc-2026-09-21`/`3f5f739`, including **F-T18.4-1's own
+> manual patch-completeness check below** (§2) — re-run against `357dc37`
+> and still passing (`purgeOutbound` now appears twice in `lib.js`, matching
+> its widened `{outboundId?, messageId?}` signature). `rc-2026-09-21` is
+> untouched and still points at `3f5f739` (tags never move) — it is a
+> historical record, not the deploy target. **The procedure below is
+> unchanged** — deploy order, the `CONVEX_DEPLOYMENT` footgun, rollback
+> limits, and the four missing CI secrets are all process documentation,
+> independent of which commit is the current candidate; only the tag name in
+> §5's final command changed (now `rc-2026-09-21.2`). Full delta:
+> `docs/reviews/release-candidate.md` §15.
 
 ## 0. Before you start
 
@@ -71,7 +72,8 @@ above before assuming any given invocation is safe to copy-paste.
    rollback does NOT undo").
 2. **Backend deploy (schema additive).** `npx convex deploy` from a clean
    detached worktree at the release tag (`git worktree add --detach <path>
-   rc-2026-09-21`, `npm ci` inside it first). This repo's schema convention
+   rc-2026-09-21.2` — or whatever tag is current, per the notice above —
+   `npm ci` inside it first). This repo's schema convention
    is additive-only (`docs/ops/RUNBOOK.md` §8.1), so this step never removes
    a field or breaks an in-flight older client.
 3. **Run both migrations**, in either order (both are independent,
