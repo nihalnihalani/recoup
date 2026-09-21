@@ -331,6 +331,14 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 
 **Contract:** `StatCards` renders `totals.byCurrency` (one line per currency, `primaryCurrency` first) instead of formatting the scoped `recoveredCents` with a guessed currency; `Purchase.tsx` passes `useCoarseNow()` as `now` to `purchases.get` so verdict staleness is real. Typecheck/lint clean; a `src/lib` unit test for the byCurrency formatter.
 
+### T16.1 — Checkpoint 6a MEDIUMs (D112 6a-1, 6a-2)
+**Owner:** sonnet-backend-2 · **Phase:** 3 (fix) · **Status:** in_progress
+**Files:** convex/lib/idempotency.ts (+test, new), convex/claims.ts, convex/replies.ts, convex/intake.ts (+tests), convex/inbound.ts (+test), convex/limits.ts, convex/lib/rateLimits.ts. Contract: D112 rows 6a-1 and 6a-2 verbatim.
+
+### T12.3 — Checkpoint 6a C3 test strength and LOW wiring gaps (D112 6a-3..6)
+**Owner:** sonnet-backend-3 · **Phase:** 3 (fix) · **Status:** in_progress
+**Files:** convex/priceWatch.test.ts, convex/purchases.ts (+test), convex/policies.ts (+test), convex/lib/schedule.ts (+test). Contract: D112 rows 6a-3..6a-6 verbatim.
+
 ### T16 — P07 retention (bounded, resumable, audit-preserving) plus P08 backend fixes: returns validators and string bounds on cla
 **Owner:** sonnet-backend · **Phase:** 2 · **Blocks on:** T12 · **High-risk:** True
 **Files:** convex/retention.ts, convex/retention.test.ts, convex/claims.ts, convex/claims.test.ts, convex/purchases.ts, convex/purchases.test.ts, convex/intake.ts, convex/intake.test.ts, convex/replies.ts, convex/replies.test.ts, convex/profiles.ts, convex/profiles.test.ts, convex/crons.ts, convex/lib/errors.ts
