@@ -138,63 +138,82 @@ test.describe("resilience", () => {
       return results.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
     }
 
-    // FINDING (real product defect, not a test issue): every authenticated
-    // page shares `Shell`/`Sidebar.tsx`/`TopBar.tsx`/`UserCard.tsx`, and
-    // several of their fixed `text-gray-400` labels on a white background
-    // fail WCAG 2 AA color contrast (axe `color-contrast`, impact
-    // "serious", 4.5:1 required for normal-size text) -- reproduced
-    // identically on Board/Watching/Settings/a Purchase/a Claim, on both
-    // desktop-chromium and mobile:
-    //   - Sidebar.tsx "Main menu" <h2> and TopBar.tsx's breadcrumb "Main
-    //     Menu" <li> and command-palette "Search anything…" placeholder:
-    //     #99a1af (text-gray-400) on #ffffff, 2.6:1.
-    //   - UserCard.tsx's "Inbox not set up yet" placeholder subtitle:
-    //     #99a1af (text-gray-400) on #ffffff, 2.6:1.
-    //   - NotificationBell's unread-count badge: #ffffff (text-on-accent)
-    //     on #ef4444 (bg-red-500), 3.76:1.
-    //   - src/App.tsx's <AuthLoading> "Loading…" splash: text-ink/50 on
-    //     bg-paper, 3.4:1 (its own dedicated fixme test below -- distinct
-    //     markup/component from the four above).
-    // None of these files are e2e/**'s to fix, so every axe test that hits
-    // them is `test.fixme` here rather than left red or silently loosened;
-    // see e2e/README.md and the traces under test-results/ for this run.
-    const CONTRAST_FIXME =
-      "shared shell components (Sidebar.tsx/TopBar.tsx/UserCard.tsx) render fixed text-gray-400-on-white " +
-      "labels that fail WCAG 2 AA color contrast (axe color-contrast/serious, 2.6:1 vs required 4.5:1) on " +
-      "every authenticated page; not e2e/**'s files to fix, flagged for the frontend owner";
+    // F-T20-1 (was FIXME, now fixed by T24a): every authenticated page
+    // shares `Shell`/`Sidebar.tsx`/`TopBar.tsx`/`UserCard.tsx`, and several
+    // of their `text-gray-400` labels on a white background failed WCAG 2 AA
+    // color contrast (axe `color-contrast`, impact "serious", 4.5:1 required
+    // for normal-size text) -- reproduced identically on Board/Watching/
+    // Settings/a Purchase/a Claim, on both desktop-chromium and mobile:
+    //   - Sidebar.tsx "Main menu" <h2>, TopBar.tsx's breadcrumb "Main Menu"
+    //     <li> and command-palette "Search anything…" placeholder, and
+    //     UserCard.tsx's "Inbox not set up yet" placeholder subtitle: were
+    //     #99a1af (text-gray-400) on #ffffff, 2.6:1 -- now text-gray-600
+    //     (#4a5565), 7.56:1.
+    //   - NotificationBell's unread-count badge: was #ffffff (text-on-accent)
+    //     on #ef4444 (bg-red-500), 3.76:1 -- now on #b91c1c (bg-red-700),
+    //     6.47:1.
+    //   - src/App.tsx's <AuthLoading> "Loading…" splash: was text-ink/50 on
+    //     bg-paper, 3.4:1 -- now text-ink/70, 6.60:1 (its own test below --
+    //     distinct markup/component from the four above).
+    // Settings/a Purchase/a Claim/AuthLoading had no other color-contrast
+    // violation once F-T20-1's own markup was fixed, so those four are real
+    // passing tests below. Board and Watching turned up NEW findings once
+    // F-T20-1's violations stopped masking them (axe only reports what it
+    // can currently see) -- these are in files outside T24a's ownership
+    // (Sidebar.tsx/TopBar.tsx/UserCard.tsx/NotificationBell.tsx/App.tsx's
+    // AuthLoading splash only), so they stay `test.fixme`:
+    //   - `src/components/dashboard/ActivityTimeline.tsx`'s per-event
+    //     timestamp (`<p class="mt-0.5 text-xs tabular-nums text-gray-400">`,
+    //     rendered on Board's "Recent activity" card): #99a1af on #ffffff,
+    //     2.6:1.
+    //   - `src/pages/Watching.tsx`'s "Watch a product" form helper text
+    //     (`<p class="text-xs text-gray-400">Works with retailers and
+    //     marketplaces alike...</p>`): #99a1af on #ffffff, 2.6:1.
+    const NEW_CONTRAST_FIXME_BASE =
+      "NEW finding once F-T20-1 was fixed (axe only reports what it can see; this was previously masked): " +
+      "#99a1af (text-gray-400) on #ffffff, 2.6:1 vs required 4.5:1 (axe color-contrast/serious); " +
+      "not T24a's files to fix (Sidebar.tsx/TopBar.tsx/UserCard.tsx/NotificationBell.tsx/App.tsx only), flagged for the frontend owner";
 
-    for (const [label, path] of [
-      ["Board", "/"],
-      ["Watching", "/watching"],
-      ["Settings", "/settings"],
-    ] as const) {
-      test.fixme(`${label} has no serious/critical accessibility violations -- ${CONTRAST_FIXME}`, async ({ leadPage: page }) => {
-        const serious = await gotoAndScan(page, path);
+    test.fixme(
+      `Board has no serious/critical accessibility violations -- ` +
+        `src/components/dashboard/ActivityTimeline.tsx's per-event timestamp ` +
+        `(<p class="mt-0.5 text-xs tabular-nums text-gray-400">, Board's "Recent activity" card). ${NEW_CONTRAST_FIXME_BASE}`,
+      async ({ leadPage: page }) => {
+        const serious = await gotoAndScan(page, "/");
         expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
-      });
-    }
+      },
+    );
 
-    test.fixme(`a Purchase page has no serious/critical accessibility violations -- ${CONTRAST_FIXME}`, async ({ leadPage: page }) => {
+    test.fixme(
+      `Watching has no serious/critical accessibility violations -- ` +
+        `src/pages/Watching.tsx's "Watch a product" form helper text ` +
+        `(<p class="text-xs text-gray-400">Works with retailers and marketplaces alike...</p>). ${NEW_CONTRAST_FIXME_BASE}`,
+      async ({ leadPage: page }) => {
+        const serious = await gotoAndScan(page, "/watching");
+        expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
+      },
+    );
+
+    test("Settings has no serious/critical accessibility violations", async ({ leadPage: page }) => {
+      const serious = await gotoAndScan(page, "/settings");
+      expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
+    });
+
+    test("a Purchase page has no serious/critical accessibility violations", async ({ leadPage: page }) => {
       const serious = await gotoAndScan(page, `/purchases/${seeded.claimPurchaseId}`);
       expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
     });
 
-    test.fixme(`a Claim page has no serious/critical accessibility violations -- ${CONTRAST_FIXME}`, async ({ leadPage: page }) => {
+    test("a Claim page has no serious/critical accessibility violations", async ({ leadPage: page }) => {
       const serious = await gotoAndScan(page, `/claims/${seeded.claimId}`);
       expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
     });
 
-    test.fixme(
-      "the AuthLoading splash has no serious/critical accessibility violations -- " +
-        "src/App.tsx's <AuthLoading> splash (\"Loading…\") fails WCAG 2 AA color contrast " +
-        "(text-ink/50 on bg-paper, 3.4:1 vs required 4.5:1, axe color-contrast/serious); " +
-        "not e2e/**'s file to fix, flagged for the frontend owner",
-      async ({ leadPage: page }) => {
-        await page.goto("/");
-        const results = await new AxeBuilder({ page }).analyze();
-        const serious = results.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
-        expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
-      },
-    );
+    test("the AuthLoading splash has no serious/critical accessibility violations", async ({ leadPage: page }) => {
+      await page.goto("/");
+      const results = await new AxeBuilder({ page }).analyze();
+      const serious = results.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
+      expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
+    });
   });
 });
