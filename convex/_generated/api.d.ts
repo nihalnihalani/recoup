@@ -53,6 +53,7 @@ import type * as priceWatch from "../priceWatch.js";
 import type * as profiles from "../profiles.js";
 import type * as purchases from "../purchases.js";
 import type * as replies from "../replies.js";
+import type * as testing from "../testing.js";
 import type * as tracking from "../tracking.js";
 import type * as watches from "../watches.js";
 
@@ -108,6 +109,7 @@ declare const fullApi: ApiFromModules<{
   profiles: typeof profiles;
   purchases: typeof purchases;
   replies: typeof replies;
+  testing: typeof testing;
   tracking: typeof tracking;
   watches: typeof watches;
 }>;
