@@ -125,12 +125,25 @@ export default function Board() {
           {watches === undefined || activity === undefined || overview === undefined ? (
             <StatCardsSkeleton />
           ) : (
-            <StatCards watches={watches} activity={activity} overview={overview} scoped={scoped} onlyExamples={onlyExamples} now={now} />
+            <StatCards
+              watches={watches}
+              activity={activity.events}
+              activityTruncated={activity.truncated}
+              activityWindowNote={activity.windowNote}
+              overview={overview}
+              scoped={scoped}
+              onlyExamples={onlyExamples}
+              now={now}
+            />
           )}
 
           <div className="grid gap-5 *:min-w-0 lg:grid-cols-3">
             <PriceHistoryCard now={now} />
-            {activity === undefined ? <ActivitySkeleton /> : <ActivityTimeline events={activity} />}
+            {activity === undefined ? (
+              <ActivitySkeleton />
+            ) : (
+              <ActivityTimeline events={activity.events} truncated={activity.truncated} windowNote={activity.windowNote} />
+            )}
           </div>
 
           {tracked === undefined ? <TrackedTableSkeleton /> : <TrackedTable rows={tracked} />}
@@ -141,7 +154,11 @@ export default function Board() {
             ) : (
               <PurchasesTable items={items} now={now} capped={overview.capped} />
             )}
-            {sources === undefined ? <SourcesSkeleton /> : <SourcesCard sources={sources} now={now} />}
+            {sources === undefined ? (
+              <SourcesSkeleton />
+            ) : (
+              <SourcesCard sources={sources.rows} truncated={sources.truncated} windowNote={sources.windowNote} now={now} />
+            )}
           </div>
         </>
       )}

@@ -5,7 +5,7 @@ import { cardClass, cardTitleClass, when } from "../../lib/ui";
 import { storeInfo } from "../../lib/stores";
 import { Icon, type IconName } from "./icons";
 import type { ActivityEvent } from "./model";
-import { Bone, controlClass, focusRing } from "./parts";
+import { Bone, controlClass, focusRing, RecentNote } from "./parts";
 
 const FIRST = 5;
 
@@ -75,7 +75,15 @@ function target(event: ActivityEvent): string | undefined {
   return undefined;
 }
 
-export function ActivityTimeline({ events }: { events: ActivityEvent[] }) {
+export function ActivityTimeline({
+  events,
+  truncated,
+  windowNote,
+}: {
+  events: ActivityEvent[];
+  truncated: boolean;
+  windowNote: string;
+}) {
   const [all, setAll] = useState(false);
   // Rows present at first paint stay still; only what arrives afterwards slides in.
   const [initial] = useState(() => new Set(events.map((event) => event.id)));
@@ -84,9 +92,12 @@ export function ActivityTimeline({ events }: { events: ActivityEvent[] }) {
   return (
     <section className={`${cardClass} flex flex-col p-5`} aria-labelledby="activity-title">
       <header className="flex items-center justify-between gap-3">
-        <h2 id="activity-title" className={cardTitleClass}>
-          Recent Activity
-        </h2>
+        <div className="flex min-w-0 items-center gap-2">
+          <h2 id="activity-title" className={cardTitleClass}>
+            Recent Activity
+          </h2>
+          {truncated && <RecentNote windowNote={windowNote} />}
+        </div>
         {events.length > FIRST && (
           <button type="button" onClick={() => setAll((value) => !value)} aria-expanded={all} aria-controls="activity-list" className={controlClass}>
             {all ? "Show fewer" : "View all"}

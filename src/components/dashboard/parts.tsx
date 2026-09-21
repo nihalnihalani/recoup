@@ -20,6 +20,19 @@ export function ExampleChip() {
 }
 
 /**
+ * Marks a section as a sampled window rather than the account's full history
+ * (D72: a truncated page is labelled, never presented as a total). `windowNote`
+ * is the server's description of exactly what was sampled, shown as a tooltip.
+ */
+export function RecentNote({ windowNote }: { windowNote: string }) {
+  return (
+    <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500" title={windowNote}>
+      Recent
+    </span>
+  );
+}
+
+/**
  * A price's move in percent: "▼ 4.2%" green when it fell, "▲" red when it rose, a
  * muted dash when unknown or flat. The arrow carries direction, not the colour.
  */

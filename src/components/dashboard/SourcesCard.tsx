@@ -1,10 +1,28 @@
 import { Link } from "react-router-dom";
 import { StoreAvatar } from "../StoreAvatar";
+import { fmt } from "../../lib/money";
 import { cardClass, cardTitleClass } from "../../lib/ui";
 import { storeInfo } from "../../lib/stores";
-import { agoLong } from "./model";
+import { agoLong, bestPrices } from "./model";
 import type { SourceRow } from "./model";
-import { Bone, controlClass } from "./parts";
+import { Bone, controlClass, RecentNote } from "./parts";
+
+/**
+ * The cheapest current price at this store, one chip per currency (D72: never
+ * summed or compared across currencies). The product it belongs to is the tooltip.
+ */
+function BestPrices({ row }: { row: SourceRow }) {
+  const bests = bestPrices(row.bests);
+  if (bests.length === 0) return null;
+  return (
+    <span
+      className="whitespace-nowrap text-xs font-semibold tabular-nums text-gray-700"
+      title={bests.map((b) => `${fmt(b.cents, b.currency)} — ${b.subject}`).join("; ")}
+    >
+      {bests.map((b) => fmt(b.cents, b.currency)).join(" · ")}
+    </span>
+  );
+}
 
 /** Share of checks at this store that produced a price. No checks yet reads gray, not red. */
 function Readability({ row }: { row: SourceRow }) {
@@ -28,14 +46,27 @@ function Readability({ row }: { row: SourceRow }) {
   );
 }
 
-export function SourcesCard({ sources, now }: { sources: SourceRow[]; now: number }) {
+export function SourcesCard({
+  sources,
+  truncated,
+  windowNote,
+  now,
+}: {
+  sources: SourceRow[];
+  truncated: boolean;
+  windowNote: string;
+  now: number;
+}) {
   return (
     <section className={`${cardClass} flex flex-col p-5`} aria-labelledby="sources-title">
       <header className="flex items-center justify-between gap-3">
-        <h2 id="sources-title" className={cardTitleClass}>
-          Stores
-          {sources.length > 0 && <span className="ml-2 font-medium tabular-nums text-gray-400">{sources.length}</span>}
-        </h2>
+        <div className="flex min-w-0 items-center gap-2">
+          <h2 id="sources-title" className={cardTitleClass}>
+            Stores
+            {sources.length > 0 && <span className="ml-2 font-medium tabular-nums text-gray-400">{sources.length}</span>}
+          </h2>
+          {truncated && <RecentNote windowNote={windowNote} />}
+        </div>
         <Link to="/watching" className={controlClass}>
           Add a store
         </Link>
@@ -65,7 +96,10 @@ export function SourcesCard({ sources, now }: { sources: SourceRow[]; now: numbe
                     {row.lastCheckedAt !== undefined && `, checked ${agoLong(row.lastCheckedAt, now)}`}
                   </p>
                 </div>
-                <Readability row={row} />
+                <div className="flex flex-col items-end gap-1">
+                  <BestPrices row={row} />
+                  <Readability row={row} />
+                </div>
               </li>
             );
           })}

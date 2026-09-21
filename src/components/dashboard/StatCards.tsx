@@ -5,7 +5,7 @@ import { cardClass, shortDay } from "../../lib/ui";
 import { Icon, type IconName } from "./icons";
 import { claimableGapSeries, mainCurrency, openDropCents, perDay, startOfDay, watchedTotalSeries } from "./model";
 import type { ActivityEvent, Item, Overview, SeriesPoint, Watch } from "./model";
-import { Bone } from "./parts";
+import { Bone, RecentNote } from "./parts";
 
 const WEEK = 7 * 86_400_000;
 /** insights.activity returns at most this many events; at the cap, older days are unknown. */
@@ -14,6 +14,7 @@ const FEED_CAP = 40;
 function StatCard({
   icon,
   title,
+  badge,
   value,
   delta,
   deltaTone,
@@ -22,6 +23,8 @@ function StatCard({
 }: {
   icon: IconName;
   title: string;
+  /** e.g. a `RecentNote` when the figure comes from a truncated, sampled window rather than the full account. */
+  badge?: ReactNode;
   value: string;
   delta: string;
   deltaTone: "good" | "bad" | "muted";
@@ -36,6 +39,7 @@ function StatCard({
           <Icon name={icon} className="size-[18px]" />
         </span>
         <h2 className="font-semibold text-gray-900">{title}</h2>
+        {badge}
       </header>
       <div className="my-4 border-t border-dashed border-gray-200" aria-hidden="true" />
       <div className="flex items-end justify-between gap-4">
@@ -58,6 +62,8 @@ function StatCard({
 export function StatCards({
   watches,
   activity,
+  activityTruncated,
+  activityWindowNote,
   overview,
   scoped,
   onlyExamples,
@@ -65,6 +71,9 @@ export function StatCards({
 }: {
   watches: Watch[];
   activity: ActivityEvent[];
+  /** Whether `activity` is a sampled window rather than the account's full history (D72): the alert count below is labelled, not presented as a total. */
+  activityTruncated: boolean;
+  activityWindowNote: string;
   overview: Overview;
   /** The bought items the money figures describe: real ones, or the example while there is nothing else. */
   scoped: Item[];
@@ -109,6 +118,7 @@ export function StatCards({
       <StatCard
         icon="bell"
         title="Price Drop Alerts"
+        badge={activityTruncated && <RecentNote windowNote={activityWindowNote} />}
         value={String(alerts.length)}
         delta={String(alertsToday)}
         deltaTone={alertsToday > 0 ? "good" : "muted"}

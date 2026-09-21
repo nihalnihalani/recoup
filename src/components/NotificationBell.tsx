@@ -7,7 +7,7 @@ import { useNow, when } from "../lib/ui";
 import { fmt } from "../lib/money";
 import { frameButtonClass } from "./shell/nav";
 
-type ActivityEvent = FunctionReturnType<typeof api.insights.activity>[number];
+type ActivityEvent = FunctionReturnType<typeof api.insights.activity>["events"][number];
 
 const NEWS_KINDS = [
   "price_drop",
@@ -115,7 +115,8 @@ function ago(at: number, now: number): string {
 
 /** Header bell: price drops, alerts and claim news, with a dot for what arrived since it was last opened. */
 export function NotificationBell() {
-  const events = useQuery(api.insights.activity);
+  const activity = useQuery(api.insights.activity);
+  const events = activity?.events;
   const now = useNow(60_000);
   const [open, setOpen] = useState(false);
   const [seenAt, setSeenAt] = useState(readSeen);
@@ -230,7 +231,14 @@ export function NotificationBell() {
           className="absolute right-0 top-full z-20 mt-2 flex max-h-[28rem] w-[22rem] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-lg outline-none"
         >
           <div className="mx-4 flex items-center justify-between gap-3 border-b border-dashed border-gray-200 py-3.5">
-            <p className="text-base font-semibold text-gray-900">Notifications</p>
+            <span className="flex min-w-0 items-center gap-2">
+              <p className="text-base font-semibold text-gray-900">Notifications</p>
+              {activity?.truncated && (
+                <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500" title={activity.windowNote}>
+                  Recent
+                </span>
+              )}
+            </span>
             {freshCount > 0 && (
               <span className="rounded-lg border border-gray-200 px-2 py-0.5 text-xs font-semibold text-gray-500 tabular-nums">
                 {freshCount} new

@@ -6,8 +6,14 @@ import { shortDay } from "../../lib/ui";
 export type Overview = FunctionReturnType<typeof api.tracking.overview>;
 export type Item = Overview["items"][number];
 export type Watch = FunctionReturnType<typeof api.watches.list>[number];
-export type ActivityEvent = FunctionReturnType<typeof api.insights.activity>[number];
-export type SourceRow = FunctionReturnType<typeof api.insights.sources>[number];
+/** `insights.activity`'s full result: a sampled window, flagged with `truncated`/`windowNote` when it was cut (D72). */
+export type ActivityResult = FunctionReturnType<typeof api.insights.activity>;
+export type ActivityEvent = ActivityResult["events"][number];
+/** `insights.sources`'s full result: same sampled-window shape as `ActivityResult`. */
+export type SourcesResult = FunctionReturnType<typeof api.insights.sources>;
+export type SourceRow = SourcesResult["rows"][number];
+/** One currency's cheapest current price at a store, from `SourceRow.bests`. Never summed or compared across currencies (D72). */
+export type BestPrice = { currency: string; cents: number; subject: string };
 export type BoardData = FunctionReturnType<typeof api.purchases.board>;
 export type PriceHistory = NonNullable<FunctionReturnType<typeof api.insights.priceHistory>>;
 export type HistoryStore = PriceHistory["stores"][number];
@@ -152,4 +158,11 @@ export function mainCurrency(currencies: string[]): string {
   const counts = new Map<string, number>();
   for (const c of currencies) counts.set(c, (counts.get(c) ?? 0) + 1);
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "USD";
+}
+
+/** A store row's `bests` as a sorted list, one entry per currency (D72: never summed or compared across currencies). */
+export function bestPrices(bests: SourceRow["bests"]): BestPrice[] {
+  return Object.entries(bests)
+    .map(([currency, best]) => ({ currency, ...best }))
+    .sort((a, b) => a.currency.localeCompare(b.currency));
 }
