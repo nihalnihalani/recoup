@@ -176,10 +176,24 @@ async function watchWindow(ctx: QueryCtx, item: Doc<"items">, now: number): Prom
   if (purchase.isExample) return { ok: false, permanent: true };
   if (purchase.status === "archived") return { ok: false, permanent: true };
   // D25: needs_review has no trustworthy purchasedAt yet, but confirming it
-  // is a normal, soon user action -- not permanent.
+  // is a normal, soon user action -- not permanent. C3/D107: this also covers
+  // an item with no productUrl yet on an unconfirmed purchase -- intake often
+  // leaves items linkless until the user reviews and confirms them, and
+  // `purchases.confirm` un-stamps the item's schedule (`clearItemSchedule`)
+  // the moment it does, so there is nothing "permanent" about this state.
   if (purchase.status !== "active" || purchase.purchasedAt === undefined) {
     return { ok: false, permanent: false };
   }
+
+  // C3(a)/D107 (Opus checkpoint-5 recheck, F1 resurrection): only past this
+  // point -- an ACTIVE, already-reviewed purchase -- is a still-missing
+  // product link treated as a standing fact (permanent). The old code ran
+  // this exact check in `eligibleItems`, BEFORE any purchase-status check at
+  // all, so it stamped every no-URL item a full year out (INELIGIBLE_REST_MS)
+  // even one belonging to a `needs_review` purchase the user had not yet had
+  // a chance to confirm -- the needs_review branch above never even ran for
+  // such an item.
+  if (!item.productUrl) return { ok: false, permanent: true };
 
   const policy = await latestPricePolicy(ctx, item.userId, purchase.merchantDomain);
   // No policy yet (still researching) is not permanent; it typically lands
@@ -233,10 +247,11 @@ export const eligibleItems = internalMutation({
     for (const item of items) {
       if (out.length >= FANOUT_LIMIT) break;
 
-      if (!item.productUrl) {
-        await ctx.db.patch(item._id, { nextCheckAt: now + INELIGIBLE_REST_MS });
-        continue;
-      }
+      // C3(a)/D107: the no-productUrl check used to live here, unconditionally,
+      // before any purchase-status check -- see `watchWindow`'s doc comment.
+      // It is now folded into `watchWindow` itself, below, so a `needs_review`
+      // purchase's linkless item gets the same transient (not permanent)
+      // treatment as every other "not yet reviewed" reason.
 
       const count = perUser.get(item.userId) ?? 0;
       if (count >= PRICE_CHECK_PER_USER_PER_TICK) {

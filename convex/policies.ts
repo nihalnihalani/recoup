@@ -17,6 +17,7 @@ import { requireUserId, ownedPolicy } from "./lib/access";
 import { MAX_WATCHES_PER_USER, POLICY_REFETCH_MIN_AGE_MS } from "./limits";
 import { normalizeDomain } from "./lib/policyText";
 import { charge, tryCharge } from "./lib/budget";
+import { clearMerchantItemSchedule } from "./lib/schedule";
 
 
 const firecrawl = new FirecrawlClient(components.firecrawl);
@@ -270,6 +271,21 @@ export const beginRefresh = internalMutation({
   },
 });
 
+/**
+ * C3(c)/D107: wraps `clearMerchantItemSchedule` for `refresh` (an action,
+ * with no `ctx.db` of its own) to call after a fresh price-adjustment
+ * snapshot lands. Unauthenticated on purpose: the only caller is `refresh`,
+ * which already resolved and owns `userId`.
+ */
+export const clearMerchantSchedule = internalMutation({
+  args: { userId: v.id("users"), merchantDomain: v.string() },
+  returns: v.null(),
+  handler: async (ctx, { userId, merchantDomain }) => {
+    await clearMerchantItemSchedule(ctx, userId, merchantDomain);
+    return null;
+  },
+});
+
 /** User-triggered re-research. Returns the id of the newly inserted snapshot. */
 export const refresh = action({
   args: { merchantDomain: v.string(), kind: policyKind },
@@ -281,7 +297,14 @@ export const refresh = action({
     if (!merchantDomain) throw new ConvexError("merchantDomain must be a domain like example.com");
     // Before anything paid: ownership and budget, in one transaction.
     await ctx.runMutation(internal.policies.beginRefresh, { userId, merchantDomain });
-    return await researchPolicy(ctx, { userId, merchantDomain, kind: args.kind });
+    const policyId = await researchPolicy(ctx, { userId, merchantDomain, kind: args.kind });
+    // C3(c)/D107: a refreshed price-adjustment snapshot may have just reopened
+    // (or newly opened) this merchant's watch window -- see `confirm`'s
+    // matching call for why this is scoped to that one kind.
+    if (args.kind === "price_adjustment") {
+      await ctx.runMutation(internal.policies.clearMerchantSchedule, { userId, merchantDomain });
+    }
+    return policyId;
   },
 });
 
@@ -310,6 +333,15 @@ export const confirm = mutation({
       confirmedByUser: true,
       ...(edited ? { passageStart: undefined, confidence: 0, userEdited: true } : {}),
     });
+    // C3(c)/D107: confirming a price-adjustment snapshot (a fresh windowDays,
+    // or one the user just typed in themselves) can reopen this merchant's
+    // watch window; un-stamp its items so the next tick reconsiders them
+    // instead of resting behind whatever `eligibleItems` last gave them.
+    // Confirming a `returns` snapshot never affects price-watch eligibility
+    // (see `priceWatch.watchWindow`), so it is not worth the extra reads.
+    if (policy.kind === "price_adjustment") {
+      await clearMerchantItemSchedule(ctx, userId, policy.merchantDomain);
+    }
     return null;
   },
 });

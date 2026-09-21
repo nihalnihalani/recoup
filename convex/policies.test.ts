@@ -102,6 +102,55 @@ describe("confirm", () => {
 
     await expect(asOther.mutation(api.policies.confirm, { policyId, channel: "email" })).rejects.toThrow();
   });
+
+  it("C3(c)/D107: confirming a price_adjustment snapshot clears this merchant's items' schedule stamp; a returns snapshot does not", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t, "Owner");
+    const merchantDomain = "clears.example";
+    const purchaseId = await t.run((ctx) =>
+      ctx.db.insert("purchases", { userId, merchant: "M", merchantDomain, currency: "USD", status: "active" }),
+    );
+    const itemId = await t.run((ctx) =>
+      ctx.db.insert("items", {
+        purchaseId, userId, name: "X", unitCents: 1_000, qty: 1, returned: false, nextCheckAt: Date.now() + 999_999,
+      }),
+    );
+
+    const priceId = await t.mutation(internal.policies.insertSnapshot, {
+      userId, merchantDomain, kind: "price_adjustment", channel: "email", passage: "", sourceUrl: `https://${merchantDomain}`, confidence: 0,
+    });
+    await as.mutation(api.policies.confirm, { policyId: priceId, channel: "email", windowDays: 14 });
+    expect((await t.run((ctx) => ctx.db.get(itemId)))!.nextCheckAt).toBeUndefined();
+
+    // Re-stamp, then confirm a RETURNS snapshot for the same merchant: price-watch
+    // eligibility never depends on a returns policy (see `priceWatch.watchWindow`),
+    // so this must not be touched.
+    await t.run((ctx) => ctx.db.patch(itemId, { nextCheckAt: Date.now() + 999_999 }));
+    const returnsId = await t.mutation(internal.policies.insertSnapshot, {
+      userId, merchantDomain, kind: "returns", channel: "email", passage: "", sourceUrl: `https://${merchantDomain}`, confidence: 0,
+    });
+    await as.mutation(api.policies.confirm, { policyId: returnsId, channel: "email", windowDays: 30 });
+    expect((await t.run((ctx) => ctx.db.get(itemId)))!.nextCheckAt).toBeDefined();
+  });
+});
+
+describe("clearMerchantSchedule (C3(c)/D107: internal wrapper `refresh` calls after a fresh snapshot lands)", () => {
+  it("un-stamps every item this user owns at the merchant", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const merchantDomain = "refreshed.example";
+    const purchaseId = await t.run((ctx) =>
+      ctx.db.insert("purchases", { userId, merchant: "M", merchantDomain, currency: "USD", status: "active" }),
+    );
+    const itemId = await t.run((ctx) =>
+      ctx.db.insert("items", {
+        purchaseId, userId, name: "X", unitCents: 1_000, qty: 1, returned: false, nextCheckAt: Date.now() + 999_999,
+      }),
+    );
+
+    await t.mutation(internal.policies.clearMerchantSchedule, { userId, merchantDomain });
+    expect((await t.run((ctx) => ctx.db.get(itemId)))!.nextCheckAt).toBeUndefined();
+  });
 });
 
 describe("refresh", () => {
