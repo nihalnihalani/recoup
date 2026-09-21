@@ -13,7 +13,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { exportPKCS8, generateKeyPair } from "jose";
 import { isRateLimitError } from "@convex-dev/rate-limiter";
 import { ConvexError } from "convex/values";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import { setup } from "./test.setup";
 import { authMailTransport } from "./lib/authMail";
 import { rateLimiter } from "./lib/rateLimits";
@@ -811,5 +811,55 @@ describe("checkpoint-4 recheck (D99) regression tests — T05.2", () => {
       );
       expect(unknownUsers).toHaveLength(0);
     });
+  });
+});
+
+describe("checkpoint 6b (D115) 6b-4a — beforeSessionCreation gates sign-in on the account-deletion tombstone", () => {
+  beforeAll(async () => {
+    process.env.SITE_URL = "https://recoup.example";
+    process.env.CONVEX_SITE_URL = "https://recoup-test.convex.site";
+    const { privateKey } = await generateKeyPair("RS256", { extractable: true });
+    process.env.JWT_PRIVATE_KEY = await exportPKCS8(privateKey);
+    process.env.ALERTS_INBOX_ID = "inbox_test";
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.E2E_SEED_ENABLED;
+  });
+
+  it("a requestDeletion'd user's sign-in throws the SAME ConvexError object shape (message and data, byte-for-byte) as an ordinary wrong password -- not merely the same string", async () => {
+    process.env.E2E_SEED_ENABLED = "true";
+    const t = setup();
+    const email = "n115-tombstoned@example.com";
+    const password = PASSWORD;
+    const { userId } = await t.action(internal.testing.seedUser, { email, password });
+    const as = t.withIdentity({ subject: `${userId}|session` });
+    await as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+
+    let tombstonedErr: unknown;
+    try {
+      await signIn(t, { flow: "signIn", email, password });
+    } catch (err) {
+      tombstonedErr = err;
+    }
+
+    // A genuine wrong-password case against a REAL (not-tombstoned) account, not merely an unknown address.
+    const otherEmail = "n115-other-account@example.com";
+    vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
+    await signIn(t, { flow: "signUp", email: otherEmail, password });
+    let wrongPasswordErr: unknown;
+    try {
+      await signIn(t, { flow: "signIn", email: otherEmail, password: "definitely-wrong-password" });
+    } catch (err) {
+      wrongPasswordErr = err;
+    }
+
+    expect(tombstonedErr).toBeInstanceOf(ConvexError);
+    expect(wrongPasswordErr).toBeInstanceOf(ConvexError);
+    expect((tombstonedErr as ConvexError<string>).data).toBe(WRONG_CREDENTIALS_MESSAGE);
+    expect((tombstonedErr as ConvexError<string>).data).toBe((wrongPasswordErr as ConvexError<string>).data);
+    expect((tombstonedErr as ConvexError<string>).message).toBe((wrongPasswordErr as ConvexError<string>).message);
+    expect(typeof (tombstonedErr as ConvexError<string>).data).toBe("string"); // no {kind, retryAfter} envelope -- not distinguishable from a rate limit either.
   });
 });

@@ -101,9 +101,11 @@ import { convexAuth, retrieveAccount } from "@convex-dev/auth/server";
 import type { GenericActionCtxWithAuthConfig } from "@convex-dev/auth/server";
 import type { Value } from "convex/values";
 import type { DataModel, Id } from "./_generated/dataModel";
+import type { QueryCtx } from "./_generated/server";
 import { normalizeEmail } from "./lib/email";
 import { authMail } from "./lib/authMail";
 import { rateLimiter } from "./lib/rateLimits";
+import { isTombstoned } from "./lib/accountState";
 
 /** Client-facing messages. Identical for known/unknown addresses by construction (D67/T05). */
 export const WRONG_CREDENTIALS_MESSAGE = "Wrong email or password";
@@ -288,4 +290,54 @@ const guardedPassword = ConvexCredentials<DataModel>({
 
 export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
   providers: [guardedPassword],
+  callbacks: {
+    /**
+     * 6b-4a (D115, checkpoint 6b): sign-in itself was NOT gated on the
+     * account-deletion tombstone -- only every APP-LEVEL query/mutation was
+     * (via `lib/access.ts`'s `requireUserId`, D77). A `deleting`/`deleted`
+     * user could still always mint a brand-new session with the correct
+     * password: right through `requestDeletion`'s own session revoke
+     * (reproduced by checkpoint 6b's F2a: a user who just called
+     * `requestDeletion` signs in again immediately and gets tokens), and
+     * forever after a permanently-failed inbox delete (F2b: the "zombie"
+     * case -- see `account.ts`'s `purge` docstring for how 6b-4b now also
+     * closes the account out on the auth side once the inbox-delete retry
+     * chain is exhausted, so this is not the only fix for that finding).
+     *
+     * This is the library's own documented extension point for exactly this
+     * ("checking whether a user is banned or otherwise disallowed from
+     * signing in"): `callbacks.beforeSessionCreation?: (ctx:
+     * GenericMutationCtx<AnyDataModel>, args: { userId: GenericId<"users"> })
+     * => Promise<void>` (`node_modules/@convex-dev/auth/src/server/types.ts`),
+     * invoked by `implementation/sessions.ts`'s `createSession` right
+     * before the `authSessions` row is written -- for EVERY sign-in flow
+     * (credentials, OAuth, email, phone), so this is the one choke point
+     * every successful sign-in passes through regardless of provider,
+     * mirroring `requireUserId`'s role for ordinary queries/mutations.
+     *
+     * The thrown error is a plain-string `ConvexError`, byte-identical to
+     * `WRONG_CREDENTIALS_MESSAGE` -- never a distinct message or shape. This
+     * callback runs OUTSIDE `guardedAuthorize`'s own try/catch (it fires
+     * from `createSession`, after `authorize` has already returned a
+     * userId, not from within the credentials provider itself), so it must
+     * produce the right shape itself rather than relying on that catch
+     * block's mapping. The same non-enumeration discipline N1 (D99)
+     * already applies to the library's own per-account lockout applies
+     * here: a distinguishable "this account is deleted" error would let
+     * anyone probe which email addresses have a (recently) deleted account,
+     * simply by attempting to sign in with a guessed password.
+     */
+    beforeSessionCreation: async (ctx, { userId }) => {
+      // The library's callback ctx is `GenericMutationCtx<AnyDataModel>` --
+      // it has no knowledge of this app's schema. `isTombstoned` only ever
+      // calls `ctx.db.query("accountState", ...)`, a capability the generic
+      // mutation ctx already has (a mutation ctx is a superset of a query
+      // ctx); the cast is needed only because the generic type erases the
+      // literal table names TypeScript checks a query against, not because
+      // of any real capability mismatch.
+      if (await isTombstoned(ctx as unknown as QueryCtx, userId as Id<"users">)) {
+        throw new ConvexError(WRONG_CREDENTIALS_MESSAGE);
+      }
+    },
+  },
 });
