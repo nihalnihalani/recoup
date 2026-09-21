@@ -12,24 +12,75 @@
  *    which is the record of what Recoup read itself.
  *  - They never open a claim and never send an alert. Both of those are
  *    statements about money and stay with our own read of the store's page.
- *  - One lookup per watch, ever (`watches.marketFetchedAt`), because the trial
- *    plan bills 3 credits plus one per day of history requested.
+ *
+ * State machine (D71): `marketState` on the watch is the single source of
+ * truth for where a lookup stands —
+ *   not_configured -> (key set) -> queued -> running -> success
+ *                                                     -> empty_result
+ *                                                     -> retryable_failure -> queued (auto retry) -> ... -> terminal_failure
+ *                                                     -> terminal_failure
+ * `requestLookup` is the only place that moves a watch into `queued`: it reads
+ * the current state, refuses or charges, and schedules `lookup` in the same
+ * transaction, so two callers racing for the same watch can only ever produce
+ * one charge and one scheduled fetch (Convex's OCC serialises the two
+ * mutations on the watch row). `lookup` never writes the database directly;
+ * it always ends by calling `recordSnapshot`, which re-reads the watch and
+ * refuses to write if it stopped being eligible while the fetch was in
+ * flight (archived, bought, or the owner's account was tombstoned).
  */
-import { v } from "convex/values";
-import { ConvexError } from "convex/values";
+import { v, type Infer } from "convex/values";
 import { internalAction, internalMutation, internalQuery, mutation, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { ownedWatch, requireUserId } from "./lib/access";
-import { charge } from "./lib/budget";
+import { isTombstoned } from "./lib/accountState";
+import { tryCharge, tryConsumeGlobalBudget } from "./lib/budget";
 import { cleanStoreUrl } from "./lib/offerMatch";
-import { marketStats, parseSnapshot, flattenHistory, hostOf, type MarketSnapshot } from "./lib/shopsavvy";
-import { MARKET_HISTORY_DAYS, MARKET_MAX_POINTS, MARKET_MAX_STORES } from "./limits";
-import { cleanLine } from "./lib/text";
+import { parseSnapshot, flattenHistory, hostOf, type MarketSnapshot } from "./lib/shopsavvy";
+import { marketState } from "./schema";
+import {
+  GLOBAL_DAILY_BUDGETS,
+  MARKET_HISTORY_DAYS,
+  MARKET_MAX_ATTEMPTS,
+  MARKET_MAX_POINTS,
+  MARKET_MAX_STORES,
+  MARKET_REFRESH_MIN_AGE_MS,
+  MARKET_RETRY_BACKOFF_MS,
+  MAX_OFFERS_PER_WATCH,
+} from "./limits";
 
 const BASE_URL = "https://api.shopsavvy.com/v1";
 const TIMEOUT_MS = 30_000;
-const MAX_NOTE_CHARS = 300;
+
+/**
+ * A response past this many characters is treated as malformed rather than
+ * parsed (P04/T04 boundary hardening applied to the transport itself): a
+ * real product's price history is a few KB of JSON, and reading an unbounded
+ * body into memory before validating any of it is the kind of thing a
+ * hostile or corrupted response could exploit. The body is always read as
+ * text and length-checked before `JSON.parse` ever sees it.
+ */
+const MAX_RESPONSE_CHARS = 2_000_000;
+
+/** Bounded resumable cursor key for `migrateStamps` (D75-style, via `opsState`). */
+const MIGRATE_OPS_KEY = "market.migrateStamps";
+/** Watches one `migrateStamps` transaction scans before rescheduling itself. */
+const MIGRATE_PAGE = 100;
+
+type MarketState = Infer<typeof marketState>;
+
+/** Shared shape of `requestLookup`/`refresh`'s result, annotated explicitly so every early return's
+ * string literals stay narrowed to `MarketState` instead of widening to `string` (and, for `refresh`,
+ * to work around the same-file `ctx.runMutation` circularity the Convex guidelines call out). */
+type RequestLookupResult = { scheduled: boolean; state: MarketState; reason?: string };
+
+/** Fixed, non-enumerating user-facing copy per terminal-ish state (D71). Never the raw provider error. */
+const MARKET_NOTE: Partial<Record<MarketState, string>> = {
+  not_configured: "Market history is not configured on this deployment",
+  empty_result: "ShopSavvy has no price history for this product",
+  retryable_failure: "Could not read market history; we will try again",
+  terminal_failure: "Market history is unavailable for this product",
+};
 
 /**
  * A day of history costs a credit, so the window is a constant and never a caller's argument.
@@ -41,10 +92,22 @@ function historyRange(now: number): { start: string; end: string } {
   return { start: day(now - MARKET_HISTORY_DAYS * 86_400_000), end: day(now) };
 }
 
+/** An HTTP response ShopSavvy returned with a non-2xx status. Only the status is kept — the body can echo the key back. */
+class ShopSavvyHttpError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(`ShopSavvy returned ${status}`);
+    this.status = status;
+  }
+}
+
+/** The response body could not be trusted enough to parse: too large, or not valid JSON. */
+class MalformedResponseError extends Error {}
+
 /**
- * One live call. Returns null when the key is unset (the feature is simply off)
- * and throws with a readable message on anything else, so the caller can store
- * the reason against the watch.
+ * One live call. Returns null when the key is unset (the feature is simply
+ * off) and throws on anything else, so the caller classifies the failure.
+ * The body is read as text with a bounded length before it is ever parsed.
  */
 export async function fetchSnapshot(productUrl: string, now: number): Promise<MarketSnapshot | null> {
   const key = process.env.SHOPSAVVY_API_KEY;
@@ -59,27 +122,56 @@ export async function fetchSnapshot(productUrl: string, now: number): Promise<Ma
     headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
-  if (!res.ok) {
-    // The body can carry the key back in an echoed request; only the status is safe to keep.
-    throw new Error(`ShopSavvy returned ${res.status}`);
+  if (!res.ok) throw new ShopSavvyHttpError(res.status);
+
+  const text = await res.text();
+  if (text.length > MAX_RESPONSE_CHARS) throw new MalformedResponseError("exceeded the size cap");
+
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new MalformedResponseError("was not valid JSON");
   }
-  return parseSnapshot(await res.json());
+  return parseSnapshot(body, now);
 }
 
+/** 400/401/403/malformed -> give up; 429/5xx/timeout/network -> worth another attempt. */
+function classifyFetchError(err: unknown): "retryable_failure" | "terminal_failure" {
+  if (err instanceof MalformedResponseError) return "terminal_failure";
+  if (err instanceof ShopSavvyHttpError) {
+    return err.status === 429 || err.status >= 500 ? "retryable_failure" : "terminal_failure";
+  }
+  // Timeouts (AbortSignal.timeout -> DOMException) and network failures (TypeError) land here.
+  return "retryable_failure";
+}
+
+/**
+ * What `lookup` needs about the watch. No longer gated on `marketFetchedAt`
+ * (the state machine in `requestLookup`/`markRunning` replaces that gate) —
+ * only existence and archived-ness, since an archived watch is never worth
+ * spending a fetch on even mid-flight.
+ */
 export const watchForMarket = internalQuery({
   args: { watchId: v.id("watches") },
   returns: v.union(
-    v.object({ productUrl: v.string(), currency: v.string(), merchantDomain: v.string() }),
+    v.object({
+      productUrl: v.string(),
+      currency: v.string(),
+      merchantDomain: v.string(),
+      /** `marketAttempts` before this run, so `lookup` can compute the next backoff step. */
+      attempts: v.number(),
+    }),
     v.null(),
   ),
   handler: async (ctx, { watchId }) => {
     const watch = await ctx.db.get(watchId);
     if (!watch || watch.status === "archived") return null;
-    if (watch.marketFetchedAt !== undefined) return null;
     return {
       productUrl: watch.productUrl,
       currency: watch.currency ?? "USD",
       merchantDomain: watch.merchantDomain,
+      attempts: watch.marketAttempts ?? 0,
     };
   },
 });
@@ -103,22 +195,126 @@ const storeArg = v.object({
 });
 
 /**
- * Writes one lookup's result. Stamps `marketFetchedAt` whatever happened, so a
- * product ShopSavvy does not know is never asked about twice.
+ * The transactional claim (D71). Both the public `refresh` and the automatic
+ * path from `watches.recordWatchCheck` go through this: it is the only place
+ * that reads the current state, decides whether another lookup is allowed,
+ * charges the budget it draws from, and schedules the fetch — all in one
+ * mutation, so two callers racing on the same watch can only ever produce one
+ * scheduled job and one charge.
+ */
+export const requestLookup = internalMutation({
+  args: { watchId: v.id("watches"), trigger: v.union(v.literal("auto"), v.literal("manual")) },
+  returns: v.object({ scheduled: v.boolean(), state: marketState, reason: v.optional(v.string()) }),
+  handler: async (ctx, { watchId, trigger }): Promise<RequestLookupResult> => {
+    const watch = await ctx.db.get(watchId);
+    if (!watch) return { scheduled: false, state: "not_configured", reason: "not_found" };
+
+    const current = watch.marketState;
+    if (watch.status === "archived") return { scheduled: false, state: current ?? "not_configured", reason: "archived" };
+    if (watch.status === "bought") return { scheduled: false, state: current ?? "not_configured", reason: "bought" };
+    if (await isTombstoned(ctx, watch.userId)) {
+      return { scheduled: false, state: current ?? "not_configured", reason: "deleted" };
+    }
+
+    if (!process.env.SHOPSAVVY_API_KEY) {
+      // Never set marketFetchedAt for this branch: it is not a retrieval, and a key added later must be
+      // able to run the very first lookup rather than being blocked by a stale "already looked up" mark.
+      if (current !== "not_configured") await ctx.db.patch(watchId, { marketState: "not_configured" });
+      return { scheduled: false, state: "not_configured", reason: "not_configured" };
+    }
+
+    if (current === "queued" || current === "running") {
+      return { scheduled: false, state: current, reason: "in_flight" };
+    }
+    if (current === "success") {
+      const stillFresh = watch.marketFetchedAt !== undefined && watch.marketFetchedAt > Date.now() - MARKET_REFRESH_MIN_AGE_MS;
+      if (trigger === "auto" || stillFresh) return { scheduled: false, state: current, reason: "too_recent" };
+    }
+    if (current === "empty_result" && trigger === "auto") {
+      return { scheduled: false, state: current, reason: "empty_result" };
+    }
+    if (current === "terminal_failure" && trigger === "auto") {
+      return { scheduled: false, state: current, reason: "terminal_failure" };
+    }
+    if (current === "retryable_failure" && watch.marketNextRetryAt !== undefined && Date.now() < watch.marketNextRetryAt) {
+      return { scheduled: false, state: current, reason: "retryable_backoff" };
+    }
+
+    const now = Date.now();
+    if (trigger === "manual") {
+      if (!(await tryCharge(ctx, watch.userId, "market_lookup", now))) {
+        return { scheduled: false, state: current ?? "not_configured", reason: "budget" };
+      }
+    } else {
+      if (!(await tryConsumeGlobalBudget(ctx, "market_lookup", GLOBAL_DAILY_BUDGETS.market_lookup.max, 1, now))) {
+        return { scheduled: false, state: current ?? "not_configured", reason: "budget" };
+      }
+    }
+
+    await ctx.db.patch(watchId, { marketState: "queued", marketClaimedAt: now });
+    await ctx.scheduler.runAfter(0, internal.market.lookup, { watchId });
+    return { scheduled: true, state: "queued" };
+  },
+});
+
+/**
+ * A user asking for market history on a watch, or asking again once a
+ * `success` is old enough to refresh. Owner-checked; the claim, the budget
+ * and the state gate all live in `requestLookup`.
+ */
+export const refresh = mutation({
+  args: { watchId: v.id("watches") },
+  returns: v.object({ scheduled: v.boolean(), state: marketState, reason: v.optional(v.string()) }),
+  handler: async (ctx, { watchId }) => {
+    const userId = await requireUserId(ctx);
+    await ownedWatch(ctx, watchId, userId); // throws for a non-owner or unknown watch
+    const result: RequestLookupResult = await ctx.runMutation(internal.market.requestLookup, {
+      watchId,
+      trigger: "manual",
+    });
+    return result;
+  },
+});
+
+/** `queued` (or, during the T12 rewiring window, undefined — see the file header) -> `running`. Anything else: false, and `lookup` exits without fetching or writing. */
+export const markRunning = internalMutation({
+  args: { watchId: v.id("watches") },
+  returns: v.boolean(),
+  handler: async (ctx, { watchId }) => {
+    const watch = await ctx.db.get(watchId);
+    if (!watch) return false;
+    if (watch.marketState !== "queued" && watch.marketState !== undefined) return false;
+    await ctx.db.patch(watchId, { marketState: "running" });
+    return true;
+  },
+});
+
+/**
+ * Writes one lookup's result. Re-reads the watch so a status change made
+ * while the fetch was in flight (archived, bought, or the account tombstoned,
+ * D87) wins: the write is skipped entirely, including the state patch, which
+ * is safe because none of those watches can re-enter `queued` through
+ * `requestLookup` again.
  */
 export const recordSnapshot = internalMutation({
   args: {
     watchId: v.id("watches"),
+    outcome: marketState,
     points: v.array(pointArg),
     stores: v.array(storeArg),
-    note: v.optional(v.string()),
+    /** Set only by `lookup`'s retry/terminal classification; omitted for success/empty_result. */
+    attempts: v.optional(v.number()),
+    nextRetryAt: v.optional(v.number()),
   },
-  returns: v.object({ points: v.number(), stores: v.number() }),
-  handler: async (ctx, { watchId, points, stores, note }) => {
+  returns: v.object({ skipped: v.boolean(), points: v.number(), stores: v.number() }),
+  handler: async (ctx, { watchId, outcome, points, stores, attempts, nextRetryAt }) => {
     const watch = await ctx.db.get(watchId);
-    if (!watch) return { points: 0, stores: 0 };
+    if (!watch) return { skipped: true, points: 0, stores: 0 };
+    if (watch.status === "archived" || watch.status === "bought") return { skipped: true, points: 0, stores: 0 };
+    if (watch.marketState !== "running") return { skipped: true, points: 0, stores: 0 };
+    if (await isTombstoned(ctx, watch.userId)) return { skipped: true, points: 0, stores: 0 };
+
     const now = Date.now();
-    await ctx.db.patch(watchId, { marketFetchedAt: now, marketNote: note });
 
     let written = 0;
     for (const point of points.slice(0, MARKET_MAX_POINTS)) {
@@ -127,66 +323,120 @@ export const recordSnapshot = internalMutation({
         .withIndex("by_key", (q) => q.eq("watchId", watchId).eq("marketKey", point.marketKey))
         .unique();
       if (existing) continue;
-      await ctx.db.insert("marketPrices", { ...point, watchId, userId: watch.userId });
+      await ctx.db.insert("marketPrices", {
+        ...point,
+        watchId,
+        userId: watch.userId,
+        source: "shopsavvy",
+        retrievedAt: now,
+      });
       written++;
     }
 
     // Stores ShopSavvy lists become offer candidates: the user still confirms each match (W3),
-    // and an unconfirmed offer never drives a verdict or an alert.
-    const rows = await ctx.db
-      .query("offers")
-      .withIndex("by_watch", (q) => q.eq("watchId", watchId))
-      .take(MARKET_MAX_STORES * 3);
-    const known = new Set(rows.map((r) => r.storeDomain));
+    // and an unconfirmed offer never drives a verdict or an alert. Bounded by MAX_OFFERS_PER_WATCH
+    // across the watch's whole offer list, not just this call's additions.
     let added = 0;
-    for (const store of stores.slice(0, MARKET_MAX_STORES)) {
-      if (known.has(store.storeDomain)) continue;
-      known.add(store.storeDomain);
-      await ctx.db.insert("offers", {
-        watchId,
-        userId: watch.userId,
-        storeDomain: store.storeDomain,
-        productUrl: store.productUrl,
-        title: store.retailer,
-        status: "candidate",
-        source: "shopsavvy",
-        lastCents: store.cents,
-        currency: store.currency,
-        lastCheckedAt: store.observedAt,
-        note: "Listed by ShopSavvy; confirm it is the same item",
-      });
-      added++;
+    if (stores.length > 0) {
+      const existingOffers = await ctx.db
+        .query("offers")
+        .withIndex("by_watch", (q) => q.eq("watchId", watchId))
+        .take(MAX_OFFERS_PER_WATCH + MARKET_MAX_STORES);
+      const known = new Set(existingOffers.map((r) => r.storeDomain));
+      let total = existingOffers.length;
+      for (const store of stores.slice(0, MARKET_MAX_STORES)) {
+        if (total >= MAX_OFFERS_PER_WATCH) break;
+        if (known.has(store.storeDomain)) continue;
+        known.add(store.storeDomain);
+        await ctx.db.insert("offers", {
+          watchId,
+          userId: watch.userId,
+          storeDomain: store.storeDomain,
+          productUrl: store.productUrl,
+          title: store.retailer,
+          status: "candidate",
+          source: "shopsavvy",
+          lastCents: store.cents,
+          currency: store.currency,
+          lastCheckedAt: store.observedAt,
+          note: "Listed by ShopSavvy; confirm it is the same item",
+        });
+        added++;
+        total++;
+      }
     }
-    return { points: written, stores: added };
+
+    const patch: Partial<Doc<"watches">> = { marketState: outcome, marketNote: MARKET_NOTE[outcome] };
+    // not_configured is reachable here only via the T12-rewiring transition window (see file header);
+    // it is never a retrieval, so marketFetchedAt/marketObservedAt stay untouched for it.
+    if (outcome !== "not_configured") {
+      patch.marketFetchedAt = now;
+      if (points.length > 0) patch.marketObservedAt = Math.max(...points.map((p) => p.observedAt));
+    }
+    if (attempts !== undefined) patch.marketAttempts = attempts;
+    patch.marketNextRetryAt = outcome === "retryable_failure" ? nextRetryAt : undefined;
+    await ctx.db.patch(watchId, patch);
+
+    return { skipped: false, points: written, stores: added };
   },
 });
 
 /**
- * Asks ShopSavvy about one watched product. Never throws past the scheduler: a
- * refusal or an unknown product ends as a note on the watch, and watching
- * carries on with our own reads.
+ * Asks ShopSavvy about one watched product. Never throws past the scheduler:
+ * every outcome, including a malformed response or a network failure, ends
+ * as a classified state on the watch via `recordSnapshot`. A retryable
+ * failure schedules its own continuation (another `requestLookup("auto")`
+ * after the backoff) so the retry is automatic and still goes through the
+ * same claim/gate/charge path as any other attempt.
  */
 export const lookup = internalAction({
   args: { watchId: v.id("watches") },
   returns: v.null(),
   handler: async (ctx, { watchId }) => {
+    const running = await ctx.runMutation(internal.market.markRunning, { watchId });
+    if (!running) return null;
+
     const watch = await ctx.runQuery(internal.market.watchForMarket, { watchId });
-    if (!watch) return null;
+    if (!watch) {
+      // Gone or archived between the claim and now; recordSnapshot's own re-read would refuse anyway,
+      // but there is nothing to fetch without a productUrl.
+      return null;
+    }
 
     const now = Date.now();
     let snapshot: MarketSnapshot | null = null;
-    let note: string | undefined;
+    let fetchError: "retryable_failure" | "terminal_failure" | null = null;
     try {
       snapshot = await fetchSnapshot(watch.productUrl, now);
-      if (snapshot === null) note = "Market history is not configured on this deployment";
     } catch (err) {
-      note = cleanLine(
-        `Could not read market history: ${err instanceof Error ? err.message : String(err)}`,
-      ).slice(0, MAX_NOTE_CHARS);
+      fetchError = classifyFetchError(err);
+      // The raw reason stays in the server console only (D71/T22): marketNote is always the fixed copy.
+      console.error("market lookup failed", { watchId, error: err instanceof Error ? err.message : String(err) });
     }
 
-    if (!snapshot) {
-      await ctx.runMutation(internal.market.recordSnapshot, { watchId, points: [], stores: [], note });
+    if (fetchError !== null) {
+      const nextAttempts = watch.attempts + 1;
+      const outcome = fetchError === "retryable_failure" && nextAttempts < MARKET_MAX_ATTEMPTS ? "retryable_failure" : "terminal_failure";
+      const nextRetryAt = outcome === "retryable_failure" ? now + MARKET_RETRY_BACKOFF_MS[watch.attempts] : undefined;
+      await ctx.runMutation(internal.market.recordSnapshot, {
+        watchId,
+        outcome,
+        points: [],
+        stores: [],
+        attempts: nextAttempts,
+        nextRetryAt,
+      });
+      if (outcome === "retryable_failure" && nextRetryAt !== undefined) {
+        await ctx.scheduler.runAfter(nextRetryAt - now, internal.market.requestLookup, { watchId, trigger: "auto" });
+      }
+      return null;
+    }
+
+    if (snapshot === null) {
+      // The key was unset. Reachable in steady state only during the T12 rewiring window (watches.ts
+      // still calling `lookup` directly, see the file header); requestLookup already handles this
+      // branch for every caller that goes through the claim.
+      await ctx.runMutation(internal.market.recordSnapshot, { watchId, outcome: "not_configured", points: [], stores: [] });
       return null;
     }
 
@@ -232,9 +482,9 @@ export const lookup = internalAction({
 
     await ctx.runMutation(internal.market.recordSnapshot, {
       watchId,
+      outcome: points.length === 0 ? "empty_result" : "success",
       points,
       stores,
-      note: points.length === 0 ? "ShopSavvy has no price history for this product" : undefined,
     });
     return null;
   },
@@ -252,23 +502,51 @@ export async function marketPointsFor(
 }
 
 /**
- * A user asking for market history on a watch that has none yet (the automatic
- * lookup runs once, after the first accepted price). Budgeted like any paid call.
+ * One-time, bounded, resumable conversion of pre-D71 watches: back then the
+ * only persisted state was `marketFetchedAt` (a timestamp or nothing) plus a
+ * free-text `marketNote`. Any watch that already has `marketFetchedAt` set
+ * but no `marketState` gets classified from what it actually has —
+ * `marketPrices` rows mean a lookup once succeeded (`success`); none mean it
+ * did not (`not_configured`, clearing `marketFetchedAt` so a key added later
+ * can run the very first real lookup rather than being blocked by the old
+ * stamp). Never charges or schedules anything. Safe to call repeatedly:
+ * finished watches are never revisited twice within a run (the cursor only
+ * moves forward) and a watch already carrying `marketState` is left alone.
  */
-export const refresh = mutation({
-  args: { watchId: v.id("watches") },
-  returns: v.null(),
-  handler: async (ctx, { watchId }) => {
-    const userId = await requireUserId(ctx);
-    const watch = await ownedWatch(ctx, watchId, userId);
-    if (watch.status === "archived") throw new ConvexError("This item is no longer being watched");
-    if (watch.marketFetchedAt !== undefined) {
-      throw new ConvexError("Market history has already been looked up for this item");
+export const migrateStamps = internalMutation({
+  args: {},
+  returns: v.object({ done: v.boolean(), scanned: v.number(), migrated: v.number() }),
+  handler: async (ctx) => {
+    const opsRow = await ctx.db
+      .query("opsState")
+      .withIndex("by_key", (q) => q.eq("key", MIGRATE_OPS_KEY))
+      .unique();
+    const cursor = opsRow?.cursor ?? null;
+
+    const page = await ctx.db.query("watches").paginate({ cursor, numItems: MIGRATE_PAGE });
+
+    let migrated = 0;
+    for (const watch of page.page) {
+      if (watch.marketFetchedAt === undefined || watch.marketState !== undefined) continue;
+      const anyPoint = await ctx.db
+        .query("marketPrices")
+        .withIndex("by_watch", (q) => q.eq("watchId", watch._id))
+        .first();
+      if (anyPoint) {
+        await ctx.db.patch(watch._id, { marketState: "success" });
+      } else {
+        await ctx.db.patch(watch._id, { marketState: "not_configured", marketFetchedAt: undefined });
+      }
+      migrated++;
     }
-    await charge(ctx, userId, "market_lookup");
-    await ctx.scheduler.runAfter(0, internal.market.lookup, { watchId });
-    return null;
+
+    const now = Date.now();
+    if (opsRow) await ctx.db.patch(opsRow._id, { cursor: page.continueCursor, updatedAt: now });
+    else await ctx.db.insert("opsState", { key: MIGRATE_OPS_KEY, cursor: page.continueCursor, updatedAt: now });
+
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.market.migrateStamps, {});
+    }
+    return { done: page.isDone, scanned: page.page.length, migrated };
   },
 });
-
-export { marketStats };

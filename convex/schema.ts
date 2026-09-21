@@ -209,6 +209,10 @@ export default defineSchema({
   marketPrices: defineTable({
     watchId: v.id("watches"), userId: v.id("users"), retailer: v.string(), storeDomain: v.optional(v.string()),
     cents: v.number(), currency: v.string(), observedAt: v.number(), marketKey: v.string(),
+    /** Always "shopsavvy" today; kept alongside `priceSource`'s other literal for when a second market source exists (T10). */
+    source: v.optional(priceSource),
+    /** When Recoup retrieved this point, distinct from `observedAt` (when the provider says the price was seen) (T10). */
+    retrievedAt: v.optional(v.number()),
   }).index("by_watch", ["watchId", "observedAt"]).index("by_key", ["watchId", "marketKey"]),
 
   /** Money the store owes on one item for one reason. Balance is derived from ledgerEvents, never stored. */
