@@ -1,9 +1,9 @@
 import { ConvexError, v } from "convex/values";
-import { getAuthUserId } from "@convex-dev/auth/server";
 import {
   action,
   internalAction,
   internalMutation,
+  internalQuery,
   mutation,
   query,
   type MutationCtx,
@@ -213,6 +213,16 @@ export const beginEvent = internalMutation({
   handler: async (ctx, { processedEventId }) => {
     const row = await ctx.db.get(processedEventId);
     if (!row || row.status !== "received" || !row.userId) return null;
+    // D115 6b-3: a tombstoned (deleting/deleted) owner's row is closed the
+    // same way `retryFailed`'s D87 guard closes one -- `succeeded` with
+    // "Ignored: account deleted" -- before it ever reaches attempts/budget
+    // accounting or the model. Checked first: a day either budget switch is
+    // out is not this row's fault, but neither is this row's fault the
+    // account is gone, and unlike a budget pause this is never retryable.
+    if (await isTombstoned(ctx, row.userId)) {
+      await ctx.db.patch(processedEventId, { status: "succeeded", summary: "Ignored: account deleted" });
+      return null;
+    }
     if (row.attempts >= MAX_ATTEMPTS) {
       const lastError = `Gave up after ${MAX_ATTEMPTS} attempts`;
       await ctx.db.patch(processedEventId, {
@@ -678,6 +688,15 @@ export const applyExtraction = internalMutation({
   handler: async (ctx, args) => {
     const row = await ctx.db.get(args.processedEventId);
     if (!row || !row.userId) return null;
+    // D115 6b-3: defense in depth alongside `beginEvent`'s own gate above --
+    // this is the only place that actually writes purchases/items/claims, so
+    // it refuses independently rather than trusting every caller to have
+    // gone through `beginEvent` first (checkpoint 6b F3a: a direct call
+    // reached this function for an account already `deleted`).
+    if (await isTombstoned(ctx, row.userId)) {
+      await ctx.db.patch(args.processedEventId, { status: "succeeded", summary: "Ignored: account deleted" });
+      return null;
+    }
     const parsed: InboundEmailT = InboundEmail.parse(args.parsed);
     const payload = (row.payload ?? {}) as Record<string, unknown>;
     const sourceMessageId =
@@ -722,6 +741,21 @@ export const applyExtraction = internalMutation({
 // ---------------------------------------------------------------------------
 
 /**
+ * Tombstone-aware resolution of the caller for `paste`, which has no
+ * `ctx.db` of its own (D115 6b-3). `ctx.runQuery` from an action propagates
+ * the same request's `ctx.auth`, so `requireUserId` here resolves the same
+ * user `getAuthUserId` used to, but also refuses a deleting/deleted account
+ * with `requireUserId`'s own non-leaking message -- the bare `getAuthUserId`
+ * this action used to call let a tombstoned caller keep pasting mail
+ * (checkpoint 6b F3a).
+ */
+export const requireActiveUserId = internalQuery({
+  args: {},
+  returns: v.id("users"),
+  handler: async (ctx) => requireUserId(ctx),
+});
+
+/**
  * Queues a pasted email for the same pipeline a forwarded one goes through.
  * The external id is the hash of the text (D14), so pasting the same email
  * twice returns the first row instead of re-extracting and re-crediting.
@@ -730,8 +764,7 @@ export const paste = action({
   args: { text: v.string() },
   returns: v.id("processedEvents"),
   handler: async (ctx, { text }): Promise<Id<"processedEvents">> => {
-    const userId = await getAuthUserId(ctx);
-    if (!userId) throw new ConvexError("Not signed in");
+    const userId = await ctx.runQuery(internal.intake.requireActiveUserId, {});
     const body = text.trim();
     if (body.length < MIN_PASTE_CHARS) {
       throw new ConvexError("Paste the whole order or refund email, not just a line of it");
@@ -761,6 +794,14 @@ export const createPasteEvent = internalMutation({
   args: { userId: v.id("users"), externalId: v.string(), text: v.string() },
   returns: v.id("processedEvents"),
   handler: async (ctx, args) => {
+    // D115 6b-3: defense in depth alongside `paste`'s own gate above --
+    // nothing has been inserted yet at this point, so refusing here throws
+    // and writes no processedEvents row at all (checkpoint 6b F3a), rather
+    // than the "mark succeeded" shape the other intake writers use once a
+    // row already exists.
+    if (await isTombstoned(ctx, args.userId)) {
+      throw new ConvexError("This account has been deleted");
+    }
     const seen = await ctx.db
       .query("processedEvents")
       .withIndex("by_external", (q) => q.eq("externalId", args.externalId))

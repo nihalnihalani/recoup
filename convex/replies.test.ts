@@ -455,3 +455,45 @@ describe("replies.finishEvent status guard (pre-launch review LOW)", () => {
     expect(await status(requeued)).toBe("received");
   });
 });
+
+// ---------------------------------------------------------------------------
+// D115 6b-3 (checkpoint 6b F4b, ported from the reviewer's scratchpad
+// da6b.test.ts): a reply that lands for a tombstoned owner -- e.g. one in
+// flight when `requestDeletion` ran, mid-purge past the `ledgerEvents` step
+// but before `claims` -- must write nothing at all. Fails against the
+// pre-T18.2 code (which wrote both a `replies` row and a `promised_credit`
+// ledgerEvents row for a deleted account, orphaned and unreachable by any
+// later purge pass) and passes once `apply` checks `isTombstoned` before
+// writing anything.
+// ---------------------------------------------------------------------------
+describe("replies.apply tombstone gate (D115 6b-3, checkpoint 6b F4b)", () => {
+  it("writes no reply row and no ledger event for a tombstoned owner's claim", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const claimId = await seedSentClaim(t, userId);
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }),
+    );
+
+    const result = await t.mutation(internal.replies.apply, {
+      claimId,
+      messageId: "msg-mid-purge",
+      from: CONTACT,
+      classification: "promise",
+      summary: "We will credit $5.",
+      promisedAmount: 5,
+    });
+
+    expect(result.deduped).toBe(false);
+    expect(result.replyId).toBeNull();
+    expect(result.ledgerWritten).toBe(false);
+    expect(await ledger(t, claimId)).toHaveLength(0);
+    const replies = await t.run((ctx) =>
+      ctx.db.query("replies").withIndex("by_claim", (q) => q.eq("claimId", claimId)).collect(),
+    );
+    expect(replies).toHaveLength(0);
+    // The claim itself is untouched: still `sent`, never bumped to `promised`.
+    const claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).toBe("sent");
+  });
+});

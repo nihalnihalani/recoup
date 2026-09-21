@@ -18,6 +18,7 @@ import { applyEvent } from "./claims";
 import { internalKey } from "./lib/idempotency";
 import { scheduleClaimReminder } from "./followUps";
 import { emailDomain } from "./drafts";
+import { isTombstoned } from "./lib/accountState";
 
 const MAX_SUMMARY_CHARS = 240;
 const MAX_TEXT_CHARS = 20_000;
@@ -226,6 +227,18 @@ export const apply = internalMutation({
 
     const claim = await ctx.db.get(args.claimId);
     if (!claim) return { deduped: false, replyId: null, ledgerWritten: false };
+
+    // D115 6b-3: a reply that lands for a tombstoned (deleting/deleted)
+    // owner -- e.g. one already in flight when `requestDeletion` ran, or one
+    // whose `classify` scheduling raced a purge that has since moved past
+    // `claims` -- writes nothing at all: no reply row, no ledger event. The
+    // claim/purchase this reply would attach to may already be gone or about
+    // to be purged, and recording money history for a deleted account is
+    // exactly what D87's "no reader resurrects a purged account's data"
+    // invariant forbids (checkpoint 6b F4b).
+    if (await isTombstoned(ctx, claim.userId)) {
+      return { deduped: false, replyId: null, ledgerWritten: false };
+    }
 
     // A stated amount is the merchant's own number; anything non-positive or
     // out of range is treated as "no amount stated" rather than a write.

@@ -616,6 +616,75 @@ describe("intake — paste, retry and the attention list", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// D115 6b-3 (checkpoint 6b F3a, ported from the reviewer's scratchpad
+// da6b.test.ts): every intake writer refuses for a tombstoned owner instead
+// of resurrecting purchases/items for a deleted account. Each case here
+// fails against the pre-T18.2 code (the public `paste` used to succeed and
+// `beginEvent`/`applyExtraction` used to process the row normally -- the
+// repro's own `expect(purchases).toHaveLength(1)` documented that a deleted
+// account could own a purchase again) and passes once the gates land.
+// ---------------------------------------------------------------------------
+describe("intake tombstone gate (D115 6b-3, checkpoint 6b F3a)", () => {
+  async function tombstone(t: T, userId: Id<"users">) {
+    await t.run((ctx) =>
+      ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }),
+    );
+  }
+
+  it("paste for a tombstoned account throws and writes no processedEvents row", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    await tombstone(t, userId);
+
+    const text = "Order confirmation from Acme.\n" + "1x Jacket $80.00\n".repeat(20);
+    await expect(as.action(api.intake.paste, { text })).rejects.toThrow(ConvexError);
+
+    const rows = await t.run((ctx) => ctx.db.query("processedEvents").collect());
+    expect(rows).toHaveLength(0);
+  });
+
+  it("createPasteEvent refuses directly for a tombstoned account (defense in depth): nothing is written", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await tombstone(t, userId);
+
+    await expect(
+      t.mutation(internal.intake.createPasteEvent, { userId, externalId: "paste:deadbeef", text: "Order confirmation…" }),
+    ).rejects.toThrow(ConvexError);
+    expect(await t.run((ctx) => ctx.db.query("processedEvents").collect())).toHaveLength(0);
+  });
+
+  it("beginEvent closes a tombstoned owner's row as succeeded/'Ignored: account deleted' instead of processing it", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-tombstoned");
+    await tombstone(t, userId);
+
+    expect(await t.mutation(internal.intake.beginEvent, { processedEventId: id })).toBeNull();
+    const row = await eventRow(t, id);
+    expect(row.status).toBe("succeeded");
+    expect(row.summary).toBe("Ignored: account deleted");
+  });
+
+  it("applyExtraction refuses directly for a tombstoned owner's row: no purchases/items are created", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const id = await queueEvent(t, userId, "evt-tombstoned-2");
+    await tombstone(t, userId);
+
+    await t.mutation(internal.intake.applyExtraction, { processedEventId: id, parsed: orderEmail() });
+
+    const purchases = await t.run((ctx) =>
+      ctx.db.query("purchases").withIndex("by_user", (q) => q.eq("userId", userId)).collect(),
+    );
+    expect(purchases).toHaveLength(0);
+    const row = await eventRow(t, id);
+    expect(row.status).toBe("succeeded");
+    expect(row.summary).toBe("Ignored: account deleted");
+  });
+});
+
 describe("intake.beginEvent", () => {
   it("claims a received row once and stops after too many attempts", async () => {
     const t = setup();
