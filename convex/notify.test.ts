@@ -460,7 +460,7 @@ describe("the alert carries nothing its sender chose (pre-launch review B2)", ()
   it("control characters never reach a stored watch name", async () => {
     const t = setup();
     const { userId, as } = await account(t);
-    const created = await as.mutation(api.watches.create, { productUrl: URL, name: "Down\r\nBcc: x@evil.example  Jacket" });
+    const created = await as.mutation(api.watches.create, { productUrl: URL, name: "Down\r\nBcc: x@evil.example\0 Jacket" });
     const name = async (id: Id<"watches">) => (await t.run((ctx) => ctx.db.get(id)))?.name;
     expect(await name(created)).toBe("DownBcc: x@evil.example Jacket");
 
