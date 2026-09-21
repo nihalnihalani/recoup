@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -144,7 +145,10 @@ describe("watches.create", () => {
 
     const listed = await as.query(api.watches.list, {});
     expect(listed).toHaveLength(1);
-    expect(listed[0].checking).toBe(true);
+    // P06/D73: raw `checkRequestedAt` instead of a server-computed `checking` boolean; the client derives it.
+    expect(listed[0].checkRequestedAt).toBe(T0);
+    expect(listed[0].lastObservedAt).toBeNull();
+    expect(listed[0].priceStale).toBe(true);
     expect(listed[0].verdict.label).toBe("unknown");
     expect(listed[0].spark).toEqual([]);
   });
@@ -347,6 +351,7 @@ describe("watches.recordWatchCheck acceptance (D16)", () => {
     expect(row.currency).toBe("USD");
     expect(row.name).toBe("Acme Down Jacket");
     expect(row.lastCheckedAt).toBe(T0);
+    expect(row.lastObservedAt).toBe(T0);
     expect(row.nextCheckAt).toBe(T0 + WATCH_CHECK_INTERVAL_MS);
     const checks = await checksFor(t, watchId);
     expect(checks).toHaveLength(1);
@@ -357,7 +362,10 @@ describe("watches.recordWatchCheck acceptance (D16)", () => {
     const got = await as.query(api.watches.get, { watchId });
     expect(got?.watch.lastCents).toBe(7_500);
     expect(got?.watch.listCents).toBe(10_000);
-    expect(got?.watch.checking).toBe(false);
+    // P06/D73: raw `checkRequestedAt` (null here: never requested) replaces the old `checking` boolean.
+    expect(got?.watch.checkRequestedAt).toBeNull();
+    expect(got?.watch.lastObservedAt).toBe(T0);
+    expect(got?.watch.priceStale).toBe(false);
     expect(got?.watch.verdict.label).toBe("not_enough_history");
     expect(got?.watch.verdict.reason).toContain("25% off");
     expect(got?.checks).toHaveLength(1);
@@ -649,12 +657,23 @@ describe("watches.sweep", () => {
     expect(await scheduled(t)).toHaveLength(2);
   });
 
-  it("reads a bounded page and leaves the rest for the next tick", async () => {
+  it("reads a bounded page (WATCH_SWEEP_PAGE) but a single user is capped at WATCH_SWEEP_PER_USER per tick (D74)", async () => {
     const t = setup();
     const { userId } = await signedIn(t);
     for (let i = 0; i < 53; i++) await seedWatch(t, userId, { nextCheckAt: T0 - i });
-    expect(await t.mutation(internal.watches.sweep, {})).toBe(50);
+    // Tick 1: the full 50-row page is read (all this one user's), but only
+    // WATCH_SWEEP_PER_USER=10 are actually scheduled; the other 40 in that
+    // page are rotated (bumped, not scheduled) so the page advances instead
+    // of repeating. The 3 rows never read this tick are untouched.
+    expect(await t.mutation(internal.watches.sweep, {})).toBe(10);
+    expect((await scheduled(t)).length).toBe(10);
+    // Tick 2: only the 3 never-read rows are still due (the 40 rotated ones
+    // were bumped WATCH_SWEEP_BUMP_MS into the future); a fresh per-tick cap
+    // easily covers all 3.
     expect(await t.mutation(internal.watches.sweep, {})).toBe(3);
+    expect((await scheduled(t)).length).toBe(13);
+    // Nothing left due at this fixed clock.
+    expect(await t.mutation(internal.watches.sweep, {})).toBe(0);
   });
 });
 
@@ -1005,5 +1024,133 @@ describe("watch spend caps (pre-launch review H2, H3, B4)", () => {
     await as.mutation(api.watches.markBought, { watchId, paidCents: 8_000, purchasedAt: T0 - DAY });
     expect(await pendingNamed(t, "fetchBoth")).toBe(0);
     expect((await usage(t)).filter((r) => r.userId === userId)).toHaveLength(0);
+  });
+});
+
+describe("P06 (D73): no reactive query result depends on the server's wall clock", () => {
+  it("grep: list/get's query bodies and summarise() never call Date.now() directly", () => {
+    // `URL` is shadowed by this file's own `const URL = "https://..."` fixture above; use the global explicitly.
+    const src = readFileSync(new globalThis.URL("./watches.ts", import.meta.url), "utf8");
+
+    const listStart = src.indexOf("export const list = query({");
+    const getStart = src.indexOf("export const get = query({");
+    const getSectionEnd = src.indexOf(
+      "// ---------------------------------------------------------------------------",
+      getStart,
+    );
+    expect(listStart).toBeGreaterThan(-1);
+    expect(getStart).toBeGreaterThan(listStart);
+    expect(getSectionEnd).toBeGreaterThan(getStart);
+    expect(src.slice(listStart, getStart)).not.toContain("Date.now()");
+    expect(src.slice(getStart, getSectionEnd)).not.toContain("Date.now()");
+
+    // `summarise` is the shared computation both queries call into; the same rule applies.
+    const summariseStart = src.indexOf("function summarise(");
+    const summariseEnd = src.indexOf("\n/**\n * The caller's non-archived watches", summariseStart);
+    expect(summariseStart).toBeGreaterThan(-1);
+    expect(summariseEnd).toBeGreaterThan(summariseStart);
+    expect(src.slice(summariseStart, summariseEnd)).not.toContain("Date.now()");
+  });
+
+  it("list called twice with different `now` args returns different derived fields but identical stored ones", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await t.mutation(internal.watches.recordWatchCheck, good(watchId, 7_500));
+
+    const fresh = (await as.query(api.watches.list, { now: T0 }))[0];
+    // assertCoarseNow bounds `now` to within a day of the server's own clock,
+    // so the second call also advances the (faked) real clock -- it is still
+    // the QUERY's own `now` argument, not a `Date.now()` read inside it, that
+    // drives the different result below.
+    vi.setSystemTime(T0 + 4 * DAY);
+    const stale = (await as.query(api.watches.list, { now: T0 + 4 * DAY }))[0];
+
+    // Stored fields: unaffected by `now`.
+    expect(fresh._creationTime).toBe(stale._creationTime);
+    expect(fresh.lastCents).toBe(stale.lastCents);
+    expect(fresh.lastObservedAt).toBe(stale.lastObservedAt);
+    expect(fresh.lastCheckedAt).toBe(stale.lastCheckedAt);
+    // Derived fields: differ because `now` differs (STALE_PRICE_MS = 3 days).
+    expect(fresh.priceStale).toBe(false);
+    expect(stale.priceStale).toBe(true);
+    expect(fresh.verdict.label).not.toBe(stale.verdict.label);
+  });
+
+  it("an out-of-bounds `now` is refused rather than silently skewing the result", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    await expect(as.query(api.watches.list, { now: T0 + 5 * DAY })).rejects.toThrow(ConvexError);
+    await expect(as.query(api.watches.list, { now: Number.NaN })).rejects.toThrow(ConvexError);
+  });
+});
+
+describe("P06 (D73): failed reads cannot make an old price look current", () => {
+  it("verdict is unknown with the staleness reason after only failed reads for 3+ days", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await t.mutation(internal.watches.recordWatchCheck, good(watchId, 7_500)); // day 0: accepted
+
+    for (let day = 1; day <= 4; day++) {
+      vi.setSystemTime(T0 + day * DAY);
+      // A rejected observation every day: lastCheckedAt keeps moving, lastObservedAt/lastCents must not.
+      await t.mutation(internal.watches.recordWatchCheck, { ...good(watchId, 7_000 + day), isRange: true });
+    }
+
+    const row = await watchRow(t, watchId);
+    expect(row.lastObservedAt).toBe(T0);
+    expect(row.lastCents).toBe(7_500);
+    expect(row.lastCheckedAt).toBe(T0 + 4 * DAY);
+
+    const now = T0 + 4 * DAY;
+    const got = await as.query(api.watches.get, { watchId, now });
+    expect(got?.watch.priceStale).toBe(true);
+    expect(got?.watch.targetHit).toBe(false);
+    expect(got?.watch.verdict.label).toBe("unknown");
+    expect(got?.watch.verdict.reason).toMatch(/days ago/);
+    expect(got?.watch.verdict.qualified).toBe(true);
+    // Still shows the last real price and exactly when it was seen and last attempted -- not silence.
+    expect(got?.watch.lastCents).toBe(7_500);
+    expect(got?.watch.lastObservedAt).toBe(T0);
+    expect(got?.watch.lastCheckedAt).toBe(T0 + 4 * DAY);
+  });
+});
+
+describe("D87: a tombstoned owner's rows are skipped by every scheduled reader", () => {
+  async function tombstone(t: T, userId: Id<"users">) {
+    await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: T0, attempts: 0 }));
+  }
+
+  it("sweep does not schedule or bump a tombstoned user's due watch", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId, { nextCheckAt: T0 - HOUR });
+    await tombstone(t, userId);
+
+    expect(await t.mutation(internal.watches.sweep, {})).toBe(0);
+    expect((await scheduled(t)).length).toBe(0);
+    expect((await watchRow(t, watchId)).nextCheckAt).toBe(T0 - HOUR); // left untouched, not even rotated
+  });
+
+  it("sweep still serves other users' due watches in the same tick", async () => {
+    const t = setup();
+    const { userId: gone } = await signedIn(t, "Gone");
+    const { userId: active } = await signedIn(t, "Active");
+    await seedWatch(t, gone, { nextCheckAt: T0 - HOUR });
+    const activeWatchId = await seedWatch(t, active, { nextCheckAt: T0 - HOUR });
+    await tombstone(t, gone);
+
+    expect(await t.mutation(internal.watches.sweep, {})).toBe(1);
+    const jobs = await scheduled(t);
+    expect(jobs.map((j) => (j.args[0] as { watchId: string }).watchId)).toEqual([String(activeWatchId)]);
+  });
+
+  it("watchForCheck (checkWatch's own guard) returns null for a tombstoned owner", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    await tombstone(t, userId);
+    expect(await t.query(internal.watches.watchForCheck, { watchId })).toBeNull();
   });
 });

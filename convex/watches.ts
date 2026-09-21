@@ -1,5 +1,5 @@
 /**
- * Watches (W1): a product the user has NOT bought yet, checked every six hours
+ * Watches (W1): a product the user has NOT bought yet, checked every two hours
  * and on demand, with a verdict line (W1b) computed from our own history.
  *
  * The external half is `priceWatch.observePrice`, shared with owned items.
@@ -26,13 +26,14 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { variantMatch, verdictValidator, watchStatus } from "./schema";
 import { ownedWatch, requireUserId } from "./lib/access";
+import { isTombstoned } from "./lib/accountState";
 import { assertCurrency, assertNonEmpty, assertPositiveCents, assertQty, assertTimestamp } from "./lib/money";
 import { claimDrop } from "./notify";
 import { defaultWatchName, parseProductUrl } from "./lib/watchUrl";
-import { verdict, type Verdict } from "./lib/verdict";
+import { verdictWithQualifier, type QualifiedVerdict } from "./lib/verdict";
 import { imageUrlChange } from "./lib/imageUrl";
 import { cleanLine } from "./lib/text";
-import { charge, consumeGlobalBudget, takeGlobalBudget, tryConsumeGlobalBudget } from "./lib/budget";
+import { charge, consumeGlobalBudget, takeGlobalBudget } from "./lib/budget";
 import { schedulePolicyFetch } from "./policies";
 import { errorNote, observePrice, rejectionReason, truncate, type PageObservation } from "./priceWatch";
 import {
@@ -41,13 +42,33 @@ import {
   MAX_PURCHASES_PER_USER,
   MAX_WATCHES_PER_USER,
   MAX_WATCH_CREATES_PER_HOUR,
+  STALE_PRICE_MS,
   WATCH_CHECK_COOLDOWN_MS,
   WATCH_CHECK_INTERVAL_MS,
   WATCH_CREATE_WINDOW_MS,
   WATCH_SWEEP_BUMP_MS,
   WATCH_SWEEP_PAGE,
+  WATCH_SWEEP_PER_USER,
   WATCH_SWEEP_STAGGER_MS,
 } from "./limits";
+
+/**
+ * P06 (D73): a client-supplied coarse "now" for DISPLAY computations only
+ * (never eligibility, cooldowns or money -- those keep reading `Date.now()`
+ * in the mutation/action that enforces them). Validated so a broken or
+ * malicious client cannot skew what a query displays by much: finite, within
+ * a day of the server's own clock, then rounded down to a 5-minute step so
+ * the reactive result only changes on that cadence instead of every render.
+ * The bounds check reads `Date.now()`, but only to THROW on a bad argument --
+ * it never contributes to any returned field, so it does not create the
+ * staleness problem the "no wall clock in a query" guideline warns about.
+ */
+export function assertCoarseNow(now: number | undefined): number | undefined {
+  if (now === undefined) return undefined;
+  if (!Number.isFinite(now)) throw new ConvexError("now must be a valid time");
+  if (Math.abs(now - Date.now()) > 86_400_000) throw new ConvexError("now must be close to the current time");
+  return Math.floor(now / 300_000) * 300_000;
+}
 
 /** Accepted watch checks carried into a purchase's price history by `markBought`. */
 const CARRY_OVER_CHECKS = 90;
@@ -58,7 +79,7 @@ const MAX_ORDER_REF_CHARS = 100;
 const MAX_NAME_CHARS = 200;
 /** `list` page size. */
 const LIST_LIMIT = 100;
-/** Newest checks the verdict is computed from, in `list` and `get` alike (15 days at the 6h cadence). */
+/** Newest checks the verdict is computed from, in `list` and `get` alike (5 days at the 2h cadence). */
 const VERDICT_WINDOW = 60;
 /** Accepted points returned per watch for the sparkline. */
 const SPARK_POINTS = 30;
@@ -84,16 +105,21 @@ const watchSummary = v.object({
   currency: v.union(v.string(), v.null()),
   targetCents: v.union(v.number(), v.null()),
   status: watchStatus,
+  /** Raw timestamp of the last attempt (accepted or not); the client derives display text (P06/D73). */
   lastCheckedAt: v.union(v.number(), v.null()),
+  /** Raw timestamp of the last ACCEPTED observation, distinct from `lastCheckedAt` (P06/D73). */
+  lastObservedAt: v.union(v.number(), v.null()),
+  /** True when `lastObservedAt` is missing or older than STALE_PRICE_MS (as of the query's `now`, or never true when no `now` was given). */
+  priceStale: v.boolean(),
   nextCheckAt: v.number(),
   /** Latest accepted price. */
   lastCents: v.union(v.number(), v.null()),
   /** The page's claimed "was" price at the latest accepted check, unverified. */
   listCents: v.union(v.number(), v.null()),
-  /** True when a target is set and the latest accepted price is at or under it. */
+  /** True when a target is set, the latest accepted price is at or under it, and that price is not stale. */
   targetHit: v.boolean(),
-  /** True while a scheduled check has not recorded yet. */
-  checking: v.boolean(),
+  /** Raw timestamp of the last requested check, if any; the client derives "checking" from this plus its own clock (P06/D73, replaces the old `checking` boolean). */
+  checkRequestedAt: v.union(v.number(), v.null()),
   /** Why the most recent check produced no price, when it did not. */
   lastNote: v.union(v.string(), v.null()),
   purchaseId: v.union(v.id("purchases"), v.null()),
@@ -165,11 +191,22 @@ async function marketFor(ctx: QueryCtx, watchId: Id<"watches">): Promise<Array<D
     .take(MARKET_MAX_POINTS);
 }
 
-/** `checks` newest first. The verdict only ever sees the newest VERDICT_WINDOW. */
+/**
+ * `checks` newest first. The verdict only ever sees the newest VERDICT_WINDOW.
+ *
+ * `argsNow` is the caller's validated, coarse `now` (P06/D73) -- optional,
+ * since a query must not read the wall clock itself. When it is missing, the
+ * "now" used for the verdict/staleness math falls back to the freshest thing
+ * this watch actually knows (`lastObservedAt`, or the newest accepted check),
+ * never to `Date.now()`: without a real clock reference from the client, this
+ * function cannot honestly judge staleness against the present moment, so it
+ * judges against the watch's own data instead, which can only ever say
+ * "fresh", never lie "stale".
+ */
 function summarise(
   watch: Doc<"watches">,
   checks: Doc<"watchChecks">[],
-  now: number,
+  argsNow: number | undefined,
   market: Array<Doc<"marketPrices">> = [],
 ): Infer<typeof watchSummary> {
   const window = checks.slice(0, VERDICT_WINDOW);
@@ -179,13 +216,17 @@ function summarise(
   const latest = accepted[0];
   const currentCents = watch.lastCents ?? null;
   const listCents = latest?.listCents ?? null;
-  const result: Verdict = verdict({
+  const now = argsNow ?? watch.lastObservedAt ?? latest?.observedAt ?? watch._creationTime;
+  const priceStale =
+    watch.lastObservedAt === undefined || now - watch.lastObservedAt > STALE_PRICE_MS;
+  const result: QualifiedVerdict = verdictWithQualifier({
     currentCents,
     listCents,
     history: accepted.map(({ observedAt, cents }) => ({ observedAt, cents })),
     now,
     currency: watch.currency,
     market: market.map((m) => ({ observedAt: m.observedAt, cents: m.cents })),
+    priceObservedAt: watch.lastObservedAt,
   });
   const marketPoints = [...market].sort((a, b) => a.observedAt - b.observedAt);
   const marketPrices = marketPoints.map((m) => m.cents);
@@ -201,15 +242,17 @@ function summarise(
     targetCents: watch.targetCents ?? null,
     status: watch.status,
     lastCheckedAt: watch.lastCheckedAt ?? null,
+    lastObservedAt: watch.lastObservedAt ?? null,
+    priceStale,
     nextCheckAt: watch.nextCheckAt,
     lastCents: currentCents,
     listCents,
     targetHit:
-      watch.targetCents !== undefined && currentCents !== null && currentCents <= watch.targetCents,
-    checking:
-      watch.checkRequestedAt !== undefined &&
-      watch.checkRequestedAt > (watch.lastCheckedAt ?? 0) &&
-      now - watch.checkRequestedAt < WATCH_CHECK_COOLDOWN_MS,
+      !priceStale &&
+      watch.targetCents !== undefined &&
+      currentCents !== null &&
+      currentCents <= watch.targetCents,
+    checkRequestedAt: watch.checkRequestedAt ?? null,
     lastNote: newest && newest.observedCents === undefined ? (newest.note ?? null) : null,
     purchaseId: watch.purchaseId ?? null,
     verdict: result,
@@ -244,11 +287,19 @@ function summarise(
   };
 }
 
-/** The caller's non-archived watches, newest first. `[]` when signed out. */
+/**
+ * The caller's non-archived watches, newest first. `[]` when signed out.
+ *
+ * `now` (P06/D73) is an optional coarse timestamp (validated by
+ * `assertCoarseNow`) the client refreshes on its own cadence and re-passes;
+ * it drives only display-derived fields (`priceStale`, `targetHit`, the
+ * verdict) -- never eligibility. Omitting it is safe: staleness then falls
+ * back to each watch's own data (see `summarise`) instead of a wall-clock read.
+ */
 export const list = query({
-  args: {},
+  args: { now: v.optional(v.number()) },
   returns: v.array(watchSummary),
-  handler: async (ctx) => {
+  handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
     if (!userId) return [];
     // One bounded indexed page per live status, rather than reading every row
@@ -266,7 +317,7 @@ export const list = query({
       .flat()
       .sort((a, b) => b._creationTime - a._creationTime)
       .slice(0, LIST_LIMIT);
-    const now = Date.now();
+    const now = assertCoarseNow(args.now);
     return await Promise.all(
       watches.map(async (w) =>
         summarise(w, await recentChecks(ctx, w._id, VERDICT_WINDOW), now, await marketFor(ctx, w._id)),
@@ -275,18 +326,19 @@ export const list = query({
   },
 });
 
-/** One watch with its recent checks (newest first). `null` when missing, archived or not the caller's. */
+/** One watch with its recent checks (newest first). `null` when missing, archived or not the caller's. Same `now` contract as `list`. */
 export const get = query({
-  args: { watchId: v.id("watches") },
+  args: { watchId: v.id("watches"), now: v.optional(v.number()) },
   returns: v.union(v.object({ watch: watchSummary, checks: v.array(watchCheckView) }), v.null()),
-  handler: async (ctx, { watchId }) => {
+  handler: async (ctx, { watchId, now: argsNow }) => {
     const userId = await getAuthUserId(ctx);
     if (!userId) return null;
     const watch = await ctx.db.get(watchId);
     if (!watch || watch.userId !== userId || watch.status === "archived") return null;
     const checks = await recentChecks(ctx, watchId, GET_CHECKS);
+    const now = assertCoarseNow(argsNow);
     return {
-      watch: summarise(watch, checks, Date.now(), await marketFor(ctx, watchId)),
+      watch: summarise(watch, checks, now, await marketFor(ctx, watchId)),
       checks: checks.map((c) => ({
         _id: c._id,
         observedAt: c.observedAt,
@@ -579,6 +631,8 @@ export const watchForCheck = internalQuery({
   handler: async (ctx, { watchId }) => {
     const watch = await ctx.db.get(watchId);
     if (!watch || watch.status === "archived" || watch.status === "bought") return null;
+    // D87: a scheduled job outlives the account it was queued for; refuse to spend on a deleted user.
+    if (await isTombstoned(ctx, watch.userId)) return null;
     // A placeholder name says nothing about the product; let the extractor name it.
     const named = watch.name !== defaultWatchName(watch.productUrl);
     return { productUrl: watch.productUrl, name: named ? watch.name : null };
@@ -685,11 +739,18 @@ export const recordWatchCheck = internalMutation({
     });
 
     const patch: Partial<Doc<"watches">> = {
+      // Attempt, whether or not it produced a usable price (P06/D73): a
+      // failed read still bumps this, so "when did we last try" is honest.
       lastCheckedAt: now,
       nextCheckAt: now + WATCH_CHECK_INTERVAL_MS,
     };
     if (observedCents !== undefined) {
       patch.lastCents = observedCents;
+      // The last SUCCESSFUL observation, distinct from `lastCheckedAt`
+      // (P06/D73): this is what `priceStale`/the verdict's staleness gate
+      // compare against, so a run of failed reads cannot make an old price
+      // look current just because we keep trying.
+      patch.lastObservedAt = now;
       if (watch.currency === undefined) patch.currency = args.currency;
     }
     // The page controls this string; it is stored as one clean line like a name the user typed.
@@ -713,13 +774,17 @@ export const recordWatchCheck = internalMutation({
       await claimDrop(ctx, watch, observedCents, watch.currency ?? args.currency ?? "USD");
     }
 
-    // W1b: once we know the product is real and what currency it prices in, ask ShopSavvy for the
-    // history we do not have. Once per watch ever (`marketFetchedAt`), and the global switch bounds
-    // the spend; a refusal leaves the watch working on our own reads alone.
-    if (observedCents !== undefined && watch.marketFetchedAt === undefined && watch.status !== "bought") {
-      if (await tryConsumeGlobalBudget(ctx, "market_lookup", GLOBAL_DAILY_BUDGETS.market_lookup.max, 1, now)) {
-        await ctx.scheduler.runAfter(0, internal.market.lookup, { watchId: watch._id });
-      }
+    // W1b/T10 (D71): once we know the product is real and what currency it
+    // prices in, ask ShopSavvy for the history we do not have. `requestLookup`
+    // is the single source of truth for whether a lookup is due -- it reads
+    // `marketState`, checks archived/tombstoned, and charges the budget it
+    // draws from, all in its own transaction, so this call site no longer
+    // duplicates any of that gating. The one check kept here is `bought`: a
+    // bought watch is never checked again (see `watchForCheck`), so a
+    // scheduled call that would immediately no-op is not worth the scheduler
+    // slot.
+    if (observedCents !== undefined && watch.status !== "bought") {
+      await ctx.scheduler.runAfter(0, internal.market.requestLookup, { watchId: watch._id, trigger: "auto" });
     }
 
     return { watchCheckId, accepted, note: note === undefined ? null : truncate(note) };
@@ -735,6 +800,20 @@ export const recordWatchCheck = internalMutation({
  * its own `nextCheckAt`, and a tick with nothing due costs one indexed read.
  * Idempotent: every scheduled row is pushed out of the due range in the same
  * transaction, so a second tick cannot schedule it again while it is in flight.
+ *
+ * Fairness (D74): the page is read exactly as before (`WATCH_SWEEP_PAGE`,
+ * earliest-due-first), but at most `WATCH_SWEEP_PER_USER` rows per user in
+ * that page are actually scheduled. EVERY row in the page -- scheduled or
+ * merely rotated past the per-user cap -- is bumped `WATCH_SWEEP_BUMP_MS`
+ * out of the due range, so one user's backlog cannot make the same page
+ * repeat forever: each tick drains a full `WATCH_SWEEP_PAGE` worth of rows
+ * out of the due set, advancing the scan deep enough to reach a quieter
+ * user's watch within a bounded number of ticks, not just `PER_USER` at a
+ * time. Rows cut purely by the global budget are the one exception: left
+ * completely untouched (not bumped), so they stay due and are retried as
+ * soon as the switch resets (H3), same as before this change. D87: a
+ * tombstoned owner's watches are skipped -- not scheduled, not bumped --
+ * left for the account purge to clean up.
  */
 export const sweep = internalMutation({
   args: {},
@@ -745,19 +824,38 @@ export const sweep = internalMutation({
       .query("watches")
       .withIndex("by_status_nextCheck", (q) => q.eq("status", "active").lte("nextCheckAt", now))
       .take(WATCH_SWEEP_PAGE);
+
+    const perUser = new Map<Id<"users">, number>();
+    const candidates: Doc<"watches">[] = []; // under the per-user cap; pending the global budget
+    const rotated: Doc<"watches">[] = []; // over the per-user cap this tick; bumped, not scheduled
+    for (const w of due) {
+      if (await isTombstoned(ctx, w.userId)) continue;
+      const count = perUser.get(w.userId) ?? 0;
+      if (count < WATCH_SWEEP_PER_USER) {
+        perUser.set(w.userId, count + 1);
+        candidates.push(w);
+      } else {
+        rotated.push(w);
+      }
+    }
+
     // H3: every check is paid, so the tick only schedules what the deployment-wide daily switch still allows.
-    // Rows left out stay due and are picked up by the first tick after the switch resets.
-    const allowed = await takeGlobalBudget(ctx, "price_check", due.length, now);
-    due.length = allowed;
-    for (let i = 0; i < due.length; i++) {
-      await ctx.db.patch(due[i]._id, {
+    // Rows cut here (not by the per-user cap) stay due and are picked up by the first tick after the switch resets.
+    const allowed = await takeGlobalBudget(ctx, "price_check", candidates.length, now);
+    const toSchedule = candidates.slice(0, allowed);
+
+    for (let i = 0; i < toSchedule.length; i++) {
+      await ctx.db.patch(toSchedule[i]._id, {
         nextCheckAt: now + WATCH_SWEEP_BUMP_MS,
         checkRequestedAt: now,
       });
       await ctx.scheduler.runAfter(i * WATCH_SWEEP_STAGGER_MS, internal.watches.checkWatch, {
-        watchId: due[i]._id,
+        watchId: toSchedule[i]._id,
       });
     }
-    return due.length;
+    for (const w of rotated) {
+      await ctx.db.patch(w._id, { nextCheckAt: now + WATCH_SWEEP_BUMP_MS });
+    }
+    return toSchedule.length;
   },
 });
