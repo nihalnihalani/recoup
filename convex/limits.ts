@@ -17,8 +17,8 @@ export const WATCH_CREATE_WINDOW_MS = 3_600_000;
 /** Manual "check now" per watch: the scraper serves a cached page for up to an hour, so re-checking sooner than 10 minutes buys nothing and still costs an extraction. */
 export const WATCH_CHECK_COOLDOWN_MS = 600_000;
 
-/** Cadence of automatic checks per watch: retailer prices move on the order of a day; same 6h compromise as the owned-item price watch. */
-export const WATCH_CHECK_INTERVAL_MS = 6 * 3_600_000;
+/** Cadence of automatic checks per watch: every check costs one scrape plus one extraction; two hours matches the owned-item price watch and gives the charts twelve real readings a day. */
+export const WATCH_CHECK_INTERVAL_MS = 2 * 3_600_000;
 
 /** Watches one sweep tick may schedule, so a bad day cannot burn the scrape quota (same bound as priceWatch FANOUT_LIMIT). */
 export const WATCH_SWEEP_PAGE = 50;
