@@ -188,6 +188,17 @@ places) needs updating by hand if production ever moves to a different
 deployment name (`docs/ops/ENVIRONMENT.md`'s E2E-only section has the exact
 locations).
 
+**`seedFixtures`' queued mailLog row is render-only (T18.5/F-T23-1b).**
+`convex/testing.ts`'s `seedFixtures` writes one `mailLog` row `status:
+"queued"` with `outboundId: "e2e-outbound-queued" as never` — a fake
+placeholder string, never a real AgentMail component id, purely so an E2E
+run's UI has something in the "sending" state to render. Do not point
+`notify.reconcileDrop`/`sweepStalled` (or any hand-run `ops` inspection) at
+this row expecting a real component lookup to succeed: `agentmail.status`
+against a fake id fails, the same way it would for any malformed id. If a
+seeded E2E account's mail log looks "stuck" on this one row, that is
+expected and not a bug to chase.
+
 ## 5. Interpret a `logEvent` kind
 
 `convex/lib/log.ts`'s `logEvent(kind, fields)` writes one JSON line per
@@ -318,4 +329,82 @@ production.
 ## 11. Retention: never-verified accounts, and a stalled cursor
 
 - **Never-verified accounts are purged after 7 days and cannot be recovered.** `convex/retention.ts`'s daily sweep deletes any `users` row with no `emailVerificationTime` once it is more than `RETENTION_UNVERIFIED_DAYS` (7) days old and owns no purchases/watches/claims/profiles rows (D107 hygiene addendum — sign-in itself is gated on verification, so an unverified account can never legitimately own any of those). There is no undo; the person must sign up again.
-- **Read a stalled retention cursor:** `npx convex run ops:backlog '{}' --deployment adorable-lion-138` — its `retention` field names which table the resumable sweep (`convex/retention.ts`'s `sweep`) is currently on (`rule`), how long the cursor has sat there untouched (`cursorAgeMs`), and whether that exceeds the 48h stall threshold (`stalled: true`, almost always one row on that table the sweep keeps failing to process — a poison page). **Reset it** by inspecting and patching the single `opsState` row keyed `"retention"` by hand (`npx convex run --inline-query 'await ctx.db.query("opsState").withIndex("by_key", q => q.eq("key", "retention")).unique()'`, then `--inline-mutation` with `ctx.db.patch` to set its `cursor` field to `'{"step":0,"page":null}'` to restart the whole cycle from the top, or to `'{"step":<next step index>,"page":null}'` to skip only the stuck step for this cycle), then resume progress with `npx convex run retention:sweep '{}' --deployment adorable-lion-138`.
+- **Read a stalled retention cursor:** `npx convex run ops:backlog '{}' --deployment adorable-lion-138` — its `retention` field names which table the resumable sweep (`convex/retention.ts`'s `sweep`) is currently on (`rule`), how long the cursor has sat there untouched (`cursorAgeMs`), and whether that exceeds the 48h stall threshold (`stalled: true`, almost always one row on that table the sweep keeps failing to process — a poison page). Inspect the raw cursor first if you want to see exactly what it holds: `npx convex run --inline-query 'await ctx.db.query("opsState").withIndex("by_key", q => q.eq("key", "retention")).unique()' --deployment adorable-lion-138`.
+- **Reset it** with `ops:resetRetentionCursor` (T18.5/F-T23-3) — **not** `npx convex run --inline-mutation`, which does not exist in this repo's pinned CLI (`convex@1.46.0` ships `--inline-query` only; there is no ad hoc inline-mutation escape hatch, unlike the read above):
+  ```sh
+  # Restart the whole cycle from the top (RETENTION_STEPS[0], "processedEvents"):
+  npx convex run ops:resetRetentionCursor '{}' --deployment adorable-lion-138
+
+  # Skip only the stuck step for this cycle (N = the index into
+  # convex/ops.ts's RETENTION_STEPS, e.g. 4 for "mailLog"):
+  npx convex run ops:resetRetentionCursor '{"step":4}' --deployment adorable-lion-138
+  ```
+  Both forms return the cursor as it was *before* the reset, so you can confirm what you just overwrote. Then resume progress with `npx convex run retention:sweep '{}' --deployment adorable-lion-138`.
+
+## 12. Account deletion
+
+`convex/account.ts`'s `requestDeletion`/`purge`/`purgeStep` (T18, D77;
+checkpoint 6c conditions closed T18.5/D124) tombstone an account, delete its
+owned rows, drain the AgentMail component's own copies of its mail, and
+attempt to delete the remote AgentMail inbox — all bounded and resumable.
+Most of this is unattended; the cases below are the ones that need a human.
+
+**Read stuck deletions:** `npx convex run ops:backlog '{}' --deployment
+adorable-lion-138` — its `deletions` field (`{ stuck, deletingTotal }`,
+T18.5) reports `accountState` rows stuck `status: "deleting"` for over 24h
+(`STUCK_DELETION_AGE_MS`) with no live scheduled `purge` job, alongside
+every `deleting` row currently in flight. A nonzero `deletingTotal` alone is
+not a problem — ordinary in-flight purges show up there too, and the daily
+`reDriveStuckDeletions` cron re-schedules anything genuinely stuck within
+24h on its own. A **persistently nonzero `stuck`** across repeated
+`backlog` calls (hours apart) means that cron itself is not running — check
+`npx convex logs` for `reDriveStuckDeletions` errors before assuming any one
+row is unrecoverable. To force an immediate re-drive instead of waiting for
+the next cron tick: `npx convex run account:reDriveStuckDeletions '{}'
+--deployment adorable-lion-138`.
+
+**What `inboxDeleted: false` means, and the manual fallback.**
+`account.deletionStatus`/the per-row `accountState.inboxDeleted` field is
+read LITERALLY, never inferred from `status` (`purge`'s own docstring has
+the full state table): `status: "deleted"` means Recoup's own side (app
+data, the AgentMail component's per-inbox rows, and every auth row) is
+fully gone; `inboxDeleted: false` on a `"deleted"` row means the REMOTE
+AgentMail inbox itself was never confirmed deleted after all 5 retry
+attempts (backoff: 1m, 10m, 1h, 6h, 24h — `INBOX_DELETE_BACKOFF_MS`). This
+is not a stuck row (there is no more retry chain to re-drive: the account is
+already fully `"deleted"` on Recoup's side) — it needs a one-time manual
+DELETE against the provider:
+
+```sh
+curl -X DELETE "https://api.agentmail.to/v0/inboxes/<inboxId>" \
+  -H "Authorization: Bearer $AGENTMAIL_API_KEY"
+```
+
+Find `<inboxId>` and confirm the failure via `npx convex run
+--inline-query 'await ctx.db.query("accountState").withIndex("by_status", q
+=> q.eq("status", "deleted")).collect()' --deployment adorable-lion-138`,
+filtering for `inboxDeleted: false`, and read `lastError` on the same row
+for why it kept failing (sanitized — never the raw provider body, see
+`lib/errors.ts`). A 404 from the DELETE call above means it is already gone
+(nothing further to do); referencing `$AGENTMAIL_API_KEY` by name only, per
+§2 — never paste the literal key into a command you might share or log.
+There is no in-app "retry inbox delete" action once `status` is already
+`"deleted"`; this manual call is the only remaining path.
+
+**Ownerless `processedEvents` rows for a still-live inbox.** Two
+independent things can each leave a `processedEvents` row with no `userId`:
+(1) a rate-limited/unrouted inbound message the app could not attribute to
+any user at ingest time (D115 6b-7, unrelated to deletion), and (2) mail
+that arrives for an inbox whose remote DELETE permanently failed (the
+`inboxDeleted: false` case above) — `profiles`/`accountState` are both
+already gone by then, so a later inbound webhook for that same (still-live)
+inbox is written the same ownerless way, keeping up to 60,000 characters of
+message text. Neither case is purge's job to clean up further: the account
+side is truthfully `"deleted"` already, and the row is not attributable to
+any live account. Both are bounded the same way: `retention.ts`'s daily
+sweep clears `processedEvents.payload` (the raw subject/from/text, not the
+row itself) for any row in a terminal status older than
+`RETENTION_PAYLOAD_DAYS` (30 days) — §11 above covers reading/resetting
+that sweep's own cursor if it looks stalled. Deleting the remote inbox by
+hand (previous item) stops any FURTHER mail from arriving at all; it does
+not retroactively clear rows already written.
