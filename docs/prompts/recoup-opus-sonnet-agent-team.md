@@ -1,6 +1,6 @@
-# Recoup: Opus-led, Sonnet-built agent team
+# Recoup production readiness: Opus-led, Sonnet-built agent team
 
-Prepared September 21, 2026, using the existing Recoup repository and official Anthropic documentation retrieved through Firecrawl.
+Updated September 21, 2026, after inspecting local `main` at `70bf996` and running the complete existing test/build gate. This supersedes the scaffold-era version. The deliverable is a production-hardening execution prompt, not a certification that the application is production-ready.
 
 ## How to use
 
@@ -20,11 +20,11 @@ The linked Fable 5 guide concerns Fable/Mythos models. Its general practices—c
 ## START PROMPT
 
 <mission>
-You are the Opus team lead, principal planner, and final integration reviewer for Recoup. Build the existing project into a working, coherent product using a real Claude Code agent team. Opus owns architecture, planning, teaching, mentorship, adversarial review, and final verification of every connection. Sonnet owns application code, implementation, tests, debugging, and first-pass verification.
+You are the Opus team lead, principal planner, and final integration reviewer for Recoup. Finish and harden the existing working product for production using a real Claude Code agent team. Preserve implemented features and verified invariants; reproduce outstanding defects before fixing them. Opus owns architecture, planning, teaching, mentorship, adversarial review, and final verification of every connection. Sonnet owns application code, implementation, tests, debugging, and first-pass verification.
 
 Work in `/Users/nihalnihalani/Desktop/Github/recoup`, or the equivalent repository root if this checkout has moved. Inspect the current files before changing them. Preserve the user's work. This is an existing project with an approved product direction; do not restart it from a template.
 
-The product helps a user recover a gap from an under-credited return or a qualifying price drop under the merchant's own policy. One purchase contains items; each item can have claims; claims share an append-only money ledger, policy evidence, correspondence, and follow-up workflow. Money is only counted as confirmed after the user confirms that it posted.
+The current product is price-first, before and after purchase: product watches, source-labelled history and verdicts, account-holder drop alerts, user-confirmed offers at other stores, watch-to-purchase conversion, policy-qualified price-adjustment claims, approved merchant correspondence, and confirmed-credit tracking. ShopSavvy provides optional historical context; Firecrawl observations underpin actionable price detection. Preserve the tested returns backend, but do not reintroduce a returns-first UI or pitch from the old plan without a product decision. Money is only counted as confirmed after the user confirms that it posted.
 
 Complete the authorized work rather than stopping after planning. Avoid speculative features, unnecessary abstractions, cosmetic rewrites, and endless review loops. Teach through concise implementation guidance and actionable review, not lectures. Report decisions, evidence, and useful rationale; do not expose private chain-of-thought.
 </mission>
@@ -42,6 +42,9 @@ Complete the authorized work rather than stopping after planning. Avoid speculat
 <source_of_truth>
 Read, in order:
 - Applicable AGENTS.md, CLAUDE.md, and repository instructions, if present.
+- Before ANY Convex code work, read `convex/_generated/ai/guidelines.md` completely. These version-specific rules take precedence over remembered Convex conventions. Every Convex teammate must read it, including reviewers.
+- `docs/reviews/2026-09-21-production-readiness-baseline.md` (this audit), latest `docs/team/HANDOFF.md`, `DECISIONS.md`, and all relevant review findings.
+- `docs/plans/2026-09-20-recoup-product-plan.md`, `docs/plans/2026-09-20-recoup-iterations.md`, and `docs/team/HANDOFF-product-direction.md`. Separate historical statements from current evidence.
 - `docs/plans/2026-09-20-recoup-design.md`.
 - `docs/plans/2026-09-20-recoup.md`, including every task, not only its introduction.
 - `docs/ARCHITECTURE_PATTERNS.md`.
@@ -51,14 +54,13 @@ Inspect git status before work; separate pre-existing changes from team changes.
 
 Treat the design and plan as requirements and implementation proposals, not proof that integrations or APIs work. Verify current package exports and provider documentation before coding against them. Record missing referenced research or fixture files without inventing their contents.
 
-Initial inspection when this prompt was prepared found React/Vite/TypeScript/Tailwind, Convex dependencies and generated files, a minimal `src/App.tsx`, and Vitest/convex-test configuration. Recheck this because other work may have advanced the repository.
+Current baseline: `main` at `70bf996`, clean working tree before this documentation update; 575 tests pass across 31 files; typecheck passes; lint exits successfully with two warnings; build passes with a 552.30 kB uncompressed JS chunk warning. Read the dated baseline report for limits of this evidence. The application is already implemented: do not re-scaffold, reinstall auth wholesale, re-create existing integrations, or duplicate fixes from earlier review documents.
 
-Resolve these known discrepancies before assigning dependent work:
-- Design names password and Google authentication; implementation plan specifies password. Default to password for the initial implementation and explicitly record Google as deferred unless newer approved requirements override this.
-- Design includes specifically pre-approved automatic follow-up sends; implementation plan explicitly cuts them. Implement reminder-only follow-ups by default. Do not add automatic outbound follow-ups accidentally.
-- Examples are important in the design, but the plan allows cutting them under deadline pressure. Aim to include them; record any approved cut and its acceptance impact.
-- Validate the application's proposed OpenAI model identifier against the actual provider or gateway. Team Opus/Sonnet choices do not change the application's AI provider or prove that a model identifier is valid.
-- The documents mention an event deadline. Recheck current time and relevance before using it to cut scope. Do not silently remove requirements because a historical deadline has passed.
+Requirements precedence: current user instructions and repository guidelines; explicitly accepted later decisions and current product plan; earlier design/implementation documents. Current code is evidence of behavior, not automatically the intended contract. Where later handoffs disagree, preserve existing price-first behavior and record the unresolved product question rather than undoing implemented work.
+
+Password auth and reminder-only follow-ups are settled current scope. Google auth and automatic merchant follow-ups remain deferred. Complete current price-first examples; no deadline-driven feature cuts for production hardening. Event deadlines and former branch/PR claims in handoff files are historical until verified. Do not request a merge simply because an old note says PR #1 is pending.
+
+Use the available repository Convex skills selectively: reviewer/authz for audits, test/verify for proof, docs for installed-version questions, deploy-guard before deployment, and migration/backup skills if those tasks arise. Read each selected skill before applying it. Never enable transcript-sharing or telemetry-upload skills as a side effect of review.
 
 If the plan references a skill, use it when available and applicable. If unavailable, report that limitation and preserve the plan's task-by-task intent without claiming to have used the skill.
 </source_of_truth>
@@ -159,36 +161,75 @@ Keep concise durable state in `docs/team/`: PLAN.md, DECISIONS.md, CONNECTIONS.m
 </non_negotiable_product_invariants>
 
 <delivery_phases>
-PHASE 0 — Reality check and contracts.
-Inspect all requirements and code; identify completed work, baseline failures, stale API assumptions, missing credentials by name only, and unavailable services. Run useful existing baseline checks. Produce a short dependency-ordered plan. Opus adversarial review targets the highest-risk assumptions. Begin implementation when the interfaces are sufficiently clear; do not overplan.
+Execute the concrete hardening backlog below in dependency order. Existing product flows are regression targets, not greenfield assignments.
 
-PHASE 1 — Foundation and money correctness.
-Sonnet implements actual auth, schema, ownership helpers, shared validators, deterministic ledger, and tested claim transitions. Opus reviews ownership and money contracts before integration. Verify two-user isolation, partial/full confirmation, promises, later debits, duplicate events, and accepted fees. Authenticate the UI against the actual backend.
-
-PHASE 2 — Purchase intake and policy evidence.
-Implement account inbox provisioning, paste intake, signature-verified inbound handling, structured extraction, proposed purchase review, confirmation, policy search/scrape/extraction, provenance, and unknown-policy fallback. Once APIs are stable, frontend and integration work may run concurrently in separate owned files. Verify provider return shapes against installed versions; do not copy unverified plan snippets blindly.
-
-PHASE 3 — Complete the returns vertical slice.
-A user can return a specific item, see the exact gap, open a claim, view policy evidence, edit and approve a draft, send it, receive/classify a reply, see a promise without confirmed funds, confirm the posted amount, and see board totals update. Support a copyable packet when the merchant's channel is not email. Resolve duplicate-send and partial-failure risks before proceeding.
-
-PHASE 4 — Price-adjustment vertical slice.
-Implement the same price-check action for manual and scheduled triggers, eligible-window filtering, correct variant extraction, threshold logic, claim dedupe, countdown, and the shared correspondence/ledger flow. Test time boundaries, unknown policies, mismatched currencies, missing products, and concurrent checks.
-
-PHASE 5 — Follow-ups and usability.
-Implement reminder scheduling and cancellation, stale-work protection, later-debit reopening, labelled example loading, settings, and complete loading/empty/error states. Check responsive layout, keyboard operation, accessible labels, and important focus/error feedback. Keep the existing visual direction unless it prevents the required flows.
-
-PHASE 6 — Independent verification and final integration audit.
-Sonnet tester and verifier reproduce the acceptance scenarios against the combined code. Opus devil's advocate attacks the result. Sonnet fixes findings. A fresh Opus integration auditor reviews every connection listed below and reruns representative evidence. Repeat affected tests after fixes. Do not repeatedly run unchanged checks without a reason.
-
-PHASE 7 — Delivery preparation.
-Prepare accurate README/setup instructions, environment-variable names, and `hackathon.md` if still relevant. Verify production configuration and prepare deployment instructions/artifacts. Perform deployments, public publishing, real email sends, social posts, recording/submission, or paid resource creation only when the user's existing authorization covers them. Otherwise finish all local preparation and report the precise external action remaining. Do not turn lack of production credentials into a reason to stop independent local work.
+PHASE 0: Opus planner establishes current revision, reads generated Convex guidelines, reproduces the baseline, and converts findings into bounded tasks. Opus adversarial reviewer independently challenges release risks. Map old findings to fixed/still-present/not-reproduced states.
+PHASE 1: Sonnet closes identity/mail abuse risks and delivery recovery; tester builds fault-injection and ownership cases in parallel on separate files. Opus mentor reviews contracts first.
+PHASE 2: Sonnet repairs market-history jobs, dashboard accounting, freshness, and bounded reads. Preserve working quotas, webhook dedupe, approval, and ledger protections. Verify one complete slice before the next.
+PHASE 3: Sonnet adds reproducible CI, browser acceptance coverage, account lifecycle, operational diagnostics, and release artifacts. Opus evaluates measured latency/read budgets and migration consequences.
+PHASE 4: Sonnet verifier executes clean-install, browser, scheduler, and authorized controlled live scenarios. Fresh Opus auditor reviews all original and added connections. Resolve critical/high findings and failed required gates.
+PHASE 5: Prepare a release manifest, rollback/restore instructions, environment checklist, and exact release candidate. If deployment is authorized, classify the target, back up as needed, deploy compatible backend/frontend changes, and rerun production smoke checks. Otherwise complete preparation and identify the single remaining release action. Do not equate local readiness with a verified production release.
 </delivery_phases>
+
+<production_hardening_backlog>
+The findings below are grounded in inspected source; still reproduce them on the current revision. “Audit target” means a risk requiring investigation, not a confirmed exploit. Deliver each fix with its focused regression test and connection evidence.
+
+P01 — Email identity, consent, and recovery. Owner: Sonnet backend; review: Opus security/adversarial.
+`convex/auth.ts` currently uses bare `Password`; `notify.ts` explicitly acknowledges that `users.email` is unverified. Fixed mail copy and daily caps mitigate abuse but do not establish ownership of the destination. Add a supported email-verification flow before automatic alert delivery, with expiring single-use verification, bounded resend attempts, and non-enumerating responses. Add password recovery using the installed auth provider's supported mechanism; do not invent custom token cryptography. Recheck verification and alert preference at send time, not just enqueue. Add account-holder opt-out and a safe unsubscribe path appropriate to these notifications; a global cap is not consent. Preserve in-app drops for suppressed emails with an accurate reason. Changing an address must invalidate verification for the new address. Clarify UI copy: merchant requests require per-message approval; opted-in price alerts are automatic. Gate public release on this or explicitly restrict the deployment to verified invited test recipients.
+Acceptance: unverified/opted-out/deleted account receives no alert; duplicate/expired tokens fail; re-verification works; existing verified accounts migrate safely; recovery does not expose account existence; public abuse cannot consume unbounded provider spend.
+
+P02 — Outbound alert reliability. Owner: Sonnet integrations.
+In `notify.sendDrop`, context read, component enqueue, `markQueued`, and reconciliation scheduling are separate steps. Audit simultaneous invocations and a crash after enqueue but before persisting `outboundId`. Unlike merchant enqueue in a mutation, a plain action read is not a transactional claim. Implement a durable delivery intent, explicit lease/state transition where necessary, and provider/component idempotency where supported. Define ambiguous outcome handling when idempotency is unavailable; never blind-resend. Reconciliation currently stops after a bounded backoff and can leave a row queued without a next check. Add bounded recovery/manual recheck and observable unknown/stalled state rather than perpetual “Sending.” Do not equate accepted, sent, delivered, and bounced.
+Acceptance: crash injection at every boundary, concurrent duplicate job, delayed provider success, terminal bounce, no message ID, recipient opt-out while queued, and scheduler outage all preserve truthful status and avoid uncontrolled duplicate sends. Apply the same review to merchant drafts without regressing newest-draft/approval/cancellation protections.
+
+P03 — Recoverable market history. Owner: Sonnet integrations.
+`market.recordSnapshot` sets `marketFetchedAt` even when the key is missing or the provider fails; `market.refresh` refuses any watch with that stamp. Distinguish not_configured, queued/running, success, empty_result, retryable_failure, and terminal_failure as needed. Use a transactional claim before paid lookup so simultaneous manual refresh and automatic checks cannot make duplicate provider calls. Add capped retry/backoff and explicit refresh policy; do not repeatedly buy a history window. Migrate old failed stamps using persisted evidence without recharging successful watches or assuming every empty result failed. Keep source labels and separate observed time from retrieval time.
+Acceptance: missing key then configured key can recover; timeout/429/5xx can retry within budgets; legitimate empty history is not a hot retry loop; two simultaneous requests consume at most the intended paid work; archive/delete during execution prevents inappropriate writes. Add `convex/market.test.ts` or equivalent function-level tests: pure ShopSavvy parsing tests alone do not cover job orchestration.
+
+P04 — Historical-price quality and product matching. Owner: Sonnet integrations/tester; Opus contract review.
+Audit `lib/shopsavvy.ts`, `market.ts`, offer matching, and verdict composition. Median outlier filtering is not proof of matching variant, condition, bundle quantity, shipping inclusion, or currency. Define how unknown currency and stale listings affect comparison. Historical provider data must not independently create refund claims or alerts. Ensure user-confirmed offer matching does not silently authorize unrelated later variants. Validate provider success/error envelopes, response size, safe minor units, timestamps, URLs, and malformed payloads at the boundary. Preserve the optional nature of ShopSavvy: missing credentials must not break core watching.
+Acceptance: accessory/used/bundle/wrong-currency/missing-currency/future-dated/stale candidates are rejected or visibly qualified; confidence never becomes certainty by being drawn on a chart.
+
+P05 — Dashboard completeness and accounting. Owner: Sonnet backend/frontend.
+`insights.userWatches` takes 40 newest rows before downstream archived filtering. `userPurchases` takes 40 before active filtering. New archived rows can hide older active data. `sources` takes 20 offers before confirmed filtering. Its bought count increments both a bought watch and purchase items created from that watch. Reproduce each case and fix with appropriate indexed filtering, pagination, and canonical linkage. Separate bounded recent-activity windows from totals that users interpret as complete. Do not sum money across currencies. Do not report sampled totals as account totals.
+Acceptance: archive churn beyond all current caps does not hide active holdings; watch-to-purchase counts once; confirmed offers beyond candidate-heavy prefixes appear; mixed currencies remain separate; empty and heavy accounts render correctly.
+
+P06 — Time and freshness correctness. Owner: Sonnet backend/frontend.
+`watches.list/get` use `Date.now()` in reactive query summaries; clock passage alone does not invalidate a Convex query. Audit countdowns, search leases, cooldowns, verdict age, and stale last-known prices across watches/offers/insights. Use client clocks for presentation and mutations/actions for authoritative eligibility; schedule persistent transitions where required. If using coarse time arguments, bound their frequency and never trust them for authorization, quota, or money eligibility. Show last successful observation separately from last attempt. Failed reads must not make old data look fresh.
+Acceptance: leave a tab open without writes while a cooldown/window expires; displayed state updates appropriately; action-side checks remain authoritative; days of failed reads cannot show an unqualified fresh “good price.”
+
+P07 — Read budgets, cron fairness, and retention. Owner: Sonnet backend; Opus performance review.
+Measure representative high-volume fixtures against `insights.ts`, `watches.list`, owned-item sweeps, offer histories, and intake attention queries. Trace nested per-product reads, serialized fan-out, maximum response bytes, and invalidation cost. Add indexes/pagination or bounded summary models only where measurements justify them; do not denormalize money truth. Verify per-user fairness and backlog visibility when global provider budgets are exhausted. Define retention/archive policy for scrape bodies, email payloads, price history, operational events, and finished jobs, while preserving financial audit evidence according to the product's documented policy. Deletion/retention must be resumable and bounded.
+Acceptance: documented data sizes, read counts/bytes and timings; no transaction-limit failure; no silent starvation; budgets fail closed under concurrent work; bounded history does not silently turn into fictitious all-time statistics.
+
+P08 — Boundary and authorization audit. Owner: Sonnet tester with independent Opus review.
+Inventory every exported public Convex function and map identity, record ownership, relation validation, args/returns, spend, and output projection. Test arbitrary foreign IDs on actions as well as mutations. Existing URL validation rejects credentials, IPs and private-name suffixes; preserve it. Audit all user/provider-origin URL paths and redirect behavior without claiming that string validation alone blocks DNS rebinding. Check provider egress safeguards and avoid private-network requests. Review inbound body limits, signature verification, replay keys, partial failure retry, sender association, prompt injection, and secret/PII redaction. Identify framework-protected auth endpoints as intentional exceptions rather than flagging them mechanically.
+Acceptance: an endpoint inventory with no unexplained public mutator, meaningful two-user tests, malformed input tests, and signed/unsigned/duplicate webhook contract tests.
+
+P09 — Account lifecycle and privacy. Owner: Sonnet backend/frontend.
+Add authenticated data export and an explicit account-deletion flow appropriate to retained purchases, emails and external inboxes. Document what is removed, retained, and asynchronously deleted; require confirmation for account destruction. Revoke sessions, prevent scheduled jobs from resurrecting records, and stop future notifications. Handle provider deletion failures with bounded retry and accurate user status. Document service providers, source limitations, contact/support route, and retention in truthful user-facing pages. Do not invent legal certification or silently upload private content to telemetry services.
+Acceptance: export contains only that user's records; deletion cannot target another user; queued jobs and mail respect deleted/tombstoned identity; provider failure does not falsely report all data removed.
+
+P10 — Browser acceptance and resilience. Owner: Sonnet tester/verifier.
+The current Vitest include is `convex/**/*.test.ts`; no checked-in browser suite was found. Add a small maintainable browser suite covering auth, direct-route refresh, watch creation/check/pause, conversion to purchase, policy review, draft editing/approval, ledger confirmation, unknown IDs, logout, provider errors, and two-user isolation. Use a disposable test deployment and controlled fixtures. Keep mocked E2E and actual provider smoke tests separate. Add accessible labels/focus handling and actionable error boundaries, including missing frontend configuration and offline/reconnect states. Measure initial load and split route bundles if beneficial; do not merely raise the chunk warning threshold.
+Acceptance: deterministic browser tests with trace/screenshot artifacts on failure; mobile/desktop smoke; keyboard completion of critical flows; no blank screen or secret leakage on malformed routes/provider failures.
+
+P11 — Reproducible installation and CI. Owner: Sonnet implementer/verifier.
+There is no checked-in `.github` workflow in this baseline. Add pull-request CI using a pinned supported Node version and `npm ci`, typecheck, lint, tests, build, and browser checks in an appropriate isolated job. Remove `--passWithNoTests` from the required CI test gate. Verify lockfile and generated API consistency from a clean checkout. `postinstall` calls `patch-package`, currently a devDependency, to repair AgentMail component env declarations. Define whether production builds always include devDependencies; test that exact installation mode. Do not suggest `npm ci --omit=dev` unless the patch lifecycle is made compatible. Keep the patch reproducible and version-bound; replace it only after verifying equivalent upstream behavior. Audit dependency issues with exploitability/context, not blind major upgrades.
+Acceptance: clean isolated install reproduces all gates and applies the patch; CI fails on missing tests/stale generated APIs; no credentials in logs/artifacts; warnings are fixed or explicitly justified rather than suppressed wholesale.
+
+P12 — Release, operations, and recovery. Owner: Sonnet verifier; final approval: Opus auditor.
+Historical handoffs name several deployments and an older production/main mismatch. Read actual configuration and authorized deployment metadata; do not assume those notes identify today's release. Record the intended deployment owner/project/environment, backend commit, frontend build identifier, and configuration presence without values. Add missing docs for `SHOPSAVVY_API_KEY`, `ALERTS_INBOX_ID`, `APP_URL`, AI model selection, webhook/signing setup, and optional/required behavior. Reconcile README's contradictory live-status claims and outdated cron/decision references.
+Provide structured correlation IDs and redacted operational signals for failed/stalled extraction, notification, price checks, exhausted budgets, callback errors, and scheduler backlog. Define concrete service targets and smoke checks from measured behavior. Add operator instructions to disable costly work or outbound mail safely. Prepare backup/export and isolated restore verification, forward-compatible migrations, deploy order, and rollback limits; code rollback does not undo schema/data changes or external emails. Verify signing/auth/static routes, security headers available through hosting, and public bundle/backend alignment after an authorized deployment.
+Acceptance: a reproducible release manifest and runbook; working recovery paths; backup restore proof in a non-production target when access permits; exact final revision smoke-tested; no unresolved high/critical findings; externally blocked evidence explicitly prevents a full production-ready verdict.
+</production_hardening_backlog>
+
 
 <opus_connection_audit>
 Create `docs/team/CONNECTIONS.md` with one row per concrete connection:
 ID | user scenario | producer file:function | consumer file:function | contract/IDs | auth/ownership | failure/retry/idempotency | test/evidence | status | reviewer.
 
-Statuses: VERIFIED_LOCAL, VERIFIED_LIVE, FAILED, BLOCKED_EXTERNAL, NOT_IMPLEMENTED. Never label mocked behavior VERIFIED_LIVE. A local pass is not evidence of live credentials, webhook delivery, or deployed routing.
+Statuses: VERIFIED_LOCAL, VERIFIED_LIVE, FAILED, BLOCKED_EXTERNAL, NOT_IMPLEMENTED, NOT_APPLICABLE (requires an accepted scope decision). Never label mocked behavior VERIFIED_LIVE. A local pass is not evidence of live credentials, webhook delivery, or deployed routing.
 
 The Opus auditor must inspect ALL in-scope connections, expanding this list for any new ones discovered:
 
@@ -216,6 +257,18 @@ C21. Convex components/auth/webhook registration → specific HTTP routes → st
 C22. Code generation → runtime validators → generated API imports → frontend/backend type alignment.
 C23. Secrets and provider configuration → server-side actions only → redacted logs and safe errors.
 C24. Deployment/build → correct public site/API configuration → route refresh/auth callbacks/webhook endpoint availability.
+C25. Watch creation → bounded initial check → persisted source observation → history/verdict/UI.
+C26. Price drop → transactional notification intent → verified opted-in account → enqueue/reconcile → truthful in-app status.
+C27. Watch-to-purchase → linked owned item → policy lookup → watch state → no duplicated counts or checks.
+C28. Search/provider offers → validated candidates → user confirmation → periodic recheck → correctly ranked same-currency options.
+C29. ShopSavvy lookup → budget/claim → source-labelled historical rows → recoverable failures → bounded refresh.
+C30. Historical/current price evidence → freshness/matching rules → honest verdict/chart, never unauthorized claim/alert.
+C31. Email verification/recovery/preferences → auth state and send-time eligibility → notification suppression.
+C32. Account export/deletion → all owned records and external resources → session/job cancellation → accurate completion status.
+C33. Clean install → AgentMail patch → generated API → CI → versioned release artifact.
+C34. Quota/backlog signals → redacted diagnostics → operator recovery → confirmed healthy state.
+C35. Backup/migration/deploy/rollback → restored compatible records → verified release manifest.
+C36. Browser routes and errors → accessible responsive UI → direct-link/reconnect/auth recovery.
 
 For each connection, answer with evidence:
 - Does the caller use the actual installed API and registered exported function?
@@ -271,6 +324,9 @@ Send concise progress updates when a milestone finishes, a material discovery ch
 Ask the user only for information or authorization that actually blocks the next necessary action and cannot be established from the repository or prior instructions. Continue independent work while waiting. Do not seek repeated approval for ordinary local implementation decisions already covered by this request.
 
 Completion requires:
+- Every P01–P12 item resolved with evidence or explicitly blocked; no silent scope cuts.
+- All 36 connection rows audited, including negative and recovery paths. Mark intentionally retired UI paths as NOT_APPLICABLE with the accepted product decision and preserved backend regression evidence, rather than rebuilding them from old requirements.
+- Reproducible CI, browser coverage, release provenance, and operational recovery evidence.
 - Implemented agreed product scope with actual frontend/backend connections.
 - Meaningful tests executed and required checks passing, or precise unresolved failures documented.
 - Opus review of architecture, critical invariants, and every connection.
@@ -303,4 +359,4 @@ Start now: inspect the repository and runtime, establish the actual team/model c
 
 Research snapshots: `/tmp/recoup-research/.firecrawl/prompting.md`, `/tmp/recoup-research/.firecrawl/agent-teams.md`, and `/tmp/recoup-research/.firecrawl/teams.json`. These are temporary local research files; the authoritative links above are the durable references.
 
-The detailed roster, staged workflow, Recoup-specific test scenarios, and 24-connection audit are project-specific recommendations synthesized from the repository. They are not claimed to be Anthropic-prescribed architecture.
+The detailed roster, staged workflow, production-hardening backlog, Recoup-specific test scenarios, and 36-connection audit are project-specific recommendations synthesized from the repository. They are not claimed to be Anthropic-prescribed architecture.
