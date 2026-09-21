@@ -34,12 +34,12 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { ownedWatch, requireUserId } from "./lib/access";
 import { isTombstoned } from "./lib/accountState";
-import { tryCharge, tryConsumeGlobalBudget } from "./lib/budget";
+import { tryCharge } from "./lib/budget";
 import { cleanStoreUrl, FIND_MARKER, registrableHost, sameStore } from "./lib/offerMatch";
+import { WATCH_ROWS } from "./offers";
 import { parseSnapshot, flattenHistory, hostOf, type MarketSnapshot } from "./lib/shopsavvy";
 import { marketState } from "./schema";
 import {
-  GLOBAL_DAILY_BUDGETS,
   MARKET_HISTORY_DAYS,
   MARKET_MAX_ATTEMPTS,
   MARKET_MAX_POINTS,
@@ -66,6 +66,15 @@ const MAX_RESPONSE_CHARS = 2_000_000;
 const MIGRATE_OPS_KEY = "market.migrateStamps";
 /** Watches one `migrateStamps` transaction scans before rescheduling itself. */
 const MIGRATE_PAGE = 100;
+
+/**
+ * F8 (D103): a `queued`/`running` claim older than this is reclaimable -- the scheduled `lookup`
+ * action almost certainly crashed or was killed rather than still being genuinely in flight (a real
+ * ShopSavvy call times out at TIMEOUT_MS = 30s; 15 minutes is generous headroom past that plus retry
+ * scheduling, chosen to make a false reclaim of a run that is actually still going vanishingly
+ * unlikely, while still bounding how long a stuck watch stays unrecoverable).
+ */
+const MARKET_CLAIM_STALE_MS = 15 * 60_000;
 
 type MarketState = Infer<typeof marketState>;
 
@@ -124,6 +133,16 @@ export async function fetchSnapshot(productUrl: string, now: number): Promise<Ma
   });
   if (!res.ok) throw new ShopSavvyHttpError(res.status);
 
+  // F8 (D103): a declared Content-Length already over the cap is rejected BEFORE the body is ever
+  // buffered into memory, so a malformed or hostile multi-hundred-MB response costs nothing to refuse.
+  // This is an optimization, not the guard: the header is caller-supplied and can be absent, wrong, or
+  // a lie, so the post-read check on the actual decoded length below stays as the authoritative one.
+  const declaredLength = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_CHARS) {
+    await res.body?.cancel();
+    throw new MalformedResponseError("declared a size over the cap");
+  }
+
   const text = await res.text();
   if (text.length > MAX_RESPONSE_CHARS) throw new MalformedResponseError("exceeded the size cap");
 
@@ -149,8 +168,10 @@ function classifyFetchError(err: unknown): "retryable_failure" | "terminal_failu
 /**
  * What `lookup` needs about the watch. No longer gated on `marketFetchedAt`
  * (the state machine in `requestLookup`/`markRunning` replaces that gate) —
- * only existence and archived-ness, since an archived watch is never worth
- * spending a fetch on even mid-flight.
+ * only existence and archived/bought-ness, since neither an archived nor a
+ * bought watch is ever worth spending a fetch on, even mid-flight (F8/D103:
+ * `requestLookup` already refuses to schedule for a bought watch, but a fetch
+ * already in flight when the watch is marked bought must stop here too).
  */
 export const watchForMarket = internalQuery({
   args: { watchId: v.id("watches") },
@@ -166,7 +187,7 @@ export const watchForMarket = internalQuery({
   ),
   handler: async (ctx, { watchId }) => {
     const watch = await ctx.db.get(watchId);
-    if (!watch || watch.status === "archived") return null;
+    if (!watch || watch.status === "archived" || watch.status === "bought") return null;
     return {
       productUrl: watch.productUrl,
       currency: watch.currency ?? "USD",
@@ -196,8 +217,21 @@ const storeArg = v.object({
   inStock: v.optional(v.boolean()),
 });
 
-/** Fixed note on a ShopSavvy-sourced candidate the provider reports out of stock (T13/P04): never priced, so it can never become "best"; still shown, qualified. */
-const OUT_OF_STOCK_NOTE = "Out of stock according to ShopSavvy; confirm it is the same item";
+/**
+ * Fixed note on a ShopSavvy-sourced candidate the provider reports out of stock (T13/P04): never
+ * priced, so it can never become "best"; still shown, qualified. Exported (D102) so
+ * `src/lib/offerNotes.ts` can be verified against it by a test rather than duplicating the string by
+ * hand.
+ */
+export const OUT_OF_STOCK_NOTE = "Out of stock according to ShopSavvy; confirm it is the same item";
+
+/**
+ * Fixed note on a ShopSavvy-sourced candidate priced in a currency other than the watch's own
+ * (F5a/D103): never priced (never written to `lastCents`/`currency`), so it can never be compared,
+ * ranked, or silently treated as cheaper/pricier than a same-currency offer just because the raw
+ * numbers happen to differ; still shown, qualified, the same shape as an out-of-stock row.
+ */
+export const CURRENCY_MISMATCH_NOTE = "Listed by ShopSavvy in a different currency; price not shown here";
 
 /**
  * The transactional claim (D71). Both the public `refresh` and the automatic
@@ -213,6 +247,7 @@ export const requestLookup = internalMutation({
   handler: async (ctx, { watchId, trigger }): Promise<RequestLookupResult> => {
     const watch = await ctx.db.get(watchId);
     if (!watch) return { scheduled: false, state: "not_configured", reason: "not_found" };
+    const now = Date.now();
 
     const current = watch.marketState;
     if (watch.status === "archived") return { scheduled: false, state: current ?? "not_configured", reason: "archived" };
@@ -229,31 +264,34 @@ export const requestLookup = internalMutation({
     }
 
     if (current === "queued" || current === "running") {
-      return { scheduled: false, state: current, reason: "in_flight" };
-    }
-    if (current === "success") {
-      const stillFresh = watch.marketFetchedAt !== undefined && watch.marketFetchedAt > Date.now() - MARKET_REFRESH_MIN_AGE_MS;
+      // F8 (D103): a claim that never resolved -- the scheduled `lookup` action crashed, or was killed
+      // mid-flight, before it ever reached `recordSnapshot` -- must not strand the watch "in flight"
+      // forever: every later `requestLookup` call would otherwise refuse for good. Reclaim it once its
+      // claim is old enough that whatever was supposed to finish it almost certainly did not; treat the
+      // reclaim as a fresh attempt below (falls through past this gate rather than returning here). If
+      // the stale run DOES eventually finish, `recordSnapshot`'s own re-read (state must still be
+      // "running") skips its write once this reclaim has moved the state on.
+      const stale = watch.marketClaimedAt !== undefined && now - watch.marketClaimedAt >= MARKET_CLAIM_STALE_MS;
+      if (!stale) return { scheduled: false, state: current, reason: "in_flight" };
+    } else if (current === "success") {
+      const stillFresh = watch.marketFetchedAt !== undefined && watch.marketFetchedAt > now - MARKET_REFRESH_MIN_AGE_MS;
       if (trigger === "auto" || stillFresh) return { scheduled: false, state: current, reason: "too_recent" };
-    }
-    if (current === "empty_result" && trigger === "auto") {
+    } else if (current === "empty_result" && trigger === "auto") {
       return { scheduled: false, state: current, reason: "empty_result" };
-    }
-    if (current === "terminal_failure" && trigger === "auto") {
+    } else if (current === "terminal_failure" && trigger === "auto") {
       return { scheduled: false, state: current, reason: "terminal_failure" };
-    }
-    if (current === "retryable_failure" && watch.marketNextRetryAt !== undefined && Date.now() < watch.marketNextRetryAt) {
+    } else if (current === "retryable_failure" && watch.marketNextRetryAt !== undefined && now < watch.marketNextRetryAt) {
       return { scheduled: false, state: current, reason: "retryable_backoff" };
     }
 
-    const now = Date.now();
-    if (trigger === "manual") {
-      if (!(await tryCharge(ctx, watch.userId, "market_lookup", now))) {
-        return { scheduled: false, state: current ?? "not_configured", reason: "budget" };
-      }
-    } else {
-      if (!(await tryConsumeGlobalBudget(ctx, "market_lookup", GLOBAL_DAILY_BUDGETS.market_lookup.max, 1, now))) {
-        return { scheduled: false, state: current ?? "not_configured", reason: "budget" };
-      }
+    // F7 (D103): the auto path used to charge only the deployment-wide global switch, so one user with
+    // enough watches could exhaust the ENTIRE global market_lookup budget (40/day) on their own watches'
+    // first checks alone, starving every other user's for the rest of the day (DA-7). `tryCharge` already
+    // draws from both the per-user cap (5/day) and the global one for a manual refresh; charging the SAME
+    // per-user counter for an auto lookup bounds one user's auto-triggered spend the same way, using the
+    // existing DAILY_BUDGETS.market_lookup config unchanged.
+    if (!(await tryCharge(ctx, watch.userId, "market_lookup", now))) {
+      return { scheduled: false, state: current ?? "not_configured", reason: "budget" };
     }
 
     await ctx.db.patch(watchId, { marketState: "queued", marketClaimedAt: now });
@@ -348,13 +386,18 @@ export const recordSnapshot = internalMutation({
       // registrable host so a watch on `shop.acme.example` still excludes a "competitor" row that
       // is really just `acme.example` under a different subdomain.
       const ownDomain = registrableHost(hostOf(watch.productUrl) ?? watch.merchantDomain) ?? watch.merchantDomain;
+      const watchCurrency = watch.currency ?? "USD";
       // by_watch rows include the offers.ts find-marker (storeDomain "~find"); it must not count
-      // toward the per-watch cap or collide with a real store's dedupe key.
+      // toward the per-watch cap or collide with a real store's dedupe key. F11 (D103): taken with
+      // `WATCH_ROWS` (offers.ts's own generous "MAX_OFFERS_PER_WATCH stores plus one window's markers"
+      // bound), not the narrower MAX_OFFERS_PER_WATCH + MARKET_MAX_STORES this used before -- that
+      // narrower bound could be crowded out by FIND_MARKER rows, undercounting the real total and
+      // letting more than MAX_OFFERS_PER_WATCH stores in overall (DA-8).
       const existingOffers = (
         await ctx.db
           .query("offers")
           .withIndex("by_watch", (q) => q.eq("watchId", watchId))
-          .take(MAX_OFFERS_PER_WATCH + MARKET_MAX_STORES)
+          .take(WATCH_ROWS)
       ).filter((r) => r.storeDomain !== FIND_MARKER);
       const known = new Set(existingOffers.map((r) => r.storeDomain));
       let total = existingOffers.length;
@@ -365,7 +408,15 @@ export const recordSnapshot = internalMutation({
         known.add(store.storeDomain);
         // A store ShopSavvy reports out of stock is never priced (T13/P04): it can never become
         // "best" this way, and is still shown, qualified by the note.
-        const priced = store.inStock !== false;
+        //
+        // F5a (D103): nor is one priced in a currency other than the watch's own -- `flattenHistory`
+        // already excludes a mismatched currency from the market POINTS series (shopsavvy.ts), but
+        // nothing did the same for STORE CANDIDATES until now: a EUR-priced amazon.de row on a USD
+        // watch would have been written priced, and only `offers.listForWatch`'s `best` computation
+        // (a different file) happened to exclude it from ranking -- never shown as an unpriced,
+        // qualified candidate the way an out-of-stock one already is (DA-11).
+        const currencyMismatch = store.currency !== undefined && store.currency !== watchCurrency;
+        const priced = store.inStock !== false && !currencyMismatch;
         await ctx.db.insert("offers", {
           watchId,
           userId: watch.userId,
@@ -377,7 +428,7 @@ export const recordSnapshot = internalMutation({
           lastCents: priced ? store.cents : undefined,
           currency: priced ? store.currency : undefined,
           lastCheckedAt: store.observedAt,
-          note: priced ? "Listed by ShopSavvy; confirm it is the same item" : OUT_OF_STOCK_NOTE,
+          note: priced ? "Listed by ShopSavvy; confirm it is the same item" : currencyMismatch ? CURRENCY_MISMATCH_NOTE : OUT_OF_STOCK_NOTE,
         });
         added++;
         total++;
@@ -391,7 +442,15 @@ export const recordSnapshot = internalMutation({
       patch.marketFetchedAt = now;
       if (points.length > 0) patch.marketObservedAt = Math.max(...points.map((p) => p.observedAt));
     }
-    if (attempts !== undefined) patch.marketAttempts = attempts;
+    if (attempts !== undefined) {
+      patch.marketAttempts = attempts;
+    } else if (outcome === "success" || outcome === "empty_result") {
+      // F9 (D103): a prior failed cycle's attempt count must not carry into a success/empty_result --
+      // otherwise a LATER failure (say, after a manual refresh) starts counting from that stale
+      // non-zero value and can reach MARKET_MAX_ATTEMPTS, and so go straight to terminal_failure, too
+      // early (DA-4).
+      patch.marketAttempts = 0;
+    }
     patch.marketNextRetryAt = outcome === "retryable_failure" ? nextRetryAt : undefined;
     await ctx.db.patch(watchId, patch);
 
@@ -435,6 +494,13 @@ export const lookup = internalAction({
     if (fetchError !== null) {
       const nextAttempts = watch.attempts + 1;
       const outcome = fetchError === "retryable_failure" && nextAttempts < MARKET_MAX_ATTEMPTS ? "retryable_failure" : "terminal_failure";
+      // F9 (D103): with MARKET_MAX_ATTEMPTS = 3, only MARKET_RETRY_BACKOFF_MS[0] (10m) and [1] (1h) are
+      // ever read here -- the 3rd attempt's `nextAttempts` (3) already fails `< MARKET_MAX_ATTEMPTS`
+      // above and goes straight to terminal_failure, so index [2] (6h) is presently dead. D71's own
+      // description ("3 attempts with 10m/1h/6h backoff") promises all three are reachable; today only
+      // two are. This file does not own limits.ts, so it cannot change either constant -- see the task
+      // report's "known gaps"/limits.ts-edit note for the recommended fix (raise MARKET_MAX_ATTEMPTS to
+      // 4, which the backoff array already has enough entries for).
       const nextRetryAt = outcome === "retryable_failure" ? now + MARKET_RETRY_BACKOFF_MS[watch.attempts] : undefined;
       await ctx.runMutation(internal.market.recordSnapshot, {
         watchId,
