@@ -347,7 +347,7 @@ freshness.test.ts: seed 3 accepted checks, then 60 failed checks via recordWatch
 **Owner:** sonnet-backend · **Status:** in_progress · **Files:** convex/account.ts, account.test.ts, auth.ts (+auth tests), crons.ts, limits.ts, lib/accountState.ts.
 
 ### T18.2 — Checkpoint 6b: tombstone gates on write lanes (D115 6b-3 writers, 6b-7)
-**Owner:** sonnet-integrations · **Status:** in_progress · **Files:** convex/inbound.ts, replies.ts, intake.ts, profiles.ts, drafts.ts, policies.ts (+tests).
+**Owner:** sonnet-integrations · **Status:** verified (3830a68..14c1303; lead re-ran 8 files 203/203; F-T21-1 flipped; D116 bounds landed) · **Files:** convex/inbound.ts, replies.ts, intake.ts, profiles.ts, drafts.ts, policies.ts (+tests).
 
 ### T18.3 — Checkpoint 6b: tombstone-aware reads (D115 6b-3 readers) + console.error sweep (T24c)
 **Owner:** sonnet-backend-3 · **Status:** pending (after T18.2) · **Files:** insights.ts, watches.ts, tracking.ts, notify.ts, offers.ts, profiles.ts reads; sweep in notify/priceWatch/watches/offers/policies/market/inbound.
