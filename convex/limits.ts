@@ -176,6 +176,43 @@ export const MAIL_SWEEP_PAGE = 50;
 /** A dedupe-keyed drop row in a transient failure state can be re-claimed after this long (D70). */
 export const DROP_RECLAIM_MIN_MS = 86_400_000;
 
+/**
+ * 6b-6 (D115): read-limit safety margin for the `processedEvents` pages
+ * `account.exportPage`/`account.purgeStep` read in one `.paginate()` call --
+ * well under Convex's 16 MiB per-transaction read cap, leaving headroom for
+ * every other read the same call makes (the account/profile row, the
+ * accountState progress row, etc.).
+ */
+export const MAX_PAGE_BYTES = 6 * 1024 * 1024;
+
+/**
+ * 6b-6 (D115): page size for the byte-aware, status-iterated branch of
+ * `account.exportPage`/`account.purgeStep` that walks `processedEvents`.
+ * Convex allows only ONE `.paginate()` call per function execution
+ * (`account.ts`'s `ParentCursor` docstring documents the same platform
+ * constraint elsewhere in that module), so the page size has to be chosen
+ * BEFORE the read -- there is no way to inspect a running byte count and
+ * stop mid-`.paginate()`. Sized conservatively off the worst case a single
+ * row's `payload` can hold: `inbound.ts`'s `MAX_TEXT_CHARS` (60,000) at 3
+ * bytes/char (multibyte UTF-8 -- CJK and similar scripts; plain ASCII never
+ * gets close) is ~180 KB/row; `MAX_PAGE_BYTES / 180 KB` rounds down to
+ * about 34, so 25 keeps real headroom under the budget even before counting
+ * the row's other fields.
+ */
+export const PROCESSED_EVENTS_PAGE = 25;
+
+/**
+ * 6b-4c (D115): how long an `accountState` row may sit in `deleting` before
+ * `account.reDriveStuckDeletions`'s daily cron treats a chain with no live
+ * scheduled `purge` job as dead and reschedules it. 24h is generous next to
+ * the inbox-delete backoff schedule (worst case ~32h across all 5 attempts)
+ * so a chain that is merely slow is never mistaken for one that died.
+ */
+export const STUCK_DELETION_AGE_MS = 86_400_000;
+
+/** Stuck `deleting` rows one `account.reDriveStuckDeletions` run may reschedule (contract-fixed bound). */
+export const STUCK_DELETION_REDRIVE_PAGE = 50;
+
 // --- ShopSavvy market-history state machine (T09, D71) -----------------------
 
 /**
