@@ -382,8 +382,11 @@ curl -X DELETE "https://api.agentmail.to/v0/inboxes/<inboxId>" \
 
 Find `<inboxId>` and confirm the failure via `npx convex run
 --inline-query 'await ctx.db.query("accountState").withIndex("by_status", q
-=> q.eq("status", "deleted")).collect()' --deployment adorable-lion-138`,
-filtering for `inboxDeleted: false`, and read `lastError` on the same row
+=> q.eq("status", "deleted")).take(20)' --deployment adorable-lion-138`
+(bounded, not `.collect()` — see this section's own point about never
+issuing an unbounded read; a `stuck`/`deletingTotal` count over 20 is
+`ops.backlog`'s job, not this ad hoc query's), filtering for `inboxDeleted:
+false`, and read `lastError` on the same row
 for why it kept failing (sanitized — never the raw provider body, see
 `lib/errors.ts`). A 404 from the DELETE call above means it is already gone
 (nothing further to do); referencing `$AGENTMAIL_API_KEY` by name only, per
