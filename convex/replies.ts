@@ -38,8 +38,12 @@ export async function classifyReply(
   });
 }
 
-// Claim statuses from which a merchant reply may move the claim to `promised` (D21).
-const REOPEN_ELIGIBLE = new Set(["sent", "packet", "reopened", "drafted"]);
+// D58: REOPEN_ELIGIBLE removed as a status-transition gate for the
+// amount-bearing path (that now goes through `applyEvent`/`statusAfterEvent`
+// unconditionally, per D53). It still governs the *no-amount* case below,
+// with `detected` added: a bare "we'll process this" reply arriving before
+// any draft was even sent should still surface as `promised`.
+const PROMISABLE_WITHOUT_AMOUNT = new Set(["sent", "packet", "reopened", "drafted", "detected"]);
 
 export const apply = internalMutation({
   args: {
@@ -89,8 +93,15 @@ export const apply = internalMutation({
     });
 
     if (args.classification === "promise" || args.classification === "credit_issued") {
-      // A ledger event is written only when the reply states an amount (D21).
-      if (promisedCents !== undefined) {
+      // D53: the reply row above is always recorded; a ledger event is
+      // written only when the reply states an amount AND the claim is not
+      // dismissed (dismissed is terminal -- `applyEvent` would throw, which
+      // would roll back the whole mutation including the reply insert, so
+      // this is checked here instead of relying on `applyEvent` to refuse).
+      // A *confirmed* claim still gets the ledger event (a merchant can
+      // restate a promise after the claim settled); `statusAfterEvent`
+      // itself keeps a confirmed claim's status unchanged.
+      if (promisedCents !== undefined && claim.status !== "dismissed") {
         await applyEvent(
           ctx,
           claim,
@@ -99,12 +110,11 @@ export const apply = internalMutation({
           `Merchant reply (${args.classification}): ${args.summary}`,
           `msg:${args.messageId}`,
         );
-      }
-      // The claim always moves to `promised` regardless of whether an
-      // amount was stated, but never backwards out of a terminal state.
-      const current = (await ctx.db.get(claim._id))!;
-      if (REOPEN_ELIGIBLE.has(current.status)) {
-        await ctx.db.patch(claim._id, { status: "promised", version: current.version + 1 });
+      } else if (promisedCents === undefined && PROMISABLE_WITHOUT_AMOUNT.has(claim.status)) {
+        // D58: a no-amount reply still nudges the claim to `promised`, but
+        // only from these statuses -- notably not `queued` (send not even
+        // confirmed delivered yet) and not `confirmed`/`dismissed`.
+        await ctx.db.patch(claim._id, { status: "promised", version: claim.version + 1 });
       }
       const after = (await ctx.db.get(claim._id))!;
       if (after.status !== "confirmed" && after.status !== "dismissed") {

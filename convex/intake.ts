@@ -6,7 +6,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { extract } from "./lib/ai";
 import { InboundEmail } from "./lib/schemas";
-import { assertCurrency, assertQty, toCents } from "./lib/money";
+import { assertCents, assertCurrency, assertPositiveCents, assertQty, assertTimestamp, toCents } from "./lib/money";
 import { openClaim, applyEvent } from "./claims";
 import { latest } from "./policies";
 
@@ -20,10 +20,16 @@ async function markEventNeedsReview(ctx: MutationCtx, eventId: Id<"processedEven
  * Plain helper (no action-in-action, D17-style): run by `inbound.process`
  * for the "intake" route, and inline by `paste`. LLM output is proposed
  * data only; `applyExtraction` re-validates it with zod.
+ *
+ * `key` (D54) is the external, per-message identity used to scope refund
+ * credit idempotency keys: the AgentMail message id for a forwarded email,
+ * or the paste's content hash for a pasted one. It is stable across a
+ * retry of the same event so a retried extraction still dedupes against
+ * ledger events it already wrote.
  */
 export async function extractInbound(
   ctx: ActionCtx,
-  args: { userId: Id<"users">; eventId: Id<"processedEvents">; subject: string; text: string; from: string },
+  args: { userId: Id<"users">; eventId: Id<"processedEvents">; subject: string; text: string; from: string; key: string },
 ): Promise<void> {
   const parsed = await extract(
     "inbound_email",
@@ -35,12 +41,13 @@ export async function extractInbound(
     userId: args.userId,
     eventId: args.eventId,
     parsed,
+    key: args.key,
   });
 }
 
 export const applyExtraction = internalMutation({
-  args: { userId: v.id("users"), eventId: v.id("processedEvents"), parsed: v.any() },
-  handler: async (ctx, { userId, eventId, parsed }) => {
+  args: { userId: v.id("users"), eventId: v.id("processedEvents"), parsed: v.any(), key: v.string() },
+  handler: async (ctx, { userId, eventId, parsed, key }) => {
     const p = InboundEmail.parse(parsed);
 
     if (p.kind === "order" && p.order) {
@@ -68,8 +75,37 @@ export const applyExtraction = internalMutation({
         return;
       }
 
-      const parsedDate = p.order.purchasedAt ? Date.parse(p.order.purchasedAt) : NaN;
-      const purchasedAt = Number.isFinite(parsedDate) ? parsedDate : undefined;
+      // D58: validate the boundary-crossing fields before writing anything.
+      // A violation routes the whole order to `needs_review` (never
+      // `failed` -- these are untrusted extracted values, not a bug) and no
+      // purchase or item is inserted at all, rather than leaving a partial
+      // row behind.
+      let purchasedAt: number | undefined;
+      if (p.order.purchasedAt) {
+        const parsedDate = Date.parse(p.order.purchasedAt);
+        if (Number.isFinite(parsedDate)) {
+          try {
+            purchasedAt = assertTimestamp(parsedDate, "purchasedAt");
+          } catch {
+            await markEventNeedsReview(ctx, eventId, `Invalid purchase date ${p.order.purchasedAt}`);
+            return;
+          }
+        }
+        // An unparseable date is treated as "not stated" (D25: purchasedAt
+        // is optional), not a validation violation.
+      }
+
+      const items: { name: string; unitCents: number; qty: number; productUrl?: string }[] = [];
+      for (const it of p.order.items) {
+        try {
+          assertQty(it.qty);
+          const unitCents = assertCents(toCents(it.unitPrice), "unitPrice");
+          items.push({ name: it.name, unitCents, qty: it.qty, productUrl: it.productUrl ?? undefined });
+        } catch {
+          await markEventNeedsReview(ctx, eventId, `Invalid price or quantity for item "${it.name}"`);
+          return;
+        }
+      }
 
       const purchaseId = await ctx.db.insert("purchases", {
         userId,
@@ -80,15 +116,14 @@ export const applyExtraction = internalMutation({
         currency,
         status: "needs_review",
       });
-      for (const it of p.order.items) {
-        assertQty(it.qty);
+      for (const item of items) {
         await ctx.db.insert("items", {
           purchaseId,
           userId,
-          name: it.name,
-          unitCents: toCents(it.unitPrice),
-          qty: it.qty,
-          productUrl: it.productUrl ?? undefined,
+          name: item.name,
+          unitCents: item.unitCents,
+          qty: item.qty,
+          productUrl: item.productUrl,
           returned: false,
         });
       }
@@ -99,14 +134,28 @@ export const applyExtraction = internalMutation({
 
     if (p.kind === "refund" && p.refund) {
       const refund = p.refund;
-      const purchases = await ctx.db
+      const allPurchases = await ctx.db
         .query("purchases")
         .withIndex("by_user", (q) => q.eq("userId", userId))
         .collect();
+
+      // D55: only active, non-example purchases are eligible, unless the
+      // refund's own merchant name explicitly marks it as an example (so
+      // the examples flow can still exercise this path end to end).
+      const refundIsExample = Boolean(refund.merchant?.toLowerCase().includes("(example)"));
+      const eligible = allPurchases.filter((x) => {
+        if (x.status !== "active") return false;
+        if (x.isExample) return refundIsExample;
+        return true;
+      });
+
+      // Preference order: exact orderRef, then exact merchant name, then
+      // merchant-name inclusion.
       const purchase =
-        (refund.orderRef && purchases.find((x) => x.orderRef === refund.orderRef)) ||
+        (refund.orderRef && eligible.find((x) => x.orderRef === refund.orderRef)) ||
+        (refund.merchant && eligible.find((x) => x.merchant.toLowerCase() === refund.merchant!.toLowerCase())) ||
         (refund.merchant &&
-          purchases.find((x) => x.merchant.toLowerCase().includes(refund.merchant!.toLowerCase()))) ||
+          eligible.find((x) => x.merchant.toLowerCase().includes(refund.merchant!.toLowerCase()))) ||
         undefined;
       if (!purchase) {
         await markEventNeedsReview(ctx, eventId, "Refund email could not be matched to a purchase");
@@ -119,8 +168,17 @@ export const applyExtraction = internalMutation({
         .collect();
       const returnsPolicy = await latest(ctx, userId, purchase.merchantDomain, "returns");
 
-      for (const credit of refund.credits) {
-        const cents = toCents(credit.amount);
+      for (const [index, credit] of refund.credits.entries()) {
+        // D58: a non-positive or otherwise invalid credit amount is a
+        // per-credit needs_review, not a thrown (and event-failing) error.
+        let cents: number;
+        try {
+          cents = assertPositiveCents(toCents(credit.amount), "credit amount");
+        } catch {
+          await markEventNeedsReview(ctx, eventId, `Credit amount ${credit.amount} is not a valid positive amount`);
+          continue;
+        }
+
         let matched: Doc<"items"> | undefined;
         if (credit.itemName) {
           const byName = items.filter((i) => i.name.toLowerCase().includes(credit.itemName!.toLowerCase()));
@@ -150,17 +208,38 @@ export const applyExtraction = internalMutation({
             type: "return_credit",
             expectedCents: matched.unitCents * matched.qty,
             policyId: returnsPolicy?._id,
+            isExample: purchase.isExample, // D55
           });
           claim = (await ctx.db.get(claimId))!;
         }
-        await applyEvent(
-          ctx,
-          claim,
-          "promised_credit",
-          cents,
-          `Merchant email says refund ${credit.state} for ${matched.name}`,
-          `${eventId}:${matched._id}`,
-        );
+
+        // D54: idempotency key is external and per credit -- scoped to this
+        // message (or paste), the matched item, and the credit's position
+        // in the email, so two different credits (or a retried extraction)
+        // never collide with each other.
+        const idempotencyKey = `${key}:${matched._id}:${index}`;
+        try {
+          await applyEvent(
+            ctx,
+            claim,
+            "promised_credit",
+            cents,
+            `Merchant email says refund ${credit.state} for ${matched.name}`,
+            idempotencyKey,
+          );
+        } catch (err) {
+          // A key collision with a conflicting kind/amount marks only this
+          // credit needs_review; the event as a whole still succeeds (D54).
+          if (err instanceof ConvexError && err.data === "idempotency conflict") {
+            await markEventNeedsReview(
+              ctx,
+              eventId,
+              `Credit ${index} for ${matched.name} needs review: conflicts with a previously recorded credit`,
+            );
+            continue;
+          }
+          throw err;
+        }
       }
       return;
     }
@@ -205,7 +284,11 @@ export const paste = action({
     if (!userId) throw new ConvexError("Not signed in");
     if (text.trim().length < 40) throw new ConvexError("Paste the full order or refund email");
 
-    const externalId = `paste:${await sha256Hex(text)}`;
+    // D54: the paste externalId is per user (`paste:${userId}:${sha256}`),
+    // not global -- two different users pasting the same forwarded email
+    // (e.g. a shared promo) must not dedupe against each other.
+    const hash = await sha256Hex(text);
+    const externalId = `paste:${userId}:${hash}`;
     const { eventId, isNew } = await ctx.runMutation(internal.intake.createPasteEvent, {
       externalId,
       userId,
@@ -214,7 +297,7 @@ export const paste = action({
     if (!isNew) return eventId;
 
     try {
-      await extractInbound(ctx, { userId, eventId, subject: "", text, from: "" });
+      await extractInbound(ctx, { userId, eventId, subject: "", text, from: "", key: hash });
       await ctx.runMutation(internal.inbound.markProcessed, { eventId, status: "succeeded" });
     } catch (e) {
       await ctx.runMutation(internal.inbound.markProcessed, {

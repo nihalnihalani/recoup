@@ -5,6 +5,7 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { requireUserId } from "./lib/access";
 import { tokenFromSubject } from "./lib/ledger";
+import { sanitizeError } from "./lib/errors";
 import { classifyReply } from "./replies";
 import { extractInbound } from "./intake";
 
@@ -137,6 +138,11 @@ export const getRow = internalQuery({
  * Finalizes a `processedEvents` row. A "succeeded" patch is a no-op once
  * the row already carries a terminal outcome set by the extraction step
  * itself (`needs_review`, D14) so `process` can never clobber it.
+ *
+ * D58: whenever a raw `lastError` is recorded, a sanitized `errorSummary`
+ * is derived and stored alongside it in the same patch. `lastError` stays
+ * server-side only (raw exception text); `errorSummary` is the sanitized
+ * value `purchases.board`'s "needs attention" list exposes to the user.
  */
 export const markProcessed = internalMutation({
   args: {
@@ -151,7 +157,10 @@ export const markProcessed = internalMutation({
     if (status === "succeeded" && row.status !== "processing") return;
     const patch: Partial<Doc<"processedEvents">> = { status };
     if (summary !== undefined) patch.summary = summary;
-    if (lastError !== undefined) patch.lastError = lastError;
+    if (lastError !== undefined) {
+      patch.lastError = lastError;
+      patch.errorSummary = sanitizeError(lastError);
+    }
     await ctx.db.patch(eventId, patch);
   },
 });
@@ -177,12 +186,15 @@ export const process = internalAction({
           text: payload.text,
         });
       } else if (row.userId) {
+        // D54: the refund-credit idempotency key is scoped to this message,
+        // not to the (possibly retried) processedEvents row.
         await extractInbound(ctx, {
           userId: row.userId,
           eventId,
           subject: payload.subject,
           text: payload.text,
           from: payload.from,
+          key: payload.messageId,
         });
       }
       await ctx.runMutation(internal.inbound.markProcessed, { eventId, status: "succeeded" });

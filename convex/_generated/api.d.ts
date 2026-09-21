@@ -19,6 +19,7 @@ import type * as inbound from "../inbound.js";
 import type * as intake from "../intake.js";
 import type * as lib_access from "../lib/access.js";
 import type * as lib_ai from "../lib/ai.js";
+import type * as lib_errors from "../lib/errors.js";
 import type * as lib_ledger from "../lib/ledger.js";
 import type * as lib_money from "../lib/money.js";
 import type * as lib_passage from "../lib/passage.js";
@@ -48,6 +49,7 @@ declare const fullApi: ApiFromModules<{
   intake: typeof intake;
   "lib/access": typeof lib_access;
   "lib/ai": typeof lib_ai;
+  "lib/errors": typeof lib_errors;
   "lib/ledger": typeof lib_ledger;
   "lib/money": typeof lib_money;
   "lib/passage": typeof lib_passage;

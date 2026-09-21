@@ -1013,6 +1013,7 @@ describe("refund credit matching two same-price items → needs_review event, no
         },
         confidence: 0.9,
       },
+      key: "evt-ambiguous-refund",
     });
 
     const row = await t.run((ctx) => ctx.db.get(eventId));

@@ -109,13 +109,21 @@ export const insert = internalMutation({
 // A claim in any of these states cannot receive a new outbound message.
 const SEND_BLOCKED_STATUSES = new Set(["confirmed", "dismissed", "queued", "sent"]);
 
+// D52: a claim in any of these states cannot be marked packet-sent either --
+// `packet` itself included, since a merchant channel outside email is a
+// one-shot record, not something to re-send.
+const PACKET_BLOCKED_STATUSES = new Set([...SEND_BLOCKED_STATUSES, "packet"]);
+
 /**
  * Approval is bound to `{to, subject, body, claimVersion, draft.version}`
  * (D11): a claim that changed since the draft was written, or a draft
  * that already has an `outboundId`, both refuse. The `outboundId` check
  * runs before the version check so a duplicate click (which itself just
  * bumped the claim's version to `queued`) reliably reports "already sent"
- * rather than "changed" (D13).
+ * rather than "changed" (D13). D58 additionally requires the draft being
+ * approved to be the newest one on the claim -- an older draft approved
+ * after a newer one was generated is stale even if its own claimVersion
+ * still matches.
  */
 export const approveAndSend = mutation({
   args: {
@@ -131,6 +139,16 @@ export const approveAndSend = mutation({
     const claim = await ownedClaim(ctx, draft.claimId, userId);
 
     if (draft.outboundId) throw new ConvexError("This draft was already sent");
+
+    const siblingDrafts = await ctx.db
+      .query("drafts")
+      .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+      .collect();
+    const newestVersion = Math.max(...siblingDrafts.map((d) => d.version));
+    if (draft.version !== newestVersion) {
+      throw new ConvexError("A newer draft exists for this claim. Use that one instead.");
+    }
+
     if (claim.version !== draft.claimVersion) {
       throw new ConvexError("The claim changed since this draft was written. Generate a new draft.");
     }
@@ -156,7 +174,12 @@ export const approveAndSend = mutation({
       .unique();
     if (!profile) throw new ConvexError("Set up your Recoup inbox first");
 
-    const subject = args.subject.includes(`[RC-${claim.token}]`) ? args.subject : `${args.subject} [RC-${claim.token}]`;
+    // D58: strip any existing `[RC-...]` token(s) -- e.g. a stale one left
+    // over from editing a copy-pasted subject -- before appending this
+    // claim's own token, so `tokenFromSubject` can never pick up the wrong
+    // claim from a leftover tag earlier in the string.
+    const strippedSubject = args.subject.replace(/\s*\[RC-[A-Z0-9]{6}\]/g, "").trim();
+    const subject = `${strippedSubject} [RC-${claim.token}]`;
     const outboundId = await agentmail.sendMessage(ctx, profile.inboxId, {
       to,
       subject,
@@ -172,7 +195,9 @@ export const approveAndSend = mutation({
       outboundId,
       recipientConfirmed: args.recipientConfirmed,
     });
-    await ctx.db.patch(claim._id, { status: "queued", version: claim.version + 1 });
+    // D56: a fresh approval always starts clean, even if a previous send on
+    // this claim left `sendUnknown` set from a stalled reconcile.
+    await ctx.db.patch(claim._id, { status: "queued", version: claim.version + 1, sendUnknown: undefined });
     await ctx.db.insert("claimNotes", { claimId: claim._id, userId, kind: "status", text: "Message queued to send" });
     await ctx.scheduler.runAfter(30_000, internal.drafts.reconcileSend, { draftId: draft._id, attempt: 1 });
     return outboundId;
@@ -235,7 +260,10 @@ export async function reconcileSendImpl(
   if (result && FAILURE_STATUSES.has(result.status)) {
     await ctx.db.patch(draft._id, { sendError: result.errorMessage ?? result.status });
     if (claim.status !== "queued") return;
-    await ctx.db.patch(claim._id, { status: "drafted", version: claim.version + 1 });
+    // D56: the failure path clears `sendUnknown` too -- a claim that was
+    // flagged unknown after 5 attempts and is now rechecked (`recheckSend`)
+    // into a definite failure should not keep showing "delivery unknown".
+    await ctx.db.patch(claim._id, { status: "drafted", version: claim.version + 1, sendUnknown: undefined });
     await ctx.db.insert("claimNotes", {
       claimId: claim._id,
       userId: claim.userId,
@@ -260,6 +288,23 @@ export const reconcileSend = internalMutation({
   handler: (ctx, args) => reconcileSendImpl(ctx, args),
 });
 
+/**
+ * D56: an owner-gated, on-demand recheck for a claim stuck `queued` with
+ * `sendUnknown` (or simply impatient to see the current status sooner than
+ * the backoff schedule). Runs exactly one reconcile pass; passing the final
+ * attempt number means a still-pending result leaves `sendUnknown` set
+ * rather than re-arming a new scheduled retry.
+ */
+export const recheckSend = mutation({
+  args: { draftId: v.id("drafts") },
+  handler: async (ctx, { draftId }) => {
+    const userId = await requireUserId(ctx);
+    const draft = await ownedDraft(ctx, draftId, userId);
+    if (!draft.outboundId) throw new ConvexError("This draft has not been sent");
+    await reconcileSendImpl(ctx, { draftId: draft._id, attempt: RECONCILE_DELAYS_MS.length });
+  },
+});
+
 /** D29: resolves the owned draft, then asks the component for its outbound status. */
 export const sendStatus = query({
   args: { draftId: v.id("drafts") },
@@ -271,12 +316,21 @@ export const sendStatus = query({
   },
 });
 
-/** For merchant channels outside email (chat, form, phone): no ledger event, just a note + reminder. */
+/**
+ * For merchant channels outside email (chat, form, phone): no ledger event,
+ * just a note + reminder. D52: refuses a claim already past this point --
+ * `confirmed`, `dismissed`, `queued`, `sent`, or already `packet` -- so a
+ * packet-sent record can't clobber a real send in flight or reopen a
+ * settled/terminal claim.
+ */
 export const markPacketSent = mutation({
   args: { claimId: v.id("claims"), note: v.string() },
   handler: async (ctx, { claimId, note }) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, claimId, userId);
+    if (PACKET_BLOCKED_STATUSES.has(claim.status)) {
+      throw new ConvexError(`This claim is ${claim.status} and cannot be marked packet-sent`);
+    }
     await ctx.db.insert("claimNotes", { claimId: claim._id, userId, kind: "status", text: note });
     await ctx.db.patch(claim._id, { status: "packet", version: claim.version + 1 });
     const fresh = (await ctx.db.get(claim._id))!;

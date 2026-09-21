@@ -177,6 +177,75 @@ describe("replies.apply", () => {
     expect(replies[0].senderMismatch).toBe(false);
   });
 
+  it("S2 (D53): a stated amount on a dismissed claim is still recorded as a reply, writes no ledger event, and never throws", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { claimId } = await seedSentClaim(t, as, userId);
+    await as.mutation(api.claims.dismiss, { claimId });
+
+    await expect(
+      t.mutation(internal.replies.apply, {
+        claimId,
+        messageId: "reply-dismissed",
+        from: "support@n.example",
+        classification: "credit_issued",
+        summary: "Refund issued",
+        promisedAmount: 40,
+      }),
+    ).resolves.not.toThrow();
+
+    const replies = await t.run((ctx) =>
+      ctx.db.query("replies").withIndex("by_claim", (q) => q.eq("claimId", claimId)).collect(),
+    );
+    expect(replies).toHaveLength(1);
+    const events = await t.run((ctx) =>
+      ctx.db.query("ledgerEvents").withIndex("by_claim", (q) => q.eq("claimId", claimId)).collect(),
+    );
+    expect(events).toHaveLength(0);
+    const claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).toBe("dismissed");
+  });
+
+  it("S12 (D58): a no-amount reply promotes a claim from `detected`, but not from `queued`", async () => {
+    const t = setup();
+    const { as } = await signedIn(t);
+    const purchaseId = await as.mutation(api.purchases.create, {
+      merchant: "N",
+      merchantDomain: "n.example",
+      purchasedAt: 0,
+      currency: "USD",
+      items: [{ name: "Scarf", unitCents: 4000, qty: 1 }],
+    });
+    const { items } = (await as.query(api.purchases.get, { purchaseId }))!;
+    await as.mutation(api.purchases.setReturned, { itemId: items[0]._id, returned: true });
+    const claimId = await as.mutation(api.claims.open, { itemId: items[0]._id });
+    const detected = (await t.run((ctx) => ctx.db.get(claimId)))!;
+    expect(detected.status).toBe("detected");
+
+    await t.mutation(internal.replies.apply, {
+      claimId,
+      messageId: "reply-detected",
+      from: "someone@n.example",
+      classification: "promise",
+      summary: "Will process soon",
+    });
+    const afterDetected = await t.run((ctx) => ctx.db.get(claimId));
+    expect(afterDetected?.status).toBe("promised");
+
+    // Force the claim into `queued` (as if a draft is mid-send) and confirm
+    // a second, no-amount reply does NOT promote it from there.
+    await t.run((ctx) => ctx.db.patch(claimId, { status: "queued" }));
+    await t.mutation(internal.replies.apply, {
+      claimId,
+      messageId: "reply-queued",
+      from: "someone@n.example",
+      classification: "promise",
+      summary: "Will process soon, take two",
+    });
+    const afterQueued = await t.run((ctx) => ctx.db.get(claimId));
+    expect(afterQueued?.status).toBe("queued");
+  });
+
   it("refusal/question sets attentionAt without touching the ledger", async () => {
     const t = setup();
     const { as, userId } = await signedIn(t);

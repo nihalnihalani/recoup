@@ -293,4 +293,138 @@ describe("drafts.markPacketSent", () => {
     );
     expect(followUps.filter((f) => f.status === "pending")).toHaveLength(1);
   });
+
+  it("S1 (D52): refuses when the claim is confirmed, dismissed, queued, sent, or already packet", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { claimId } = await seedClaim(t, as, userId);
+
+    for (const status of ["confirmed", "dismissed", "queued", "sent", "packet"] as const) {
+      await t.run((ctx) => ctx.db.patch(claimId, { status }));
+      await expect(as.mutation(api.drafts.markPacketSent, { claimId, note: "x" })).rejects.toThrow(
+        new RegExp(status),
+      );
+    }
+  });
+});
+
+describe("drafts.approveAndSend — D58 subject normalization (S8)", () => {
+  it("strips a stale [RC-...] token before appending the claim's own token", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { claimId } = await seedClaim(t, as, userId, { confirmPolicy: true });
+    const draftId = await t.mutation(internal.drafts.insert, {
+      claimId,
+      userId,
+      to: "support@n.example",
+      subject: "Order help [RC-STALE1]",
+      body: "b",
+    });
+
+    await as.mutation(api.drafts.approveAndSend, {
+      draftId,
+      to: "support@n.example",
+      subject: "Order help [RC-STALE1]",
+      body: "b",
+    });
+
+    const claim = (await as.query(api.claims.get, { claimId }))!.claim;
+    const draft = await t.run((ctx) => ctx.db.get(draftId));
+    expect(draft?.subject).toBe(`Order help [RC-${claim.token}]`);
+    expect(draft?.subject?.match(/\[RC-[A-Z0-9]{6}\]/g)).toHaveLength(1);
+  });
+});
+
+describe("drafts.approveAndSend — D58 newest-draft requirement (S11)", () => {
+  it("refuses approval of an older draft once a newer draft exists on the same claim", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { claimId } = await seedClaim(t, as, userId, { confirmPolicy: true });
+    const draft1 = await t.mutation(internal.drafts.insert, {
+      claimId,
+      userId,
+      to: "support@n.example",
+      subject: "s1",
+      body: "b1",
+    });
+    const draft2 = await t.mutation(internal.drafts.insert, {
+      claimId,
+      userId,
+      to: "support@n.example",
+      subject: "s2",
+      body: "b2",
+    });
+
+    await expect(
+      as.mutation(api.drafts.approveAndSend, { draftId: draft1, to: "support@n.example", subject: "s1", body: "b1" }),
+    ).rejects.toThrow(/newer draft exists/);
+
+    await as.mutation(api.drafts.approveAndSend, { draftId: draft2, to: "support@n.example", subject: "s2", body: "b2" });
+    const claim = (await as.query(api.claims.get, { claimId }))!.claim;
+    expect(claim.status).toBe("queued");
+  });
+});
+
+describe("drafts.recheckSend — D56 (S6)", () => {
+  it("refuses a draft that has not been sent, and a non-owner", async () => {
+    const t = setup();
+    const { as: alice, userId } = await signedIn(t, "Alice");
+    const { as: bob } = await signedIn(t, "Bob");
+    const { claimId } = await seedClaim(t, alice, userId);
+    const draftId = await t.mutation(internal.drafts.insert, {
+      claimId,
+      userId,
+      to: "support@n.example",
+      subject: "s",
+      body: "b",
+    });
+
+    await expect(alice.mutation(api.drafts.recheckSend, { draftId })).rejects.toThrow(/not been sent/);
+    await expect(bob.mutation(api.drafts.recheckSend, { draftId })).rejects.toThrow();
+  });
+
+  it("runs one reconcile pass on demand, flagging sendUnknown while the send is still pending", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { claimId } = await seedClaim(t, as, userId, { confirmPolicy: true });
+    const draftId = await t.mutation(internal.drafts.insert, {
+      claimId,
+      userId,
+      to: "support@n.example",
+      subject: "s",
+      body: "b",
+    });
+    await as.mutation(api.drafts.approveAndSend, { draftId, to: "support@n.example", subject: "s", body: "b" });
+
+    await as.mutation(api.drafts.recheckSend, { draftId });
+
+    const claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).toBe("queued");
+    expect(claim?.sendUnknown).toBe(true);
+  });
+
+  it("sendUnknown is cleared both by a fresh approveAndSend and by a subsequent terminal failure", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { claimId } = await seedClaim(t, as, userId, { confirmPolicy: true });
+    const draftId = await t.mutation(internal.drafts.insert, {
+      claimId,
+      userId,
+      to: "support@n.example",
+      subject: "s",
+      body: "b",
+    });
+    await as.mutation(api.drafts.approveAndSend, { draftId, to: "support@n.example", subject: "s", body: "b" });
+
+    const pending = async () => ({ status: "pending" as const, agentmailMessageId: null, threadId: null, errorMessage: null });
+    await t.run((ctx) => reconcileSendImpl(ctx, { draftId, attempt: 5 }, pending));
+    let claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.sendUnknown).toBe(true);
+
+    const failing = async () => ({ status: "failed" as const, agentmailMessageId: null, threadId: null, errorMessage: "bounced" });
+    await t.run((ctx) => reconcileSendImpl(ctx, { draftId, attempt: 5 }, failing));
+    claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).toBe("drafted");
+    expect(claim?.sendUnknown).toBeUndefined();
+  });
 });
