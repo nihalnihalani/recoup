@@ -1,16 +1,18 @@
-import { useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
+import { ConvexError } from "convex/values";
 import { Link } from "react-router-dom";
 import { useState } from "react";
 import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
 import { Money } from "../components/Money";
 import { Countdown } from "../components/Countdown";
 import { StatusPill } from "../components/StatusPill";
 import { Empty, Loading, QueryBoundary } from "../components/States";
 
-// T11b-2 will replace these disabled controls once the intake/examples lanes land.
-const INTAKE_NOTE = "retry arrives with intake";
-const EXAMPLES_NOTE = "examples arrive with intake";
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof ConvexError && typeof err.data === "string" ? err.data : fallback;
+}
 
 // Board totals are plain cent sums over the signed-in user's own purchases, which in
 // practice share one currency (assertCurrency enforces ISO 4217 per purchase, but
@@ -82,6 +84,52 @@ type Attention = {
   lastError?: string;
 };
 
+function AttentionRow({ a }: { a: Attention }) {
+  const retry = useMutation(api.inbound.retryEvent);
+  const [retrying, setRetrying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleRetry() {
+    setError(null);
+    setRetrying(true);
+    try {
+      await retry({ eventId: a._id as Id<"processedEvents"> });
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't retry this event."));
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  return (
+    <li className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-rust/30 bg-rust/5 px-4 py-3 text-sm">
+      <div>
+        <p className="font-medium text-ink">
+          {a.status === "failed" ? "Failed" : "Needs review"} · {a.kind}
+          {a.attempts > 0 && <span className="text-ink/40"> · {a.attempts} attempt{a.attempts === 1 ? "" : "s"}</span>}
+        </p>
+        {a.summary && <p className="mt-0.5 text-ink/60">{a.summary}</p>}
+        {a.lastError && <p className="mt-0.5 text-rust/80">{a.lastError}</p>}
+        {error && (
+          <p role="alert" className="mt-0.5 text-rust">
+            {error}
+          </p>
+        )}
+      </div>
+      {a.status === "failed" && (
+        <button
+          type="button"
+          onClick={() => void handleRetry()}
+          disabled={retrying}
+          className="shrink-0 rounded-md border border-line px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-ink/70 transition hover:border-harbor/40 hover:text-harbor disabled:opacity-60"
+        >
+          {retrying ? "Retrying…" : "Retry"}
+        </button>
+      )}
+    </li>
+  );
+}
+
 function AttentionSection({ attention }: { attention: Attention[] }) {
   if (attention.length === 0) return null;
   return (
@@ -89,27 +137,7 @@ function AttentionSection({ attention }: { attention: Attention[] }) {
       <h2 className="text-xs font-semibold uppercase tracking-wide text-ink/50">Needs attention</h2>
       <ul className="space-y-2">
         {attention.map((a) => (
-          <li
-            key={a._id}
-            className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-rust/30 bg-rust/5 px-4 py-3 text-sm"
-          >
-            <div>
-              <p className="font-medium text-ink">
-                {a.status === "failed" ? "Failed" : "Needs review"} · {a.kind}
-                {a.attempts > 0 && <span className="text-ink/40"> · {a.attempts} attempt{a.attempts === 1 ? "" : "s"}</span>}
-              </p>
-              {a.summary && <p className="mt-0.5 text-ink/60">{a.summary}</p>}
-              {a.lastError && <p className="mt-0.5 text-rust/80">{a.lastError}</p>}
-            </div>
-            <button
-              type="button"
-              disabled
-              title={INTAKE_NOTE}
-              className="shrink-0 rounded-md border border-line px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-ink/40 opacity-60"
-            >
-              Retry
-            </button>
-          </li>
+          <AttentionRow key={a._id} a={a} />
         ))}
       </ul>
     </section>
@@ -171,8 +199,49 @@ function PurchaseRow({ row }: { row: BoardRow }) {
   );
 }
 
-function AddPurchaseSection() {
+function AddPurchaseSection({ hasExample }: { hasExample: boolean }) {
+  const paste = useAction(api.intake.paste);
+  const loadExample = useMutation(api.examples.load);
+
   const [pasted, setPasted] = useState("");
+  const [pasting, setPasting] = useState(false);
+  const [pasteError, setPasteError] = useState<string | null>(null);
+  const [pasteNotice, setPasteNotice] = useState<string | null>(null);
+
+  const [loadingExample, setLoadingExample] = useState(false);
+  const [exampleError, setExampleError] = useState<string | null>(null);
+  const [exampleNotice, setExampleNotice] = useState<string | null>(null);
+
+  async function handleAdd() {
+    setPasteError(null);
+    setPasteNotice(null);
+    setPasting(true);
+    try {
+      await paste({ text: pasted });
+      setPasted("");
+      setPasteNotice("Reading… check Needs attention or the board in a moment");
+    } catch (err) {
+      setPasteError(errorMessage(err, "Couldn't read that email."));
+    } finally {
+      setPasting(false);
+    }
+  }
+
+  async function handleLoadExample() {
+    setExampleError(null);
+    setExampleNotice(null);
+    setLoadingExample(true);
+    try {
+      const result = await loadExample({});
+      if (!result.loaded) {
+        setExampleNotice("You already have example purchases loaded.");
+      }
+    } catch (err) {
+      setExampleError(errorMessage(err, "Couldn't load example purchases."));
+    } finally {
+      setLoadingExample(false);
+    }
+  }
 
   return (
     <section className="space-y-2 rounded-lg border border-line bg-white/50 p-4">
@@ -185,27 +254,42 @@ function AddPurchaseSection() {
         value={pasted}
         onChange={(event) => setPasted(event.target.value)}
         rows={5}
+        disabled={pasting}
         placeholder="Paste the order confirmation email text here…"
-        className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-harbor focus:ring-2 focus:ring-harbor/20"
+        className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-harbor focus:ring-2 focus:ring-harbor/20 disabled:opacity-60"
       />
+      {pasteError && (
+        <p role="alert" className="text-sm text-rust">
+          {pasteError}
+        </p>
+      )}
+      {pasteNotice && <p className="text-sm text-moss">{pasteNotice}</p>}
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
-          disabled
-          title={INTAKE_NOTE}
-          className="rounded-md bg-harbor px-4 py-2 text-sm font-semibold text-paper opacity-60"
+          onClick={() => void handleAdd()}
+          disabled={pasting || pasted.trim().length === 0}
+          className="rounded-md bg-harbor px-4 py-2 text-sm font-semibold text-paper disabled:opacity-60"
         >
-          Add
+          {pasting ? "Reading…" : "Add"}
         </button>
-        <button
-          type="button"
-          disabled
-          title={EXAMPLES_NOTE}
-          className="rounded-md border border-line px-4 py-2 text-sm font-semibold text-ink/60 opacity-60"
-        >
-          Load an example purchase
-        </button>
+        {!hasExample && (
+          <button
+            type="button"
+            onClick={() => void handleLoadExample()}
+            disabled={loadingExample}
+            className="rounded-md border border-line px-4 py-2 text-sm font-semibold text-ink/60 transition hover:border-harbor/40 hover:text-harbor disabled:opacity-60"
+          >
+            {loadingExample ? "Loading…" : "Load an example purchase"}
+          </button>
+        )}
       </div>
+      {exampleNotice && <p className="text-sm text-ink/60">{exampleNotice}</p>}
+      {exampleError && (
+        <p role="alert" className="text-sm text-rust">
+          {exampleError}
+        </p>
+      )}
     </section>
   );
 }
@@ -223,6 +307,7 @@ function BoardContent() {
   }
 
   const { purchases, totals, attention } = board;
+  const hasExample = purchases.some((row) => row.purchase.isExample);
 
   return (
     <div className="space-y-8">
@@ -243,7 +328,7 @@ function BoardContent() {
         </ul>
       )}
 
-      <AddPurchaseSection />
+      <AddPurchaseSection hasExample={hasExample} />
     </div>
   );
 }
