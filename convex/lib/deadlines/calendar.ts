@@ -9,9 +9,11 @@ import { federalHolidayOn, inHolidayTable } from "./usFederalHolidays";
 export type HolidayRule = "none" | "us_federal";
 
 export class BeyondCalendarError extends Error {
-  constructor(public readonly date: string) {
+  readonly date: string;
+  constructor(date: string) {
     super(`date ${date} is outside the committed holiday calendar`);
     this.name = "BeyondCalendarError";
+    this.date = date;
   }
 }
 
