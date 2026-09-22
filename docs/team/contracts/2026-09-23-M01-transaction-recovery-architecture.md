@@ -221,11 +221,19 @@ export const incidentStatus = v.union(v.literal("candidate"), v.literal("confirm
 
 export const authorityClass = v.union(v.literal("legal_entitlement"), v.literal("contract_benefit"), v.literal("merchant_promise"),
   v.literal("settlement_or_program"), v.literal("goodwill"));
-/** Mission §9 outcomes. M02 fixtures' `likely_eligible_missing_evidence` ≡ `likely_eligible` (docs/rules/README.md alias table; M08's fixture loader maps it). */
+/** Mission §9 outcomes. docs/rules/README.md alias table, applied by M08's fixture loader: `likely_eligible_missing_evidence` → `likely_eligible`;
+ *  `not_yet_due` (D147(6), README rule 4) maps 1:1 (rev 5.2). `not_yet_due` = the path is not ripe yet; it carries a re-evaluation
+ *  date or event and is NEVER `not_eligible`. */
 export const evaluationOutcome = v.union(
   v.literal("eligible"), v.literal("likely_eligible"), v.literal("possible_contract_benefit"), v.literal("needs_facts"),
   v.literal("manual_review"), v.literal("not_eligible"), v.literal("deadline_passed"), v.literal("source_unverified"), v.literal("unsupported"),
+  v.literal("not_yet_due"),
 );
+/** rev 5.2 (D147(6)): when a `not_yet_due` path should be re-evaluated. At least one of the two is set. */
+export const reevaluate = v.object({
+  at: v.optional(v.string()),    // ISO local date ("YYYY-MM-DD"), e.g. a promised ship-by date (fixture `reevaluate_at`)
+  when: v.optional(v.string()),  // a named event, e.g. "MBR filed" (fixture `reevaluate_when`); the event is a fact key change
+});
 export const tri = v.union(v.literal("pass"), v.literal("fail"), v.literal("unknown"));
 export const remedyType = v.union(v.literal("price_difference"), v.literal("cash_refund"), v.literal("statement_credit"), v.literal("reimbursement"),
   v.literal("fee_refund"), v.literal("billing_correction"), v.literal("voucher"), v.literal("points"), v.literal("repair"),
@@ -288,6 +296,7 @@ export const nextAction = v.union(
   v.object({ kind: v.literal("ask_anyway"), reason: v.string() }), // D143.1: user-initiated ask when source is unverified
   v.object({ kind: v.literal("manual_review"), reason: v.string() }),
   v.object({ kind: v.literal("none"), reason: v.string() }),
+  v.object({ kind: v.literal("wait"), reevaluate }),               // rev 5.2: not_yet_due → "check again on <date>" / "after <event>"
 );
 export const nonCashKind = v.union(v.literal("voucher"), v.literal("points"), v.literal("repair"), v.literal("replacement"),
   v.literal("service_credit"), v.literal("fee_waiver"), v.literal("other"));
@@ -396,6 +405,7 @@ export const approvalBinding = v.object({
     overlap: v.array(v.object({ withScenario: scenarioId, withRemedyKey: v.string(), relation: overlapRelation })),
     nextAction, explanation: v.array(v.string()),
     boundFacts: v.optional(v.array(boundFactValue)), // rev 5 (N6): the pack's bound-fact values (≤ 32); written on every row
+    reevaluate: v.optional(reevaluate),              // rev 5.2: set iff outcome === "not_yet_due"
   }).index("by_opportunity", ["opportunityId"]).index("by_user", ["userId"]),
   // Array bounds asserted by the single writer: conditions ≤ 64, missingFacts ≤ 32, assumptions ≤ 16, disqualifiers ≤ 16,
   // deadlines ≤ 8, sourceRefs ≤ 8, overlap ≤ 8, explanation ≤ 12.
@@ -419,6 +429,7 @@ export const approvalBinding = v.object({
 // claims += caseMode?: v.union(v.literal("request"), v.literal("track_automatic"))   (DA-A-25)
 //         + nonCashResolvedAt?: number                                                 (DA-A-18)
 // drafts += purpose?: v.union(v.literal("formal"), v.literal("informal"))             (DA-A-9: informal outreach never changes delivery)
+// opportunities += reevaluateAt?: number (UTC ms, start of the local reevaluate.at date) + .index("by_status_and_reevaluate_at", ["status", "reevaluateAt"])   (rev 5.2, D147(6))
 export const recipientSource = v.union(v.literal("confirmed_policy_snapshot"), v.literal("rule_pack"),
   v.literal("user_entered_from_document"), v.literal("user_entered"));
   packets: defineTable({
@@ -610,7 +621,7 @@ export const recipientSource = v.union(v.literal("confirmed_policy_snapshot"), v
   3. **if R01 v1 is not active:** run the **legacy path unchanged** (today's code, with no opportunity rows). This keeps deploy and revert safe. **Wave 1 closes only with R01 v1 active** (M18 + lead), so the vertical slice is real (DA-A-2, DA-A-11).
 - **`openCase({ opportunityId, claimedAmount? })`:**
   1. check ownership and the tombstone;
-  2. re-evaluate (`case_open`); the outcome must be in **`APPROVABLE_OUTCOMES = {eligible, likely_eligible, possible_contract_benefit}`**. This one set is shared by case opening, `drafts.prepareSend` and `packets.approve` (DA-A-14);
+  2. re-evaluate (`case_open`); the outcome must be in **`APPROVABLE_OUTCOMES = {eligible, likely_eligible, possible_contract_benefit}`** (`not_yet_due` is not approvable; `openCase` refuses with `nextAction: wait`). This one set is shared by case opening, `drafts.prepareSend` and `packets.approve` (DA-A-14);
   3. if `activeClaimId` points to a claim that is not closed, return that claim id (idempotent);
   4. **overlap guard (DA-A-4, D145).** Read the user's active claims on this transaction and on the server-set `relatedTransactionId`, through `by_transaction_and_status`, **filtered by `userId`** (DA-A-29).
      - A loss-key intersection with **no declared relation defaults to `alternative`**: the open is refused with "You already have an active claim for this loss via <X>".
@@ -756,7 +767,13 @@ export interface EvaluationResult {
   amount: AmountCalc | null; deadlines: DeadlineResult[]; sourceRefs: SourceRef[];
   lossKeys: string[]; overlap: OverlapDecl[]; nextAction: NextAction; explanation: string[];
   flags: { unsupportedReason?: string; sourceStale?: boolean; effectiveDateMismatch?: boolean;
-           conflictingKeys: string[]; contractCoverageInexact?: boolean; manualReviewReason?: string };
+           conflictingKeys: string[];                       // every decisive key whose cell is `conflicting`
+           conflicts: { key: string; kind: "candidates" | "confirmed_vs_observed" | "confirmed_vs_confirmed";
+                        values: { value: string; source: string }[]; sameAnswer: boolean }[];   // rev 5.3 (D152); kind is tagged
+                        // by lib/facts/resolve.ts (M11); sameAnswer = every conflicting value yields the same outcome (candidate testing)
+           contractCoverageInexact?: boolean; manualReviewReason?: string;
+           notYetDue?: { at?: string; when?: string } };   // rev 5.2: set by the pack only from KNOWN facts (e.g. ship-by date
+                                                            // confirmed and still in the future; MBR confirmed "not filed")
 }
 export type Evaluator<S, P> = (input: EvaluationInput<S, P>) => EvaluationResult;
 
@@ -770,7 +787,22 @@ export function deriveOutcome(d: Dimensions, f: Flags, assumptions: Assumption[]
 //  2 f.sourceStale || f.effectiveDateMismatch             -> "source_unverified"   (only reachable for ACTIVE packs)
 //  3 d.applies === "fail"                                 -> "not_eligible"       (from known facts only)
 //  4 d.windowOpen === "fail"                              -> "deadline_passed"    (USER-obligor deadlines only — DA-A-5)
-//  5 f.conflictingKeys.length > 0 || f.manualReviewReason -> "manual_review"
+//  4b f.notYetDue                                         -> "not_yet_due"        (rev 5.2, D147(6)): below the rule/timing
+//        verdicts (a path that fails applicability or whose user deadline passed is not "not yet due"), above manual_review and
+//        needs_facts (a path that is not ripe is reported as such; its missingFacts are still listed so questions can be answered
+//        early). An UNKNOWN ripeness fact is not notYetDue — it is a missing fact → needs_facts. NEVER maps to not_eligible.
+//        result.reevaluate = f.notYetDue; nextAction = { kind: "wait", reevaluate }; amount may be computed but is never shown
+//        as owed (§5, §9).
+//  5 conflicts, split by WHO can resolve them (rev 5.3, D152):
+//    5a f.manualReviewReason, or a conflict of kind confirmed_vs_observed | confirmed_vs_confirmed
+//       -> "manual_review". The user cannot settle it by answering: a user_confirmed value contradicts an observed/system
+//       value (e.g. the user confirmed delivery on the 3rd, the carrier's tracking says the 9th), or two confirmed values
+//       contradict. The explanation names both sources and what would resolve it (upload proof / correct the confirmation).
+//    5b a conflict of kind "candidates" (only extracted candidates disagree, or candidates disagree with nothing confirmed)
+//       -> "needs_facts". missingFacts gets reason "conflicting" and the question shows both values and their sources.
+//    5c every conflict has sameAnswer = true -> skip 5a/5b; the outcome stands but is capped at likely_eligible
+//       (PENDING M09b — until the reviewer signs off and the lead records it, M12 keeps 5c behind a single constant and the
+//       fixture variants for it are marked pending).
 //  6 d.applies === "unknown" || d.factsKnown === "unknown" -> "needs_facts"       (required-class facts only)
 //  7 f.contractCoverageInexact                            -> "possible_contract_benefit"
 //  8 d.evidenceSupports !== "pass" || assumptions.length > 0 -> "likely_eligible"  (DA-A-2 row: "only assumption-class unknowns → likely_eligible")
@@ -814,7 +846,7 @@ export function computeDeadline(spec: DeadlineSpec, cells: CellLookup, now: numb
 
 | State | Holder | Written by |
 |---|---|---|
-| Eligibility | `opportunities.outcome` (+ `evaluations`) | `recordEvaluation` only |
+| Eligibility | `opportunities.outcome` (+ `evaluations`, incl. `reevaluate` for `not_yet_due`) | `recordEvaluation` only |
 | Opportunity lifecycle | `opportunities.status` | `openCase`, claim-closure hooks, `dismiss` |
 | Case workflow | `claims.status` (existing + `denied` in wave 2) + `nonCashResolvedAt` (wave 2) + `caseMode` (wave 2) | existing writers, `recordDenial`, `recordNonCashResolution` |
 | Delivery | `lib/claimState.delivery(claim, drafts, packets, submissions)` (derived) | — |
@@ -830,7 +862,16 @@ export function computeDeadline(spec: DeadlineSpec, cells: CellLookup, now: numb
   - any open status → closed-for-ask via `nonCashResolvedAt`.
 
   `packet` is reached for scenario claims only through `submissions.record`.
-- **Display** (mission §14): detected / needs facts / likely eligible / user verified / ready to send / **tracking** (the `track_automatic` case mode) / submitted (on the required channel) / paid / denied / escalated (wave 3) / expired (derived).
+- **Display** (mission §14): detected / needs facts / likely eligible / user verified / ready to send / **tracking** (the `track_automatic` case mode) / submitted (on the required channel) / paid / denied / escalated (wave 3) / expired (derived) / **not yet due** (rev 5.2).
+- **`not_yet_due` (rev 5.2, D147(6)):**
+  - It is not approvable: `openCase`, `prepareSend` and `packets.approve` refuse it, and auto-open never fires.
+  - **It is never a card with an amount as owed.** The card shows "Check again on <date>" or "Check again after <event>", with no estimate in owed wording, and it is excluded from every money tile in `recovery.summary`: not Potential and not Ready. It is counted in a "Not yet due" count/strip.
+  - **Re-evaluation:**
+    - a `reevaluate.when` event is a fact change and re-evaluates on the normal `fact_change` trigger;
+    - a `reevaluate.at` date is picked up by the wave-2 sweep (M29): `opportunities.reevaluateAt` (UTC ms, start of that local date) plus the index `by_status_and_reevaluate_at` are added in the wave-2 addendum (M20).
+
+    Queries never flip the state by clock. The UI shows the date with the client clock.
+  - If the outcome of an open case becomes `not_yet_due`, that is material (it leaves the approvable set; §2.8).
 
 ---
 
@@ -993,7 +1034,7 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 ## 10. Acceptance criteria ("fixture" = expected values written by hand, never produced by the code under test)
 
 **Common (every active evaluator):**
-- M02's fixture categories pass unchanged through M08's loader, with `likely_eligible_missing_evidence` mapped to `likely_eligible`.
+- M02's fixture categories pass unchanged through M08's loader, with `likely_eligible_missing_evidence` mapped to `likely_eligible` and **`not_yet_due` passed through 1:1 with `reevaluate_at` → `reevaluate.at` and `reevaluate_when` → `reevaluate.when`** (rev 5.2).
 - Evaluating twice gives one evaluation row.
 - 30 alternating price observations give a bounded number of evaluation rows (DA-A-32).
 - Foreign ids on every public function get an identical not-found.
@@ -1027,6 +1068,9 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 | N5 (rev 5) | `claims.test.ts` · "provisional 4,000 outstanding + confirmCredit 1,000 without the flag → ProvisionalOutstanding, nothing written"; "with separateFromProvisional → recorded, provisional still 4,000"; "finalize path unchanged" | M10, M16 |
 | N6 (rev 5) | `drafts.test.ts` · "edit a legacy item's unitCents after approval → the binding's evaluation still shows the approved values"; `lib/facts/snapshot.test.ts` · "boundFactValues are canonical and bounded ≤ 32" | M11, M12, M13 |
 | N7 (rev 5) | `r01Parity.test.ts` · "a later confirmed snapshot with a different windowDays → v1 uses it (same as legacy) with assumption A-T2" (both modes) | M12, M16 |
+| D152 conflicts (rev 5.3) | `lib/rules/outcome.test.ts` · "two extracted candidates disagree, nothing confirmed → needs_facts; the missing fact has reason conflicting and the question lists both values with their evidence sources"; "user_confirmed delivery 3rd vs observed carrier tracking 9th → manual_review; the explanation names both sources and 'upload proof or correct your confirmation'"; "two confirmed values contradict → manual_review"; "same-answer candidates → outcome stands, capped at likely_eligible" (**marked pending M09b**); `lib/facts/resolve.test.ts` · "conflict kind tagged: candidates / confirmed_vs_observed / confirmed_vs_confirmed" | M11, M12 |
+| D147(6) engine (rev 5.2) | `lib/rules/outcome.test.ts` · "flags.notYetDue → not_yet_due; never not_eligible"; "applies fail + notYetDue → not_eligible (rule 3 wins)"; "user deadline passed + notYetDue → deadline_passed (rule 4 wins)"; "notYetDue + conflicting/missing facts → not_yet_due, missingFacts still listed"; "an unknown ripeness fact → needs_facts, not not_yet_due"; `opportunities.test.ts` · "not_yet_due → openCase refused with nextAction wait; no auto-open"; `recovery.test.ts` · "not_yet_due never appears in any money tile" | M12 |
+| D147(6) packs (rev 5.2) | M08 loader over `docs/rules/fixtures/R04.json` · **R04-03b** (MBR confirmed not filed → `not_yet_due`, `reevaluate.when` "MBR filed"); `R05.json` · **R05-04b** (`reevaluate.when`: buyer cancels before shipment), **R05-04c** (`reevaluate.at` 2026-10-11), **R05-05a/b** (`reevaluate.at` 2026-09-01), **R05-07** (`reevaluate.at` 2026-09-21) — all pass unmapped | M21 (R05), M22 (R04) |
 
 **Core financial fixtures (mission §17, M16, through public mutations):**
 - expected 4,000 / promise 4,000 → unresolved 4,000 → confirm 1,500 → 2,500 → confirm 2,500 → 0;
@@ -1128,7 +1172,8 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 - N3: activation withdrawal is material;
 - N6: `evaluations.boundFacts` written; `resultHash` includes `boundFactsHash`;
 - N7: `latestPolicy()` snapshot + A-T2;
-- wave-2 note: the retail paid-total cap uses a confirmed `retail.order_total` when present, else item totals with `paidTotalPartial` |
+- wave-2 note: the retail paid-total cap uses a confirmed `retail.order_total` when present, else item totals with `paidTotalPartial`;
+- rev 5.2: the D147(6) engine row (`not_yet_due` precedence 4b, `wait` next action, excluded from tiles) |
 | M13 | ingestion-integrations | `convex/evidence.ts`, `convex/http.ts` (upload/download/OPTIONS), `convex/lib/sniff.ts`, `convex/intake.ts`, `convex/inbound.ts`, `convex/lib/schemas.ts`, `convex/drafts.ts` (binding, `prepareSend`, `approveAndSend` hash/ack check, S-M03-1/4/5, `resendAfterUnknown` with full checks, SEC-AI-4 validator for the R01 draft), `convex/mail.ts`, `convex/notify.ts` (S-M03-1 for alerts), `convex/replies.ts` (S-M03-6 only), `convex/lib/rateLimits.ts` (rev 5: the `evidenceUpload`, `evidenceDownload` and `prepareSend` buckets, using M10's constants) (+ tests) | M10, M11, M12 (evaluation helper), M1B (flags) | the rev-3 security tests (SEC-UP-1/2/3/5/6, SEC-SD-2 fixture, A.1/A.2 inverted); DA-A-8, DA-A-14, DA-A-21 rows; DA-A-20 ("upload → content_deleted → re-upload → active row with content"); DA-A-27 ("finalize stores 64-hex"); DA-A-28a ("UTF-8 filename round-trips"), 28c (localhost refused on a non-dev `CONVEX_SITE_URL`), 28e (HEIC → never sent to the model), 28f (quota charged from `_storage.size`); DA-A-31 ("resend after a material change → refused"); SEC-AI-6 ("a spoofed 'refund issued $500' to the inbox → unverified_sender candidate, no ledger promise"); S-M03-4/5/6 repros inverted; SEC-AI-4 ("an unknown email/URL in the generated body blocks approval"); **rev 5:**
 - C1: `window_may_have_passed` for linked claims; with acknowledgment → sends, no bump, no new draft;
 - C2: the binding at `drafts.insert` uses the R01 v1 bound-fact list, never the live price;
@@ -1159,7 +1204,7 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 | M27 | opus-rules-reviewer | `docs/reviews/…-pack-review-R02-R05.md` | M09, M21, M22 | each code pack matches its M09-approved spec and passes the M02 fixtures unchanged → the lead records each activation **before that slice's wave-2 close** |
 | M28 | ingestion-integrations | `convex/drafts.ts` (item-less context, `claimCurrency`, `purpose`), `convex/replies.ts` (DA-A-19 currency; scenario-aware prompt; `expectedDomain`), `convex/followUps.ts` (item-less claims; `responseExpectation`), `convex/lib/schemas.ts` (ReplyClass), `convex/inbound.ts` (unchanged unless needed) | M20 | DA-A-12 HC-1 sites compile and are tested; DA-A-19 ("a '€40' reply on a USD claim → no ledger event, needs review") |
 | M2C | backend-2 | `convex/tracking.ts` (`isClosedForAsk`; item-less claims; DA-A-34 A.7 inverted on overview), `convex/purchases.ts` (board skips `scenario` claims, per-currency fields added alongside the untouched legacy totals), `convex/insights.ts` (optional ids, `claimCurrency`), `convex/priceWatch.ts` (DA-A-22 denied re-open rule) | M20 | repro A.1 inverted; DA-A-22 ("a denied claim at the same price → no claim; a lower price → a claim for (deniedObserved − new) × qty only"); `purchases.test.ts:387–407` unmodified |
-| M29 | backend | `convex/crons.ts` (deadline attention sweep + the evidence-retry sweep entry M23 provides), `convex/deadlines.ts` (new), `convex/ops.ts` (backlog additions) | M20, M21 | **C50 user-obligor deadline attention for R03** (in-app only): a bounded sweep on `by_status_and_next_deadline_at`; re-reads state; skips closed, dismissed, superseded and tombstoned work (SEC-CH-6); "a reminder for a case closed after scheduling is a no-op" |
+| M29 | backend | `convex/crons.ts` (deadline attention sweep + the evidence-retry sweep entry M23 provides), `convex/deadlines.ts` (new), `convex/ops.ts` (backlog additions) | M20, M21 | **rev 5.2:** the same sweep re-evaluates `not_yet_due` opportunities whose `reevaluateAt` ≤ now (bounded page on `by_status_and_reevaluate_at`, tombstone-gated; test "R05-04c re-evaluated on 2026-10-11 → new outcome recorded"). **C50 user-obligor deadline attention for R03** (in-app only): a bounded sweep on `by_status_and_next_deadline_at`; re-reads state; skips closed, dismissed, superseded and tombstoned work (SEC-CH-6); "a reminder for a case closed after scheduling is a no-op" |
 | M2A | frontend | `src/lib/coverageCopy.ts` (new), `src/pages/SignIn.tsx` (landing copy), `README.md`, `hackathon.md` | M24 | **§20 copy consistency**: every coverage claim in the product copy is derived from `coverage.ts` + RULES-COVERAGE; a copy test fails when any page claims a scenario the production registry does not evaluate ("checks supported recovery paths", never "every right"); no billing copy |
 
 ### 11.3 Waves 3–4 — expansion (each with its recorded blocker or scope; nothing becomes a card without an active pack)
@@ -1256,6 +1301,8 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 | O14 | Closed-window send | **Warn + acknowledge**, identical for linked and unlinked claims, until R01 v2 (D145) |
 | O15 | 24 h multiples in R01 v1 | **Agreed** for parity; R01 v2 is M37 |
 | O16 | httpAction upload | **Agreed**, with DA-A-8/20/27/28 |
+
+**Pending M09b (rev 5.2, narrowed by D152 in rev 5.3).** D152 decides the divergent cases: rule 5a gives `manual_review` for a confirmed value against an observed or confirmed value, and rule 5b gives `needs_facts` for candidates only. **Still pending:** a `conflicting` decisive fact whose candidates **all yield the same answer**. Per D152 the outcome stands, capped at `likely_eligible` (rule 5c), but that awaits M09b's sign-off. README X2 currently says the outcome stands **uncapped**, and M09b checks the README and fixture alignment. M12 implements candidate-testing (evaluate once per candidate, compare outcomes) so the ruling is a one-line change in `deriveOutcome`. The fixture variants built for this case ("both candidates on the same side") are marked `pending M09b` in M12's run until the reviewer rules and the lead records it.
 
 **Remaining items for the lead:**
 - **(R4-1)** Record the D83(5) wording amendment (§2.6).
@@ -1357,3 +1404,16 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 | Id | What changed | Section(s) / task |
 |---|---|---|
 | D147(1) | R04 path a (checked-bag fee refund, 14 CFR 260.5) may reach `eligible` when its decisive facts are confirmed; the `likely_eligible` cap now applies only to the property-loss and incidental-expense paths; extracted candidates still cap at `likely_eligible` (D147(2)) | §10 R04 · M22 |
+
+### 13.4 Rev 5.2 (M06d)
+
+| Id | What changed | Section(s) / task |
+|---|---|---|
+| D147(6) | New outcome `not_yet_due` with a `reevaluate` {at: ISO date \| when: named event}; precedence 4b (below not_eligible/deadline_passed, above manual_review/needs_facts; an unknown ripeness fact stays needs_facts); never `not_eligible`; not approvable; never a card with an amount as owed and excluded from every money tile; "check again on <date>/after <event>" (`nextAction: wait`); event re-evaluates on fact change, date via the wave-2 M29 sweep (`opportunities.reevaluateAt` + index in the M20 addendum); loader passes it through 1:1 | §2.4, §2.8, §4, §5, §10 (engine + R04/R05 rows) · M10 (schema delta), M12, M20, M21, M22, M29 |
+| Pending M09b | A conflicting decisive fact whose candidates all give the same answer: outcome stands (README X2) or capped at `likely_eligible` — recorded, not decided; candidate-testing seam in M12 | §12 · M12 |
+
+### 13.5 Rev 5.3 (M06e)
+
+| Id | What changed | Section(s) / task |
+|---|---|---|
+| D152 | `deriveOutcome` rule 5 split by who can resolve the conflict: 5a `manual_review` (user_confirmed vs observed/system, or confirmed vs confirmed; explanation names both sources and the fix); 5b `needs_facts` (candidates only; question shows both values and sources); 5c same-answer candidates → outcome stands capped at `likely_eligible` — still **pending M09b**; conflict kind tagged in `resolve.ts` | §4, §10, §12 · M11, M12 |

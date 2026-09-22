@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+import { afterEach, beforeEach, vi } from "vitest";
 import { convexTest } from "convex-test";
 import agentmail from "@agentmail/convex/test";
 import firecrawl from "@firecrawl/firecrawl-convex/test";
@@ -55,4 +56,77 @@ export function setup() {
 export async function signedIn(t: ReturnType<typeof setup>, name = "Tester") {
   const userId: Id<"users"> = await t.run(async (ctx) => ctx.db.insert("users", { name }));
   return { userId, as: t.withIdentity({ subject: `${userId}|session` }) };
+}
+
+// ---------------------------------------------------------------------------
+// M08 helpers (additive; the exports above keep their signatures)
+// ---------------------------------------------------------------------------
+
+export type SignedInUser = Awaited<ReturnType<typeof signedIn>>;
+
+/**
+ * Two independent signed-in users for two-user isolation tests: `owner` owns
+ * the rows under test; `other` is the foreign caller whose every read and
+ * write must be refused with the same error as a missing id. Each is
+ * `{ userId, as }` exactly as `signedIn` returns. Names default to
+ * "Owner"/"Other" so assertion messages say which side leaked.
+ */
+export async function twoUsers(
+  t: Parameters<typeof signedIn>[0],
+  names: readonly [string, string] = ["Owner", "Other"],
+): Promise<{ owner: SignedInUser; other: SignedInUser }> {
+  const owner = await signedIn(t, names[0]);
+  const other = await signedIn(t, names[1]);
+  return { owner, other };
+}
+
+/**
+ * Pins the wall clock at `at` by faking ONLY `Date` (`Date.now()`,
+ * `new Date()`), the D138/M04 pattern. Returns the restore function.
+ *
+ * Use it whenever a test passes a FIXED time to code that compares it with
+ * the server clock. Every public query taking `now` validates it with
+ * `watches.assertCoarseNow` (±24 h of `Date.now()`), so `{ now: Date.UTC(…) }`
+ * without a pin passes on the day it was written and fails the next day
+ * (D138). `convex/testing/clockPins.test.ts` fails on any such unpinned call.
+ *
+ * Why only `Date`: fully faked timers starve convex-test's nested
+ * `ctx.runQuery`/`runMutation` inside `t.run` (the read-budget tests measure
+ * exactly that), and scheduled functions then only run through
+ * `t.finishAllScheduledFunctions(vi.runAllTimers)`. Tests that drive the
+ * scheduler should keep calling `vi.useFakeTimers()` + `vi.setSystemTime()`
+ * themselves.
+ *
+ * The pinned clock is frozen: it moves only with `vi.setSystemTime(later)` or
+ * `vi.advanceTimersByTime(ms)`. convex-test stamps `_creationTime` from this
+ * clock but keeps it monotonic, so moving the clock BACKWARD after inserting
+ * rows is clamped (QA-15).
+ */
+export function pinClock(at: number | Date): () => void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(at);
+  return () => {
+    vi.useRealTimers();
+  };
+}
+
+/**
+ * `pinClock` for a whole `describe` block (or file): pins before each test
+ * and restores after it. Call it at the top of the block:
+ *
+ *   describe("overview at a fixed instant", () => {
+ *     const NOW = Date.UTC(2026, 8, 21, 12);
+ *     pinClockEach(NOW);
+ *     it("…", async () => { await as.query(api.tracking.overview, { now: NOW }); });
+ *   });
+ */
+export function pinClockEach(at: number | Date): void {
+  let restore: (() => void) | undefined;
+  beforeEach(() => {
+    restore = pinClock(at);
+  });
+  afterEach(() => {
+    restore?.();
+    restore = undefined;
+  });
 }

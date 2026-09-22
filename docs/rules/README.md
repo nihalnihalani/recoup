@@ -16,7 +16,8 @@ docs/rules/
   R04-baggage.md                    14 CFR 260.5 (bag fee) + 14 CFR 254 (liability) — three paths
   R05-mail-internet-order.md        16 CFR 435 (MITOR)
   TRIAGE.md                         R06–R25 sources, legal status, verdicts
-  fixtures/R01.json                 13 cases, R01 v1 legacy snapshot tier (M1C)
+  fixtures/R01.json                 15 cases, R01 v1 legacy snapshot tier (M1C, M2D)
+  fixtures/R01v2.json               16 cases, R01 v2 merchant-pack tier (M2D)
   fixtures/R02.json … R05.json      12 cases each, constructed from source text, never from code
   sources/                          captured first-party text (US federal works) + excerpts file
 ```
@@ -101,6 +102,22 @@ A fixture loader should map `likely_eligible_missing_evidence` → `likely_eligi
 
 ### Fixture format (`recoup.rule-fixtures/v1`)
 
+**Canonical schema** (the M08 loader validates against this list, not against any one file):
+
+| Element | Allowed values |
+|---|---|
+| Fact `type` | `enum`, `string`, `datetime` (ISO-8601 with UTC offset), `date` (`YYYY-MM-DD`), `boolean`, `integer`, `money` (`{amount_minor: int, currency: ISO-4217}` plus descriptive keys such as `label`, `note`), `money[]` (array of money), `observation` (a price observation: money plus `variantMatch`, `confidence`, `isRange`, `observedAt`, `source`, `seller`, `store_id`, `channel`, flags such as `is_clearance`), `object`, `array` |
+| Fact `state` | `user_confirmed`, `observed`, `derived`, `extracted_candidate`, `conflicting` (requires `candidates: [{value, …}]`), `missing` (value `null`), `assumption` (assumption-class; R01 v1) |
+| Fact keys | `type`, `value` (always present; `null` when missing), `state`, optional `candidates`, plus descriptive keys (`evidence`, `note`, `from`) |
+| Top-level keys | `schema`, `rule_id`, `rule_version` (`v<N>`), optional `tier`, `spec`, `construction`, `conventions` (must include `outcome_vocabulary` and `loader`), `cases` |
+| Case keys | `id`, `title`, `categories`, optional `path`, `clock`, `source`, `facts` \| (`facts_from` + `facts_override`), `expected`, `variants`, `action`, `context`, `justification`; annotations `mission_domain_fixture`, `window_end`, `applies_from` |
+| Variant keys | `id`, optional `change`, `clock`, `source`, `action`, `context_change`, `expected`, `justification`; annotations `delta`, `day`, `delay`, `drop` |
+| `source` | `{last_verified_on: date, refresh_window_days: int, note?}` or `{record: "missing", note?}` |
+| `expected` | exactly one of `outcome` or `results: [{path, outcome, …}]`; other keys are carried through for the test to assert (`missing_facts`, `unconfirmed_decisive_facts`, `assumptions`, `amount`, `deadline`, `claim`, `reevaluate_at`, `reevaluate_when`, `next_action`, `packet_readiness`, `dedupe`, `overlap`, `totals`, `forbidden_outputs`, `note`, …) |
+| `categories` | lower-case tags; every file covers each mission §17 group: `positive`, `negative`, `missing_fact`, `contradictory_fact`, `boundary_time`, unsupported (`unsupported_jurisdiction` \| `unsupported_product` \| `unsupported_payment`), stale/missing source (`stale_source` \| `stale_or_changing_source` \| `missing_source`), `exclusion`, `duplicate_evaluation`, `overlapping_remedy` |
+| File ↔ manifest | each `fixtures/<stem>.json` has exactly one `manifest.json` pack whose `fixtures` is that path and whose `scenarioId` equals `<stem>` (so the R01 merchant-pack tier is `R01v2`, rule_id `R01v2.…`) |
+
+
 - `conventions` in each file define fact encoding (`{type, value, state}` with `state ∈ user_confirmed | observed | derived | extracted_candidate | conflicting | missing | assumption`; mapping in cross-pack rule 2), money (`amount_minor` + ISO-4217, on every money object including exclusions), calendars, and deadline meaning. `conflicting` facts carry `candidates` (cross-pack rule 3).
 - A case has **either** a top-level `expected` **or** an `expected` on every variant. `clock` (ISO-8601 with offset) and optional `source` (`last_verified_on`, `refresh_window_days`) may be set on the case or on a variant; the variant wins.
 - `facts_from: "<case id>"` + `facts_override: {…}` copies another case's facts. A variant's `change` replaces the named facts for that variant.
@@ -108,6 +125,7 @@ A fixture loader should map `likely_eligible_missing_evidence` → `likely_eligi
 - `justification.passages` cite passage ids from the spec or `sources/federal-web-pages-excerpts.md`.
 - `context` holds non-fact state (existing claims on the item, price history, unconfirmed offers); a variant's `context_change` replaces named entries. `action` defaults to `evaluate`; R01-05d uses `send_existing_claim` to test the late-send warning.
 - `fixtures/R01.json` covers the **R01 v1 legacy snapshot tier** (contract rev 4 §2.7, task M1C). Its best outcome is `likely_eligible`; it has no staleness → `source_unverified` case (rule 3 exception).
+- `fixtures/R01v2.json` covers the **R01 v2 merchant-pack tier** (R01 spec §1–§7): known effective-date mismatch → `source_unverified` + ask anyway; unknown → capped; per-merchant window `constrains`; 7-day pack refresh.
 - Every fixture clock must be injected as `now`. Evaluators must not read the wall clock (D138).
 
 ## Captured sources

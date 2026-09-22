@@ -39,7 +39,7 @@ function hc19Name(fields: string[]): string {
 
 const NEW_TABLES: Record<string, string[]> = {
   transactions: ["by_user_and_status", "by_user_and_natural_key", "by_purchase"],
-  facts: ["by_transaction_and_subject_key_and_key", "by_user"],
+  facts: ["by_transaction_and_subject_key_and_key", "by_transaction_and_state_and_subject_key_and_key", "by_user"],
   incidents: ["by_transaction", "by_user"],
   evidence: [
     "by_user_and_content_hash",
