@@ -245,3 +245,77 @@ insights.ts(313,314,329,330,331)  replies.ts(62,63)  tracking.ts(230,231)
 ```
 
 `npx tsc -p tsconfig.app.json --noEmit` reports only `src/pages/Claim.tsx(89)`, an implicit-any cascade. The real currency default at `Claim.tsx:87` (`purchase?.currency ?? "USD"`) is not flagged. Neither is `purchases.board`, which already types `item` as `Doc<"items"> | undefined` and would silently include scenario claims (A.1).
+
+---
+
+# Recheck of rev 4 (M07)
+
+Model (self-reported from my system prompt): Opus 5.5 / claude-opus-5-5
+
+- **Under review:** contract rev 4 at `044b20d` (1,266 lines; changelog in §13). The contract is unchanged at `origin/main` = `72fe1a2`. **D145 is the intended design**: each item is judged on whether rev 4 implements D145 correctly. D146 (confirmations) and D147 (M09 spec review) were read. The M1C R01 fixtures `docs/rules/fixtures/R01.json` (`72fe1a2`, written independently of the contract) serve as a cross-check.
+- **Scope:** the pre-wave-1 items DA-A-1, 2, 3, 4, 5, 7, 8, 9, 11, 13, 14, 15, 16, 17 and 21, plus D142, D143, and new defects rev 4 introduces in wave-1 scope. This is a design recheck; no production code was run. The only computation was the Luhn check behind C5.
+- **"Fails on rev 3?"** asks whether the §10 regression test named for the item would fail against the rev-3 design, which checkpoint B requires.
+
+## Verdict: wave 1 may start, with five named conditions
+
+C1–C5 are contract-text edits. M10, M11, M14 and M1B can start now. C1–C4 must land before M12 and M13 finalize their designs, and C5 before M10's `lib/pan.ts`. No D145 ruling is unsafe.
+
+| Condition | What | Must land before |
+|---|---|---|
+| **C1** | N1: the late-send acknowledgment path is unreachable for **linked** R01 claims. | M12 (R01 v1 deadline spec), M13 (`prepareSend`) |
+| **C2** | DA-A-15: define R01 v1's bound-fact set, and add a varying-price test. | M12, M13 (binding at `drafts.insert`) |
+| **C3** | N4: run the R01 tests on the v1 path through a test seam, and re-run the suite at the activation commit. | M12, M16 |
+| **C4** | DA-A-17: make `ready` the fallback tile. | M12 (`recovery.summary`) |
+| **C5** | D142: drop the 13-digit Visa length, and use Luhn-valid samples in the keep-tests. | M10 (`lib/pan.ts`) |
+
+## Pre-wave-1 items
+
+| Item | Status | Rev-4 refs | Fails on rev 3? | Note |
+|---|---|---|---|---|
+| DA-A-1 | **CLOSED** | §2.5 l.458–466 (U non-unknown first; `user_unknown` after observed/derived; `KnownCell` type rule) | Yes. Rev 3's step 1 resolved "confirmed user_unknown" as `confirmed`. | — |
+| DA-A-2 | **CLOSED** | `missingFact.class` l.255; `FactRequirement.class` l.713; `deriveOutcome` rows 6/8 l.750–752; R01 v1 requirements l.565–569; recordCheck order and legacy fallback l.588–591; M18 + lead activation, wave-1 close l.591 | Yes. Rev 3 made the missing fact → `needs_facts` → no claim. **Only if the test runs on the v1 path (C3).** | M1C R01-03 agrees: unconfirmed policy → `likely_eligible`, one claim. D147: R01 activation now also waits for M2D + M09b, so wave-1 close depends on them. |
+| DA-A-3 | **CLOSED** | §2.8 step 4 l.583 (mandatory link before the upsert decision); legacy key synthesis §3.3 | Yes. Rev 3 counted 5,000 in both Potential and Ready. | — |
+| DA-A-4 | **CLOSED** | overlap guard (default `alternative`; `coordinated` only with a `sourcePassageId`; `userId`-filtered) l.596; components, `recovered`/`excess`, per-transaction cap, I1–I5 l.663–700 | Yes, all four named tests. | Implements D145 (min(Σ, loss) plus an excess line). Wave-2 note: retail P(T) = Σ items leaves out tax and shipping, so an R05 order-total estimate would be capped below its real amount. Use the confirmed `totalMinor` when present (M12/M21). |
+| DA-A-5 | **CLOSED** | `obligor` l.239; `DeadlineSpec.obligor` l.762; rule 4 user-only l.748; counterparty never `passed` l.781; `nextDeadlineAt` user-only l.368 | Yes (rev 3's R02 #5 gave `needs_facts`; overdue gave `deadline_passed`). | — |
+| DA-A-7 | **CLOSED** | §2.6 retention l.519ff; `privacyFacts.ts` copy test; D146 R4-1 records the D83(5) amendment | Yes. Rev 3 kept evidence linked to an active transaction. | "Has a case" includes dismissed claims. That matches the disclosed rule ("unless you start a claim"). |
+| DA-A-8 | **CLOSED** | `X-Doc-Type`, `awaiting_doc_type`, `declareDocType`, `card_statement` → `store_only` l.502; pre-scan (M23) | Yes (rev 3 gave `queued`). | Residual: a statement **image** that the user declares as a "receipt" can be extracted. It is covered by D145's live-extraction flag (off for real users). M24's doc-type picker must have no default value. |
+| DA-A-9 | **CLOSED** | `requiredChannel` l.242 (claims, wave 1); projection l.796; Asked on `requiredChannel` l.677 | Yes. | — |
+| DA-A-11 | **CLOSED** | Registries l.556; `activation.ts`/`verification.ts` lead-owned (D146 R4-4); M18/M19/M1C; wave-1 close requires activation (l.591) | Yes (testRegistry import rule; activation-only registry). | See C3 for how tests reach the v1 path before activation. |
+| DA-A-13 | **CLOSED** | §3.1 l.612 (`isTwoDecimalCurrency` carve-out) | Yes. | M1C R01-07 agrees. |
+| DA-A-14 | **CLOSED** | `prepareSend` commits, returns and never throws on a policy refusal, and charges nothing (l.818–826); one `APPROVABLE_OUTCOMES` allow-list l.594 | Yes (repro A.3). | **Conflicts with DA-A-21 → N1.** |
+| DA-A-15 | **PARTIALLY** | Hash inputs are values only (l.482; `factRef` without ids l.244) — closed. | "Same value re-confirmed" yes. "12 checks at one price → 0 bumps" is weak: it never varies the price. | The bound-fact set ("interpolations + amount inputs + anchors") exists **only in the changelog (l.1235) and M21's wave-2 test**, not in §2.4/§2.5. The wave-1 R01 draft binding (`drafts.insert`, M13) has no defined set, and whether the **live** observed price is bound decides KM3. **C2:** R01 v1 bound facts = unit price, quantity, item identity, purchase date, the claim amount, and the **opening** observation (`openedFromPriceCheckId`, frozen) — never the live observed cell. Test: "12 checks at 12 different prices on an open case → 0 version bumps; a corrected unit price → bump". |
+| DA-A-16 | **CLOSED** | Finalize with derived keys through `writeConfirmedCredit` l.639; `confirmCredit` refusal l.640; grep test | Yes (repro A.2). | New low N5. |
+| DA-A-17 | **PARTIALLY** | Tiles by furthest state l.675–679; I1–I3 l.700 | Yes (overlapping tiles; unknown sends appeared in no tile). | `ready` is an enumeration ("detected/drafted/packet_prepared/failed"). An open claim with status `promised` where promised ≤ net (a partial promise already paid), or a `reopened`/legacy `packet` claim with no send delivery, falls into **no** tile, which breaks I3. Example: a return claim of 4,000, a refund email promising 1,500, and 1,500 confirmed leaves 2,500 outstanding in no tile. **C4:** `ready` = every open member not in a higher tile, plus a property-test generator that covers those statuses. |
+| DA-A-21 | **STILL_OPEN** | l.828 (identical for linked and unlinked, no hard refusal) vs l.594/l.826 | The named test "linked and unlinked identical" **fails on rev 4 itself** (N1). | See N1. |
+| D142 | **PARTIALLY** | l.515 (Luhn + issuer prefix + brand length + separators); typed identifiers bypass the masker; `putFact` masks, never refuses | "112-… order ref unchanged" fails on rev 3 **only if the sample is Luhn-valid**. | Rule (b) keeps **Visa at 13 digits**, so a Luhn-valid 13-digit identifier starting with 4 is still masked. That covers Frontier (422) and Spirit (487) e-ticket numbers and German/Austrian EAN-13 codes (400–440). `4221234567897` and `4006381333932` are both Luhn-valid and would be masked under rev 4, so D142's own keep-tests pass only with samples that don't exercise the rule. **C5:** Visa lengths 16/19 only. Keep-test samples must be Luhn-valid: `112-3456789-1234562`, `4221234567897`, `4006381333932`, IMEI `352099001761481` (all verified). |
+| D143.1 | **CLOSED** | Reviewed-tier temporal rule is in R01 v2 (M37); v1 uses assumptions A-T1/A-T2 (l.560) | — | README rule 3 updated (`72fe1a2`); M1C R01-11 agrees. See N7 on which snapshot is meant. |
+| D143.3 | **CLOSED (wave-1 part)** | `advisoryActBy` l.271; engine `advisoryWhenAnchorUnknown`; M12 engine test | — | The rest (channel, anchor, no merchant gate) is specified in M21. |
+| D143.2 / .4 / .5 | specified | M22; §2.7 | — | D147 has since changed R04 path a (it may now reach `eligible`) — for M22/M2D, not wave 1. |
+
+## New defects in wave-1 scope
+
+| ID | Sev | Rev-4 refs | Defect | Smallest change | Test |
+|---|---|---|---|---|---|
+| **N1** | medium (→ **C1**) | l.594, l.826 vs l.828, §10 R01 bullet "window + 1 minute → warning", DA-A-21 test; M1C **R01-05d** | Past the window, R01 v1's user-obligor window gives `windowOpen: fail`, so the outcome is `deadline_passed`, which is not in `APPROVABLE_OUTCOMES`. `prepareSend` then refuses with `outcome_not_approvable`, so the acknowledgment path is **unreachable for linked claims**. After lazy linking (DA-A-3) that means every R01 claim. The materiality rule (a user deadline flipped to passed) also bumps `claims.version`, so the existing draft goes stale and a new LLM draft is needed. The independently written fixture R01-05d expects `outcome: deadline_passed` **and** `send: requires_acknowledgment, with_acknowledgment: sends, identical_for_linked_and_unlinked`. D147 adds that the R01 window's subject (drop, request or both) is itself unresolved, which argues further against a hard gate. | In `prepareSend`: `deadline_passed` whose **only** failing timing condition is the R01 legacy window (`authority: merchant_promise`, unit `elapsed_24h_days`) → code `window_may_have_passed`, which can be acknowledged. The same rule applies to linked and unlinked claims. That window flip is **not material** for an open case, so no version bump; the acknowledgment replaces it. Auto-open stays closed past the window (R01-05c). | R01-05c/05d through M08's loader. "Linked claim, windowEndsAt + 1 min → `window_may_have_passed`; with acknowledgment → sends; no version bump; no new draft required." |
+| **N2** | low | l.818–831 | `prepareSend` is a new public mutation that writes evaluations. The contract does not state `requireUserId` → `ownedDraft` → tombstone → example refusal **before** evaluating, nor M03 §3.7's per-user `evaluate` limiter. For an **unlinked** past-window claim there is no opportunity or binding, so what `preparedHash` covers is undefined. | State the check order and the limiter. For unlinked claims, `preparedHash` = hash(claimVersion, draftVersion, windowEndsAt, acknowledgment). | Foreign draft → identical not-found, nothing written; a 61st call per minute → rate-limited; unlinked late send round-trips. |
+| **N3** | low | l.591 ("keeps deploy and revert safe") | If `activation.ts` is reverted, linked claims keep an `opportunityId`, but `evaluateTransaction` no longer selects R01. What `prepareSend` then does (likely `source_unverified` → unsendable) is undefined. | A claim whose scenario has no active pack uses the legacy send checks plus the window acknowledgment. | Activate → link → deactivate (test registry) → the linked claim is still sendable with legacy checks. |
+| **N4** | low (→ **C3**) | l.556 (`testRegistry` importable only from `*.test.ts`), l.591 | The production registry returns R01 v1 only after the lead's activation commit, which follows M18 and now also M2D/M09b (D147). Until then, `recordCheck` runs the legacy fallback, so r01Parity and the DA-A-2/3/13 tests **pass on the fallback and prove nothing about v1**. | Name the seam: tests force R01 v1 active (`vi.mock` of `lib/rules/registry`, the pattern M03's appendix used for `lib/ai`) and run every R01 test in both modes. Wave 1 closes only after the full suite is re-run **at the activation commit**. | r01Parity parameterized over {v1 active, fallback}. |
+| **N5** | low | l.640 | `confirmCredit` refusing while provisional > 0 also blocks recording a **genuinely separate** credit, such as a merchant refund posting during an issuer investigation. The only other route is finalize, which would record the issuer's decision falsely. | Allow `confirmCredit` with an explicit `separateFromProvisional: true` acknowledgment; the default path still refuses. | Provisional 4,000 outstanding + a separate merchant credit of 1,000 → recorded with the acknowledgment, provisional unchanged. |
+| **N6** | low | l.244 (`factRef` has no ids), evaluations l.379 | Hashing values instead of ids was right, but the stored evaluation also lost which facts it used. For legacy-adapter cells (mutable purchases and items) the values an approved binding relied on can no longer be shown or reconstructed, and mission §9 says every evaluation identifies its fact snapshot. | Store the bound facts' `(subjectKey, key, status, value)` on the evaluation or the binding (bounded, ≤ 32). They are values, so hashes are unaffected. | Edit a legacy item after approval → the binding still shows the approved values. |
+| **N7** | low | l.560 ("per-purchase policy snapshot") | There is no per-purchase snapshot: `policies` is keyed by (user, merchant, kind), and the legacy path uses `latestPolicy()` (newest confirmed, else newest). Picking "the snapshot nearest the purchase" instead would change `windowDays` and break parity. | Pin it: R01 v1 uses `latestPolicy()`'s snapshot, and A-T1/A-T2 are computed from that snapshot's `retrievedAt`. | A later confirmed snapshot with a different `windowDays` → v1 uses it (parity), with A-T2. |
+
+Not a rev-4 defect (pre-existing, recorded only): `recovery.summary`'s `nodes` exclude dismissed claims, as the board does, so a partial credit received before a dismissal is left out of Recovered.
+
+## Pre-wave-2 items (one line each)
+
+- **DA-A-6:** specified in M23 (`lib/quote.ts`, pinned PDF text layer, three named tests); schema `quoteStatus` is three-valued from wave 1.
+- **DA-A-10:** specified in M20 (§6 recording rule, `staleAtRecord`, two named tests).
+- **DA-A-12:** specified in M28 (`drafts`, `replies`, `followUps`) and M2C (`tracking`, board, insights); A.1 inverted.
+- **DA-A-18:** specified in M20 (`recordNonCashResolution`) and M22 (R02 acceptance fact).
+- **DA-A-19:** specified in M28 (reply currency; "€40 on USD → no ledger event").
+- **DA-A-20:** moved into wave 1 (M13/M14) with a named test.
+- **DA-A-22:** specified in M2C (denied re-open rule) and M1C R01-10.
+- **DA-A-23:** specified in M20 (`ENGINE_VERSION`) and M19 (manifest append-only check against `origin/main`).
+- **DA-A-24:** specified in M12 (`conditions.ts` decisive-missing combinator) and M22 (no disability or time-zone question).
+- **DA-A-25:** specified in M22/M24 (`track_automatic`, `track` → overdue → `escalate`).
+- **Wave-2 note:** `verify-rule-sources.mjs` is on-demand only. Once R02–R05 are active, a pack goes stale 30–180 days after the last manual run. Every open case then flips to `source_unverified`, which is material and bumps versions. M1B reports stale packs, but the lead should schedule the re-verification ahead of each window rather than only at wave close.
