@@ -10,6 +10,9 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import schema from "../schema";
 import { BLOB_REFERENCES } from "./blobRefs";
+import { chargeStoredBytes, releaseStoredBytes, storedBytes, STORED_BYTES_DAY, STORED_BYTES_KIND } from "./blobRefs";
+import { setup, signedIn } from "../test.setup";
+import { MAX_EVIDENCE_BYTES_PER_USER } from "../limits";
 
 type AnyValidator = {
   kind: string;
@@ -76,5 +79,37 @@ describe("lib/blobRefs — BLOB_REFERENCES covers every _storage field in the sc
     const tables = synthetic.tables as unknown as TableDefs;
     const uncovered = storageFieldsOf(tables).filter((f) => !covered(tables, f));
     expect(uncovered.sort()).toEqual(["avatars.image", "packets.files[].blob"]);
+  });
+});
+
+describe("lib/blobRefs — lifetime stored-bytes counter (D173)", () => {
+  it("chargeStoredBytes is all or nothing against MAX_EVIDENCE_BYTES_PER_USER", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const results = await t.run(async (ctx) => {
+      const first = await chargeStoredBytes(ctx, userId, MAX_EVIDENCE_BYTES_PER_USER - 10);
+      const over = await chargeStoredBytes(ctx, userId, 11); // one byte past the cap: refused, nothing written
+      const afterRefusal = await storedBytes(ctx, userId);
+      const exact = await chargeStoredBytes(ctx, userId, 10); // exactly to the cap: allowed
+      return { first, over, afterRefusal, exact, final: await storedBytes(ctx, userId) };
+    });
+    expect(results).toEqual({ first: true, over: false, afterRefusal: MAX_EVIDENCE_BYTES_PER_USER - 10, exact: true, final: MAX_EVIDENCE_BYTES_PER_USER });
+    const rows = await t.run((ctx) => ctx.db.query("usage").collect());
+    expect(rows).toEqual([expect.objectContaining({ userId, day: STORED_BYTES_DAY, kind: STORED_BYTES_KIND, count: MAX_EVIDENCE_BYTES_PER_USER })]);
+  });
+
+  it("releaseStoredBytes clamps at 0 and never creates a row; counters are per user", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    const counts = await t.run(async (ctx) => {
+      await releaseStoredBytes(ctx, a.userId, 500); // nothing counted yet: no row appears
+      const noRow = (await ctx.db.query("usage").collect()).length;
+      await chargeStoredBytes(ctx, a.userId, 300);
+      await chargeStoredBytes(ctx, b.userId, 700);
+      await releaseStoredBytes(ctx, a.userId, 1_000); // more than counted: clamps at 0
+      return { noRow, a: await storedBytes(ctx, a.userId), b: await storedBytes(ctx, b.userId) };
+    });
+    expect(counts).toEqual({ noRow: 0, a: 0, b: 700 });
   });
 });

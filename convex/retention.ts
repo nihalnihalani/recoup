@@ -13,7 +13,7 @@ import {
   PROCESSED_EVENTS_PAGE,
 } from "./limits";
 import { EVALUATION_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, EVIDENCE_TEXT_KINDS, ORPHAN_BLOB_MIN_AGE_HOURS } from "./lib/privacyFacts";
-import { deleteBlobIfPresent, isBlobReferenced } from "./lib/blobRefs";
+import { isBlobReferenced, releaseEvidenceBlob } from "./lib/blobRefs";
 
 /**
  * D75: a resumable, bounded data-retention sweep. NEVER touches
@@ -547,7 +547,9 @@ async function keepEvidence(
  * their own table and are never touched here.
  */
 async function clearEvidenceContent(ctx: MutationCtx, row: Doc<"evidence">): Promise<void> {
-  if (row.storageId) await deleteBlobIfPresent(ctx, row.storageId);
+  // D173: deletes the blob and releases its bytes from the lifetime stored-bytes counter; the patch below removes
+  // `storageId` in this same mutation, so a retried page never releases twice.
+  await releaseEvidenceBlob(ctx, row);
   await ctx.db.patch(row._id, { text: undefined, storageId: undefined, extractionSummary: undefined, retention: "content_deleted" });
 }
 

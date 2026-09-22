@@ -16,6 +16,7 @@ import {
 } from "./limits";
 import { EVALUATION_PRUNE_PAGE, EVIDENCE_RETENTION_PAGE, ORPHAN_SWEEP_OPS_KEY, ORPHAN_SWEEP_PAGE, RECOVERY_RETENTION_OPS_KEY } from "./retention";
 import { EVALUATION_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, ORPHAN_BLOB_MIN_AGE_HOURS } from "./lib/privacyFacts";
+import { chargeStoredBytes, storedBytes } from "./lib/blobRefs";
 
 /**
  * `_creationTime` is stamped by convex-test's mock backend off the REAL wall
@@ -1024,5 +1025,70 @@ describe("M14b (D163) — retention.sweep's processedEvents step is byte-aware",
     expect(total).toBe(TOTAL); // each row cleared exactly once, across the interruption
     const rows = await t.run((ctx) => ctx.db.query("processedEvents").collect());
     expect(rows.every((r) => r.payload === undefined)).toBe(true);
+  });
+});
+
+// ===========================================================================
+// M14c (D173): retention releases a cleared upload's bytes from the lifetime
+// stored-bytes counter (`lib/blobRefs`) in the same mutation, keyed on the row
+// losing its storageId, so a retried page never releases twice.
+// ===========================================================================
+
+async function seedSizedUpload(t: T, userId: Id<"users">, sizeBytes: number, transactionId?: Id<"transactions">) {
+  return await t.run(async (ctx) => {
+    const storageId = await ctx.storage.store(new Blob(["x".repeat(16)]));
+    return await ctx.db.insert("evidence", {
+      userId, transactionId, kind: "upload", docType: "receipt", sourceChannel: "upload", provenance: "user_uploaded", storageId,
+      contentHash: String(++evidenceCounter).padStart(64, "s"), sizeBytes, receivedAt: Date.now(),
+      extractionStatus: "store_only", extractionAttempts: 0, retention: "active",
+    });
+  });
+}
+
+describe("M14c (D173) — retention releases cleared uploads from the lifetime stored-bytes counter", () => {
+  it("clearing an unattached upload releases its sizeBytes; a kept upload and text-only evidence release nothing; a retried page releases nothing twice", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { transactionId } = await seedRetailTransaction(t, userId);
+    const cleared = await seedSizedUpload(t, userId, 1_000);
+    await seedSizedUpload(t, userId, 400, transactionId); // attached to an open transaction: kept
+    await seedEvidence(t, userId, { kind: "email" }); // text only, no blob: cleared, releases nothing
+    await t.run((ctx) => chargeStoredBytes(ctx, userId, 1_400));
+
+    vi.advanceTimersByTime(PAST_EVIDENCE_WINDOW_MS);
+    const first = await t.mutation(internal.retention.sweepRecovery, {}); // the evidence page
+    expect(first).toMatchObject({ table: "evidence", patched: 2 });
+    expect(await t.run((ctx) => storedBytes(ctx, userId))).toBe(400);
+    expect((await t.run((ctx) => ctx.db.get(cleared)))?.storageId).toBeUndefined();
+
+    // Retry the same page: put the cursor back where it was before that call, as a re-run after a lost ack would.
+    await t.run(async (ctx) => {
+      const row = await ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", RECOVERY_RETENTION_OPS_KEY)).unique();
+      if (row) await ctx.db.delete(row._id);
+    });
+    const retried = await t.mutation(internal.retention.sweepRecovery, {});
+    expect(retried).toMatchObject({ table: "evidence", patched: 0 });
+    await runRecoveryCycle(t);
+    expect(await t.run((ctx) => storedBytes(ctx, userId))).toBe(400);
+  });
+
+  it("never goes negative: releasing more than was counted clamps at 0", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await seedSizedUpload(t, userId, 1_000);
+    await t.run((ctx) => chargeStoredBytes(ctx, userId, 300));
+    vi.advanceTimersByTime(PAST_EVIDENCE_WINDOW_MS);
+    await runRecoveryCycle(t);
+    expect(await t.run((ctx) => storedBytes(ctx, userId))).toBe(0);
+  });
+
+  it("the orphan sweep releases nothing: an orphan was never bound, so never charged", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await t.run((ctx) => chargeStoredBytes(ctx, userId, 5_000));
+    await t.run((ctx) => ctx.storage.store(new Blob(["abandoned"])));
+    vi.advanceTimersByTime(ORPHAN_BLOB_MIN_AGE_HOURS * 3_600_000 + 60_000);
+    await runOrphanCycle(t);
+    expect(await t.run((ctx) => storedBytes(ctx, userId))).toBe(5_000);
   });
 });
