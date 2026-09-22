@@ -151,3 +151,98 @@ After (1) and (2), send me the new file hash. I will re-check only the diff and 
 - **N4.** `r01AutoOpen` labels a returned item's `not_eligible` as "Drop below threshold". This is unreachable from `recordCheckV1`, where the legacy `watchWindow` returns "No open price window" first, but it would be wrong if reused.
 - **N5.** `cashClass: "cash"` is legacy parity: price-adjustment claims count as cash recoveries today. The v1 spec states no remedy form; merchants may pay by refund or by credit (Apple AP-1 "refund or credit"). Record it as a known limitation; R01 v2's `remedy_form` resolves it.
 - **N6.** The pack declares `lifecycle: "reviewed"`, which is informative only. Its manifest entry must not move to `reviewed` until this review approves.
+
+---
+
+# M18b — re-check of the M12b fix (2026-09-23)
+
+| Field | Value |
+|---|---|
+| Scope | **Only** the diff of `9fddc6c` ("fix(M12b)…"), which touches `convex/lib/rules/r01_price_adjustment_v1.ts` and its test file only, plus the tests. `origin/main` = `9fddc6c` when I checked. Every other reviewed path (engine, deadlines, facts, `money.ts`, loader, `priceWatch.ts`, `opportunities.ts`, `docs/rules/**`) is byte-identical to the M18 revision. `R01.json`, `manifest.json` and the loader are unchanged since `935ed03`. |
+| Pack file | `convex/lib/rules/r01_price_adjustment_v1.ts`, SHA-256 **`c0ea84d560a6665691d19beecdfed1d31307ac7c52ac86435d66daddfe0bce50`** (previously `2f9b609d…173f`) |
+
+## Verdict: **approve_for_activation**
+
+Both required items are resolved. Every non-blocking note was taken up correctly. All 36 runnable fixtures still pass unchanged.
+
+Activation still follows contract §2.7:
+1. The researcher records the manifest entry (`lifecycle: "reviewed"`, `packFile`, `packFileSha256` = the value above).
+2. The lead appends the `ACTIVATIONS` entry with a DECISIONS id and re-runs the full suite at the activation commit (C3; see N1 below).
+
+## Required item 1 — only a vetted price check is an accepted observation
+
+**Code.**
+- `vetted` requires all three of:
+  - `status === "observed"`;
+  - `source.kind ∈ {legacy_price_check, price_check}`;
+  - the check's acceptance metadata (`meta !== null`).
+- A vetted value then runs the full D16 bars.
+- Anything else yields the rejection note "That price was not read from a vetted price check of this item" and counts as `missing`. It never counts as `candidate_unconfirmed`.
+- The observed price no longer enters candidate testing. A candidates-only conflict on it is "not accepted". A confirmed-vs-observed conflict (5a) still gives `manual_review`, so R01-16 still passes.
+- The open-case path builds its opening observation as `legacy_price_check` with metadata, so it stays vetted and the C2/KM3 invariant still holds.
+- `r01ObservationRejection` now rejects an undefined `variantMatch`. That matches legacy `priceWatch.rejectionReason` exactly (`args.variantMatch !== "exact"`). The undefined-confidence rule was already identical.
+
+**My throwaway repros, re-run in an isolated worktree at `origin/main` and not committed.** Setup: USD 499.99 purchase, confirmed policy, clock inside the window.
+
+| Observed-price cell | Outcome | Estimate | Missing | Auto-open |
+|---|---|---|---|---|
+| `extracted_candidate` EUR 300.00 (evidence) | `needs_facts` | none | `retail.observed_price` (missing) | no |
+| `extracted_candidate` USD 9.99 (evidence) | `needs_facts` | none | same | no |
+| `observed`, evidence-sourced, **no metadata** | `needs_facts` | none | same | no |
+| `observed`, evidence-sourced, with metadata | `needs_facts` | none | same | no |
+| `observed`, `legacy_price_check`, no metadata | `needs_facts` | none | same | no |
+| `observed`, `legacy_price_check` + metadata, EUR 300.00 | `needs_facts` (currency bar) | none | same | no |
+| `observed`, `legacy_price_check` + metadata, USD 449.99 | `likely_eligible` | USD 50.00 | — | yes |
+
+The new tests cover the same ground: both repros, evidence without metadata, a price check without metadata, a user-confirmed price, a candidates-only conflict, an undefined variant, and the vetted positive case.
+
+## Required item 2 — parameter citations
+
+- **Each field** of `R01Params` now carries a JSDoc citing its basis before the legacy line it reproduces:
+  - R01.json `conventions.threshold`, `after_settled_claim`, `observation` and `temporal_assumptions`;
+  - contract §2.7 (KM1; "Reconciliation for R01 v1");
+  - README rule 3;
+  - D16.
+- **The window** is documented on the interface: spec §5 last bullet, `conventions.window`, O15/HC-11, C1.
+- **The currency gate:** D160 / DA-A-13.
+- **The limitation note** now cites M09 R01.6-2 / R01 v2.
+
+All cited keys exist in `R01.json` `conventions`.
+
+## Non-blocking notes
+
+| Note | Change | Assessment |
+|---|---|---|
+| N2 paid + denied | The ask is `min(denial difference, paid remainder)`, reached only when the paid remainder already clears its threshold. Otherwise the result stays `not_eligible`. | **Correct.** Both rules apply at once: never re-ask money already paid (the remainder rule) and after a denial only the new difference (DA-A-22). The smaller figure is the largest ask that satisfies both, so it is the required reading, not just a cautious one. The tests give 500 and 1,000 as I compute them by hand. |
+| N3 KWD | three-decimal test added next to JPY → `unsupported`, no amount, no auto-open | done |
+| N4 returned item | `r01AutoOpen` → "No open price window" | done |
+| N5 credit vs cash | limitation added (Apple AP-1 "refund or credit"; R01 v2 `remedy_form`) | done |
+| N6 lifecycle | code declares `researched`; informative only | done |
+
+## Harness change — confirmed
+
+The one change in the fixture-driven part of the test file: a fixture fact `retail.observed_price` in state `observed` becomes a row with source `{kind: "price_check"}`. In a 5a conflict, each candidate row takes its own state's source (observed → price check, user_confirmed → user). Candidates-only conflicts keep the `evidence` source.
+
+This follows README cross-pack rule 2 ("`observed` → `observed` (machine observation, e.g. an accepted price check)") and the R01.json convention that "an accepted price observation is `observed`". It is also how production builds the cell (`legacyRetail` → `legacy_price_check`).
+
+Nothing else changed:
+- the loader call;
+- the `describe.each` over every case;
+- the D158/D161 class mapping;
+- the per-key assertions;
+- the auto-open and send checks.
+
+The observation metadata the vetting needs comes from the fixture's own `variantMatch` / `confidence` / `isRange`, as before.
+
+**Results at `origin/main`:**
+- `vitest run convex/lib/rules/r01_price_adjustment_v1.test.ts --reporter=verbose` → **202 passed**: 188 as before plus 14 new, 0 failed, 0 skipped. All 36 runnable ids R01-01 … R01-16 appear.
+- The wider set (the rules engine, deadlines, facts, the loader, `priceWatch` legacy and forced-v1 runs, the parity file, `freshness.v1` and `opportunities`) → **21 files, 630 passed, 2 todo** (the D179 DA-A-22 stubs).
+- `check-rule-packs` → OK.
+
+## One carry-forward for activation (non-blocking)
+
+**N7.** R01 v1 now drops an accepted price-check row that lacks `variantMatch` or `confidence`. It shows `needs_facts` where it previously used the price. For rows written by today's `recordCheck` this cannot happen: the same bars run at write time. Rows accepted before those bars existed could lack either field.
+
+The effect is conservative (no amount, no auto-open). Price checks on an open case read the claim's frozen opening observation (C2), so open cases are unaffected. Before the activation entry, I suggest the lead count `priceChecks` rows with `observedCents` set and `variantMatch` or `confidence` missing. If any exist, note the display change in the activation decision.
+
+N1 (engine modules are not pinned by `packFileSha256` until M20's `ENGINE_VERSION`) still stands. The C3 full-suite re-run at the activation commit remains mandatory.
