@@ -1,3 +1,35 @@
+# Team plan — Mission 2: US transaction-recovery platform (lead-owned)
+
+Started 2026-09-23 at `18f3b46`. All roles Opus 5.5 (D135). Task IDs `M##`; decisions continue from D134. Mission 1 (production hardening, closed at `rc-2026-09-21.2`) follows below unchanged.
+
+Statuses: pending · ready · in_progress · review · changes_requested · verified · blocked.
+
+## Roster (created in waves; every agent launched with `model: "opus"`, which resolves to Opus 5.5 per D135)
+
+| Role | Agent name | Wave | Status |
+|---|---|---|---|
+| Lead | this session | – | active |
+| Product architect | opus-product-architect | 0 | active |
+| Rules researcher | opus-rules-researcher | 0 | active |
+| Security & privacy reviewer | opus-security-privacy-reviewer | 0 | active |
+| QA engineer | opus-qa-engineer | 0 | active |
+| Devil's advocate | opus-devils-advocate | 0→ (after M01) | pending |
+| Backend / ingestion / travel / commerce / benefits / frontend engineers | opus-* | 1+ | pending |
+| Release auditor | opus-release-auditor | 5 | pending |
+
+## Tasks
+
+| ID | Wave | Owner | Blocks on | Purpose | Files (only writer) | Status |
+|---|---|---|---|---|---|---|
+| M00 | 0 | lead | – | Baseline at 18f3b46: runtime/model probe, gates | docs/team/** | verified (VERIFICATION.md 2026-09-23) |
+| M01 | 0 | opus-product-architect | – | Current-state map + smallest compatible transaction/evidence/fact/incident/rule/opportunity/case architecture; migration + IA; per-slice acceptance | docs/team/contracts/2026-09-23-M01-*.md | in_progress |
+| M02 | 0 | opus-rules-researcher | – | First-party rule research: Phase-1 rule specs R01–R05 with captured passages + fixtures; triage R06–R25 sources | docs/rules/** | in_progress |
+| M03 | 0 | opus-security-privacy-reviewer | – | P01/P02/P08/P09 reclassification on current revision; public endpoint inventory delta; threat model for upload/documents/new channels/sensitive domains | docs/reviews/2026-09-23-security-baseline.md | in_progress |
+| M04 | 0 | opus-qa-engineer | – | Fix the dated-`now` test time-bomb (tracking.test.ts ×2) and sweep for others; P03–P07/P10–P12 reclassification; test-harness inventory | convex/*.test.ts (fixture-clock fixes only), docs/reviews/2026-09-23-qa-baseline.md | in_progress |
+| M05 | 0 | opus-devils-advocate | M01 | Checkpoint A: adversarial review of the M01 contract before implementation | docs/reviews/2026-09-23-da-checkpoint-A.md | pending |
+
+---
+
 # Team plan — production hardening (lead-owned)
 
 Source: Phase 0 workflow (12 Sonnet reproducers → 24 Opus refuters → Opus planner), full output in `docs/team/phase0/`. Statuses: pending · ready · in_progress · review · changes_requested · verified · blocked.

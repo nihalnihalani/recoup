@@ -89,3 +89,9 @@ All 15 rows in the table above: **VERIFIED_LOCAL** via `convex/scenarios.test.ts
 - `npm run typecheck`, `npm run lint`, `node scripts/check-patch.mjs`: clean. `npx convex codegen`: no diff.
 - `npx convex dev --once` → adorable-lion-138 ready. `SITE_URL=https://adorable-lion-138.convex.site npm run smoke`: 7/7 (static site = 3f5f739 build until T25 re-uploads the .2 dist).
 - Opus checkpoints: 6d accepted T18 with conditions (D129) → closed by T18.6; 6e in progress.
+
+## 2026-09-23 · Mission 2 baseline · 18f3b46 (lead)
+- Toolchain: node v25.2.1 / npm 11.6.2 locally; `.nvmrc` = 22 (CI pins 22).
+- `npm test`: 66 files — **1,351 passed, 1 expected fail (F-D74-1), 2 failed** (`tracking.test.ts` ×2, dated-`now` fixture; D138).
+- `npm run typecheck`: clean. `npm run lint` (oxlint): clean. `npm run build`: clean. `node scripts/check-patch.mjs`: OK.
+- Logs: session scratchpad `baseline/*.log`.

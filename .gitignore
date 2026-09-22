@@ -30,6 +30,7 @@ bipolar/
 
 # Local agent state
 .omc/
+.firecrawl/
 
 # Playwright (T20 P10 browser suite): local run artifacts, never committed.
 /test-results/
