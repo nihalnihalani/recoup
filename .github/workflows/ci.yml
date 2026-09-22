@@ -100,6 +100,28 @@ jobs:
           CONVEX_URL: ${{ secrets.CODEGEN_CHECK_CONVEX_URL }}
           CONVEX_ADMIN_KEY: ${{ secrets.CODEGEN_CHECK_CONVEX_ADMIN_KEY }}
 
+  # M08 (D138 recurrence guard): the whole suite with the process clock moved
+  # +400 days (convex/testing/clockShift.setup.ts), through the same count
+  # gate. A test that passes only on today's date fails here the day it
+  # lands, not a year later. Measured locally at about 1x the normal suite
+  # time (48 s vs 50 s), so it runs on every push, in parallel with checks.
+  clockshift:
+    name: clockshift (+400 days)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: npm ci
+        run: npm ci
+
+      - name: test:clockshift
+        run: npm run test:clockshift
+
   # P10 browser acceptance suite (T20). Runs only when the E2E_CONVEX_URL and
   # E2E_DEPLOY_KEY repo secrets exist. They must point at a DEDICATED E2E
   # deployment: never the shared dev deployment adorable-lion-138 and never

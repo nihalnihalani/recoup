@@ -20,6 +20,9 @@
 //      --passWithNoTests was hiding).
 //
 // Usage: node scripts/check-test-count.mjs [minCount]
+//
+// `npm run test:clockshift` runs this same gate with RECOUP_CLOCK_SHIFT_DAYS
+// set (vitest.config.mts then loads convex/testing/clockShift.setup.ts).
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -104,6 +107,8 @@ if (!ok) {
   process.exit(1);
 }
 
+const shift = process.env.RECOUP_CLOCK_SHIFT_DAYS;
 console.log(
-  `[test:ci] OK - ${total} tests passed across ${testFiles.length} file(s) (minimum ${minCount}).`,
+  `[test:ci] OK - ${total} tests passed across ${testFiles.length} file(s) (minimum ${minCount})` +
+    (shift ? `, clock shifted +${shift} days.` : "."),
 );

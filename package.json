@@ -14,6 +14,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ci": "node scripts/check-test-count.mjs",
+    "test:clockshift": "RECOUP_CLOCK_SHIFT_DAYS=400 node scripts/check-test-count.mjs",
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p convex/tsconfig.json --noEmit",
     "typecheck:e2e": "tsc -p e2e/tsconfig.json --noEmit",
     "postinstall": "patch-package --error-on-fail",
