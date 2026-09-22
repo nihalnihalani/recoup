@@ -36,9 +36,7 @@ const SOURCES = import.meta.glob<string>(["./**/*.ts", "!./**/*.test.ts", "!./_g
  * DA-A-35: purchase insert sites that are not yet migrated, each named with the task that owns the file. The owner
  * deletes its entry in the same commit that adds the call; the test below fails while an entry is stale.
  */
-const PENDING_ENSURE: Record<string, string> = {
-  "./testing.ts": "M16 — e2e seeders (contract §11.1 M16)",
-};
+const PENDING_ENSURE: Record<string, string> = {};
 
 /** `const X = await ctx.db.insert("purchases", …)` → the ids that must reach `ensurePurchaseTransaction`. */
 function purchaseInsertSites(src: string) {

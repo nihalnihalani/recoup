@@ -195,6 +195,27 @@ function runConvex<T = unknown>(fn: string, args: Record<string, unknown> = {}):
   }
 }
 
+/**
+ * The seeded deployment's two public URLs, derived from its name (`<name>.convex.cloud` for the client API,
+ * `<name>.convex.site` for HTTP actions such as `/evidence/upload`). The same safety checks as seeding apply.
+ */
+export function deploymentUrls(): { cloudUrl: string; siteUrl: string } {
+  const target = resolveTarget();
+  assertSafeTarget(target);
+  return { cloudUrl: `https://${target.name}.convex.cloud`, siteUrl: `https://${target.name}.convex.site` };
+}
+
+/** The signed-in page's Convex Auth access token (the JWT Convex Auth keeps in localStorage), or null. */
+export async function authTokenOf(page: Page): Promise<string | null> {
+  return await page.evaluate(() => {
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (key !== null && key.startsWith("__convexAuthJWT")) return window.localStorage.getItem(key);
+    }
+    return null;
+  });
+}
+
 // ---------------------------------------------------------------------------
 // testing.ts wrappers
 // ---------------------------------------------------------------------------
