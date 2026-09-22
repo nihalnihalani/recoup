@@ -585,3 +585,251 @@ The research is sound and every sample merchant passage matches its live page. I
 - X3 "not yet" outcomes lack a machine-readable re-evaluation date.
 
 R01 has no fixtures to review.
+
+---
+
+# M09b re-review of the revised R01–R05 (2026-09-23)
+
+| Field | Value |
+|---|---|
+| Task | M09b — re-check M2D against the primary text; D152 sign-off; final verdicts |
+| Reviewer | `opus-rules-reviewer` (Opus 5.5, `claude-opus-5-5`), same independent instance as M09. I did not consult the researcher and did not rely on its resolution table. |
+| Base revision | `783a803`. Rules files as of `2ee5dac`: M2D commits `72fe1a2`, `29ea774`, `880ec8e`, `3ef4027`, `06be10a`, `ec9e603`, `2743862`, `2ee5dac`. No `docs/rules/**` change after `2ee5dac`. |
+| Rulings read | D147, D151, D152; contract rev 5.3 §2.7 and §4 (`deriveOutcome` rules 4b and 5a–5c, `computeDeadline`) |
+| Method | Same as M09:<br>• recomputed all 23 manifest hashes;<br>• re-fetched primary sources where a new capture or hash claim could be checked;<br>• decided every new or changed fixture result **before** reading its `expected` block: all 154 results in the six files (R01 v1 35, R01 v2 30, R02 24, R03 18, R04 24, R05 23). |
+
+> Engineering review is not legal certification (M09 header applies unchanged).
+
+## B.0 Final verdicts
+
+| Pack | Verdict | Blocking items |
+|---|---|---|
+| **R01 v1** (legacy snapshot tier, `fixtures/R01.json`) | **approve_for_activation** | none |
+| **R01 v2** (reviewed merchant tier, `fixtures/R01v2.json`) | **approve_with_changes** | 3 fixture staleness defects; 2 spec sentences (B.8) |
+| **R02** | **approve_with_changes** | 2 fixture outcome disagreements; decisive-fact list does not match the fixtures (B.8) |
+| **R03** | **approve_with_changes** | §11 / §16 step 6 conflict with D152 5c; R03-07; deadline representation in R03-01b/07b (B.8) |
+| **R04** | **approve_with_changes** | 1 spec edit: path a temporal gate (B.8). Every fixture agrees. |
+| **R05** | **approve_with_changes** | R05-04 notice adequacy; decisive-fact list vs fixtures; deadline representation in R05-01b/10b (B.8) |
+
+- Every M09 source claim marked `unsupported` or `contradicted` is now resolved.
+- No new claim is unsupported by the text.
+- The remaining work is alignment between fixture, spec, contract and D152. No pack is rejected.
+
+## B.1 Integrity and new captures
+
+**Manifest.** All 23 manifest hashes match: 18 captures and 5 fixture files, recomputed with `shasum`.
+
+**New captures — do they support what they are cited for?**
+
+| Capture | Reviewer check | Supports its citation? |
+|---|---|---|
+| `federal-register-notices.txt` (12 FR passages) | Re-fetched the full text of 2011-31715, 2014-22092, 2025-08286 and 2024-23588: **SHA-256 identical** to the file's values. DATES passages found verbatim ("This interim final rule is effective December 30, 2011."; "…will become effective on December 8, 2014."; the BNPL interpretive rule listed; "$3,800 to $4,700"). The other 8 DATES texts match the FR API values I read in M09 (§1.2). | yes: R02 header dates, R02 L1 pause history and gap, R02 L12, R03 header and L5, R04 header and §10, R05 header |
+| `ecfr-12cfr1026.7-9-excerpt.txt` | Re-fetched eCFR point-in-time 2026-09-18: raw SHA-256 **`cec7f74c…7bce8d` reproduced**. (a)(9) and (b)(9) text verbatim. | yes (R03 P-1026.7(b)(9)) |
+| `ecfr-12cfr1026.12b-excerpt.txt` | Raw `c4b8895e…c67f38` reproduced. "…shall not exceed the lesser of $50 …" present. | yes (R03 §4 note) |
+| `ecfr-12cfr1005.6.txt`, `ecfr-12cfr1005.11c-excerpt.txt` | Raw `0669a14f…10d0` reproduced. The two-business-day and 10-business-day texts are present. | yes (R03-04 explanation; TRIAGE R13) |
+| Excerpts DOT-BAG-9, DOT-BAG-10 | transportation.gov still 403s curl and WebFetch, so I **could not re-verify** them. Added in M2D "from the same browser session". | Labelled guidance-only; used only as guidance. **Acceptable at lower assurance.** |
+| Excerpts FTC-MITOR-G7, G8 | curl of the FTC business guide: **both passages verbatim** on the live page | yes (R05 §7 partial shipment → amount `manual_review`; §10 order-status page) |
+
+## B.2 Resolution of every M09 item (checked in the files)
+
+| M09 item | Status | Evidence / remainder |
+|---|---|---|
+| X1 confirmed-fact threshold | **partially** | README cross-pack rule 1, `unconfirmed_decisive_facts`, and cap variants R02-01d, R03-01b, R04-01b, R05-01b. **Remainder:** the decisive-fact lists in R02 §16.8 and R05 §16.7 name facts that several `eligible` fixtures omit (B.4). |
+| X2 conflict candidates encoded | **resolved** (README wording, see B.7) | Candidates are encoded in R01-15, R01v2-15, R02-07, R03-07, R04-09, R05-10. Every file has a same-side variant. README rule 3 still says "the outcome stands" (uncapped), while D152 says capped. |
+| X3 not-yet-due | **resolved** | `not_yet_due` + `reevaluate_at`/`reevaluate_when` in R04-03b and R05-04b/04c/05a/05b/07; contract rev 5.2 adds it. README rule 4 and the outcome-mapping row still say "no `not_yet_due` value yet", which is stale. |
+| X4 publication vs effective dates | **resolved** | R03 and R05 headers corrected; manifest `dates`; FR captures verified (B.1) |
+| X5 missing-source variants | **resolved** | R02-11b, R03-10b, R04-10b, R05-11b, R01v2-09b, R01-04 |
+| X6 calendar-day zone | **resolved** | R02 A1 (fixed), R03 A4, R04 A3, R05 A5 (R05-05b now carries `ship_to_timezone`), R01 `calendar_zone` |
+| R01.6-1 fixtures | **resolved** | `R01.json` (35 results), `R01v2.json` (30). Three construction defects in v2 (B.4). |
+| R01.6-2 `window.constrains` | **resolved** | Best Buy `price_change`, Target `request`, Costco `price_change` (+`request` for promo items, CO-3), Apple `both`; manifest `windows` agrees |
+| R01.6-3 `unsupported` vs `source_unverified` | **resolved** | §6: no pack → `unsupported`; pack exists but channel/version not captured or stale → `source_unverified`. §7.3 and §7.4 agree. |
+| R01.6-4 ask anyway; max effective date | **resolved** | §1.4, §1.5; R01v2-02 |
+| R01.6-5 normalized content hash | **resolved, one procedure gap** | See B.3. Reproducible only after a whitespace trim that §2.1 does not state. |
+| R01.6-6 Target Plus, Costco reseller | **resolved** | TG-2/TG-3 and CO-1 facts; R01v2-05b, 06b, 06c |
+| R02.6-1 operational delay | **resolved** | §4, §16.3, enum `operational_delay`; R02-05b/05c |
+| R02.6-2 partial itinerary (A4) | **resolved** | §8; R02-01c amount `manual_review` |
+| R02.6-3 anchors | **resolved** | (iii)(B) changed-flight date added, A7, §16.7 departed case |
+| R02.6-4 "on or about" rule | **resolved** | A1 now "different calendar dates in the two zones" |
+| R02.6-5 temporal gate; pause history | **resolved** | §16.1b; L1 history including the 2026-07-01..06 gap; R02-01e |
+| R02.6-6 (a)(4) qualification; DOT-REF-8 | **resolved** | §12.4; L10 |
+| R02.6-7 fixtures | **partially** | X1, X2, R02-11 clock and R02-05 null are fixed. **New:** R02-07b and R02-09b disagree (B.4). |
+| R03.6-1 dates | **resolved** | 2011-12-30; 2019-04-01 |
+| R03.6-2 credit split; act-by per type | **resolved** | `credit_issued_not_reflected` vs `promised_credit_not_issued`; per-type lower bound; `credit_issue_date` |
+| R03.6-3 email wording | **resolved** | §10 now states the safe harbor and the receipt-at-address basis |
+| R03.6-4 captures, citation, P2P | **resolved** | 1026.7 captured; "1666(a), subparagraph (B)(ii)"; L9 |
+| R03.6-5 fixtures | **partially** | X1, X2, R03-04 text and X6 are fixed. **New:** §11 / §16.6 vs D152 5c (B.7); deadline representation (B.4). |
+| R04.6-1 lead ruling (D147(1)) | **resolved** | Path a may be `eligible`; D143(4) cap on b/c only |
+| R04.6-2 path b cap; authority class | **resolved** | §15.3 v1 cap; header |
+| R04.6-3 large-aircraft fact | **resolved** | `large_aircraft_segment_on_ticket`; R04-04b, R04-06 assumption |
+| R04.6-4 (f)(2) "documented by the carrier"; pre-existing damage | **resolved** | `exemption_documented_by_carrier`; R04-07b; DOT-BAG-9 (guidance-only, not re-verifiable) |
+| R04.6-5 "before leaving the airport" | **resolved** | DOT-BAG-10 (guidance-only, not re-verifiable) |
+| R04.6-6 bag-fee timing wording | **resolved** | §10, L6, fixture R04-01 |
+| R04.6-7 $3,800 capture; enforcement note; refresh window | **resolved** | FR-2024-23588 SUMMARY; §10 enforcement-window display; 30 days everywhere; R04-06b, R04-10 |
+| R04.6-8 conflict; fixtures | **resolved** | L9; X1/X2/X3; E4 currency. **New, small:** path a has no compliance-date gate (B.8). |
+| R05.6-1 dates | **resolved** | effective 2014-12-08 |
+| R05.6-2 notice adequacy | **partially** | Spec §8 and R05-03/03b are fixed. **R05-04's notice has no adequacy fact, and its text does not offer cancellation** (B.4). |
+| R05.6-3 cancel before R | **resolved** | §8.2 |
+| R05.6-4 sent; counting start; statement alternative | **resolved** | §9, A6 |
+| R05.6-5 partial shipment; order-status page | **resolved** | G7 / G8 (verified live); amount `manual_review`; R05-01c |
+| R05.6-6 calendar zone | **resolved** | A5; R05-05b |
+| R05.6-7 fixtures; enum | **partially** | X1/X2/X3 fixed, `paid_at_order` renamed. **New:** decisive-list completeness (B.4). |
+
+**Appendix A items (M09 unsupported/contradicted).** All 14 are resolved:
+- **Captured and reproduced by me:** 1026.7(b)(9), 1026.12(b), the BNPL withdrawal, the Reg E clocks, and the $3,800 figure.
+- **Relabelled with correct dates:** R03 and R05 effective dates.
+- **Captured as guidance and verified live:** R05 partial shipment and order-status page.
+- **Captured as guidance, not re-verifiable (403):** R04 pre-existing damage and "before leaving the airport".
+- **Removed:** the R05 civil-penalty figure.
+- **Fixed:** the R01 §6 contradiction and R02 §8.
+
+## B.3 R01 redesign — reviewer checks
+
+- **Content hashes reproduce, with one unstated step.** I re-fetched Apple, Costco and Target on 2026-09-23 and applied §2.1 exactly:
+  - drop script/style/noscript/svg;
+  - replace other tags with a space;
+  - decode entities, apply NFC, collapse whitespace;
+  - cut from `section_start` (inclusive) to `section_end` (exclusive).
+
+  The result does **not** match `02f32d90…`, `9cc32d9c…` or `2a44c2f6…`. With a final **trim of leading and trailing whitespace**, all three match exactly. §2.1 must add the trim, or two implementations will disagree forever.
+- **Passage hashes.** All 11 (BB-1..3, TG-1..3, CO-1..3, AP-1..2) reproduce from the quoted text. The nine non-Best-Buy passages are present verbatim on today's pages.
+- **Best Buy "lower assurance, passage-only"** is honest: curl is still bot-walled, and my M09 WebFetch was model-mediated. §9 L5 records it.
+- **Window model.** `constrains` per merchant matches the passages as I read them in M09.
+- **Missing day-counting rule in the spec.** `R01v2.json` conventions state "Best Buy: receipt day = day 1" (from BB-3, "begins the day you receive"), which gives R01v2-01's 2026-09-24. Spec §5 says "end = anchor + length", which would give 2026-09-25. §5 / §7.1 must carry the day-1 rule.
+- **R01 v1 parity constants.** I checked them against today's legacy code:
+  - `priceDropCents` threshold `max(100, round(2%))`;
+  - `windowEndsAt` 24-hour multiples, with `endsAt < now` = closed (so `now == endsAt` is open, as R01-05b expects);
+  - remainder rule `max(100, round(unit×qty×2%))`;
+  - `MIN_CONFIDENCE 0.7`;
+  - `MIN_PLAUSIBLE_FRACTION 0.1`.
+
+  All match the fixture conventions.
+
+## B.4 Blind fixture decisions — disagreements only
+
+I decided 154 results blind. The table lists every result where my decision differs from the fixture. The other 145 agree on outcome, missing facts, amount and dates.
+
+| Fixture | Mine (from the text) | Fixture | Why | Fix |
+|---|---|---|---|---|
+| **R02-07b** | `needs_facts` [ticket_refundability] | `likely_eligible` | R02-07's facts have no `ticket_refundability`, which is an applicability condition (§2.2; 260.6(a)(1) "holds a nonrefundable ticket"). By contract `deriveOutcome`, rule 6 (applies unknown) fires after 5c. The same-side variant therefore tests two things at once. | Add `ticket_refundability`, `consumer_response_at` and the amount inputs as `user_confirmed` to R02-07 so the variant isolates the conflict. |
+| **R02-09b** | `likely_eligible` | `eligible` (21,210) | `already_refunded` is absent. §16.8 lists it as a decisive amount input, and D147(2) says an unknown amount input keeps the outcome at `likely_eligible`. | Add `already_refunded {0 USD, user_confirmed}` to R02-09. |
+| **R05-04**, **R05-04b**, **R05-04c** | `needs_facts` [delay_notice_offers_cancel_and_refund] | eligible 2026-10-21 / not_yet_due / not_yet_due | The notice has no adequacy fact, and its text ("We are unable to provide a new ship date.") offers no cancellation. Under revised §8, unknown → `needs_facts`. If the text is read as complete, the notice is inadequate → case 1 → vesting 2026-09-11 → refund sent by **2026-09-22**, not 10-21. | Add `delay_notice_offers_cancel_and_refund: true` (user_confirmed) and a notice text that offers cancel + prompt refund to R05-04. The expected blocks then stand. |
+| **R01v2-03b** | `source_unverified` | `deadline_passed` | Inherits `last_verified_on 2026-09-20`, 7-day window. The clock of 2026-09-30 is 10 days later, so it is stale. `deriveOutcome` rule 2 precedes rule 4. | Give the variant `source.last_verified_on` ≥ 2026-09-23. |
+| **R01v2-04c** | `source_unverified` | `likely_eligible` | Case source 2026-09-19; clock 2026-09-29 is 10 days later → stale | Variant source ≥ 2026-09-22 |
+| **R01v2-04d** | `source_unverified` | `deadline_passed` | Clock 2026-09-30 is 11 days later → stale | Variant source ≥ 2026-09-23 |
+
+**Decisive-fact lists vs fixtures (spec ↔ fixture; outcome unchanged if the list is narrowed).** Six `eligible` fixture results omit a fact that the pack's own decisive list names:
+- **R02 §16.8:**
+  - R02-02b, 02c, 05b, 06 and 09b lack `operating_carrier`/`marketing_carrier`;
+  - R02-02b, 02c and 05b lack `offer_type`;
+  - all of them lack `ancillary_fees_paid` (missing ≠ zero).
+- **R05 §16.7:** R05-04, 05c and 07b lack the countries; R05-04 and 05c lack `payment_terms`.
+
+Either complete the fixtures, or make the lists conditional. For example: carrier identity is decisive only when coverage is not derivable from a US-point scheduled itinerary; `offer_type` only on offer-based deemed-request paths; `payment_terms` only where the 50-day rule could apply. An evaluator cannot pass both the spec as written and these fixtures.
+
+**Deadline representation vs contract `computeDeadline` (fixture ↔ contract).** Contract §4 says:
+- a `candidate` anchor → `unknown_anchor`, with no `dueAt`;
+- a `conflicting` anchor → `disputed_anchor`.
+
+Four fixtures instead assert a firm `deadline.date` from an unconfirmed or disputed anchor:
+- R03-01b (2026-11-09);
+- R03-07b (2026-10-31);
+- R05-01b (2026-09-16);
+- R05-10b (2026-09-16).
+
+Mission §9: "Never infer the legal anchor from whichever date is easiest to extract." Fix the fixtures:
+- **User-obligor (R03):** `date: null`, status `unknown_anchor` / `disputed_anchor`, `advisory_act_by` = earliest candidate + 60.
+- **Counterparty-obligor (R05 seller refund):** `date: null`. No "overdue" escalation is computed from an unconfirmed anchor.
+
+R01-15b's `claim.windowEndsAt` = earliest candidate is a legacy claim field, not a `DeadlineResult`. It is conservative and acceptable.
+
+**Non-blocking observations.**
+- R01v2-15 models "carrier delivered to the leasing office on 09-01" vs "user picked it up on 09-03" as a fact conflict. Both can be true; the real question is what Apple's "the date you receive your product" means. The outcome (`needs_facts`) is acceptable, but a user answer cannot settle an interpretation. Consider `manual_review` ("merchant decides") for delivered-to-agent cases.
+- R02 `conventions.fact_encoding` still lists 5 states while `fact_states` lists 7.
+- R05-04b should carry `next_action` "you can cancel before shipment for a refund". Its `reevaluate_when` is the user's own action, not something to wait for.
+
+## B.5 Sign-off (item 4): same-answer conflict capped at `likely_eligible` (D152 / contract rule 5c)
+
+**I sign off, with four conditions.**
+
+**Why the cap is right under mission §9.**
+- A conflict whose candidates all give the same outcome leaves the rule's result certain but a decisive fact unconfirmed. `likely_eligible` states exactly that: "rule applies; evidence or a confirmation outstanding".
+- It does **not** turn uncertainty into eligibility: `eligible` stays unreachable until the user resolves the fact (D147(2)).
+- `needs_facts` would be worse. It is not approvable, so it would block a packet whose outcome cannot change. For R03 that would delay a time-sensitive notice, which mission §10 forbids.
+
+**Conditions.**
+1. **Same answer means the same outcome *and* the same amount.** If candidates give different claim amounts (e.g., two extracted fares), the conflict is material → rule 5b `needs_facts`. The contract's `sameAnswer` currently compares only the outcome. No current fixture has differing amounts, so this is a contract edit, not a fixture edit.
+2. **Deadlines never take a candidate's date.**
+   - A conflicting anchor stays `disputed_anchor` (no `dueAt`).
+   - User-obligor paths show a labelled advisory act-by from the **earliest** candidate.
+   - Counterparty paths compute no overdue/escalation date until resolved.
+   - The four fixtures in B.4 must change accordingly.
+3. **The cap is lifted only by confirmation.** The same "which is right?" question as 5b is asked, showing both values and sources. The fact appears in `unconfirmed_decisive_facts`.
+4. **5c applies to kind `candidates` only.** A `confirmed_vs_observed` or `confirmed_vs_confirmed` conflict stays rule 5a `manual_review` even when every value gives the same outcome. A packet or letter would otherwise state a user-confirmed value that the system's own evidence contradicts (mission §6: AI must not present unsupported facts; packets must be truthful). The contract currently says "every conflict has sameAnswer = true → skip 5a/5b"; narrow that to "every conflict is of kind candidates and has sameAnswer = true".
+
+**Consequential edit.** README cross-pack rule 3 must say "the outcome stands, **capped at `likely_eligible`**" to match D152. Fixture conventions R02–R05 already say this.
+
+## B.6 Item 5: `not_yet_due` as its own result
+
+**Agree.** Mission §9's outcome list is illustrative ("such as"), and its logic of "missing ≠ false" and "unsupported ≠ not eligible" applies equally to an unripe path. Reporting a path that will ripen as `not_eligible` would mislead.
+
+The contract design (rule 4b) is right on each point:
+- it sits below `not_eligible` and `deadline_passed`;
+- an unknown ripeness fact stays `needs_facts`;
+- it is not approvable;
+- it is excluded from money tiles;
+- date re-evaluation runs through the M29 sweep, which re-reads state (mission §6 scheduling).
+
+Two conditions:
+- When `reevaluate_when` is an action the user controls ("MBR filed", "buyer cancels before shipment"), the result must carry that action as `next_action` and the UI must present it as something the user can do now, not as "wait". R04-03b has it; R05-04b does not.
+- README rule 4 and the mapping row still say the contract lacks the value. Rev 5.2 added it, so update the README.
+
+## B.7 D152 alignment — fixtures whose expected result disagrees with D152
+
+| Fixture | D152 rule that applies | Fixture expects | Should be |
+|---|---|---|---|
+| **R03-07** | 5c. Candidates (08-01 PDF; 09-01 user recollection) both leave the window open on the clock date, so the outcome is the same. | `needs_facts` | `likely_eligible_missing_evidence`, `unconfirmed_decisive_facts: [first_statement_transmitted_on]`, deadline `disputed_anchor` with advisory act-by **2026-09-30** (earliest + 60) |
+| R03 spec §11 "Conflicting anchors → outcome `needs_facts`" and §16 step 6 | 5b / 5c split | always `needs_facts` | `needs_facts` only when candidates give different outcomes; otherwise 5c + advisory (as R03-07b already does) |
+| README cross-pack rule 3 | 5c cap | "outcome stands" (uncapped) | "stands, capped at `likely_eligible`" |
+
+Checked and **consistent** with D152:
+- **Divergent candidates → `needs_facts`:** R01-15, R01v2-15, R02-07, R04-09, R05-10.
+- **Same-answer variants → capped:** R01-15b, R01v2-15b, R02-07b, R03-07b, R04-09b, R05-10b. R02-07b's outcome is still wrong for a separate reason (B.4).
+- **Rule 5a:** no fixture encodes a `user_confirmed` value against an observed or confirmed value, so none is tested. I recommend one 5a case per file in wave 2. D152's own example (user-confirmed delivery on the 3rd vs carrier tracking on the 9th) fits R05 or R03.
+
+## B.8 Required changes (exact) before each pack can be encoded as active
+
+**R01 v2**
+1. §2.1: append "trim leading and trailing whitespace" before hashing. The three content hashes reproduce only with it.
+2. §5 / §7.1: "Best Buy's period 'begins the day you receive' (BB-3): receipt day = day 1, so the last day = `received_at` + length − 1" (matches R01v2-01's 2026-09-24).
+3. Fixtures R01v2-03b, 04c, 04d: set a variant `source.last_verified_on` within 7 days of the variant clock.
+
+**R02**
+1. R02-07: add `ticket_refundability`, `consumer_response_at`, `fare_paid`, `taxes_paid` and `already_refunded` (user_confirmed), so R02-07b tests only the conflict.
+2. R02-09: add `already_refunded {0 USD, user_confirmed}`.
+3. §16.8 decisive list vs fixtures: complete R02-02, 05, 06 and 09, or make the carrier and `offer_type` entries conditional (B.4). Add `ancillary_fees_paid: []` (confirmed) where no fees exist.
+
+**R03**
+1. §11 "Conflicting anchors" row and §16 step 6: apply D152 5b/5c.
+2. R03-07 → capped result per B.7.
+3. R03-01b and R03-07b: replace `deadline.date` with `date: null` + `unknown_anchor` / `disputed_anchor` + `advisory_act_by` (2026-11-09 / 2026-10-31).
+
+**R04**
+1. §15: add step 1b as in R02. Deemed-refund conditions met (or incident) before the part 260 bag-fee compliance date 2024-10-28 → `source_unverified`. Add one variant.
+
+**R05**
+1. R05-04: add the adequacy fact (true, user_confirmed) and an adequate notice text.
+2. §16.7 decisive list vs fixtures: add countries and `payment_terms` to R05-04, 05c and 07b, or make those entries conditional.
+3. R05-01b and R05-10b: `deadline.date: null`, no computed seller-refund date from an unconfirmed or disputed anchor.
+4. R05-04b: add `next_action`.
+
+**Cross-pack**
+1. README rule 3: add the cap wording. README rule 4 and the mapping row: remove "no `not_yet_due` value yet".
+2. Contract rule 5c (architect, rev 5.4): `sameAnswer` must compare the amount too, and 5c must apply to kind `candidates` only (B.5 conditions 1 and 4).
+3. The lead records this sign-off in DECISIONS so M12 can un-pend the 5c variants.
+
+**Recommended, not blocking.**
+- One rule-5a fixture per file.
+- R02 departure-earlier 3 h and international 6 h boundaries.
+- R04 incident in the 2025-02-20..03-19 non-enforcement window.
+- R05 cancellation received after R.
+- R01v2-15 re-modelled as `manual_review`.
