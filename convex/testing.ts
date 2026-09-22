@@ -37,6 +37,8 @@ import type { Id } from "./_generated/dataModel";
 import { normalizeEmail } from "./lib/email";
 import { openClaim } from "./claims";
 import { windowEndsAt } from "./lib/ledger";
+import { ensurePurchaseTransaction } from "./transactions";
+import { maskPans } from "./lib/pan";
 
 /** D83 item 6 / D95 / D102: the documented production host. Substring match against `CONVEX_SITE_URL`. */
 const PRODUCTION_HOST_MARKER = "cool-oyster-399";
@@ -237,6 +239,8 @@ export const seedFixtures = internalMutation({
       currency: "USD",
       status: "active",
     });
+    // DA-A-35: every purchase gets its category-neutral transaction in the same mutation, as the app's own writers do.
+    await ensurePurchaseTransaction(ctx, boughtPurchaseId);
     await ctx.db.patch(boughtWatchId, { purchaseId: boughtPurchaseId });
     const boughtItemId = await ctx.db.insert("items", {
       purchaseId: boughtPurchaseId,
@@ -301,6 +305,7 @@ export const seedFixtures = internalMutation({
       currency: "USD",
       status: "active",
     });
+    await ensurePurchaseTransaction(ctx, claimPurchaseId);
     const claimItemId = await ctx.db.insert("items", {
       purchaseId: claimPurchaseId,
       userId,
@@ -418,6 +423,133 @@ export const seedFixtures = internalMutation({
 });
 
 // ---------------------------------------------------------------------------
+// Mission 2 seeders (M16): an R01-ready purchase, a real observation, text evidence with a synthetic card number
+// ---------------------------------------------------------------------------
+
+/** A synthetic Visa test number (4111 1111 1111 1111 is every processor's published test PAN, never a real card). */
+export const SYNTHETIC_PAN = "4111 1111 1111 1111";
+
+/**
+ * An R01-ready retail purchase for the browser spec: an active purchase bought two days ago, one watched line of
+ * 2 × 12,000, the merchant's CONFIRMED 14-day price-adjustment policy, and its transaction (DA-A-35). Nothing is
+ * observed yet: `recordObservation` drives the real cron write path, so whatever the deployment's activation state
+ * is (legacy fallback or R01 v1 active) decides what the user then sees.
+ */
+export const seedR01Purchase = internalMutation({
+  args: { userId: v.id("users") },
+  returns: v.object({ purchaseId: v.id("purchases"), itemId: v.id("items"), transactionId: v.id("transactions") }),
+  handler: async (ctx, { userId }) => {
+    assertE2EEnabled();
+    if (!(await ctx.db.get(userId))) throw new ConvexError("seedR01Purchase: user not found");
+    const now = Date.now();
+    const domain = "e2e-r01.example";
+    const purchasedAt = now - 2 * DAY;
+    await ctx.db.insert("policies", {
+      userId,
+      merchantDomain: domain,
+      kind: "price_adjustment",
+      windowDays: 14,
+      channel: "email",
+      contactEmail: `care@${domain}`,
+      passage: "E2E fixture policy: if our price drops within 14 days of purchase, we refund the difference.",
+      sourceUrl: `https://${domain}/price-promise`,
+      retrievedAt: purchasedAt + 10 * 60_000,
+      confidence: 1,
+      confirmedByUser: true,
+    });
+    const purchaseId = await ctx.db.insert("purchases", {
+      userId,
+      merchant: "E2e R01 Store",
+      merchantDomain: domain,
+      orderRef: "E2E-R01-1",
+      purchasedAt,
+      currency: "USD",
+      status: "active",
+    });
+    const transactionId = await ensurePurchaseTransaction(ctx, purchaseId);
+    const itemId = await ctx.db.insert("items", {
+      purchaseId,
+      userId,
+      name: "E2E trail runner",
+      unitCents: 12_000,
+      qty: 2,
+      productUrl: `https://${domain}/p/e2e-trail-runner`,
+      returned: false,
+    });
+    return { purchaseId, itemId, transactionId };
+  },
+});
+
+/**
+ * One price observation through the REAL write path the cron uses (`priceWatch.recordCheck`), as if the scraper had
+ * read this price: same rejection bars, window check, legacy or R01 v1 evaluation, auto-open. For browser specs
+ * that need a price drop without a live scrape (the dev deployment's provider keys are placeholders, D83).
+ */
+export const recordObservation = internalAction({
+  args: {
+    itemId: v.id("items"),
+    observedCents: v.number(),
+    currency: v.optional(v.string()),
+    variantMatch: v.optional(v.union(v.literal("exact"), v.literal("unsure"), v.literal("none"))),
+  },
+  returns: v.object({ claimId: v.union(v.id("claims"), v.null()), accepted: v.boolean(), note: v.optional(v.string()) }),
+  handler: async (ctx, args): Promise<{ claimId: Id<"claims"> | null; accepted: boolean; note?: string }> => {
+    assertE2EEnabled();
+    const r = await ctx.runMutation(internal.priceWatch.recordCheck, {
+      itemId: args.itemId,
+      sourceUrl: "https://e2e-r01.example/p/e2e-trail-runner",
+      observedCents: args.observedCents,
+      currency: args.currency ?? "USD",
+      confidence: 0.95,
+      variantMatch: args.variantMatch ?? "exact",
+      note: "E2E fixture observation",
+    });
+    return { claimId: r.claimId, accepted: r.accepted, ...(r.note !== undefined ? { note: r.note } : {}) };
+  },
+});
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * A pasted-email evidence row as intake stores it: the text is masked (D142 `maskPans`) BEFORE it is hashed or
+ * stored, so a card number in the input never reaches the database. The default text carries `SYNTHETIC_PAN`, so a
+ * browser spec can assert the UI shows only the last four digits. Optionally attached to a transaction.
+ */
+export const seedTextEvidence = internalMutation({
+  args: { userId: v.id("users"), transactionId: v.optional(v.id("transactions")), text: v.optional(v.string()) },
+  returns: v.object({ evidenceId: v.id("evidence"), storedText: v.string() }),
+  handler: async (ctx, args) => {
+    assertE2EEnabled();
+    if (!(await ctx.db.get(args.userId))) throw new ConvexError("seedTextEvidence: user not found");
+    if (args.transactionId) {
+      const txn = await ctx.db.get(args.transactionId);
+      if (!txn || txn.userId !== args.userId) throw new ConvexError("seedTextEvidence: transaction not found");
+    }
+    const raw = args.text ?? `Order E2E-R01-1 confirmed. Paid with card ${SYNTHETIC_PAN}. Total $240.00.`;
+    const storedText = maskPans(raw);
+    const evidenceId = await ctx.db.insert("evidence", {
+      userId: args.userId,
+      ...(args.transactionId ? { transactionId: args.transactionId } : {}),
+      kind: "paste",
+      docType: "order_confirmation",
+      docTypeDeclaredBy: "user",
+      sourceChannel: "paste",
+      provenance: "user_pasted",
+      contentHash: await sha256Hex(storedText),
+      text: storedText,
+      receivedAt: Date.now(),
+      extractionStatus: "not_requested",
+      extractionAttempts: 0,
+      retention: "active",
+    });
+    return { evidenceId, storedText };
+  },
+});
+
+// ---------------------------------------------------------------------------
 // lastCodeFor
 // ---------------------------------------------------------------------------
 
@@ -476,6 +608,20 @@ export const resetUser = internalMutation({
       .unique();
     if (!user) return { deleted: false };
     const userId = user._id;
+
+    // Mission 2 rows (M16): evaluations, opportunities, facts, incidents, evidence (and its stored file), non-cash
+    // remedies, intake events, then the transactions they hang off. Children before parents, all bounded.
+    await deleteAll(ctx, await ctx.db.query("evaluations").withIndex("by_user", (q) => q.eq("userId", userId)).take(BOUND));
+    await deleteAll(ctx, await ctx.db.query("opportunities").withIndex("by_user_and_dedupe_key", (q) => q.eq("userId", userId)).take(BOUND));
+    await deleteAll(ctx, await ctx.db.query("facts").withIndex("by_user", (q) => q.eq("userId", userId)).take(BOUND));
+    await deleteAll(ctx, await ctx.db.query("incidents").withIndex("by_user", (q) => q.eq("userId", userId)).take(BOUND));
+    for (const row of await ctx.db.query("evidence").withIndex("by_user_and_content_hash", (q) => q.eq("userId", userId)).take(BOUND)) {
+      if (row.storageId && (await ctx.db.system.get("_storage", row.storageId)) !== null) await ctx.storage.delete(row.storageId);
+      await ctx.db.delete(row._id);
+    }
+    await deleteAll(ctx, await ctx.db.query("nonCashRemedies").withIndex("by_user", (q) => q.eq("userId", userId)).take(BOUND));
+    await deleteAll(ctx, await ctx.db.query("processedEvents").withIndex("by_user_status", (q) => q.eq("userId", userId)).take(BOUND));
+    await deleteAll(ctx, await ctx.db.query("transactions").withIndex("by_user_and_status", (q) => q.eq("userId", userId)).take(BOUND));
 
     // Claims and every table hanging off a claim.
     const claims = await ctx.db.query("claims").withIndex("by_user", (q) => q.eq("userId", userId)).take(BOUND);

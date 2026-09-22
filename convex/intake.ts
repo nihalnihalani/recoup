@@ -347,11 +347,18 @@ export const processEvent = internalAction({
 // Writing the extraction
 // ---------------------------------------------------------------------------
 
-/** Where an intake event's content came from, and the evidence row that holds it (null at the evidence cap). */
-type IntakeSource = { evidenceId: Id<"evidence"> | null; provenance: EvidenceProvenance };
+/**
+ * Where an intake event's content came from, and the evidence row that holds it (null at the evidence cap).
+ * `fromAccountAddress`: the From header names the account's own email — still only a header (DA-B-3), used for the
+ * wording of a hold, never as authentication.
+ */
+type IntakeSource = { evidenceId: Id<"evidence"> | null; provenance: EvidenceProvenance; fromAccountAddress: boolean };
 
 /** SEC-AI-6 copy: said wherever an unverified sender's email is held back, so a person forwarding from a second address knows why. */
 export const UNVERIFIED_SENDER_NOTE = "It was sent from an address that isn't your account email";
+/** DA-B-3 copy: the From header names the user's own address, but a sender address can be forged. */
+export const UNAUTHENTICATED_OWN_ADDRESS_NOTE =
+  "Recoup can't verify that it really came from you (an email's sender address can be faked)";
 
 /**
  * Writes the facts an email proposes as `extracted_candidate` rows through the single fact writer (`putFact`,
@@ -551,7 +558,8 @@ async function applyOrder(
   }
 
   const note = currency ? "" : " The email did not state a clear currency, so confirm it before anything is compared.";
-  const senderNote = source.provenance === "unverified_sender" ? ` ${UNVERIFIED_SENDER_NOTE}, so check every detail.` : "";
+  const senderNote =
+    source.provenance === "unverified_sender" && !source.fromAccountAddress ? ` ${UNVERIFIED_SENDER_NOTE}, so check every detail.` : "";
   const skippedNote =
     skipped.length > 0 ? ` Could not read ${skipped.join(", ")} — add ${skipped.length === 1 ? "it" : "them"} manually if needed.` : "";
   await finish(
@@ -649,7 +657,7 @@ async function applyRefund(
   sourceMessageId: string | undefined,
   messageIdOrPasteHash: string,
   refund: NonNullable<InboundEmailT["refund"]>,
-  trust: { verified: boolean; confirmedByUser?: boolean },
+  trust: { verified: boolean; confirmedByUser?: boolean; fromAccountAddress?: boolean },
 ) {
   const purchase = await matchPurchase(ctx, userId, refund);
   if (!purchase) {
@@ -673,7 +681,7 @@ async function applyRefund(
       ctx,
       processedEventId,
       "needs_review",
-      `A refund email about your ${purchase.merchant} order was held for review. ${UNVERIFIED_SENDER_NOTE}, so nothing was recorded. If it is genuine, confirm it here, or forward it again from your account email.`,
+      `A refund email about your ${purchase.merchant} order was held for review. ${trust.fromAccountAddress ? UNAUTHENTICATED_OWN_ADDRESS_NOTE : UNVERIFIED_SENDER_NOTE}, so nothing was recorded. If it is genuine, confirm it here.`,
     );
     return;
   }
@@ -825,8 +833,8 @@ export function senderAddress(from: string): string | null {
 }
 
 /**
- * SEC-AI-6: true only when the email's sender is the account's own address. An account with no email on file has
- * nothing to compare against and is NOT treated as verified (D174).
+ * True when the email's From header names the account's own address (D174). DA-B-3: a header string is NOT
+ * authentication — this only chooses the wording of a hold. An account with no email on file never matches.
  */
 async function isAccountSender(ctx: MutationCtx, userId: Id<"users">, from: string): Promise<boolean> {
   const address = senderAddress(from);
@@ -862,21 +870,25 @@ export const applyExtraction = internalMutation({
       typeof payload.messageId === "string" ? payload.messageId : undefined;
     const read = (key: string) => (typeof payload[key] === "string" ? (payload[key] as string) : "");
 
-    // SEC-AI-6: who stands behind this content. A paste is the user's own act; an email is the user's only when it
-    // comes from the account's own address (a forward from their mailbox). Anything else is an unverified sender.
-    const provenance: EvidenceProvenance =
-      row.kind === "paste" ? "user_pasted" : (await isAccountSender(ctx, row.userId, read("from"))) ? "user_forwarded" : "unverified_sender";
+    // SEC-AI-6 / DA-B-3 (D194): who stands behind this content. A paste is the user's own act. An email is never the
+    // user's on the strength of its From header — that string is chosen by whoever sent it. It could be only with a
+    // sender-authentication pass aligned with the From domain, and AgentMail 0.1.0 reports none, so every email is
+    // an unverified sender: its facts are candidates only and a refund waits for the user's own confirmation.
+    const isEmail = row.kind !== "paste";
+    const provenance: EvidenceProvenance = isEmail ? "unverified_sender" : "user_pasted";
+    const fromAccountAddress = isEmail && (await isAccountSender(ctx, row.userId, read("from")));
     // §7: the (masked) email becomes evidence before anything is proposed from it.
     const evidenceId = await recordTextEvidence(ctx, {
       userId: row.userId,
-      kind: row.kind === "paste" ? "paste" : "email",
+      kind: isEmail ? "email" : "paste",
       provenance,
+      ...(isEmail ? { senderAuth: "unavailable" as const } : {}),
       text: read("text"),
-      headers: row.kind === "paste" ? undefined : { from: read("from"), subject: read("subject"), messageId: sourceMessageId },
+      headers: isEmail ? { from: read("from"), subject: read("subject"), messageId: sourceMessageId } : undefined,
       processedEventId: args.processedEventId,
       docType: parsed.kind === "order" ? "order_confirmation" : parsed.kind === "refund" ? "refund_notice" : "unknown",
     });
-    const source: IntakeSource = { evidenceId, provenance };
+    const source: IntakeSource = { evidenceId, provenance, fromAccountAddress };
     // A paste has no message id; its content hash is just as stable, so a re-run of the same paste is
     // recognised as "already applied" too (B5).
     const orderSourceId = sourceMessageId ?? (row.kind === "paste" ? row.externalId : undefined);
@@ -899,7 +911,7 @@ export const applyExtraction = internalMutation({
         sourceMessageId,
         messageIdOrPasteHash,
         parsed.refund,
-        { verified: provenance !== "unverified_sender" },
+        { verified: provenance !== "unverified_sender", fromAccountAddress },
       );
       return null;
     }
@@ -1327,7 +1339,44 @@ const attentionRow = v.object({
   claimId: v.optional(v.id("claims")),
   route: v.optional(processedRoute),
   summary: v.optional(v.string()),
+  /** D194: a refund email held for the user's one-tap confirmation (`confirmRefundEmail`) — show the tap. */
+  refundAwaitingConfirmation: v.boolean(),
+  /**
+   * D194: what the held refund says, for display as a merchant's PROMISE, never as a confirmed credit. Built with the
+   * same validation `applyRefund` applies (positive minor units, a clear ISO currency); a credit that fails it is left
+   * out. Absent when nothing is held.
+   */
+  pendingRefund: v.optional(
+    v.object({
+      merchant: v.union(v.string(), v.null()),
+      credits: v.array(v.object({ itemName: v.union(v.string(), v.null()), amountMinor: v.number(), currency: v.string() })),
+    }),
+  ),
 });
+
+/** Credits shown per held refund; an email listing more is still confirmed in full by the tap. */
+const MAX_PENDING_CREDITS_SHOWN = 20;
+
+/** The display projection of a held refund (D194), or undefined when the row holds none or it no longer parses. */
+function pendingRefundView(payload: unknown) {
+  const held = (payload as { pendingRefund?: unknown } | undefined)?.pendingRefund;
+  if (held === undefined) return undefined;
+  const parsed = RefundCandidate.safeParse(held);
+  if (!parsed.success) return undefined;
+  const credits: { itemName: string | null; amountMinor: number; currency: string }[] = [];
+  for (const credit of parsed.data.credits.slice(0, MAX_PENDING_CREDITS_SHOWN)) {
+    const currency = safeCurrency(credit.currency);
+    if (currency === null) continue;
+    let amountMinor: number;
+    try {
+      amountMinor = assertPositiveCents(toCents(credit.amount), "credit amount");
+    } catch {
+      continue;
+    }
+    credits.push({ itemName: credit.itemName === null ? null : cleanLine(credit.itemName).slice(0, 200), amountMinor, currency });
+  }
+  return { merchant: parsed.data.merchant === null ? null : cleanLine(parsed.data.merchant).slice(0, 120), credits };
+}
 
 /**
  * The board's "needs attention" list (D14): every inbound message or paste of
@@ -1351,8 +1400,12 @@ export const needsAttention = query({
     return pages
       .flat()
       .sort((a, b) => b._creationTime - a._creationTime)
-      .map(({ payload: _payload, processingStartedAt: _startedAt, lastError, errorSummary, ...row }) => ({
+      .map(({ payload, processingStartedAt: _startedAt, lastError, errorSummary, ...row }) => {
+        const pendingRefund = row.status === "needs_review" && row.route === "intake" ? pendingRefundView(payload) : undefined;
+        return {
         ...row,
+        refundAwaitingConfirmation: pendingRefund !== undefined,
+        ...(pendingRefund !== undefined ? { pendingRefund } : {}),
         // T16: never the raw `lastError` -- a row written before D58 (or by
         // a direct db.patch, e.g. in a test) may carry a `lastError` with no
         // `errorSummary` yet; sanitize it here rather than let it through.
@@ -1362,6 +1415,7 @@ export const needsAttention = query({
         // the wire, so it never actually serializes.
         lastError: undefined,
         errorSummary: errorSummary ?? (lastError !== undefined ? sanitizeError(lastError) : undefined),
-      }));
+        };
+      });
   },
 });

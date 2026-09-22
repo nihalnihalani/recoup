@@ -720,6 +720,14 @@ export default defineSchema({
     extractionSummary: v.optional(v.string()),
     /** DA-A-6: a deterministic text layer is present (PDF text / email / paste). */
     hasTextLayer: v.optional(v.boolean()),
+    /**
+     * DA-B-3 / D194 (M13b): the sender-authentication verdict an inbound email arrived with. `@agentmail/convex` 0.1.0
+     * exposes none (no SPF/DKIM/DMARC or Authentication-Results field), so every inbound email records `"unavailable"`
+     * and is unverified whatever its From header says. `dmarc_aligned_pass` is RESERVED for when the provider reports
+     * a DMARC pass aligned with the From domain; no code writes it today (a test enforces that). Unset on uploads and
+     * pastes.
+     */
+    senderAuth: v.optional(v.union(v.literal("unavailable"), v.literal("dmarc_aligned_pass"))),
     retention: evidenceRetention, isExample: v.optional(v.boolean()),
   }).index("by_user_and_content_hash", ["userId", "contentHash"])
     .index("by_transaction", ["transactionId"])

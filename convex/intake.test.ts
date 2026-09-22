@@ -16,7 +16,8 @@ type T = ReturnType<typeof setup>;
 /** A queued intake event, as `inbound.onMessageReceived` would have left it. */
 async function queueEvent(t: T, userId: Id<"users">, externalId = "evt-1") {
   // D174 (lead-approved fixture change, M13 / SEC-AI-6): the fixture models the account holder forwarding their own
-  // mail, so the queued user's account email is the fixture's `from` address.
+  // mail, so the queued user's account email is the fixture's `from` address. DA-B-3 (D190/D194): that From header is
+  // still not authentication, so an emailed refund is applied only by the user's one-tap confirmation (`applyWithTap`).
   await t.run(async (ctx) => await ctx.db.patch(userId, { email: "f@x.example" }));
   return await t.run(
     async (ctx) =>
@@ -62,6 +63,23 @@ function refundEmail(credits: unknown[], over: Record<string, unknown> = {}) {
 
 async function eventRow(t: T, id: Id<"processedEvents">) {
   return (await t.run(async (ctx) => await ctx.db.get(id)))!;
+}
+
+/**
+ * DA-B-3 (D190/D194): an emailed refund writes nothing until the account holder confirms it — no sender verdict is
+ * available, and a From header alone is not authentication. Runs the extraction, then the owner's one-tap
+ * `confirmRefundEmail` when a refund is being held; everything the refund tests below assert happens after the tap.
+ */
+async function applyWithTap(
+  t: T,
+  owner: Awaited<ReturnType<typeof signedIn>>["as"],
+  args: { processedEventId: Id<"processedEvents">; parsed: unknown },
+) {
+  await t.mutation(internal.intake.applyExtraction, args);
+  const row = await eventRow(t, args.processedEventId);
+  if ((row.payload as { pendingRefund?: unknown } | undefined)?.pendingRefund !== undefined) {
+    await owner.mutation(api.intake.confirmRefundEmail, { processedEventId: args.processedEventId });
+  }
 }
 
 /** A confirmed purchase with one line item, optionally marked returned. */
@@ -278,6 +296,10 @@ describe("intake.applyExtraction — refunds (D15)", () => {
         { itemName: "wool scarf", amount: 40, currency: "USD", state: "posted" },
       ]),
     });
+    // DA-B-3: the email alone (From = the account address, no sender verdict) writes nothing and opens no claim.
+    expect((await eventRow(t, id)).status).toBe("needs_review");
+    expect(await claimsOn(t, itemId)).toHaveLength(0);
+    await as.mutation(api.intake.confirmRefundEmail, { processedEventId: id });
 
     const claims = await claimsOn(t, itemId);
     expect(claims).toHaveLength(1);
@@ -297,9 +319,9 @@ describe("intake.applyExtraction — refunds (D15)", () => {
       { itemName: "wool scarf", amount: 40, currency: "USD", state: "promised" },
     ]);
 
-    await t.mutation(internal.intake.applyExtraction, { processedEventId: id, parsed });
+    await applyWithTap(t, as, { processedEventId: id, parsed });
     await t.run(async (ctx) => await ctx.db.patch(id, { status: "received" }));
-    await t.mutation(internal.intake.applyExtraction, { processedEventId: id, parsed });
+    await applyWithTap(t, as, { processedEventId: id, parsed });
 
     const claims = await claimsOn(t, itemId);
     expect(claims).toHaveLength(1);
@@ -313,7 +335,7 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     const { itemId } = await purchaseWithItem(t, as, { returned: false });
 
     const id = await queueEvent(t, userId, "evt-notreturned");
-    await t.mutation(internal.intake.applyExtraction, {
+    await applyWithTap(t, as, {
       processedEventId: id,
       parsed: refundEmail([
         { itemName: "wool scarf", amount: 40, currency: "USD", state: "posted" },
@@ -334,7 +356,7 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     const { itemId } = await purchaseWithItem(t, as, { returned: true });
 
     const id = await queueEvent(t, userId, "evt-bad-credit");
-    await t.mutation(internal.intake.applyExtraction, {
+    await applyWithTap(t, as, {
       processedEventId: id,
       parsed: refundEmail([{ itemName: "wool scarf", amount: 0, currency: "USD", state: "promised" }]),
     });
@@ -351,7 +373,7 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     const { itemId } = await purchaseWithItem(t, as, { returned: true, unitCents: 4_000 });
 
     const id = await queueEvent(t, userId, "evt-ambiguous");
-    await t.mutation(internal.intake.applyExtraction, {
+    await applyWithTap(t, as, {
       processedEventId: id,
       // No item name, and 12.50 matches nothing we hold.
       parsed: refundEmail([{ itemName: null, amount: 12.5, currency: "USD", state: "promised" }]),
@@ -369,7 +391,7 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     const { itemId } = await purchaseWithItem(t, as, { returned: true, unitCents: 4_000 });
 
     const id = await queueEvent(t, userId, "evt-byamount");
-    await t.mutation(internal.intake.applyExtraction, {
+    await applyWithTap(t, as, {
       processedEventId: id,
       parsed: refundEmail([{ itemName: null, amount: 40, currency: "USD", state: "promised" }]),
     });
@@ -405,7 +427,7 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     });
 
     const id = await queueEvent(t, userId, "evt-inactive");
-    await t.mutation(internal.intake.applyExtraction, {
+    await applyWithTap(t, as, {
       processedEventId: id,
       parsed: refundEmail([{ itemName: "wool scarf", amount: 40, currency: "USD", state: "promised" }]),
     });
@@ -434,7 +456,7 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     await as.mutation(api.purchases.setReturned, { itemId: detail.items[0]._id, returned: true });
 
     const idNoLabel = await queueEvent(t, userId, "evt-example-unlabeled");
-    await t.mutation(internal.intake.applyExtraction, {
+    await applyWithTap(t, as, {
       processedEventId: idNoLabel,
       parsed: refundEmail([{ itemName: "wool scarf", amount: 40, currency: "USD", state: "promised" }]),
     });
@@ -442,7 +464,7 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     expect(await claimsOn(t, detail.items[0]._id)).toHaveLength(0);
 
     const idLabeled = await queueEvent(t, userId, "evt-example-labeled");
-    await t.mutation(internal.intake.applyExtraction, {
+    await applyWithTap(t, as, {
       processedEventId: idLabeled,
       parsed: refundEmail(
         [{ itemName: "wool scarf", amount: 40, currency: "USD", state: "promised" }],
@@ -479,7 +501,7 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     await as.mutation(api.purchases.setReturned, { itemId: exactItemId, returned: true });
 
     const id = await queueEvent(t, userId, "evt-exact-merchant");
-    await t.mutation(internal.intake.applyExtraction, {
+    await applyWithTap(t, as, {
       processedEventId: id,
       // No orderRef, so matching falls to merchant name; "Nordstrom" is an
       // exact hit on one purchase and a substring hit on both.
@@ -499,7 +521,7 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     const { itemId } = await purchaseWithItem(t, a.as, { returned: true });
 
     const id = await queueEvent(t, b.userId, "evt-cross");
-    await t.mutation(internal.intake.applyExtraction, {
+    await applyWithTap(t, b.as, {
       processedEventId: id,
       parsed: refundEmail([
         { itemName: "wool scarf", amount: 40, currency: "USD", state: "promised" },
@@ -516,7 +538,7 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     const id = await queueEvent(t, userId, "evt-conflict");
 
     // First pass records the promised credit normally.
-    await t.mutation(internal.intake.applyExtraction, {
+    await applyWithTap(t, as, {
       processedEventId: id,
       parsed: refundEmail([{ itemName: "wool scarf", amount: 40, currency: "USD", state: "promised" }]),
     });
@@ -526,7 +548,7 @@ describe("intake.applyExtraction — refunds (D15)", () => {
     // different amount for the same credit position -- a genuine
     // idempotency conflict, not a harmless re-apply.
     await t.run(async (ctx) => await ctx.db.patch(id, { status: "received" }));
-    await t.mutation(internal.intake.applyExtraction, {
+    await applyWithTap(t, as, {
       processedEventId: id,
       parsed: refundEmail([{ itemName: "wool scarf", amount: 50, currency: "USD", state: "promised" }]),
     });
@@ -1245,7 +1267,7 @@ describe("intake spend caps (pre-launch review B5, M1, M5)", () => {
     expect(row).not.toHaveProperty("payload");
     expect(row).not.toHaveProperty("processingStartedAt");
     expect(Object.keys(row).sort()).toEqual(
-      ["_creationTime", "_id", "attempts", "errorSummary", "externalId", "kind", "route", "status", "userId"].sort(),
+      ["_creationTime", "_id", "attempts", "errorSummary", "externalId", "kind", "refundAwaitingConfirmation", "route", "status", "userId"].sort(),
     );
   });
 

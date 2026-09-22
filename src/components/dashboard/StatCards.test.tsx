@@ -92,6 +92,9 @@ describe("StatCards money (DA-A-34, QA-2)", () => {
     }
     expect(usd.textContent).toContain(formatMinor(2_500, "USD"));
     expect(usd.textContent).toContain("estimated, not guaranteed");
+    // DA-B-13: a refused claim can still sit in Asked in wave 1, so the hint never claims "no answer".
+    expect(usd.textContent).toContain("sent or submitted; no money yet");
+    expect(usd.textContent).not.toContain("no answer yet");
     expect(usd.textContent).toContain(`of which provisional ${formatMinor(1_500, "USD")}`);
     // The provisional part sits inside Asked; it is not a separate, additive figure.
     expect(usd.textContent).not.toContain(formatMinor(5_500, "USD"));

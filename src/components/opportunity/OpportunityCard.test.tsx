@@ -254,3 +254,23 @@ describe("OpportunityCard: the next action", () => {
     expect(text).not.toMatch(/retail\.[a-z_]+/);
   });
 });
+
+describe("OpportunityCard: review_amount (DA-B-2)", () => {
+  it("says the open claim asks more than the estimate and links to the claim to adjust it", () => {
+    const text = renderCard(
+      view(
+        {
+          amount: { estimate: { amountMinor: 2_500, currency: "USD" }, basis: "exact_formula", formula: "(5,000 - 2,500) x 1", inputs: [] },
+          nextAction: { kind: "review_amount", claimId: "c7" as Id<"claims">, claimedMinor: 5_000, estimateMinor: 2_500, currency: "USD" },
+        },
+        { status: "case_open", activeClaimId: "c7" as Id<"claims"> },
+      ),
+    );
+    expect(text).toContain(
+      `Your open claim asks for ${formatMinor(5_000, "USD")}, more than the current estimate of ${formatMinor(2_500, "USD")}.`,
+    );
+    expect(screen.getByRole("link", { name: "Review the claim amount" }).getAttribute("href")).toBe("/claims/c7");
+    // One next action: the review replaces the plain "Open the claim".
+    expect(screen.queryByRole("link", { name: "Open the claim" })).toBeNull();
+  });
+});

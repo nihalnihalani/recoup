@@ -110,6 +110,11 @@ test.describe("resilience", () => {
       await creditForm.locator("summary").focus();
       await page.keyboard.press("Enter"); // opens the <details> disclosure
 
+      // DA-B-10: "How did it come back?" is a required choice; Space selects the focused radio.
+      await creditForm.getByRole("radio", { name: /To my card or original payment/ }).focus();
+      await page.keyboard.press("Space");
+      await expect(creditForm.getByRole("radio", { name: /To my card or original payment/ })).toBeChecked();
+
       await creditForm.getByLabel(/^Amount/).focus();
       await page.keyboard.type("9.00");
       await page.keyboard.press("Tab"); // -> "Where you saw it"
