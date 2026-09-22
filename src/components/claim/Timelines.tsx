@@ -29,6 +29,8 @@ const EVENT: Record<EventKind, { title: string; tone: Tone; glyph: ClaimGlyph; s
   promised_credit: { title: "Credit promised", tone: "waiting", glyph: "clock", sign: "" },
   confirmed_credit: { title: "Back on your card", tone: "good", glyph: "card", sign: "+" },
   later_debit: { title: "Charged again", tone: "bad", glyph: "repeat", sign: "−" },
+  provisional_credit: { title: "Provisional credit (not final)", tone: "waiting", glyph: "clock", sign: "" },
+  provisional_released: { title: "Provisional credit resolved", tone: "plain", glyph: "note", sign: "" },
 };
 
 type Entry = {

@@ -1,7 +1,31 @@
+import { ConvexError } from "convex/values";
 import { assertCents, assertQty } from "./money";
 
-export type EventKind = "promised_credit" | "confirmed_credit" | "later_debit";
+/**
+ * Every ledger event kind (contract rev 5 §3.2). The ledger is EXHAUSTIVE (HC-3/KM2): `balance()` and
+ * `statusAfterEvent()` switch on every kind with a `never` check, and an unknown kind at runtime throws —
+ * it is never silently counted as a debit.
+ * - `promised_credit`: the merchant's latest promise (D21) — not money.
+ * - `confirmed_credit`: money the USER confirmed posted — only `claims.ts` writes it (SEC-MF-5, D145).
+ * - `later_debit`: a reversal / later debit (D40) — reduces net recovered, reopens the claim.
+ * - `provisional_credit`: a user-recorded provisional credit (e.g. during an issuer investigation) —
+ *   shown separately as "of which provisional", never in `unresolved`, never a status change.
+ * - `provisional_released`: the provisional credit ended (finalized — paired with a `confirmed_credit` —
+ *   or reversed); reduces `provisionalOutstanding`, never `unresolved`.
+ */
+export const EVENT_KINDS = [
+  "promised_credit",
+  "confirmed_credit",
+  "later_debit",
+  "provisional_credit",
+  "provisional_released",
+] as const;
+export type EventKind = (typeof EVENT_KINDS)[number];
 export type LedgerEvent = { kind: EventKind; cents: number };
+
+function unknownKind(kind: never): never {
+  throw new ConvexError(`unknown ledger event kind ${String(kind)}`);
+}
 
 /**
  * The full claim lifecycle (D13, D21, D24). `queued` sits between `drafted`
@@ -41,9 +65,23 @@ export function balance(expectedCents: number, events: LedgerEvent[]): Balance {
   let debited = 0;
   for (const e of events) {
     assertCents(e.cents, "ledger event cents");
-    if (e.kind === "promised_credit") promised = e.cents;
-    else if (e.kind === "confirmed_credit") confirmed += e.cents;
-    else debited += e.cents;
+    switch (e.kind) {
+      case "promised_credit":
+        promised = e.cents;
+        break;
+      case "confirmed_credit":
+        confirmed += e.cents;
+        break;
+      case "later_debit":
+        debited += e.cents;
+        break;
+      case "provisional_credit":
+      case "provisional_released":
+        // §3.2: provisional money is reported separately (`provisionalOutstanding`); `unresolved` is unchanged.
+        break;
+      default:
+        return unknownKind(e.kind);
+    }
   }
   return {
     expected: expectedCents,
@@ -52,6 +90,35 @@ export function balance(expectedCents: number, events: LedgerEvent[]): Balance {
     debited,
     unresolved: expectedCents - confirmed + debited,
   };
+}
+
+/**
+ * Provisional money still outstanding on a claim (§3.2): Σ provisional_credit − Σ provisional_released.
+ * Throws when releases exceed credits (the ledger would be claiming a negative provisional balance).
+ * Shown as "of which provisional"; never part of `unresolved`, Recovered or any confirmed total.
+ */
+export function provisionalOutstanding(events: LedgerEvent[]): number {
+  let credited = 0;
+  let released = 0;
+  for (const e of events) {
+    assertCents(e.cents, "ledger event cents");
+    switch (e.kind) {
+      case "provisional_credit":
+        credited += e.cents;
+        break;
+      case "provisional_released":
+        released += e.cents;
+        break;
+      case "promised_credit":
+      case "confirmed_credit":
+      case "later_debit":
+        break;
+      default:
+        return unknownKind(e.kind);
+    }
+  }
+  if (released > credited) throw new ConvexError("A provisional release cannot exceed the provisional credit");
+  return credited - released;
 }
 
 export function isSettled(b: Balance): boolean {
@@ -88,6 +155,7 @@ export function windowEndsAt(purchasedAt: number, windowDays: number): number {
  * unresolved. `confirmed_credit` settles the claim, or reopens a
  * previously-confirmed claim that a later debit had already pushed back
  * into the red. `promised_credit` never moves a confirmed claim backwards.
+ * Provisional kinds never change status (§3.2). Exhaustive: an unknown kind throws.
  */
 export function statusAfterEvent(
   current: ClaimStatus,
@@ -95,13 +163,20 @@ export function statusAfterEvent(
   b: Balance,
 ): ClaimStatus {
   if (current === "dismissed") return current;
-  if (kind === "later_debit") return b.unresolved > 0 ? "reopened" : current;
-  if (kind === "confirmed_credit") {
-    if (isSettled(b)) return "confirmed";
-    return current === "confirmed" ? "reopened" : current;
+  switch (kind) {
+    case "later_debit":
+      return b.unresolved > 0 ? "reopened" : current;
+    case "confirmed_credit":
+      if (isSettled(b)) return "confirmed";
+      return current === "confirmed" ? "reopened" : current;
+    case "promised_credit":
+      return current === "confirmed" ? current : "promised";
+    case "provisional_credit":
+    case "provisional_released":
+      return current;
+    default:
+      return unknownKind(kind);
   }
-  // promised_credit
-  return current === "confirmed" ? current : "promised";
 }
 
 /**

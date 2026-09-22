@@ -3,6 +3,7 @@ import { internalMutation, type MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { isTombstoned } from "./lib/accountState";
+import { isClosedForAsk } from "./lib/claimState";
 
 const DAY_MS = 86_400_000;
 /** Floor on the reminder delay: never nag a merchant sooner than a week (D26). */
@@ -83,7 +84,8 @@ export async function scheduleClaimReminder(ctx: MutationCtx, claim: Doc<"claims
 
 /**
  * Fires a scheduled reminder. Acts on the claim's current status only
- * (D28): `confirmed` and `dismissed` claims cancel their pending reminders
+ * (D28): claims closed for ask (`lib/claimState.isClosedForAsk` — today
+ * `confirmed` and `dismissed`, contract §5) cancel their pending reminders
  * without touching `attentionAt`; every other status gets `attentionAt` set
  * so the board surfaces it. Acts only on pending rows that are due (D42);
  * with none, it is a no-op. Does not gate on claimVersion — a partial
@@ -108,12 +110,7 @@ export const fire = internalMutation({
     ).filter((f) => f.status === "pending" && f.fireAt <= now);
     if (pending.length === 0) return null;
     const claim = await ctx.db.get(claimId);
-    if (
-      !claim ||
-      claim.status === "confirmed" ||
-      claim.status === "dismissed" ||
-      (await isTombstoned(ctx, claim.userId))
-    ) {
+    if (!claim || isClosedForAsk(claim) || (await isTombstoned(ctx, claim.userId))) {
       for (const f of pending) await ctx.db.patch(f._id, { status: "cancelled" });
       return null;
     }

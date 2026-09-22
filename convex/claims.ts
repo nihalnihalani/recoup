@@ -3,12 +3,13 @@ import { components } from "./_generated/api";
 import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { ownedClaim, ownedItem, requireUserId } from "./lib/access";
-import { balance, deriveStatus, newToken, statusAfterEvent, type EventKind } from "./lib/ledger";
+import { balance, deriveStatus, newToken, statusAfterEvent } from "./lib/ledger";
 import { assertCents, assertPositiveCents } from "./lib/money";
 import { assertMaxChars } from "./lib/text";
 import schema, { claimStatus, eventKind } from "./schema";
 import { cancelPending } from "./followUps";
 import { claimBalance, balanceValidator } from "./lib/balance";
+import { isClosedForAsk } from "./lib/claimState";
 import { agentmail } from "./mail";
 
 /**
@@ -70,10 +71,13 @@ export async function openClaim(
     .withIndex("by_item", (q) => q.eq("itemId", args.itemId))
     .collect();
   // D44: an item is returned once, so one return_credit claim per item
-  // unless the earlier one was dismissed. Price adjustments may repeat once
-  // the previous one is confirmed or dismissed.
-  const closed = args.type === "return_credit" ? ["dismissed"] : ["confirmed", "dismissed"];
-  if (existing.some((c) => c.type === args.type && !closed.includes(c.status))) {
+  // unless the earlier one was dismissed (a confirmed return still blocks:
+  // this is replaceability, not closed-for-ask). Price adjustments may repeat
+  // once the previous one is closed for ask (`lib/claimState.isClosedForAsk`,
+  // contract §5: confirmed/dismissed today, + denied / non-cash in wave 2).
+  const blocks = (c: Doc<"claims">) =>
+    args.type === "return_credit" ? c.status !== "dismissed" : !isClosedForAsk(c);
+  if (existing.some((c) => c.type === args.type && blocks(c))) {
     throw new ConvexError(
       args.type === "return_credit"
         ? "A return claim already exists for this item"
@@ -229,7 +233,7 @@ async function findLedgerDuplicate(
 export async function applyEvent(
   ctx: MutationCtx,
   claim: Doc<"claims">,
-  kind: EventKind,
+  kind: Doc<"ledgerEvents">["kind"],
   cents: number,
   evidence: string,
   idempotencyKey: string,

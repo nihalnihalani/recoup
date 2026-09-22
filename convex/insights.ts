@@ -357,6 +357,8 @@ export const activity = query({
         }
 
         for (const entry of ledger) {
+          // provisional credits are not recovery events; wave-2 M2C adds a feed entry
+          if (entry.kind === "provisional_credit" || entry.kind === "provisional_released") continue;
           claimEvents.push({
             ...base,
             id: entry._id,

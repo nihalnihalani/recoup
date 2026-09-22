@@ -9,7 +9,7 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | Role | Agent name | Wave | Status |
 |---|---|---|---|
 | Lead | this session | – | active |
-| Product architect | opus-product-architect | 0 | idle (M01 delivered) |
+| Product architect | opus-product-architect | 0–1 | idle (M01, M06–M06f delivered) |
 | Rules researcher | opus-rules-researcher | 0 | idle (M02 delivered) |
 | Security & privacy reviewer | opus-security-privacy-reviewer | 0 | idle (M03 delivered) |
 | QA engineer | opus-qa-engineer | 0 | idle (M04 delivered) |
@@ -31,13 +31,13 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | M06 | 0 | opus-product-architect | M05 | Contract rev 4: all pre-wave-1 changes (DA-A-1..5,7,8,9,11,13..17,21) + D142 + D143 + D145 rulings; pre-wave-2 items written as specified text; new tasks for pack review, source re-verification, R01 v2, R10/R13/R18/R19–R25, deadline attention, diagnostics, copy consistency | docs/team/contracts/2026-09-23-M01-*.md | verified (044b20d, rev 4, 1,266 lines, §13 changelog; R4-1..4 confirmed D146) |
 | M07 | 0 | opus-devils-advocate | M06 | Recheck rev 4 against the pre-wave-1 required changes only | docs/reviews/2026-09-23-da-checkpoint-A.md (addendum) | verified (16b6a5a; start with C1–C5; rulings D148) |
 | M06b | 1 | opus-product-architect | M07 | Contract rev 5: C1–C4, N2–N7, wave-2 notes (D148) | docs/team/contracts/2026-09-23-M01-*.md | verified (c081a17; M10 delta forwarded; R04 §10 per D147 → M06c) |
-| M08 | 1 | opus-qa-engineer | – | Test infra + CI: DOM env for *.test.tsx (QA-13), rule-fixture loader (hash + alias), twoUsers/clock helpers + time-bomb lint test, CI lint 0 / floor / e2e typecheck / concurrency / env-driven e2e fixtures | vitest.config.mts, package.json, package-lock.json, convex/test.setup.ts, convex/testing/**, src/test/**, .github/workflows/ci.yml, scripts/check-test-count.mjs, e2e/fixtures.ts, playwright.config.ts, docs/reviews/2026-09-23-M08-test-infra.md | in_progress |
+| M08 | 1 | opus-qa-engineer | – | Test infra + CI: DOM env for *.test.tsx (QA-13), rule-fixture loader (hash + alias), twoUsers/clock helpers + time-bomb lint test, CI lint 0 / floor / e2e typecheck / concurrency / env-driven e2e fixtures | vitest.config.mts, package.json, package-lock.json, convex/test.setup.ts, convex/testing/**, src/test/**, .github/workflows/ci.yml, scripts/check-test-count.mjs, e2e/fixtures.ts, playwright.config.ts, docs/reviews/2026-09-23-M08-test-infra.md | verified (9 commits, c6e0371..02057b8; D157) |
 | M09 | 1 | opus-rules-reviewer | – | Independent spec-level review of R01–R05 against captured primary text + blind fixture check (activation gate, DA-A-11) | docs/reviews/2026-09-23-rules-review-R01-R05.md | verified (8fd1e3f; R01 reject-resubmit, R02–R05 approve-with-changes; rulings D147) |
 | M2D | 1 | opus-rules-researcher | M09, M1C | Apply M09's 27 edits + R01 window-event redesign + fixture construction fixes; capture every uncaptured normative source; D147 rulings | docs/rules/** | verified (2743862 et al.; 23/23 hashes; D151) |
 | M09b | 1 | opus-rules-reviewer | M2D | Re-review of revised specs/fixtures; activation gate | docs/reviews/2026-09-23-rules-review-R01-R05.md (addendum) | verified (4bcf07b; R01 v1 approve_for_activation; others approve_with_changes; D154) |
-| M2E | 1 | opus-rules-researcher | M09b | Apply M09b §B.8 edits; README rule 3 cap; confirmed-vs-observed fixture per file | docs/rules/** | in_progress |
-| M09c | 1 | opus-rules-reviewer | M2E | Re-check changed items only | review addendum | pending |
-| M06f | 1 | opus-product-architect | M09b | Contract §4 5c decided + disputed-anchor deadline rule + not_yet_due next action (D154) | contract | in_progress |
+| M2E | 1 | opus-rules-researcher | M09b | Apply M09b §B.8 edits; README rule 3 cap; confirmed-vs-observed fixture per file | docs/rules/** | verified (0ce6c95..58f2ac9) |
+| M09c | 1 | opus-rules-reviewer | M2E | Re-check changed items only | review addendum | verified (337b4b1; spec gate: R01v1/R01v2/R02/R03/R04 approved, R05 one edit; D158) |
+| M06f | 1 | opus-product-architect | M09b | Contract §4 5c decided + disputed-anchor deadline rule + not_yet_due next action (D154) | contract | verified (ab72962, e780129; M12 briefed) |
 
 ---
 
@@ -592,7 +592,7 @@ release-candidate.md: commit SHA, tag `rc-<date>`, node/npm versions, lockfile s
 | M16 | opus-qa-engineer | pending (M10–M15) |
 | M17 | opus-devils-advocate | pending (checkpoint B) |
 | M18 | opus-rules-reviewer | pending (M09, M12, M1C) |
-| M19 | opus-qa-engineer-2 | pending (M08) |
+| M19 | opus-qa-engineer | in_progress |
 | M1A | opus-ingestion-integrations-engineer-2 | verified (ccdd61f; 99/99; D149) |
-| M1B | opus-backend-engineer-4 | in_progress (from 92993cb) |
+| M1B | opus-backend-engineer-4 | verified (34a2f87 via lead integration feaa52a; D156) |
 | M1C | opus-rules-researcher | done (72fe1a2; → M09b re-review with M2D) |

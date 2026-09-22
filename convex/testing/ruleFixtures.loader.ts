@@ -26,10 +26,10 @@
  *    inherited, and nothing is ever computed).
  *  - **Vocabulary.** Fixture outcome names map to the M01 contract's
  *    `evaluationOutcome` through the README alias table
- *    (`likely_eligible_missing_evidence` → `likely_eligible`). A README
- *    "none yet" outcome (`not_yet_due`) passes through unmapped and marks the
- *    fixture `pendingContractOutcome`. Any other unknown name throws. The
- *    verbatim `expected` stays in `expectedAsWritten`.
+ *    (`likely_eligible_missing_evidence` → `likely_eligible`; `not_yet_due`
+ *    1:1 since contract rev 5.2). The contract list is read from the schema
+ *    validator itself (`convex/schema.ts` `evaluationOutcome`). An unknown
+ *    name throws. The verbatim `expected` stays in `expectedAsWritten`.
  *
  * `now` is `Date.parse(clock)`. Inject it; evaluators never read the wall
  * clock (D138, README "Every fixture clock must be injected as `now`").
@@ -44,28 +44,17 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Infer } from "convex/values";
 import { z } from "zod";
+import { evaluationOutcome } from "../schema";
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const RULES_MANIFEST_PATH = "docs/rules/manifest.json";
 export const RULE_FIXTURES_DIR = "docs/rules/fixtures";
 
-/**
- * M01 contract §2.4 `evaluationOutcome`. Replace this list with the
- * validator's inferred type once it exists in code (M10/M12).
- */
-export const CONTRACT_OUTCOMES = [
-  "eligible",
-  "likely_eligible",
-  "possible_contract_benefit",
-  "needs_facts",
-  "manual_review",
-  "not_eligible",
-  "deadline_passed",
-  "source_unverified",
-  "unsupported",
-] as const;
-export type ContractOutcome = (typeof CONTRACT_OUTCOMES)[number];
+/** The contract's `evaluationOutcome` (M01 §2.4), read from the schema validator so it can never drift from code. */
+export type ContractOutcome = Infer<typeof evaluationOutcome>;
+export const CONTRACT_OUTCOMES: readonly ContractOutcome[] = Object.freeze(evaluationOutcome.members.map((m) => m.value));
 
 /**
  * `docs/rules/README.md` "Outcome vocabulary mapping": fixture wording
@@ -82,19 +71,8 @@ export const FIXTURE_OUTCOME_ALIASES: Readonly<Record<string, ContractOutcome>> 
   deadline_passed: "deadline_passed",
   source_unverified: "source_unverified",
   unsupported: "unsupported",
+  not_yet_due: "not_yet_due", // D147(6), contract rev 5.2
 });
-
-/**
- * Fixture outcomes the README lists with "none yet" in the contract column:
- * the name is valid in a fixture but the contract has no value for it, so it
- * is passed through unmapped (never folded into another outcome) and the
- * fixture is marked `pendingContractOutcome`. Evaluator tests should
- * `it.todo`/skip those until the architect adds the outcome, then this entry
- * moves into CONTRACT_OUTCOMES + FIXTURE_OUTCOME_ALIASES.
- */
-export const PENDING_OUTCOMES = ["not_yet_due"] as const; // D147(6), README "Outcome vocabulary mapping"
-export type PendingOutcome = (typeof PENDING_OUTCOMES)[number];
-export type FixtureOutcome = ContractOutcome | PendingOutcome;
 
 /** Mission §17 fixture categories every rule file must cover (contract §9 activation gate, §10). Each entry lists the accepted category tags. */
 export const REQUIRED_CATEGORY_GROUPS: Readonly<Record<string, readonly string[]>> = Object.freeze({
@@ -126,11 +104,11 @@ export type FixtureSource =
   | { last_verified_on: string; refresh_window_days: number; note?: string }
   | { record: "missing"; note?: string };
 
-export type FixturePathResult = { path: string; outcome: FixtureOutcome } & Record<string, unknown>;
+export type FixturePathResult = { path: string; outcome: ContractOutcome } & Record<string, unknown>;
 
-/** A fixture's `expected`, verbatim except that every outcome is in the contract vocabulary (or a pending outcome, see PENDING_OUTCOMES). */
+/** A fixture's `expected`, verbatim except that every outcome is in the contract vocabulary. */
 export type FixtureExpected = Record<string, unknown> &
-  ({ outcome: FixtureOutcome; results?: undefined } | { outcome?: undefined; results: FixturePathResult[] });
+  ({ outcome: ContractOutcome; results?: undefined } | { outcome?: undefined; results: FixturePathResult[] });
 
 /** One runnable fixture: a case with a top-level `expected`, or one variant. Deep-frozen. */
 export type RuleFixtureCase = {
@@ -153,8 +131,6 @@ export type RuleFixtureCase = {
   /** Non-fact state (existing claims, prior opportunities, ShopSavvy history): the case's `context` with the variant's `context_change` applied. `{}` when absent. Not copied by `facts_from`. */
   context: Readonly<Record<string, unknown>>;
   expected: FixtureExpected;
-  /** True when any expected outcome is in PENDING_OUTCOMES (no contract value yet). */
-  pendingContractOutcome: boolean;
   expectedAsWritten: unknown;
   /** Descriptive fields the loader does not interpret (`mission_domain_fixture`, `window_end`, `applies_from`, `delta`, `day`, `delay`, `drop`). */
   annotations: Readonly<Record<string, unknown>>;
@@ -343,15 +319,10 @@ function formatZodError(err: z.ZodError): string {
 // Pure parsing / resolution (no I/O)
 // ---------------------------------------------------------------------------
 
-function isPendingOutcome(name: string): name is PendingOutcome {
-  return (PENDING_OUTCOMES as readonly string[]).includes(name);
-}
-
-function toContractOutcome(fixtureOutcome: string, vocabulary: readonly string[], where: string): FixtureOutcome {
+function toContractOutcome(fixtureOutcome: string, vocabulary: readonly string[], where: string): ContractOutcome {
   if (!vocabulary.includes(fixtureOutcome)) {
     throw new RuleFixtureError(where, `outcome "${fixtureOutcome}" is not in this file's conventions.outcome_vocabulary`);
   }
-  if (isPendingOutcome(fixtureOutcome)) return fixtureOutcome;
   const mapped = FIXTURE_OUTCOME_ALIASES[fixtureOutcome];
   if (!mapped) throw new RuleFixtureError(where, `outcome "${fixtureOutcome}" has no contract mapping (docs/rules/README.md alias table)`);
   return mapped;
@@ -422,7 +393,7 @@ export function parseRuleFixtureDocument(
   const d = parsed.data;
   const vocabulary = d.conventions.outcome_vocabulary;
   for (const name of vocabulary) {
-    if (!FIXTURE_OUTCOME_ALIASES[name] && !isPendingOutcome(name)) {
+    if (!FIXTURE_OUTCOME_ALIASES[name]) {
       throw new RuleFixtureError(where, `conventions.outcome_vocabulary entry "${name}" has no contract mapping (docs/rules/README.md alias table)`);
     }
   }
@@ -480,12 +451,11 @@ export function parseRuleFixtureDocument(
     };
     const caseAnnotations = Object.fromEntries(CASE_ANNOTATION_KEYS.filter((k) => c[k] !== undefined).map((k) => [k, c[k]]));
 
-    const push = (item: Omit<RuleFixtureCase, "now" | "pendingContractOutcome">, rawExpected: ParsedExpected, itemWhere: string) => {
+    const push = (item: Omit<RuleFixtureCase, "now">, rawExpected: ParsedExpected, itemWhere: string) => {
       assertMoneyShapes(item.facts, itemWhere);
       assertMoneyShapes(rawExpected, itemWhere);
       const now = Date.parse(item.clock);
-      const outcomes = item.expected.outcome !== undefined ? [item.expected.outcome] : item.expected.results.map((r) => r.outcome);
-      cases.push(deepFreeze({ ...item, now, pendingContractOutcome: outcomes.some(isPendingOutcome) }));
+      cases.push(deepFreeze({ ...item, now }));
     };
 
     if (c.expected !== undefined) {

@@ -124,6 +124,7 @@ import { accountStateStatus } from "./schema";
 import { requireUserId } from "./lib/access";
 import { sanitizeError } from "./lib/errors";
 import { rateLimiter } from "./lib/rateLimits";
+import { deleteBlobIfPresent } from "./lib/blobRefs";
 import { RETENTION_PAGE, PROCESSED_EVENTS_PAGE, STUCK_DELETION_AGE_MS, STUCK_DELETION_REDRIVE_PAGE } from "./limits";
 
 const CONFIRMATION_PHRASE = "delete my account";
@@ -135,39 +136,77 @@ const EXPORT_PAGE = 200;
 // Table topology shared by `exportPage` (read) and `purgeStep` (delete).
 // ---------------------------------------------------------------------------
 
-const EXPORT_TABLES = v.union(
-  v.literal("purchases"),
-  v.literal("items"),
-  v.literal("claims"),
-  v.literal("ledgerEvents"),
-  v.literal("claimNotes"),
-  v.literal("drafts"),
-  v.literal("replies"),
-  v.literal("followUps"),
-  v.literal("policies"),
-  v.literal("priceChecks"),
-  v.literal("watches"),
-  v.literal("watchChecks"),
-  v.literal("offers"),
-  v.literal("offerChecks"),
-  v.literal("marketPrices"),
-  v.literal("mailLog"),
-  v.literal("processedEvents"),
-  v.literal("alertSettings"),
-  v.literal("profiles"),
-);
-type ExportTable =
-  | "purchases" | "items" | "claims" | "ledgerEvents" | "claimNotes" | "drafts" | "replies" | "followUps"
-  | "policies" | "priceChecks" | "watches" | "watchChecks" | "offers" | "offerChecks" | "marketPrices"
-  | "mailLog" | "processedEvents" | "alertSettings" | "profiles";
+/**
+ * Every table `exportPage` can serve, as a runtime list (exported so the
+ * SEC-DEL-1 reflective test in `account.test.ts` can compare it with
+ * `schema.tables`). `EXPORT_TABLES` below is the argument validator built
+ * from it, so the two cannot drift.
+ */
+export const EXPORT_TABLE_NAMES = [
+  "purchases", "items", "claims", "ledgerEvents", "claimNotes", "drafts", "replies", "followUps",
+  "policies", "priceChecks", "watches", "watchChecks", "offers", "offerChecks", "marketPrices",
+  "mailLog", "processedEvents", "alertSettings", "profiles",
+  // M14 (contract rev 5 §8): the wave-1 transaction-recovery tables (M10 schema, 92993cb).
+  "transactions", "facts", "incidents", "evidence", "opportunities", "evaluations", "nonCashRemedies",
+] as const;
+type ExportTable = (typeof EXPORT_TABLE_NAMES)[number];
+const EXPORT_TABLES = v.union(...EXPORT_TABLE_NAMES.map((name) => v.literal(name)));
 
-/** `purgeStep`'s table order (contract, verbatim): child rows before the parents they point at, so a crash mid-purge never leaves a dangling reference. */
-const PURGE_STEPS = [
-  "followUps", "claimNotes", "drafts", "replies", "ledgerEvents", "claims", "priceChecks", "items",
+/**
+ * `purgeStep`'s table order: child rows before the parents they point at.
+ * The Mission-1 tables keep their T18 contract order verbatim. The M14 block
+ * follows contract rev 5 §8 ("nonCashRemedies, evaluations, opportunities,
+ * facts, incidents before claims; evidence and transactions before
+ * profiles"). Each position, justified by the id edges in `schema.ts`:
+ *  - `nonCashRemedies` (→ claims) goes with the other claim children, before `claims`.
+ *  - `evaluations` (→ opportunities; `nextAction.claimId` → claims) goes before both.
+ *  - `opportunities` (→ transactions, incidents, claims) goes before `incidents`, `claims` and `transactions`.
+ *  - `facts` (→ transactions, evidence, priceChecks) and `incidents`
+ *    (→ transactions, evidence) go before `evidence`, `transactions` and `priceChecks`.
+ *  - `claims` (→ transactions, purchases, items, policies, priceChecks) is unchanged relative to those parents.
+ *  - `evidence` (→ transactions, processedEvents) goes before both, and
+ *    deletes each row's blob in the same mutation as the row (SEC-DEL-2).
+ *  - `transactions` (→ purchases) goes before `purchases`.
+ * Three edges form cycles that no order satisfies:
+ *  - evaluations ↔ opportunities.currentEvaluationId
+ *  - opportunities.activeClaimId ↔ claims.opportunityId
+ *  - evidence.transactionId ↔ transactions.sourceEvidenceId
+ * For each cycle the contract's order deletes the dependent row first. The
+ * dangling pointer lasts one step, and only while the account is
+ * tombstoned: `requireUserId` refuses every caller, and scheduled readers
+ * check `isTombstoned`. `account.test.ts` derives every edge from
+ * `schema.tables` and pins the accepted back-edges, so a new edge that
+ * points backward fails that test.
+ */
+export const PURGE_STEPS = [
+  "followUps", "claimNotes", "drafts", "replies", "ledgerEvents",
+  "nonCashRemedies", "evaluations", "opportunities", "facts", "incidents",
+  "claims",
+  "evidence", "transactions",
+  "priceChecks", "items",
   "purchases", "policies", "offerChecks", "offers", "marketPrices", "watchChecks", "watches", "mailLog",
   "usage", "alertSettings", "processedEvents", "profiles",
 ] as const;
 type PurgeTable = (typeof PURGE_STEPS)[number];
+
+/**
+ * SEC-DEL-1: the one user-owned table `exportPage` deliberately does not
+ * serve. The reflective test in `account.test.ts` pins this list, so
+ * widening it means editing that test.
+ */
+export const EXPORT_EXEMPT = {
+  usage: "internal per-day spend counters (quota bookkeeping, not user content); still purged",
+} as const;
+
+/**
+ * SEC-DEL-1: tables with a `userId` field that are handled outside
+ * `PURGE_STEPS` (and outside the export). Pinned by the same reflective test.
+ */
+export const OUTSIDE_PURGE_STEPS = {
+  accountState: "the deletion tombstone itself (D77): kept by design, never exported",
+  authSessions: "Convex Auth: revoked by requestDeletion and purgeAuth",
+  authAccounts: "Convex Auth: deleted by purgeAuth (holds the password hash, never exported)",
+} as const;
 
 /** A table reached directly by a `userId`-prefixed index on the table itself (a plain `by_user`, or the first field of a compound index -- a valid index-range prefix). */
 type DirectSpec = { kind: "direct"; index: string };
@@ -207,7 +246,45 @@ const TABLE_SPECS: Record<ExportTable | "usage", TableSpec> = {
   watchChecks: { kind: "parent", parentTable: "watches", parentIndex: "by_user", childTable: "watchChecks", childIndex: "by_watch", childField: "watchId" },
   offerChecks: { kind: "parent", parentTable: "offers", parentIndex: "by_user", childTable: "offerChecks", childIndex: "by_offer", childField: "offerId" },
   marketPrices: { kind: "parent", parentTable: "watches", parentIndex: "by_user", childTable: "marketPrices", childIndex: "by_watch", childField: "watchId" },
+  // M14: every wave-1 table carries a userId-led index, so each is "direct".
+  transactions: { kind: "direct", index: "by_user_and_status" },
+  facts: { kind: "direct", index: "by_user" },
+  incidents: { kind: "direct", index: "by_user" },
+  evidence: { kind: "direct", index: "by_user_and_content_hash" },
+  opportunities: { kind: "direct", index: "by_user_and_status" },
+  evaluations: { kind: "direct", index: "by_user" },
+  nonCashRemedies: { kind: "direct", index: "by_user" },
 };
+
+/**
+ * Byte-aware page sizes for direct tables whose rows can be large, used by
+ * both `exportPage` and `purgeStep` (the 6b-6 pattern: Convex allows one
+ * `.paginate()` per execution, so the size is fixed before the read).
+ *  - `evidence`: `text` holds up to 60,000 chars (contract §2.6), the same
+ *    worst case `processedEvents.payload` has, so it uses the same
+ *    `PROCESSED_EVENTS_PAGE` (25 rows ≈ 4.5 MB of 3-byte UTF-8).
+ *  - `evaluations`: every row carries the bounded arrays of §2.4
+ *    (conditions ≤ 64, missingFacts ≤ 32, boundFacts ≤ 32, …). A generous
+ *    ~100 KB/row worst case × 50 ≈ 5 MB stays under `MAX_PAGE_BYTES`.
+ *    200 rows would not.
+ */
+const EVALUATION_PAGE = 50;
+const DIRECT_PAGE_OVERRIDES: Partial<Record<ExportTable | "usage", number>> = {
+  evidence: PROCESSED_EVENTS_PAGE,
+  evaluations: EVALUATION_PAGE,
+};
+
+/**
+ * SEC-DEL-3: an exported evidence row lists its file by `_id`,
+ * `contentHash` and `fileName`, plus `hasFile`. It never carries a URL
+ * (no `ctx.storage.getUrl` anywhere in this module) or the raw `storageId`
+ * handle. The owner downloads the bytes through the authenticated
+ * `GET /evidence/file?id=<_id>` endpoint (SEC-UP-5, M13).
+ */
+function exportEvidenceRow(row: Doc<"evidence">) {
+  const { storageId, ...rest } = row;
+  return { ...rest, hasFile: storageId !== undefined };
+}
 
 type RawPage = { page: Array<Doc<any>>; isDone: boolean; continueCursor: string };
 
@@ -396,8 +473,9 @@ export const exportPage = query({
     const cursorIn = cursor ?? null;
 
     if (spec.kind === "direct") {
-      const page = await paginateByUser(ctx, table, spec.index, userId, cursorIn, EXPORT_PAGE);
-      return { rows: page.page, cursor: page.isDone ? null : page.continueCursor };
+      const page = await paginateByUser(ctx, table, spec.index, userId, cursorIn, DIRECT_PAGE_OVERRIDES[table] ?? EXPORT_PAGE);
+      const rows = table === "evidence" ? page.page.map((row) => exportEvidenceRow(row as Doc<"evidence">)) : page.page;
+      return { rows, cursor: page.isDone ? null : page.continueCursor };
     }
 
     if (spec.kind === "status") {
@@ -657,6 +735,27 @@ async function deleteMailLogPage(ctx: MutationCtx, userId: Id<"users">, cursor: 
 }
 
 /**
+ * M14 (SEC-DEL-2): one byte-aware page of the user's `evidence` rows, each
+ * row's `_storage` blob deleted and then the row, in THIS mutation. The
+ * pair commits or rolls back together, so no committed call leaves a row
+ * without its blob or a blob without its row.
+ *
+ * Resumable: a row whose blob is already gone (a crash's aftermath, an
+ * operator's manual delete) is not an error. `deleteBlobIfPresent` checks
+ * `_storage` first, because `ctx.storage.delete` on a missing id throws and
+ * would otherwise wedge this step for good.
+ */
+async function deleteEvidencePage(ctx: MutationCtx, userId: Id<"users">, cursor: string | null, numItems: number): Promise<{ deleted: number; isDone: boolean; continueCursor: string }> {
+  const page = await paginateByUser(ctx, "evidence", "by_user_and_content_hash", userId, cursor, numItems);
+  for (const row of page.page) {
+    const storageId = (row as Doc<"evidence">).storageId;
+    if (storageId) await deleteBlobIfPresent(ctx, storageId);
+    await deleteRow(ctx, row);
+  }
+  return { deleted: page.page.length, isDone: page.isDone, continueCursor: page.continueCursor };
+}
+
+/**
  * Deletes up to `numItems` rows from a "via-parent" table's page (children
  * only -- the parent table is its own, later, step), same one-`.paginate()`-
  * call design as `readParentTable`, but simpler: a deleted row never comes
@@ -755,9 +854,12 @@ export const purgeStep = internalMutation({
       // needs its own purge call before the row is safe to delete -- see
       // `deleteMailLogPage`'s docstring -- so this one table uses a smaller
       // page than every other direct table's `RETENTION_PAGE`.
+      // M14 (SEC-DEL-2): evidence deletes each row's blob with the row; see `deleteEvidencePage`.
       const result = table === "mailLog"
         ? await deleteMailLogPage(ctx, userId, cursorIn, MAILLOG_PURGE_PAGE)
-        : await deleteDirectPage(ctx, table, spec.index, userId, cursorIn, RETENTION_PAGE);
+        : table === "evidence"
+          ? await deleteEvidencePage(ctx, userId, cursorIn, DIRECT_PAGE_OVERRIDES.evidence ?? PROCESSED_EVENTS_PAGE)
+          : await deleteDirectPage(ctx, table, spec.index, userId, cursorIn, DIRECT_PAGE_OVERRIDES[table] ?? RETENTION_PAGE);
       stepDone = result.isDone;
       nextCursor = result.isDone ? null : result.continueCursor;
     } else if (spec.kind === "status") {
