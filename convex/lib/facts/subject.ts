@@ -85,3 +85,13 @@ export function subjectMatches(pattern: string, key: string): boolean {
   }
   return pattern === key;
 }
+
+/**
+ * The `evaluateTransaction` scope for a set of changed fact subjects (M11d, C43): the item subjects alone when every
+ * change is item-level (DA-A-32: re-evaluate only what changed); any transaction-level (or other) subject re-evaluates
+ * the whole transaction, because it feeds every subject's result.
+ */
+export function evaluationScope(changed: readonly string[]): { subjects?: string[] } {
+  const items = changed.filter((k) => parseSubjectKey(k)?.kind === "item");
+  return changed.length > 0 && items.length === changed.length ? { subjects: [...new Set(items)] } : {};
+}

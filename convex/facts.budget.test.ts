@@ -15,6 +15,7 @@ import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import schema from "./schema";
 import { putFact, readCellRows, readLiveFacts } from "./lib/facts/write";
+import { loadRetailSnapshot } from "./lib/facts/legacyRetail";
 
 const modules = import.meta.glob("./**/*.*s");
 const SUPERSEDED = 5_000;
@@ -97,4 +98,54 @@ describe(`fact reads never scan superseded history (1 live row + ${SUPERSEDED} s
     // accountState + transaction + purchase + 1 item + its price checks (none) + the live row.
     expect(read).toBeLessThanOrEqual(10);
   }, HEAVY_TEST_TIMEOUT_MS);
+});
+
+describe("M11d: a subject-scoped retail snapshot reads only the requested items (DA-A-32)", () => {
+  it("one item of a 50-item purchase: a constant number of documents, not 50 items", async () => {
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    const userId: Id<"users"> = await t.run((ctx) => ctx.db.insert("users", { name: "Scoped" }));
+    const { transactionId, itemIds } = await t.run(async (ctx) => {
+      const purchaseId = await ctx.db.insert("purchases", {
+        userId, merchant: "Northwind", merchantDomain: "northwind.example", currency: "USD", status: "active", purchasedAt: Date.now() - 86_400_000,
+      });
+      const itemIds: Id<"items">[] = [];
+      for (let i = 0; i < 50; i++) {
+        itemIds.push(await ctx.db.insert("items", { purchaseId, userId, name: `Item ${i}`, unitCents: 1_000 + i, qty: 1, returned: false }));
+      }
+      const transactionId = await ctx.db.insert("transactions", {
+        userId, category: "retail_order", status: "active", counterpartyName: "Northwind", currency: "USD", purchaseId, liveFactCount: 0,
+      });
+      return { transactionId, itemIds };
+    });
+    const { read, items, whole } = await t.run(async (ctx) => {
+      const txn = (await ctx.db.get(transactionId))!;
+      let items = 0;
+      const read = await documentsRead(ctx, async () => {
+        items = (await loadRetailSnapshot(ctx, txn, { itemIds: [itemIds[7]] })).items.length;
+      });
+      const whole = await documentsRead(ctx, async () => {
+        await loadRetailSnapshot(ctx, txn);
+      });
+      return { read, items, whole };
+    });
+    expect(items).toBe(1);
+    // purchase + the one item (no price checks, no live facts) — independent of the purchase's 50 items.
+    expect(read).toBeLessThanOrEqual(3);
+    expect(whole).toBeGreaterThanOrEqual(51);
+  });
+
+  it("an item id of another purchase is ignored, never read into the snapshot", async () => {
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    const userId: Id<"users"> = await t.run((ctx) => ctx.db.insert("users", { name: "Scoped" }));
+    const { txnA, foreignItem } = await t.run(async (ctx) => {
+      const a = await ctx.db.insert("purchases", { userId, merchant: "A", merchantDomain: "a.example", currency: "USD", status: "active" });
+      const b = await ctx.db.insert("purchases", { userId, merchant: "B", merchantDomain: "b.example", currency: "USD", status: "active" });
+      await ctx.db.insert("items", { purchaseId: a, userId, name: "Mine", unitCents: 1, qty: 1, returned: false });
+      const foreignItem = await ctx.db.insert("items", { purchaseId: b, userId, name: "Other purchase", unitCents: 1, qty: 1, returned: false });
+      const txnA = await ctx.db.insert("transactions", { userId, category: "retail_order", status: "active", counterpartyName: "A", currency: "USD", purchaseId: a, liveFactCount: 0 });
+      return { txnA, foreignItem };
+    });
+    const items = await t.run(async (ctx) => (await loadRetailSnapshot(ctx, (await ctx.db.get(txnA))!, { itemIds: [foreignItem] })).items.length);
+    expect(items).toBe(0);
+  });
 });
