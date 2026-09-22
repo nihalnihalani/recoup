@@ -580,16 +580,16 @@ release-candidate.md: commit SHA, tag `rc-<date>`, node/npm versions, lockfile s
 
 | ID | Owner | Status |
 |---|---|---|
-| M10 | opus-backend-engineer | in_progress |
-| M11 | opus-backend-engineer-2 | pending (M10) |
+| M10 | opus-backend-engineer | in_progress (commit 1 schema 92993cb landed) |
+| M11 | opus-backend-engineer-2 | in_progress (from 92993cb) |
 | M12 | opus-backend-engineer-3 | pending (M10, M11, M09, M1C) |
 | M13 | opus-ingestion-integrations-engineer | pending (M10–M12, M1B) |
-| M14 | opus-backend-engineer (after M10) | pending (M10) |
+| M14 | opus-backend-engineer-5 | in_progress (from 92993cb) |
 | M15 | opus-frontend-ux-engineer | pending (M08, M12–M14) |
 | M16 | opus-qa-engineer | pending (M10–M15) |
 | M17 | opus-devils-advocate | pending (checkpoint B) |
 | M18 | opus-rules-reviewer | pending (M09, M12, M1C) |
 | M19 | opus-qa-engineer-2 | pending (M08) |
 | M1A | opus-ingestion-integrations-engineer-2 | verified (ccdd61f; 99/99; D149) |
-| M1B | opus-backend-engineer-4 | pending (M10) |
+| M1B | opus-backend-engineer-4 | in_progress (from 92993cb) |
 | M1C | opus-rules-researcher | done (72fe1a2; → M09b re-review with M2D) |
