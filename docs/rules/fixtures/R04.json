@@ -136,7 +136,8 @@
       "title": "Domestic delay boundary: 11h59m / 12h00m / 12h01m",
       "path": "R04.a",
       "categories": [
-        "boundary_time"
+        "boundary_time",
+        "negative"
       ],
       "mission_domain_fixture": null,
       "clock": "2026-09-23T12:00:00-07:00",
@@ -645,7 +646,8 @@
       "title": "Bag delayed because the passenger did not recheck it at the first US entry point",
       "path": "R04.a",
       "categories": [
-        "exclusion"
+        "exclusion",
+        "negative"
       ],
       "mission_domain_fixture": null,
       "clock": "2026-09-23T12:00:00-07:00",
