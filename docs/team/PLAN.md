@@ -35,8 +35,8 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | M09 | 1 | opus-rules-reviewer | – | Independent spec-level review of R01–R05 against captured primary text + blind fixture check (activation gate, DA-A-11) | docs/reviews/2026-09-23-rules-review-R01-R05.md | verified (8fd1e3f; R01 reject-resubmit, R02–R05 approve-with-changes; rulings D147) |
 | M2D | 1 | opus-rules-researcher | M09, M1C | Apply M09's 27 edits + R01 window-event redesign + fixture construction fixes; capture every uncaptured normative source; D147 rulings | docs/rules/** | verified (2743862 et al.; 23/23 hashes; D151) |
 | M09b | 1 | opus-rules-reviewer | M2D | Re-review of revised specs/fixtures; activation gate | docs/reviews/2026-09-23-rules-review-R01-R05.md (addendum) | verified (4bcf07b; R01 v1 approve_for_activation; others approve_with_changes; D154) |
-| M2E | 1 | opus-rules-researcher | M09b | Apply M09b §B.8 edits; README rule 3 cap; confirmed-vs-observed fixture per file | docs/rules/** | in_progress |
-| M09c | 1 | opus-rules-reviewer | M2E | Re-check changed items only | review addendum | pending |
+| M2E | 1 | opus-rules-researcher | M09b | Apply M09b §B.8 edits; README rule 3 cap; confirmed-vs-observed fixture per file | docs/rules/** | verified (0ce6c95..58f2ac9) |
+| M09c | 1 | opus-rules-reviewer | M2E | Re-check changed items only | review addendum | in_progress |
 | M06f | 1 | opus-product-architect | M09b | Contract §4 5c decided + disputed-anchor deadline rule + not_yet_due next action (D154) | contract | verified (ab72962, e780129; M12 briefed) |
 
 ---
@@ -594,5 +594,5 @@ release-candidate.md: commit SHA, tag `rc-<date>`, node/npm versions, lockfile s
 | M18 | opus-rules-reviewer | pending (M09, M12, M1C) |
 | M19 | opus-qa-engineer-2 | pending (M08) |
 | M1A | opus-ingestion-integrations-engineer-2 | verified (ccdd61f; 99/99; D149) |
-| M1B | opus-backend-engineer-4 | in_progress (from 92993cb) |
+| M1B | opus-backend-engineer-4 | verified (34a2f87 via lead integration feaa52a; D156) |
 | M1C | opus-rules-researcher | done (72fe1a2; → M09b re-review with M2D) |
