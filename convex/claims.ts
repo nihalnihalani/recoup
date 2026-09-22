@@ -3,12 +3,12 @@ import { components } from "./_generated/api";
 import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { ownedClaim, ownedItem, requireUserId } from "./lib/access";
-import { balance, deriveStatus, newToken, statusAfterEvent } from "./lib/ledger";
-import { assertCents, assertPositiveCents } from "./lib/money";
+import { balance, deriveStatus, newToken, provisionalOutstanding, statusAfterEvent } from "./lib/ledger";
+import { assertCents, assertPositiveCents, assertUserAmount, claimCurrency } from "./lib/money";
 import { assertMaxChars } from "./lib/text";
-import schema, { claimStatus, eventKind } from "./schema";
+import schema, { claimStatus, eventKind, money, nonCashKind } from "./schema";
 import { cancelPending } from "./followUps";
-import { claimBalance, balanceValidator } from "./lib/balance";
+import { claimBalance, claimEvents, balanceValidator } from "./lib/balance";
 import { isClosedForAsk } from "./lib/claimState";
 import { agentmail } from "./mail";
 
@@ -26,6 +26,10 @@ import { agentmail } from "./mail";
 const MAX_EVIDENCE_CHARS = 2_000;
 const MAX_REASON_CHARS = 500;
 const MAX_IDEMPOTENCY_KEY_CHARS = 128;
+/** A non-cash remedy's description ("Store voucher, expires 2027-01-31"): one line, not a document. */
+const MAX_NON_CASH_DESCRIPTION_CHARS = 500;
+/** Non-cash rows `get` returns per claim: a handful per case in practice; bounded read (guidelines). */
+const MAX_NON_CASH_READ = 100;
 
 /**
  * Same accepted deviation as `drafts.sendCtx` (D12a): the AgentMail
@@ -214,13 +218,18 @@ async function findLedgerDuplicate(
     .first();
 }
 
+type LedgerKind = Doc<"ledgerEvents">["kind"];
+
 /**
  * Appends one ledger event and recomputes claim status from the full
  * ledger (ARCHITECTURE_PATTERNS: derived sums are never stored). Refuses a
  * dismissed claim, which is terminal. Idempotency keys are scoped to the
  * claim (D38): the same key with the same kind and cents is a no-op, the
  * same key with different facts is a conflict. A later debit can never
- * exceed the net confirmed credit (D40).
+ * exceed the net confirmed credit (D40); a provisional release can never
+ * exceed the outstanding provisional credit (§3.2). `currency`, when given,
+ * is stamped on the row (every NEW writer passes the claim's currency) and
+ * a dedupe hit with a different stamped currency is a conflict.
  *
  * D112 6a-1: `MAX_IDEMPOTENCY_KEY_CHARS` is NOT enforced here any more --
  * only on the client-supplied keys the public mutations below take
@@ -229,15 +238,20 @@ async function findLedgerDuplicate(
  * length bound is meaningful for it; `legacyIdempotencyKey`, when passed, is
  * the pre-migration raw key the same caller used to write (see
  * `findLedgerDuplicate` above).
+ *
+ * Not exported: every write goes through `applyEvent` (which refuses
+ * `confirmed_credit`) or `writeConfirmedCredit` (the one confirmed-credit
+ * writer, SEC-MF-5 as amended by D145).
  */
-export async function applyEvent(
+async function appendLedgerEvent(
   ctx: MutationCtx,
   claim: Doc<"claims">,
-  kind: Doc<"ledgerEvents">["kind"],
+  kind: LedgerKind,
   cents: number,
   evidence: string,
   idempotencyKey: string,
   legacyIdempotencyKey?: string,
+  currency?: string,
 ) {
   if (claim.status === "dismissed") throw new ConvexError("Claim is dismissed");
   assertPositiveCents(cents, "cents");
@@ -246,7 +260,8 @@ export async function applyEvent(
 
   const dup = await findLedgerDuplicate(ctx, claim._id, idempotencyKey, legacyIdempotencyKey);
   if (dup) {
-    if (dup.kind !== kind || dup.cents !== cents) throw new ConvexError("idempotency conflict");
+    const currencyDiffers = currency !== undefined && dup.currency !== undefined && dup.currency !== currency;
+    if (dup.kind !== kind || dup.cents !== cents || currencyDiffers) throw new ConvexError("idempotency conflict");
     return { deduped: true as const, status: claim.status };
   }
 
@@ -256,8 +271,22 @@ export async function applyEvent(
       throw new ConvexError("A later debit cannot exceed the confirmed credit");
     }
   }
+  if (kind === "provisional_released") {
+    const outstanding = provisionalOutstanding(await claimEvents(ctx, claim._id));
+    if (cents > outstanding) {
+      throw new ConvexError("A release cannot exceed the outstanding provisional credit");
+    }
+  }
 
-  await ctx.db.insert("ledgerEvents", { claimId: claim._id, userId: claim.userId, kind, cents, evidence, idempotencyKey });
+  await ctx.db.insert("ledgerEvents", {
+    claimId: claim._id,
+    userId: claim.userId,
+    kind,
+    cents,
+    evidence,
+    idempotencyKey,
+    ...(currency === undefined ? {} : { currency }),
+  });
   const events = await ctx.db
     .query("ledgerEvents")
     .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
@@ -273,6 +302,62 @@ export async function applyEvent(
   return { deduped: false as const, status };
 }
 
+/**
+ * The ledger write every other module uses (replies, intake, the claim
+ * mutations below). It can NEVER write `confirmed_credit`: only the user's
+ * own confirmation creates confirmed money (mission §6, SEC-MF-5), through
+ * `writeConfirmedCredit`. The type excludes it and a runtime check refuses it.
+ */
+export async function applyEvent(
+  ctx: MutationCtx,
+  claim: Doc<"claims">,
+  kind: Exclude<LedgerKind, "confirmed_credit">,
+  cents: number,
+  evidence: string,
+  idempotencyKey: string,
+  legacyIdempotencyKey?: string,
+  currency?: string,
+) {
+  if ((kind as LedgerKind) === "confirmed_credit") {
+    throw new ConvexError("A confirmed credit is recorded only by the user's own confirmation");
+  }
+  return await appendLedgerEvent(ctx, claim, kind, cents, evidence, idempotencyKey, legacyIdempotencyKey, currency);
+}
+
+/**
+ * THE only writer of `confirmed_credit` (SEC-MF-5 as amended by D145; DA-A-16). Reached only from
+ * user-authenticated mutations in this file: `confirmCredit` and `finalizeProvisionalCredit`. The amount is a
+ * user-typed amount, so it is bounded by `MAX_USER_AMOUNT_MINOR` (D145).
+ */
+async function writeConfirmedCredit(
+  ctx: MutationCtx,
+  claim: Doc<"claims">,
+  cents: number,
+  evidence: string,
+  idempotencyKey: string,
+  currency: string | undefined,
+) {
+  assertUserAmount(cents, "cents");
+  return await appendLedgerEvent(ctx, claim, "confirmed_credit", cents, evidence, idempotencyKey, undefined, currency);
+}
+
+/** The claim's currency (`lib/money.claimCurrency`): its own, else its purchase's; null when neither is known. */
+async function currencyOf(ctx: MutationCtx, claim: Doc<"claims">): Promise<string | null> {
+  if (claim.currency !== undefined) return claim.currency;
+  return claimCurrency(claim, await ctx.db.get(claim.purchaseId));
+}
+
+/** As `currencyOf`, for the new money writers that REQUIRE a currency (§2.4: ledgerEvents.currency). */
+async function requireCurrency(ctx: MutationCtx, claim: Doc<"claims">): Promise<string> {
+  const currency = await currencyOf(ctx, claim);
+  if (currency === null) throw new ConvexError("This claim's currency is unknown");
+  return currency;
+}
+
+/**
+ * Internal-only ledger path. Admits only the merchant/system-sourced kinds (`promised_credit`, `later_debit`);
+ * `confirmed_credit` and both provisional kinds are user-recorded and have their own authenticated mutations.
+ */
 export const applyEventInternal = internalMutation({
   args: {
     claimId: v.id("claims"),
@@ -285,14 +370,32 @@ export const applyEventInternal = internalMutation({
   handler: async (ctx, args) => {
     const claim = await ctx.db.get(args.claimId);
     if (!claim || claim.userId !== args.userId) throw new ConvexError("Claim not found");
-    return applyEvent(ctx, claim, args.kind, args.cents, args.evidence, args.idempotencyKey);
+    const kind = args.kind;
+    if (kind !== "promised_credit" && kind !== "later_debit") {
+      throw new ConvexError(`${kind} cannot be recorded through applyEventInternal`);
+    }
+    return applyEvent(ctx, claim, kind, args.cents, args.evidence, args.idempotencyKey);
   },
 });
 
 const applyEventResult = v.object({ deduped: v.boolean(), status: claimStatus });
 
+/**
+ * The user confirms money posted (the only source of confirmed recovery, mission §6).
+ * rev 5 N5 (D148): while a provisional credit is outstanding the user must say which this is. Without
+ * `separateFromProvisional: true` the mutation writes nothing and throws
+ * `ConvexError({ kind: "ProvisionalOutstanding", provisionalMinor })`; the UI then offers "the provisional
+ * credit became final" (→ `finalizeProvisionalCredit`) or "a separate credit" (→ this mutation with the flag).
+ * A genuinely separate posting is never refused. A retry of a credit already recorded under this key dedupes.
+ */
 export const confirmCredit = mutation({
-  args: { claimId: v.id("claims"), cents: v.number(), evidence: v.string(), idempotencyKey: v.string() },
+  args: {
+    claimId: v.id("claims"),
+    cents: v.number(),
+    evidence: v.string(),
+    idempotencyKey: v.string(),
+    separateFromProvisional: v.optional(v.boolean()),
+  },
   returns: applyEventResult,
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
@@ -300,7 +403,15 @@ export const confirmCredit = mutation({
     // D112 6a-1: the 128-char bound is enforced HERE, at the public
     // mutation that takes a client-supplied key, not inside `applyEvent`.
     assertMaxChars(args.idempotencyKey, "idempotencyKey", MAX_IDEMPOTENCY_KEY_CHARS);
-    return applyEvent(ctx, claim, "confirmed_credit", args.cents, args.evidence, args.idempotencyKey);
+    assertPositiveCents(args.cents, "cents");
+    assertUserAmount(args.cents, "cents");
+    if (args.separateFromProvisional !== true) {
+      const provisionalMinor = provisionalOutstanding(await claimEvents(ctx, claim._id));
+      if (provisionalMinor > 0 && !(await findLedgerDuplicate(ctx, claim._id, args.idempotencyKey))) {
+        throw new ConvexError({ kind: "ProvisionalOutstanding", provisionalMinor });
+      }
+    }
+    return writeConfirmedCredit(ctx, claim, args.cents, args.evidence, args.idempotencyKey, (await currencyOf(ctx, claim)) ?? undefined);
   },
 });
 
@@ -312,6 +423,131 @@ export const recordLaterDebit = mutation({
     const claim = await ownedClaim(ctx, args.claimId, userId);
     assertMaxChars(args.idempotencyKey, "idempotencyKey", MAX_IDEMPOTENCY_KEY_CHARS);
     return applyEvent(ctx, claim, "later_debit", args.cents, args.evidence, args.idempotencyKey);
+  },
+});
+
+/**
+ * The user records a PROVISIONAL credit (e.g. an issuer's provisional credit during an investigation, §3.2).
+ * It is shown as "of which provisional", never as recovered money, and never changes the claim's status.
+ * The amount must be in the claim's currency.
+ */
+export const recordProvisionalCredit = mutation({
+  args: { claimId: v.id("claims"), amount: money, evidence: v.string(), idempotencyKey: v.string() },
+  returns: applyEventResult,
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const claim = await ownedClaim(ctx, args.claimId, userId);
+    assertMaxChars(args.idempotencyKey, "idempotencyKey", MAX_IDEMPOTENCY_KEY_CHARS);
+    assertPositiveCents(args.amount.amountMinor, "amount");
+    assertUserAmount(args.amount.amountMinor, "amount");
+    const currency = await requireCurrency(ctx, claim);
+    if (args.amount.currency !== currency) {
+      throw new ConvexError(`currency mismatch: this claim is in ${currency}`);
+    }
+    return applyEvent(ctx, claim, "provisional_credit", args.amount.amountMinor, args.evidence, args.idempotencyKey, undefined, currency);
+  },
+});
+
+/**
+ * The provisional credit became final (DA-A-16). Writes `provisional_released` under the derived key
+ * `${idempotencyKey}:release` and `confirmed_credit` under `${idempotencyKey}:confirm` — two events, two keys,
+ * so one client key never collides with itself (repro A.2) — the confirmed credit through the same single
+ * writer `confirmCredit` uses. A retry dedupes both. `cents` may not exceed the outstanding provisional credit.
+ */
+export const finalizeProvisionalCredit = mutation({
+  args: { claimId: v.id("claims"), cents: v.number(), evidence: v.string(), idempotencyKey: v.string() },
+  returns: applyEventResult,
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const claim = await ownedClaim(ctx, args.claimId, userId);
+    assertMaxChars(args.idempotencyKey, "idempotencyKey", MAX_IDEMPOTENCY_KEY_CHARS);
+    assertPositiveCents(args.cents, "cents");
+    assertUserAmount(args.cents, "cents");
+    const currency = await requireCurrency(ctx, claim);
+    const released = await applyEvent(
+      ctx, claim, "provisional_released", args.cents, args.evidence, `${args.idempotencyKey}:release`, undefined, currency,
+    );
+    const fresh = await ctx.db.get(claim._id);
+    if (!fresh) throw new ConvexError("Claim not found");
+    const confirmed = await writeConfirmedCredit(ctx, fresh, args.cents, args.evidence, `${args.idempotencyKey}:confirm`, currency);
+    return { deduped: released.deduped && confirmed.deduped, status: confirmed.status };
+  },
+});
+
+/** The provisional credit was reversed (§3.2): releases it with no confirmed money. Status unchanged. */
+export const reverseProvisionalCredit = mutation({
+  args: { claimId: v.id("claims"), cents: v.number(), evidence: v.string(), idempotencyKey: v.string() },
+  returns: applyEventResult,
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const claim = await ownedClaim(ctx, args.claimId, userId);
+    assertMaxChars(args.idempotencyKey, "idempotencyKey", MAX_IDEMPOTENCY_KEY_CHARS);
+    assertPositiveCents(args.cents, "cents");
+    assertUserAmount(args.cents, "cents");
+    const currency = await requireCurrency(ctx, claim);
+    return applyEvent(ctx, claim, "provisional_released", args.cents, args.evidence, args.idempotencyKey, undefined, currency);
+  },
+});
+
+/**
+ * Records a non-cash remedy (voucher, points, repair, replacement…; contract §3.2, M10 wave 1): an append-only
+ * `nonCashRemedies` row, `promised` or `received`, that never touches the ledger, the claim's status or its
+ * version, and never enters a cash total (mission §6: non-cash is not interchangeable with cash). A face value,
+ * when given, is a user-typed amount in the claim's currency, shown per item only. Idempotency is per claim
+ * (same key + same facts → dedupe; different facts → conflict). Closing a claim on a non-cash resolution is
+ * `recordNonCashResolution` (M20, wave 2).
+ */
+export const recordNonCashRemedy = mutation({
+  args: {
+    claimId: v.id("claims"),
+    kind: nonCashKind,
+    description: v.string(),
+    faceValue: v.optional(money),
+    state: v.union(v.literal("promised"), v.literal("received")),
+    idempotencyKey: v.string(),
+  },
+  returns: v.object({ deduped: v.boolean(), remedyId: v.id("nonCashRemedies") }),
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const claim = await ownedClaim(ctx, args.claimId, userId);
+    if (claim.status === "dismissed") throw new ConvexError("Claim is dismissed");
+    assertMaxChars(args.idempotencyKey, "idempotencyKey", MAX_IDEMPOTENCY_KEY_CHARS);
+    if (args.idempotencyKey.trim().length === 0) throw new ConvexError("idempotencyKey must not be empty");
+    const description = args.description.trim();
+    if (description.length === 0) throw new ConvexError("description must not be empty");
+    assertMaxChars(description, "description", MAX_NON_CASH_DESCRIPTION_CHARS);
+    if (args.faceValue) {
+      assertPositiveCents(args.faceValue.amountMinor, "faceValue");
+      assertUserAmount(args.faceValue.amountMinor, "faceValue");
+      const currency = await requireCurrency(ctx, claim);
+      if (args.faceValue.currency !== currency) throw new ConvexError(`currency mismatch: this claim is in ${currency}`);
+    }
+
+    const dup = await ctx.db
+      .query("nonCashRemedies")
+      .withIndex("by_claim_and_idempotency_key", (q) => q.eq("claimId", claim._id).eq("idempotencyKey", args.idempotencyKey))
+      .unique();
+    if (dup) {
+      const same =
+        dup.kind === args.kind &&
+        dup.state === args.state &&
+        dup.description === description &&
+        dup.faceValue?.amountMinor === args.faceValue?.amountMinor &&
+        dup.faceValue?.currency === args.faceValue?.currency;
+      if (!same) throw new ConvexError("idempotency conflict");
+      return { deduped: true, remedyId: dup._id };
+    }
+    const remedyId = await ctx.db.insert("nonCashRemedies", {
+      userId,
+      claimId: claim._id,
+      kind: args.kind,
+      description,
+      ...(args.faceValue ? { faceValue: args.faceValue } : {}),
+      state: args.state,
+      idempotencyKey: args.idempotencyKey,
+      recordedAt: Date.now(),
+    });
+    return { deduped: false, remedyId };
   },
 });
 
@@ -438,6 +674,10 @@ export const get = query({
     // has a schema for it.
     messages: v.any(),
     balance: balanceValidator,
+    /** Outstanding provisional credit (§3.2): shown as "of which provisional", never in `balance`. */
+    provisionalMinor: v.number(),
+    /** Non-cash remedies, oldest first (never summed with cash). */
+    nonCashRemedies: v.array(schema.doc("nonCashRemedies")),
   }),
   handler: async (ctx, { claimId }) => {
     const userId = await requireUserId(ctx);
@@ -465,6 +705,12 @@ export const get = query({
       .query("claimNotes")
       .withIndex("by_claim", (q) => q.eq("claimId", claimId))
       .collect();
+    const nonCashRemedies = (
+      await ctx.db
+        .query("nonCashRemedies")
+        .withIndex("by_claim_and_idempotency_key", (q) => q.eq("claimId", claimId))
+        .take(MAX_NON_CASH_READ)
+    ).sort((a, b) => a.recordedAt - b.recordedAt || a._creationTime - b._creationTime);
     const policy = claim.policyId ? await ctx.db.get(claim.policyId) : null;
     const messages = claim.threadId
       ? await ctx.runQuery(components.agentmail.lib.listInboundMessages, { threadId: claim.threadId })
@@ -481,6 +727,8 @@ export const get = query({
       policy,
       messages,
       balance: balance(claim.expectedCents, events),
+      provisionalMinor: provisionalOutstanding(events),
+      nonCashRemedies,
     };
   },
 });
