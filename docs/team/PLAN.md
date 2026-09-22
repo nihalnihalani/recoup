@@ -26,7 +26,9 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | M02 | 0 | opus-rules-researcher | – | First-party rule research: Phase-1 rule specs R01–R05 with captured passages + fixtures; triage R06–R25 sources | docs/rules/** | verified (9a1e913, c6bb660, 6c429c8; lead verified §260.2/§254.4/§1026.13/§435 passages and 12/12 source SHA-256; all packs `researched`, none active) |
 | M03 | 0 | opus-security-privacy-reviewer | – | P01/P02/P08/P09 reclassification on current revision; public endpoint inventory delta; threat model for upload/documents/new channels/sensitive domains | docs/reviews/2026-09-23-security-baseline.md | verified (793fc29; 367/367 P-suites; 7 throwaway repros; lead confirmed S-M03-1 in component source lib.ts:190-200) |
 | M04 | 0 | opus-qa-engineer | – | Fix the dated-`now` test time-bomb (tracking.test.ts ×2) and sweep for others; P03–P07/P10–P12 reclassification; test-harness inventory | convex/*.test.ts (fixture-clock fixes only), docs/reviews/2026-09-23-qa-baseline.md | verified (f128bf4 time-bomb fix, lead re-ran tracking 13/13; 19499cf QA baseline) |
-| M05 | 0 | opus-devils-advocate | M01 | Checkpoint A: adversarial review of the M01 contract before implementation | docs/reviews/2026-09-23-da-checkpoint-A.md | in_progress |
+| M05 | 0 | opus-devils-advocate | M01 | Checkpoint A: adversarial review of the M01 contract before implementation | docs/reviews/2026-09-23-da-checkpoint-A.md | verified (c47b023; approve-with-changes; 0C/11H/14M/11L; all accepted, rulings D145) |
+| M06 | 0 | opus-product-architect | M05 | Contract rev 4: all pre-wave-1 changes (DA-A-1..5,7,8,9,11,13..17,21) + D142 + D143 + D145 rulings; pre-wave-2 items written as specified text; new tasks for pack review, source re-verification, R01 v2, R10/R13/R18/R19–R25, deadline attention, diagnostics, copy consistency | docs/team/contracts/2026-09-23-M01-*.md | in_progress |
+| M07 | 0 | opus-devils-advocate | M06 | Recheck rev 4 against the pre-wave-1 required changes only | docs/reviews/2026-09-23-da-checkpoint-A.md (addendum) | pending |
 
 ---
 

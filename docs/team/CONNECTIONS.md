@@ -172,3 +172,31 @@ LOW items (F-AUD-7…12) do not block.
 Re-fetched at finalization: `origin/main` is still `ba15aaf3addd7ddcbfbfa3fd2f85f32cb55243e1` — **the delta is empty**, so every row above refers to `ba15aaf` and no row status changes from the delta pass.
 
 Observed but NOT audited (uncommitted, not on `origin/main`, therefore not part of the candidate): the shared checkout carries T18.5's in-flight working tree (`git diff --stat` = 15 files, +897/−27: `account.ts/.test`, `drafts.ts/.test`, `mailPurge.ts`, `ops.ts/.test`, `policies.ts/.test`, `priceWatch.ts/.test`, `profiles.ts/.test`, `docs/ops/RUNBOOK.md`, `patches/@agentmail+convex+0.1.0.patch`). A read-only grep shows it targets exactly the D124 list: `isTombstoned` now appears in `policies.ts` (2), `profiles.ts` (3), `priceWatch.ts` (4), `drafts.ts` (3) (B2–B5); `ops.backlog` calls `internal.account.stuckDeletions` (B6); the patch adds `purgeOutbound` (B1); RUNBOOK §11 now names `ops:resetRetentionCursor` instead of `--inline-mutation` (F-AUD-5/F-T23-3). When it lands, re-run `zz_audit.test.ts › B4 (D124)` (expected to flip to PASS) and re-check that F-AUD-2's concurrent-`ensureInbox` case is covered by the B3 fix (it is a different race: same user, not deletion). F-AUD-1 (`purchases.board`) is not in that diff.
+
+
+## Mission 2 connections (C37–C58) — added 2026-09-23 (lead); all NOT_IMPLEMENTED until their tasks land
+
+| ID | Scenario | Planned producer → consumer | Owning task(s) | Status |
+|---|---|---|---|---|
+| C37 | Upload → owned storage → extraction → candidate facts | `http.ts` POST /evidence/upload → `evidence.finalizeUpload` → extraction action → `facts` | M13, M23 | NOT_IMPLEMENTED |
+| C38 | Transaction confirmation → typed records → evidence links | `transactions`/`facts` writers → `evidence` links | M11, M13 | NOT_IMPLEMENTED |
+| C39 | Manual incident → confirmed facts → evaluator selection | incident entry → `facts` → `lib/rules/applicable` | M11, M12, M24 | NOT_IMPLEMENTED |
+| C40 | First-party source → captured passage → versioned reviewed rule | `docs/rules/sources` → pack module → rules-reviewer → DECISIONS activation | M02 ✓ (capture), pack review task, M12 | NOT_IMPLEMENTED (captures exist) |
+| C41 | Jurisdiction/payment/product classification → rule selection | fact snapshot → `lib/rules/applicable` | M12, M21, M22 | NOT_IMPLEMENTED |
+| C42 | Fact snapshot + rule version → deterministic evaluation | `snapshot_*` → pack evaluator → `evaluations` | M12 | NOT_IMPLEMENTED |
+| C43 | Missing facts → questions → confirmation → re-evaluation | `opportunities` missingFacts → Questions UI → `putFact` → re-evaluate | M11, M12, M15 | NOT_IMPLEMENTED |
+| C44 | Evaluation → authority/amount/deadline/source presentation | `opportunities` query → OpportunityCard | M12, M15 | NOT_IMPLEMENTED |
+| C45 | Multiple opportunities → overlap → non-duplicated totals | loss components → `recovery.summary` | M12 | NOT_IMPLEMENTED |
+| C46 | Selected opportunity → compatible claim/case | `cases.openCaseForOpportunity` → `claims` | M12, M20 | NOT_IMPLEMENTED |
+| C47 | Evidence + rule + facts → versioned claim packet | `packets` builders | M20, M21, M22 | NOT_IMPLEMENTED |
+| C48 | Packet edit / source / fact change → approval invalidation | binding hash + ENGINE_VERSION → materiality → version bump | M12, M13, M20 | NOT_IMPLEMENTED |
+| C49 | Approved claim → channel → truthful submission evidence | email (AgentMail) / `submissions.record` with `requiredChannel` | M13, M20 | NOT_IMPLEMENTED |
+| C50 | Notice anchor → deadline → reminder → current-state guard | `lib/deadlines` (obligor-aware) → in-app attention sweep | M12, wave-2 deadline task | NOT_IMPLEMENTED |
+| C51 | Exact card product + guide version → benefit evaluation | card-product fact → benefit packs | M30 | NOT_IMPLEMENTED |
+| C52 | Product/serial/VIN → recall candidate → confirmed match | recall packs | M32 | NOT_IMPLEMENTED |
+| C53 | Program/source refresh → reviewed update → affected opportunities | `scripts/verify-rule-sources.mjs` → review item → re-evaluation sweep | source-verify task, M34 | NOT_IMPLEMENTED |
+| C54 | Rule supersession → preserved historical evaluation → safe re-evaluation | `evaluations` append-only → re-evaluation sweep | M34 | NOT_IMPLEMENTED |
+| C55 | New claim categories → ledger → confirmed recovery dashboard | scenario claims → `ledgerEvents` → `recovery.summary` | M10, M12, M20 | NOT_IMPLEMENTED |
+| C56 | Sensitive-document export/deletion → storage/providers/jobs | `account.ts` export/purge incl. `_storage` blobs | M14 | NOT_IMPLEMENTED |
+| C57 | Coverage registry → UI availability → no unsupported automation | production registry (active packs only) → coverage list UI | M12, M15/M35 | NOT_IMPLEMENTED |
+| C58 | Diagnostics / feature controls → operator action → bounded recovery | `ops.backlog` + extraction flag + rule-eval/source-refresh logs | wave-2 ops task | NOT_IMPLEMENTED |
