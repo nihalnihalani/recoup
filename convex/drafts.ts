@@ -701,7 +701,7 @@ export type PrepareCode =
   | "unverified_content";
 
 type ApprovalState =
-  | { ok: false; code: PrepareCode; message: string; findings?: string[]; estimate?: Money }
+  | { ok: false; code: PrepareCode; message: string; findings?: string[]; findingsHash?: string; estimate?: Money }
   | {
       ok: true;
       /** The binding to approve under (linked claims), or null (the legacy binding: text + versions). */
@@ -710,9 +710,24 @@ type ApprovalState =
       /** DA-B-2: the claim asks more than the rule's exact estimate and the user acknowledged it. */
       amountAboveEstimate: boolean;
       findings: string[];
+      /** DA-B-11: the hash of exactly these findings for exactly this text (`findingsHashOf`). */
+      findingsHash: string;
     };
 
-type Acks = { windowRisk: boolean; unverifiedContent: boolean; amountAboveEstimate: boolean };
+/**
+ * The user's acknowledgments. `unverifiedContent` is the `findingsHash` of the findings the user was SHOWN and
+ * accepted (DA-B-11) — never a bare yes: it covers only that set of findings for that text.
+ */
+type Acks = { windowRisk: boolean; unverifiedContent: string | null; amountAboveEstimate: boolean };
+
+/**
+ * DA-B-11 (D195): the canonical hash of a content-check result — the sorted findings plus the approved text and
+ * draft version — so an acknowledgment is tied to what the user saw, and a changed finding or a changed text needs a
+ * new one.
+ */
+async function findingsHashOf(draft: Doc<"drafts">, text: ApprovalText, findings: readonly string[]): Promise<string> {
+  return await canonicalHash({ v: 1, findings: [...findings].sort(), draftVersion: draft.version, to: text.to, subject: text.subject, body: text.body });
+}
 
 const RULE_WITHDRAWN_MESSAGE =
   "Recoup's automatic checks for this kind of claim were withdrawn. Review the claim and approve it again.";
@@ -784,21 +799,29 @@ async function approvalState(
     };
   }
   const findings = unverifiedContent(text.body, await draftAllowances(ctx, claim, purchase, text.to, link?.evaluation ?? null));
-  if (findings.length > 0 && !acks.unverifiedContent) {
+  const findingsHash = await findingsHashOf(draft, text, findings);
+  if (findings.length > 0 && acks.unverifiedContent !== findingsHash) {
     return {
       ok: false,
       code: "unverified_content",
       message: "The message mentions details Recoup did not supply. Edit them out, or confirm that you checked them.",
       findings,
+      findingsHash,
     };
   }
-  return { ok: true, binding, needsWindowAck, amountAboveEstimate: amountReview !== null, findings };
+  return { ok: true, binding, needsWindowAck, amountAboveEstimate: amountReview !== null, findings, findingsHash };
 }
 
-function acksOf(input: { acknowledgeWindowRisk?: boolean; acknowledgeUnverifiedContent?: boolean; acknowledgeAmountAboveEstimate?: boolean }): Acks {
+function acksOf(input: {
+  acknowledgeWindowRisk?: boolean;
+  acknowledgeUnverifiedContent?: boolean;
+  acknowledgedFindingsHash?: string;
+  acknowledgeAmountAboveEstimate?: boolean;
+}): Acks {
   return {
     windowRisk: input.acknowledgeWindowRisk === true,
-    unverifiedContent: input.acknowledgeUnverifiedContent === true,
+    // DA-B-11: the flag alone acknowledges nothing; it counts only together with the findings hash the user saw.
+    unverifiedContent: input.acknowledgeUnverifiedContent === true && input.acknowledgedFindingsHash !== undefined ? input.acknowledgedFindingsHash : null,
     amountAboveEstimate: input.acknowledgeAmountAboveEstimate === true,
   };
 }
@@ -820,7 +843,7 @@ async function preparedHashOf(
     body: text.body,
     ...(state.needsWindowAck ? { acknowledgeWindowRisk: true } : {}),
     ...(state.amountAboveEstimate ? { acknowledgeAmountAboveEstimate: true } : {}),
-    ...(state.findings.length > 0 ? { acknowledgeUnverifiedContent: true } : {}),
+    ...(state.findings.length > 0 ? { acknowledgedFindingsHash: state.findingsHash } : {}),
   });
 }
 
@@ -837,6 +860,8 @@ const prepareArgs = {
   body: v.string(),
   acknowledgeWindowRisk: v.optional(v.boolean()),
   acknowledgeUnverifiedContent: v.optional(v.boolean()),
+  /** DA-B-11: the `findingsHash` of the findings the user was shown and accepted; required with the flag above. */
+  acknowledgedFindingsHash: v.optional(v.string()),
   /** DA-B-2: the user chose to ask for the claim's full amount although Recoup's exact estimate is lower. */
   acknowledgeAmountAboveEstimate: v.optional(v.boolean()),
 };
@@ -852,19 +877,21 @@ const prepareCode = v.union(
   v.literal("unverified_content"),
 );
 const prepareResult = v.union(
-  v.object({ ok: v.literal(true), preparedHash: v.string(), findings: v.array(v.string()) }),
+  v.object({ ok: v.literal(true), preparedHash: v.string(), findings: v.array(v.string()), findingsHash: v.string() }),
   v.object({
     ok: v.literal(false),
     code: prepareCode,
     message: v.string(),
     findings: v.optional(v.array(v.string())),
+    /** `unverified_content` only: acknowledge exactly these findings by echoing it as `acknowledgedFindingsHash`. */
+    findingsHash: v.optional(v.string()),
     /** `amount_exceeds_estimate` only: the estimate the UI offers to adjust the claim to. */
     estimate: v.optional(moneyValidator),
   }),
 );
 type PrepareResult =
-  | { ok: true; preparedHash: string; findings: string[] }
-  | { ok: false; code: PrepareCode; message: string; findings?: string[]; estimate?: Money };
+  | { ok: true; preparedHash: string; findings: string[]; findingsHash: string }
+  | { ok: false; code: PrepareCode; message: string; findings?: string[]; findingsHash?: string; estimate?: Money };
 
 /**
  * The evaluation half of a prepare: re-evaluates the claim's R01 subject (`approval_check`) and COMMITS it — the
@@ -908,6 +935,7 @@ async function prepareCore(
     body: string;
     acknowledgeWindowRisk?: boolean;
     acknowledgeUnverifiedContent?: boolean;
+    acknowledgedFindingsHash?: string;
     acknowledgeAmountAboveEstimate?: boolean;
   },
 ): Promise<PrepareResult> {
@@ -932,7 +960,7 @@ async function prepareCore(
   // A draft written before its claim was linked is bound now, at the user's review (the text they see is the text
   // being bound); a draft already bound keeps its original evaluation reference (N6).
   if (state.binding !== null && draft.binding === undefined) await ctx.db.patch(draft._id, { binding: state.binding });
-  return { ok: true, preparedHash: await preparedHashOf(draft, fresh, text, state), findings: state.findings };
+  return { ok: true, preparedHash: await preparedHashOf(draft, fresh, text, state), findings: state.findings, findingsHash: state.findingsHash };
 }
 
 /**
@@ -974,8 +1002,10 @@ const sendApprovalArgs = {
   preparedHash: v.optional(v.string()),
   /** C1 / DA-A-21: the user acknowledged that the store's window may have passed. */
   acknowledgeWindowRisk: v.optional(v.boolean()),
-  /** SEC-AI-4: the user checked the details `prepareSend` flagged in the body. */
+  /** SEC-AI-4: the user checked the details `prepareSend` flagged in the body (with `acknowledgedFindingsHash`). */
   acknowledgeUnverifiedContent: v.optional(v.boolean()),
+  /** DA-B-11: the `findingsHash` of exactly the findings the user checked; a different current set refuses the send. */
+  acknowledgedFindingsHash: v.optional(v.string()),
   /** DA-B-2: the user asks for the claim's full amount although Recoup's exact estimate is lower. */
   acknowledgeAmountAboveEstimate: v.optional(v.boolean()),
 };
@@ -989,6 +1019,7 @@ type SendApproval = {
   preparedHash?: string;
   acknowledgeWindowRisk?: boolean;
   acknowledgeUnverifiedContent?: boolean;
+  acknowledgedFindingsHash?: string;
   acknowledgeAmountAboveEstimate?: boolean;
 };
 
@@ -1104,6 +1135,10 @@ async function verifyPrepared(
     throw new ConvexError("Adjust the claim amount, or confirm that you want to ask for the full amount, then send.");
   }
   if (!state.ok && state.code === "rule_withdrawn") throw new ConvexError(state.message);
+  if (!state.ok && state.code === "unverified_content") {
+    // DA-B-11: the acknowledgment covered other findings (or other text) than the ones the check finds now.
+    throw new ConvexError(`Review the message again. It mentions details you have not checked: ${(state.findings ?? []).join("; ")}.`);
+  }
   if (!state.ok || args.preparedHash === undefined || (await preparedHashOf(draft, claim, text, state)) !== args.preparedHash) {
     throw new ConvexError("Review the claim again before sending.");
   }
@@ -1167,7 +1202,14 @@ export const approveAndSend = mutation({
 
 const resendResult = v.union(
   v.object({ ok: v.literal(true), outboundId: vOutboundId, draftId: v.id("drafts") }),
-  v.object({ ok: v.literal(false), code: v.union(v.literal("outcome_known"), prepareCode), message: v.string(), findings: v.optional(v.array(v.string())) }),
+  v.object({
+    ok: v.literal(false),
+    code: v.union(v.literal("outcome_known"), prepareCode),
+    message: v.string(),
+    findings: v.optional(v.array(v.string())),
+    findingsHash: v.optional(v.string()),
+    estimate: v.optional(moneyValidator),
+  }),
 );
 
 /**

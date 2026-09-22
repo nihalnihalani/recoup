@@ -206,7 +206,7 @@ type PrepareCode = Extract<FunctionReturnType<typeof api.drafts.prepareSend>, { 
 type Pending =
   | { kind: "ack_window"; message: string }
   | { kind: "ack_amount"; message: string; estimate: { amountMinor: number; currency: string } | undefined }
-  | { kind: "ack_content"; message: string; findings: string[] }
+  | { kind: "ack_content"; message: string; findings: string[]; findingsHash: string | undefined }
   | { kind: "blocked"; message: string }
   | { kind: "review"; message: string }
   | { kind: "retry_later"; message: string };
@@ -216,6 +216,7 @@ function pendingFor(
   message: string,
   findings: string[] | undefined,
   estimate?: { amountMinor: number; currency: string },
+  findingsHash?: string,
 ): Pending {
   switch (code) {
     case "window_may_have_passed":
@@ -223,7 +224,7 @@ function pendingFor(
     case "amount_exceeds_estimate":
       return { kind: "ack_amount", message, estimate };
     case "unverified_content":
-      return { kind: "ack_content", message, findings: findings ?? [] };
+      return { kind: "ack_content", message, findings: findings ?? [], findingsHash };
     case "outcome_not_approvable":
     case "example_claim":
       return { kind: "blocked", message };
@@ -276,6 +277,8 @@ export function Composer({
   // belong to the old text); the window acknowledgment is about the claim, not the words, so it stays.
   const [ackWindow, setAckWindow] = useState(false);
   const [ackContent, setAckContent] = useState(false);
+  // DA-B-11 (D195): the server-issued hash of the exact findings the user acknowledged; sent with the flag.
+  const [ackFindingsHash, setAckFindingsHash] = useState<string | undefined>(undefined);
   const [ackAmount, setAckAmount] = useState(false);
   const [resendAcknowledged, setResendAcknowledged] = useState(false);
 
@@ -290,6 +293,7 @@ export function Composer({
   function edit(setter: (value: string) => void, value: string) {
     setter(value);
     setAckContent(false);
+    setAckFindingsHash(undefined);
     if (pending?.kind === "ack_content") setPending(null);
   }
 
@@ -299,6 +303,7 @@ export function Composer({
    */
   function refuse(next: Pending) {
     setAckContent(false);
+    setAckFindingsHash(undefined);
     setPending(next);
   }
 
@@ -330,7 +335,7 @@ export function Composer({
     }
   }
 
-  type Acks = { window: boolean; content: boolean; amount?: boolean };
+  type Acks = { window: boolean; content: boolean; amount?: boolean; findingsHash?: string };
 
   const approval = (acks: Acks) => ({
     draftId: draft._id,
@@ -339,6 +344,7 @@ export function Composer({
     body,
     ...(acks.window ? { acknowledgeWindowRisk: true } : {}),
     ...(acks.content ? { acknowledgeUnverifiedContent: true } : {}),
+    ...(acks.content && acks.findingsHash !== undefined ? { acknowledgedFindingsHash: acks.findingsHash } : {}),
     ...(acks.amount ? { acknowledgeAmountAboveEstimate: true } : {}),
   });
 
@@ -348,7 +354,7 @@ export function Composer({
     await ensureInbox({});
     const prepared = await prepareSend(approval(acks));
     if (!prepared.ok) {
-      refuse(pendingFor(prepared.code, prepared.message, prepared.findings, prepared.estimate));
+      refuse(pendingFor(prepared.code, prepared.message, prepared.findings, prepared.estimate, prepared.findingsHash));
       return;
     }
     await approveAndSend({
@@ -373,7 +379,13 @@ export function Composer({
     });
     if (!result.ok) {
       refuse(
-        pendingFor(result.code, result.message, "findings" in result ? result.findings : undefined, "estimate" in result ? result.estimate : undefined),
+        pendingFor(
+          result.code,
+          result.message,
+          "findings" in result ? result.findings : undefined,
+          "estimate" in result ? result.estimate : undefined,
+          "findingsHash" in result ? result.findingsHash : undefined,
+        ),
       );
     }
   }
@@ -475,26 +487,28 @@ export function Composer({
           onAckWindow={() =>
             void run(async () => {
               setAckWindow(true);
-              await act({ window: true, content: ackContent, amount: ackAmount });
+              await act({ window: true, content: ackContent, amount: ackAmount, findingsHash: ackFindingsHash });
             })
           }
-          onAckContent={() =>
+          onAckContent={() => {
+            const findingsHash = pending.kind === "ack_content" ? pending.findingsHash : undefined;
             void run(async () => {
               setAckContent(true);
-              await act({ window: ackWindow, content: true, amount: ackAmount });
-            })
-          }
+              setAckFindingsHash(findingsHash);
+              await act({ window: ackWindow, content: true, amount: ackAmount, findingsHash });
+            });
+          }}
           claimedMinor={claim.expectedCents}
           onAckAmount={() =>
             void run(async () => {
               setAckAmount(true);
-              await act({ window: ackWindow, content: ackContent, amount: true });
+              await act({ window: ackWindow, content: ackContent, amount: true, findingsHash: ackFindingsHash });
             })
           }
           onAdjustAmount={(estimateMinor) =>
             void run(async () => {
               await adjustExpected({ claimId: claim._id, expectedCents: estimateMinor, reason: "Adjusted to Recoup's current estimate" });
-              await act({ window: ackWindow, content: ackContent });
+              await act({ window: ackWindow, content: ackContent, findingsHash: ackFindingsHash });
             })
           }
         />
@@ -522,7 +536,7 @@ export function Composer({
             disabled={busy || !resendAcknowledged}
             aria-describedby={pending ? pendingMessageId : undefined}
             className={primaryButtonClass}
-            onClick={() => void run(() => act({ window: ackWindow, content: ackContent, amount: ackAmount }))}
+            onClick={() => void run(() => act({ window: ackWindow, content: ackContent, amount: ackAmount, findingsHash: ackFindingsHash }))}
           >
             {busy ? "Sending…" : "Send again"}
           </button>
@@ -555,7 +569,7 @@ export function Composer({
               disabled={busy || pending?.kind === "blocked"}
               aria-describedby={pending ? pendingMessageId : undefined}
               className={primaryButtonClass}
-              onClick={() => void run(() => send({ window: ackWindow, content: ackContent, amount: ackAmount }))}
+              onClick={() => void run(() => send({ window: ackWindow, content: ackContent, amount: ackAmount, findingsHash: ackFindingsHash }))}
             >
               {busy ? "Sending…" : "Approve & send"}
             </button>

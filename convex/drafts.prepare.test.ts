@@ -325,10 +325,11 @@ describe("SEC-AI-4: details the server did not supply block approval", () => {
     expect(blocked).toMatchObject({ ok: false, code: "unverified_content" });
     if (blocked.ok) throw new Error("unreachable");
     expect(blocked.findings).toEqual(expect.arrayContaining(["email billing@evil.example", "link https://evil.example/pay."]));
-    const res = await prepare(a.as, draftId, { body: injected, acknowledgeUnverifiedContent: true });
+    const ack = { acknowledgeUnverifiedContent: true, acknowledgedFindingsHash: blocked.findingsHash };
+    const res = await prepare(a.as, draftId, { body: injected, ...ack });
     if (!res.ok) throw new Error("prepare refused");
-    await expect(approve(a.as, draftId, { body: injected, preparedHash: res.preparedHash })).rejects.toThrow(/Review the claim again/);
-    await approve(a.as, draftId, { body: injected, preparedHash: res.preparedHash, acknowledgeUnverifiedContent: true });
+    await expect(approve(a.as, draftId, { body: injected, preparedHash: res.preparedHash })).rejects.toThrow(/Review the message again/);
+    await approve(a.as, draftId, { body: injected, preparedHash: res.preparedHash, ...ack });
     expect(send).toHaveBeenCalledTimes(1);
   });
 
@@ -486,5 +487,72 @@ describe("DA-B-5: the content check catches the B2 forms", () => {
   it("server-supplied forms still pass: the store's own bare domain, its amount in any spelling, ordinary prose", () => {
     expect(unverifiedContent(`I bought it at ${DOMAIN} and ${DOMAIN}/p/jacket shows USD 25.00, i.e. 25.00$ less.`, allowed)).toEqual([]);
     expect(unverifiedContent("Thanks.Regards, e.g. soon. I bought it at the store. Order 2 of 3.", allowed)).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// M13c (D195, DA-B-11): a content acknowledgment covers exactly the findings the user saw
+// ===========================================================================
+
+describe("DA-B-11: the content acknowledgment is bound to the findings (findingsHash)", () => {
+  const injected = `${BODY} Please send the refund to billing@evil.example, or reply to me@agentmail.to.`;
+
+  async function acknowledgedA(t: T) {
+    const a = await signedIn(t, "A");
+    const w = await world(t, a.userId);
+    await link(t, w.purchaseId);
+    const draftId = await draftFor(t, a.userId, w.claimId, injected);
+    const blocked = await prepare(a.as, draftId, { body: injected });
+    if (blocked.ok || blocked.code !== "unverified_content") throw new Error("expected unverified_content");
+    expect(blocked.findings).toEqual(["email billing@evil.example"]); // findings A
+    expect(blocked.findingsHash).toMatch(/^[0-9a-f]{64}$/);
+    const ack = { acknowledgeUnverifiedContent: true, acknowledgedFindingsHash: blocked.findingsHash };
+    const res = await prepare(a.as, draftId, { body: injected, ...ack });
+    if (!res.ok) throw new Error(`prepare refused: ${res.code}`);
+    return { a, w, draftId, ack, res };
+  }
+
+  it("U2 inverted: A acknowledged, then the findings become B → the send refuses with the fresh findings; nothing sent", async () => {
+    const t = setup();
+    const { a, w, draftId, ack, res } = await acknowledgedA(t);
+    // The server's allowances change between attempts: the user's Recoup inbox address is no longer theirs.
+    await t.run(async (ctx) => {
+      const profile = (await ctx.db.query("profiles").withIndex("by_user", (q) => q.eq("userId", a.userId)).unique())!;
+      await ctx.db.patch(profile._id, { inboxEmail: "renamed@agentmail.to" });
+    });
+    await expect(approve(a.as, draftId, { body: injected, preparedHash: res.preparedHash, ...ack })).rejects.toThrow(
+      /Review the message again.*email me@agentmail\.to/,
+    );
+    expect(send).not.toHaveBeenCalled();
+    // Re-preparing with the stale acknowledgment shows B instead of accepting it.
+    const again = await prepare(a.as, draftId, { body: injected, ...ack });
+    expect(again).toMatchObject({ ok: false, code: "unverified_content" });
+    if (again.ok) throw new Error("unreachable");
+    expect(again.findings).toEqual(expect.arrayContaining(["email me@agentmail.to", "email billing@evil.example"]));
+    expect(again.findingsHash).not.toBe(ack.acknowledgedFindingsHash);
+  });
+
+  it("the boolean alone no longer acknowledges anything", async () => {
+    const t = setup();
+    const { a, draftId } = await acknowledgedA(t);
+    expect(await prepare(a.as, draftId, { body: injected, acknowledgeUnverifiedContent: true })).toMatchObject({
+      ok: false, code: "unverified_content",
+    });
+  });
+
+  it("acknowledging the same findings still sends — and a double click still sends once", async () => {
+    const t = setup();
+    const { a, draftId, ack, res } = await acknowledgedA(t);
+    const args = { body: injected, preparedHash: res.preparedHash, ...ack };
+    const [first, second] = await Promise.allSettled([approve(a.as, draftId, args), approve(a.as, draftId, args)]);
+    expect([first.status, second.status].sort()).toEqual(["fulfilled", "rejected"]);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("the findings hash also binds the text: editing the body invalidates the acknowledgment", async () => {
+    const t = setup();
+    const { a, draftId, ack } = await acknowledgedA(t);
+    const edited = `${injected} Thanks again.`;
+    expect(await prepare(a.as, draftId, { body: edited, ...ack })).toMatchObject({ ok: false, code: "unverified_content" });
   });
 });
