@@ -261,3 +261,84 @@ describe("ensurePurchaseTransaction (contract §2.2, DA-A-35)", () => {
     await expect(t.run((ctx) => ensurePurchaseTransaction(ctx, purchaseId))).rejects.toThrow(/Purchase not found/);
   });
 });
+
+async function tombstone(t: T, userId: Id<"users">) {
+  await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: Date.now(), attempts: 0 }));
+}
+
+describe("transactions public queries (ownership, bounds)", () => {
+  it("list: the caller's transactions in one status, newest first; never another user's", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    const p1 = await a.as.mutation(api.purchases.create, basePurchase);
+    const p2 = await a.as.mutation(api.purchases.create, { ...basePurchase, orderRef: "NW-2" });
+    await a.as.mutation(api.purchases.create, { ...basePurchase, orderRef: "NW-3", purchasedAt: undefined, status: "needs_review" });
+    await b.as.mutation(api.purchases.create, basePurchase);
+    const active = await a.as.query(api.transactions.list, {});
+    expect(active.truncated).toBe(false);
+    expect(active.transactions.map((x) => x.purchaseId)).toEqual([p2, p1]);
+    expect((await a.as.query(api.transactions.list, { status: "needs_review" })).transactions).toHaveLength(1);
+    const bs = await b.as.query(api.transactions.list, {});
+    expect(bs.transactions).toHaveLength(1);
+    expect(bs.transactions[0].userId).toBe(b.userId);
+  });
+
+  it("list is bounded and reports a real cut", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 101; i++) {
+        await ctx.db.insert("transactions", { userId, category: "card_charge", status: "active", counterpartyName: `M${i}`, currency: "USD", liveFactCount: 0 });
+      }
+    });
+    const res = await as.query(api.transactions.list, {});
+    expect(res.transactions).toHaveLength(100);
+    expect(res.truncated).toBe(true);
+  });
+
+  it("get: a foreign id and a deleted id get the identical not-found", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    const p = await a.as.mutation(api.purchases.create, basePurchase);
+    const [txn] = await txnsFor(t, p);
+    expect((await a.as.query(api.transactions.get, { transactionId: txn._id }))._id).toBe(txn._id);
+    const gone = await t.run(async (ctx) => {
+      const id = await ctx.db.insert("transactions", { userId: a.userId, category: "card_charge", status: "active", counterpartyName: "X", currency: "USD", liveFactCount: 0 });
+      await ctx.db.delete(id);
+      return id;
+    });
+    const foreign = await b.as.query(api.transactions.get, { transactionId: txn._id }).catch((e: Error) => e.message);
+    const missing = await a.as.query(api.transactions.get, { transactionId: gone }).catch((e: Error) => e.message);
+    expect(foreign).toMatch(/Transaction not found/);
+    expect(missing).toBe(foreign);
+  });
+
+  it("forPurchase: the mirror, null for a legacy purchase without one, identical not-found for a foreign purchase", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    const p = await a.as.mutation(api.purchases.create, basePurchase);
+    const [txn] = await txnsFor(t, p);
+    expect((await a.as.query(api.transactions.forPurchase, { purchaseId: p }))?._id).toBe(txn._id);
+    const legacy = await t.run((ctx) =>
+      ctx.db.insert("purchases", { userId: a.userId, merchant: "Old", merchantDomain: "old.example", currency: "USD", status: "active" }),
+    );
+    expect(await a.as.query(api.transactions.forPurchase, { purchaseId: legacy })).toBeNull();
+    const foreign = await b.as.query(api.transactions.forPurchase, { purchaseId: p }).catch((e: Error) => e.message);
+    expect(foreign).toMatch(/Purchase not found/);
+  });
+
+  it("every public query refuses a signed-out caller and a deleted account", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const p = await a.as.mutation(api.purchases.create, basePurchase);
+    const [txn] = await txnsFor(t, p);
+    await expect(t.query(api.transactions.list, {})).rejects.toThrow(/Not signed in/);
+    await tombstone(t, a.userId);
+    await expect(a.as.query(api.transactions.list, {})).rejects.toThrow(/deleted/);
+    await expect(a.as.query(api.transactions.get, { transactionId: txn._id })).rejects.toThrow(/deleted/);
+    await expect(a.as.query(api.transactions.forPurchase, { purchaseId: p })).rejects.toThrow(/deleted/);
+  });
+});

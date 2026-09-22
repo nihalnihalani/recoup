@@ -1,6 +1,8 @@
-import { ConvexError } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
-import type { MutationCtx } from "./_generated/server";
+import { query, type MutationCtx } from "./_generated/server";
+import schema, { transactionStatus } from "./schema";
+import { ownedPurchase, ownedTransaction, requireUserId } from "./lib/access";
 
 /**
  * The fields a retail transaction mirrors from its purchase (contract §2.2). Everything else on the row
@@ -61,3 +63,54 @@ export async function ensurePurchaseTransaction(
     ...fields,
   });
 }
+
+/** Transactions one `list` call returns, newest first; `truncated` says more exist. */
+export const LIST_LIMIT = 100;
+
+/**
+ * The caller's transactions in one status (default `active`), newest first, at most `LIST_LIMIT`
+ * (`transactions.by_user_and_status`, one bounded range). Example transactions are included and carry `isExample`.
+ */
+export const list = query({
+  args: { status: v.optional(transactionStatus) },
+  returns: v.object({ transactions: v.array(schema.doc("transactions")), truncated: v.boolean() }),
+  handler: async (ctx, { status }) => {
+    const userId = await requireUserId(ctx);
+    const page = await ctx.db
+      .query("transactions")
+      .withIndex("by_user_and_status", (q) => q.eq("userId", userId).eq("status", status ?? "active"))
+      .order("desc")
+      .take(LIST_LIMIT + 1);
+    return { transactions: page.slice(0, LIST_LIMIT), truncated: page.length > LIST_LIMIT };
+  },
+});
+
+/** One of the caller's transactions. A foreign or missing id → the same "Transaction not found" (one read). */
+export const get = query({
+  args: { transactionId: v.id("transactions") },
+  returns: schema.doc("transactions"),
+  handler: async (ctx, { transactionId }) => {
+    const userId = await requireUserId(ctx);
+    return await ownedTransaction(ctx, transactionId, userId);
+  },
+});
+
+/**
+ * The transaction mirroring one of the caller's purchases, or null when none exists yet (a purchase created before
+ * wave 1 gets one on its next confirm or evaluation — queries never write). A foreign or missing purchase → the same
+ * "Purchase not found".
+ */
+export const forPurchase = query({
+  args: { purchaseId: v.id("purchases") },
+  returns: v.union(schema.doc("transactions"), v.null()),
+  handler: async (ctx, { purchaseId }) => {
+    const userId = await requireUserId(ctx);
+    await ownedPurchase(ctx, purchaseId, userId);
+    const txn = await ctx.db
+      .query("transactions")
+      .withIndex("by_purchase", (q) => q.eq("purchaseId", purchaseId))
+      .first();
+    // Defence in depth: the mirror always carries the purchase's owner, but never return a row the caller does not own.
+    return txn !== null && txn.userId === userId ? txn : null;
+  },
+});
