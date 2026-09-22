@@ -11,7 +11,7 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import schema, { approvalBinding } from "./schema";
+import schema, { approvalBinding, money as moneyValidator } from "./schema";
 import { ownedClaim, requireUserId } from "./lib/access";
 import { isClosedForAsk } from "./lib/claimState";
 import { balanceValidator, claimBalance } from "./lib/balance";
@@ -27,7 +27,9 @@ import { sanitizeError } from "./lib/errors";
 import { redact } from "./lib/log";
 import { clearPendingMailEvent, getPendingMailEvent } from "./mailEvents";
 import { MAIL_RECONCILE_STALL_MS, MAX_SENDS_PER_CLAIM } from "./limits";
-import { claimCurrency } from "./lib/money";
+import { claimCurrency, formatMinor, type Money } from "./lib/money";
+import { amountExceedsEstimate } from "./lib/amountReview";
+import { isPackActive } from "./lib/rules/registry";
 import { boundFactsHash, canonicalHash } from "./lib/canonical";
 import { rateLimiter } from "./lib/rateLimits";
 import { isApprovable } from "./lib/rules/types";
@@ -394,20 +396,27 @@ export const insert = internalMutation({
     }
     // §6 / C2: a draft of a claim linked to an opportunity is bound at insert to the claim's current evaluation — its
     // bound facts (R01 v1: never the live price), amount, rule and engine versions. `prepareSend` compares against it.
-    const purchase = await ctx.db.get(claim.purchaseId);
-    const link = await liveLink(ctx, claim);
-    const binding = purchase && link?.evaluation ? await bindingFor(claim, purchase, link.opportunity._id, link.evaluation) : undefined;
+    // The claim is re-evaluated first (committed, like a review), so the draft is written against the claim as it is
+    // NOW: a change the user just made (a corrected quantity, an adjusted amount — DA-B-2) is absorbed here, with its
+    // version bump, instead of invalidating this very draft at its first review.
+    // Example claims never send (B1), so they are never re-evaluated for approval.
+    const claimPurchase = await ctx.db.get(claim.purchaseId);
+    if (claim.isExample !== true && claimPurchase?.isExample !== true) await reevaluateForApproval(ctx, claim, Date.now());
+    const current = (await ctx.db.get(claim._id))!;
+    const purchase = await ctx.db.get(current.purchaseId);
+    const link = await liveLink(ctx, current);
+    const binding = purchase && link?.evaluation ? await bindingFor(current, purchase, link.opportunity._id, link.evaluation) : undefined;
     const draftId = await ctx.db.insert("drafts", {
       claimId: args.claimId,
       userId: args.userId,
       version: prev.length + 1,
-      claimVersion: claim.version,
+      claimVersion: current.version,
       to: args.to.trim(),
       subject: args.subject.slice(0, 200),
       body: args.body.slice(0, MAX_BODY_CHARS),
       ...(binding !== undefined ? { binding } : {}),
     });
-    if (claim.status === "detected") await ctx.db.patch(claim._id, { status: "drafted" });
+    if (current.status === "detected") await ctx.db.patch(claim._id, { status: "drafted" });
     return draftId;
   },
 });
@@ -533,8 +542,35 @@ const MAX_FINDINGS = 10;
 const EMAIL_IN_TEXT = /[^\s@<>()[\]"',;:]+@[^\s@<>()[\]"',;:]+\.[A-Za-z]{2,}/g;
 const URL_IN_TEXT = /\b(?:https?:\/\/|www\.)[^\s<>()"']+/gi;
 const PHONE_IN_TEXT = /(?:\+\d{1,3}[\s.-]?)?\(?\b\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b/g;
-const AMOUNT_IN_TEXT =
-  /(?:[$€£]\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*\.\d{2}\b(?:\s?(?:USD|EUR|GBP|CAD|AUD|dollars?))?|\b\d[\d,]*\s?(?:USD|EUR|GBP|CAD|AUD|dollars?)\b)/gi;
+const CURRENCY_CODES = "USD|EUR|GBP|CAD|AUD";
+const CURRENCY_WORDS = "dollars?|euros?|pounds?|bucks";
+/**
+ * Money in every form DA-B-5 names: a leading symbol ("$450"), a two-decimal number with or without a code ("95.00
+ * USD"), a number then a code or word ("40 dollars"), a code first ("USD 450"), and a trailing symbol ("450$").
+ */
+const AMOUNT_IN_TEXT = new RegExp(
+  [
+    "[$€£]\\s?\\d[\\d,]*(?:\\.\\d{1,2})?",
+    `\\b(?:${CURRENCY_CODES})\\s?\\d[\\d,]*(?:\\.\\d{1,2})?`,
+    `\\b\\d[\\d,]*(?:\\.\\d{1,2})?\\s?[$€£]`,
+    `\\b\\d[\\d,]*\\.\\d{2}\\b(?:\\s?(?:${CURRENCY_CODES}|${CURRENCY_WORDS}))?`,
+    `\\b\\d[\\d,]*\\s?(?:${CURRENCY_CODES}|${CURRENCY_WORDS})\\b`,
+  ].join("|"),
+  "gi",
+);
+const NUMBER_WORDS =
+  "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million";
+/** A spelled amount: number words (with "and"/hyphens between them) next to a currency word or code (DA-B-5). */
+const SPELLED_AMOUNT = new RegExp(
+  `\\b(?:${NUMBER_WORDS})(?:[\\s-]+(?:and[\\s-]+)?(?:${NUMBER_WORDS}))*\\s+(?:${CURRENCY_WORDS}|${CURRENCY_CODES})\\b`,
+  "gi",
+);
+/** "claims [at] evil.example", "claims (at) evil.example" → an address (DA-B-5). */
+const BRACKET_AT = /\s*[[(]\s*at\s*[\])]\s*/gi;
+/** "claims at evil.example" when no path follows (a path makes it a bare link, checked below). */
+const WORD_AT = /\b([A-Za-z0-9._%+-]+)\s+at\s+((?:[a-z0-9-]+\.)+[a-z]{2,})\b(?![/.\w-])/gi;
+/** A bare `host.tld/path` token (no scheme) — DA-B-5. A host without a path is not a link and is left alone. */
+const BARE_LINK = /\b((?:[a-z0-9-]+\.)+[a-z]{2,})(\/[^\s<>()"']*)/gi;
 
 function normalizeUrl(raw: string): string {
   return raw.replace(/[.,;:!?)\]]+$/, "").replace(/^www\./i, "https://www.").replace(/\/+$/, "").toLowerCase();
@@ -570,21 +606,34 @@ export function unverifiedContent(body: string, allowed: Allowances): string[] {
   const add = (f: string) => {
     if (findings.length < MAX_FINDINGS && !findings.includes(f)) findings.push(f);
   };
-  const withoutUrls = body.replace(URL_IN_TEXT, " ");
+  const hostAllowed = (host: string) => [...allowed.hosts].some((h) => host === h || host.endsWith(`.${h}`));
+  // 1. Links with a scheme or "www.".
   for (const m of body.matchAll(URL_IN_TEXT)) {
     const url = normalizeUrl(m[0]);
     const host = hostOf(m[0]);
-    const known = allowed.urls.has(url) || (host !== null && [...allowed.hosts].some((h) => host === h || host.endsWith(`.${h}`)));
-    if (!known) add(`link ${m[0]}`);
+    if (!allowed.urls.has(url) && !(host !== null && hostAllowed(host))) add(`link ${m[0]}`);
   }
-  for (const m of withoutUrls.matchAll(EMAIL_IN_TEXT)) {
+  // 2. Addresses, after undoing the obfuscations DA-B-5 names ("[at]", "(at)", " at " before a bare host).
+  let rest = body.replace(URL_IN_TEXT, " ").replace(BRACKET_AT, "@");
+  rest = rest.replace(WORD_AT, (whole, local: string, host: string) => (hostAllowed(host.toLowerCase()) ? whole : `${local}@${host}`));
+  for (const m of rest.matchAll(EMAIL_IN_TEXT)) {
     if (!allowed.emails.has(m[0].toLowerCase())) add(`email ${m[0]}`);
   }
-  for (const m of withoutUrls.matchAll(PHONE_IN_TEXT)) add(`phone ${m[0].trim()}`);
-  for (const m of withoutUrls.matchAll(AMOUNT_IN_TEXT)) {
+  rest = rest.replace(EMAIL_IN_TEXT, " ");
+  // 3. Bare `host.tld/path` links with no scheme.
+  for (const m of rest.matchAll(BARE_LINK)) {
+    const token = m[0].replace(/[.,;:!?)\]]+$/, "");
+    if (!allowed.urls.has(normalizeUrl(`https://${token}`)) && !hostAllowed(m[1].toLowerCase())) add(`link ${token}`);
+  }
+  rest = rest.replace(BARE_LINK, " ");
+  // 4. Phone numbers, then amounts (numeric in every symbol/code position, and spelled out).
+  for (const m of rest.matchAll(PHONE_IN_TEXT)) add(`phone ${m[0].trim()}`);
+  for (const m of rest.matchAll(AMOUNT_IN_TEXT)) {
     const minor = amountTokenMinor(m[0]);
     if (minor === null || !allowed.amountsMinor.has(minor)) add(`amount ${m[0].trim()}`);
   }
+  // A spelled amount is never something the server wrote; it is always listed.
+  for (const m of rest.matchAll(SPELLED_AMOUNT)) add(`amount ${m[0].trim()}`);
   return findings;
 }
 
@@ -642,6 +691,7 @@ function approvalText(claim: Doc<"claims">, input: { to: string; subject: string
 }
 
 export type PrepareCode =
+  | "amount_exceeds_estimate"
   | "outcome_not_approvable"
   | "binding_changed"
   | "window_may_have_passed"
@@ -651,14 +701,21 @@ export type PrepareCode =
   | "unverified_content";
 
 type ApprovalState =
-  | { ok: false; code: PrepareCode; message: string; findings?: string[] }
+  | { ok: false; code: PrepareCode; message: string; findings?: string[]; estimate?: Money }
   | {
       ok: true;
       /** The binding to approve under (linked claims), or null (the legacy binding: text + versions). */
       binding: ApprovalBinding | null;
       needsWindowAck: boolean;
+      /** DA-B-2: the claim asks more than the rule's exact estimate and the user acknowledged it. */
+      amountAboveEstimate: boolean;
       findings: string[];
     };
+
+type Acks = { windowRisk: boolean; unverifiedContent: boolean; amountAboveEstimate: boolean };
+
+const RULE_WITHDRAWN_MESSAGE =
+  "Recoup's automatic checks for this kind of claim were withdrawn. Review the claim and approve it again.";
 
 const WINDOW_MESSAGE =
   "The store's price-adjustment window may have passed. You can still send the request; confirm that you understand it may be refused.";
@@ -681,7 +738,7 @@ async function approvalState(
   claim: Doc<"claims">,
   purchase: Doc<"purchases">,
   text: ApprovalText,
-  acks: { windowRisk: boolean; unverifiedContent: boolean },
+  acks: Acks,
   now: number,
 ): Promise<ApprovalState> {
   if (claim.version !== draft.claimVersion) {
@@ -690,9 +747,15 @@ async function approvalState(
   const link = await liveLink(ctx, claim);
   let binding: ApprovalBinding | null = null;
   let needsWindowAck = false;
+  let amountReview: { estimate: Money; claimed: Money } | null = null;
   if (link !== null) {
     const evaluation = link.evaluation;
     if (evaluation === null) return { ok: false, code: "outcome_not_approvable", message: "Recoup has not checked this claim yet." };
+    // DA-B-1 (b): the rule the evaluation ran under must still be active NOW — a withdrawal between the review and
+    // the send is a hard refusal, read without evaluating (the next review supersedes the opportunity, N3).
+    if (!isPackActive(evaluation.ruleId, evaluation.ruleVersion)) {
+      return { ok: false, code: "rule_withdrawn", message: RULE_WITHDRAWN_MESSAGE };
+    }
     if (!isApprovable(evaluation.outcome)) {
       if (!r01LateAskAcknowledgeable(evaluation)) {
         return { ok: false, code: "outcome_not_approvable", message: `Recoup's check no longer supports this claim (${evaluation.outcome.replace(/_/g, " ")}).` };
@@ -703,10 +766,23 @@ async function approvalState(
     if (draft.binding !== undefined && draft.binding.contextHash !== binding.contextHash) {
       return { ok: false, code: "binding_changed", message: "What this draft asks for changed since it was written. Generate a new draft and review it again." };
     }
-  } else if (claim.windowEndsAt !== undefined && now > claim.windowEndsAt) {
-    needsWindowAck = true;
+    // DA-B-2: the one shared predicate (`lib/amountReview`, also behind the opportunity's `review_amount`).
+    const review = amountExceedsEstimate({ expectedCents: claim.expectedCents, currency: claimCurrency(claim, purchase) }, evaluation.amount);
+    if (review.exceeds) amountReview = review;
   }
+  // DA-B-1 (a) / DA-A-21: the legacy window is read from the clock for EVERY claim that has one — linked or not —
+  // so a review done before the window closed never approves a send after it without the acknowledgment.
+  if (claim.windowEndsAt !== undefined && now > claim.windowEndsAt) needsWindowAck = true;
   if (needsWindowAck && !acks.windowRisk) return { ok: false, code: "window_may_have_passed", message: WINDOW_MESSAGE };
+  if (amountReview !== null && !acks.amountAboveEstimate) {
+    const { estimate, claimed } = amountReview;
+    return {
+      ok: false,
+      code: "amount_exceeds_estimate",
+      message: `This claim asks ${formatMinor(claimed.amountMinor, claimed.currency)}; Recoup's current estimate is ${formatMinor(estimate.amountMinor, estimate.currency)}. Adjust the claim to ${formatMinor(estimate.amountMinor, estimate.currency)}, or confirm that you want to ask for the full amount.`,
+      estimate,
+    };
+  }
   const findings = unverifiedContent(text.body, await draftAllowances(ctx, claim, purchase, text.to, link?.evaluation ?? null));
   if (findings.length > 0 && !acks.unverifiedContent) {
     return {
@@ -716,7 +792,15 @@ async function approvalState(
       findings,
     };
   }
-  return { ok: true, binding, needsWindowAck, findings };
+  return { ok: true, binding, needsWindowAck, amountAboveEstimate: amountReview !== null, findings };
+}
+
+function acksOf(input: { acknowledgeWindowRisk?: boolean; acknowledgeUnverifiedContent?: boolean; acknowledgeAmountAboveEstimate?: boolean }): Acks {
+  return {
+    windowRisk: input.acknowledgeWindowRisk === true,
+    unverifiedContent: input.acknowledgeUnverifiedContent === true,
+    amountAboveEstimate: input.acknowledgeAmountAboveEstimate === true,
+  };
 }
 
 /** The hash the user approves (§6 `preparedHash`); `approveAndSend` recomputes it read-only and compares. */
@@ -735,6 +819,7 @@ async function preparedHashOf(
     subject: text.subject,
     body: text.body,
     ...(state.needsWindowAck ? { acknowledgeWindowRisk: true } : {}),
+    ...(state.amountAboveEstimate ? { acknowledgeAmountAboveEstimate: true } : {}),
     ...(state.findings.length > 0 ? { acknowledgeUnverifiedContent: true } : {}),
   });
 }
@@ -752,9 +837,12 @@ const prepareArgs = {
   body: v.string(),
   acknowledgeWindowRisk: v.optional(v.boolean()),
   acknowledgeUnverifiedContent: v.optional(v.boolean()),
+  /** DA-B-2: the user chose to ask for the claim's full amount although Recoup's exact estimate is lower. */
+  acknowledgeAmountAboveEstimate: v.optional(v.boolean()),
 };
 
 const prepareCode = v.union(
+  v.literal("amount_exceeds_estimate"),
   v.literal("outcome_not_approvable"),
   v.literal("binding_changed"),
   v.literal("window_may_have_passed"),
@@ -765,9 +853,18 @@ const prepareCode = v.union(
 );
 const prepareResult = v.union(
   v.object({ ok: v.literal(true), preparedHash: v.string(), findings: v.array(v.string()) }),
-  v.object({ ok: v.literal(false), code: prepareCode, message: v.string(), findings: v.optional(v.array(v.string())) }),
+  v.object({
+    ok: v.literal(false),
+    code: prepareCode,
+    message: v.string(),
+    findings: v.optional(v.array(v.string())),
+    /** `amount_exceeds_estimate` only: the estimate the UI offers to adjust the claim to. */
+    estimate: v.optional(moneyValidator),
+  }),
 );
-type PrepareResult = { ok: true; preparedHash: string; findings: string[] } | { ok: false; code: PrepareCode; message: string; findings?: string[] };
+type PrepareResult =
+  | { ok: true; preparedHash: string; findings: string[] }
+  | { ok: false; code: PrepareCode; message: string; findings?: string[]; estimate?: Money };
 
 /**
  * The evaluation half of a prepare: re-evaluates the claim's R01 subject (`approval_check`) and COMMITS it — the
@@ -787,7 +884,7 @@ async function reevaluateForApproval(ctx: MutationCtx, claim: Doc<"claims">, now
       return {
         ok: false,
         code: "rule_withdrawn",
-        message: "Recoup's automatic checks for this kind of claim were withdrawn. Review the claim and approve it again.",
+        message: RULE_WITHDRAWN_MESSAGE,
       };
     }
   }
@@ -805,7 +902,14 @@ async function prepareCore(
   draft: Doc<"drafts">,
   claim: Doc<"claims">,
   purchase: Doc<"purchases">,
-  input: { to: string; subject: string; body: string; acknowledgeWindowRisk?: boolean; acknowledgeUnverifiedContent?: boolean },
+  input: {
+    to: string;
+    subject: string;
+    body: string;
+    acknowledgeWindowRisk?: boolean;
+    acknowledgeUnverifiedContent?: boolean;
+    acknowledgeAmountAboveEstimate?: boolean;
+  },
 ): Promise<PrepareResult> {
   const text = approvalText(claim, input); // S-M03-5: capped before any regex; throws on a malformed address.
   const limit = await rateLimiter.limit(ctx, "prepareSend", { key: userId });
@@ -821,7 +925,7 @@ async function prepareCore(
     fresh,
     purchase,
     text,
-    { windowRisk: input.acknowledgeWindowRisk === true, unverifiedContent: input.acknowledgeUnverifiedContent === true },
+    acksOf(input),
     now,
   );
   if (!state.ok) return state;
@@ -872,6 +976,8 @@ const sendApprovalArgs = {
   acknowledgeWindowRisk: v.optional(v.boolean()),
   /** SEC-AI-4: the user checked the details `prepareSend` flagged in the body. */
   acknowledgeUnverifiedContent: v.optional(v.boolean()),
+  /** DA-B-2: the user asks for the claim's full amount although Recoup's exact estimate is lower. */
+  acknowledgeAmountAboveEstimate: v.optional(v.boolean()),
 };
 type SendApproval = {
   to: string;
@@ -883,6 +989,7 @@ type SendApproval = {
   preparedHash?: string;
   acknowledgeWindowRisk?: boolean;
   acknowledgeUnverifiedContent?: boolean;
+  acknowledgeAmountAboveEstimate?: boolean;
 };
 
 type CheckedSend = { to: string; subject: string; body: string; inboxId: string; approvedHash?: string };
@@ -987,12 +1094,16 @@ async function verifyPrepared(
     claim,
     purchase,
     text,
-    { windowRisk: args.acknowledgeWindowRisk === true, unverifiedContent: args.acknowledgeUnverifiedContent === true },
+    acksOf(args),
     now,
   );
   if (!state.ok && state.code === "window_may_have_passed") {
     throw new ConvexError("Acknowledge that the store's window may have passed, then send.");
   }
+  if (!state.ok && state.code === "amount_exceeds_estimate") {
+    throw new ConvexError("Adjust the claim amount, or confirm that you want to ask for the full amount, then send.");
+  }
+  if (!state.ok && state.code === "rule_withdrawn") throw new ConvexError(state.message);
   if (!state.ok || args.preparedHash === undefined || (await preparedHashOf(draft, claim, text, state)) !== args.preparedHash) {
     throw new ConvexError("Review the claim again before sending.");
   }

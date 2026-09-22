@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   checkRulePacks,
+  engineClosure,
   parseDecisions,
   readAtRev,
   readExportedLiteral,
@@ -29,6 +30,8 @@ const FIXTURES = "docs/rules/fixtures/R09.json";
 const FIXTURES_SRC = '{"cases":[]}\n';
 const CAPTURE = "docs/rules/sources/example.txt";
 const CAPTURE_SRC = "# URL: https://example.gov/x\ncaptured text\n";
+/** The engine pin of a closure (check 7): SHA-256 over sorted "<path>\t<sha256>\n" lines, computed here by hand. */
+const pinOf = (entries: Array<[string, string]>) => sha([...entries].sort(([a], [b]) => (a < b ? -1 : 1)).map(([f, src]) => `${f}\t${sha(src)}\n`).join(""));
 
 type Manifest = {
   packs: Array<Record<string, unknown>>;
@@ -48,6 +51,9 @@ function manifest(lifecycle = "reviewed", extra: Record<string, unknown> = {}): 
         sources: ["example-src"],
         packFile: PACK_FILE,
         packFileSha256: sha(PACK_SRC),
+        // DA-B-6: an active pack pins its engine closure (here: the pack file alone, it imports nothing).
+        engineRoots: [PACK_FILE],
+        engineClosureSha256: pinOf([[PACK_FILE, PACK_SRC]]),
         ...extra,
       },
       { ruleId: "R08.draft", scenarioId: "R08", version: 1, lifecycle: "researched", fixtures: null, sources: [] },
@@ -100,7 +106,7 @@ describe("check-rule-packs: activation", () => {
     expect(r.errors).toEqual([]);
     expect(r.activeCount).toBe(0);
     expect(r.notes.join("\n")).toMatch(/activation\.ts not present: no active packs/);
-    expect(r.notes.join("\n")).toMatch(/ENGINE_VERSION: no engine yet/);
+    expect(r.notes.join("\n")).toMatch(/engine pin: no active pack to pin/);
   });
 
   it("passes with 'no active packs' for an empty ACTIVATIONS array", () => {
@@ -225,6 +231,57 @@ describe("check-rule-packs: append-only against BASE", () => {
   });
 });
 
+describe("check-rule-packs: engine pin (DA-B-6, D190/D193)", () => {
+  const ENGINE = "convex/lib/rules/outcome_example.ts";
+  const ENGINE_SRC = 'import { money } from "../money_example";\nimport type { T } from "./types_example";\nexport const rule = 1;\n';
+  const MONEY = "convex/lib/money_example.ts";
+  const MONEY_SRC = 'import { cap } from "../limits_example";\nimport { v } from "convex/values";\nexport const money = cap;\n';
+  const LIMITS = "convex/limits_example.ts";
+  const LIMITS_SRC = "export const cap = 100;\n";
+  const TYPES = "convex/lib/rules/types_example.ts";
+  const PACK_WITH_ENGINE = 'import { rule } from "./outcome_example";\nimport "../../_generated/api";\nexport const pack = rule;\n';
+  const closureFiles = { [PACK_FILE]: PACK_WITH_ENGINE, [ENGINE]: ENGINE_SRC, [MONEY]: MONEY_SRC, [LIMITS]: LIMITS_SRC, [TYPES]: "export type T = 1;\n", "convex/_generated/api.ts": "export const api = 1;\n" };
+  const pinned = pinOf([[PACK_FILE, PACK_WITH_ENGINE], [ENGINE, ENGINE_SRC], [MONEY, MONEY_SRC], [LIMITS, LIMITS_SRC]]);
+  const activeWith = (extra: Record<string, unknown>, fileOverrides: Record<string, string | null> = {}) =>
+    run({
+      manifest: manifest("reviewed", { packFileSha256: sha(PACK_WITH_ENGINE), engineRoots: [PACK_FILE, ENGINE], engineClosureSha256: pinned, ...extra }),
+      activationSource: activation([ACTIVE]),
+      readRepoFile: files({ ...closureFiles, ...fileOverrides }),
+    });
+
+  it("follows relative VALUE imports within convex/ transitively; skips type-only imports, packages and _generated", () => {
+    const c = engineClosure([PACK_FILE], files(closureFiles));
+    expect(c.files.map(([f]) => f)).toEqual([MONEY, ENGINE, PACK_FILE, LIMITS].sort());
+    expect(c.sha256).toBe(pinned);
+    expect(c.missing).toEqual([]);
+  });
+
+  it("an active pack whose engine closure matches its pin passes", () => {
+    const r = activeWith({});
+    expect(r.errors).toEqual([]);
+    expect(r.notes.join("\n")).toMatch(/engine pin: 1\/1 active pack\(s\) match/);
+  });
+
+  it("editing ANY file in the closure (the engine, lib/money, limits) without a new pin fails", () => {
+    for (const [file, src] of [[ENGINE, `${ENGINE_SRC}// tweak\n`], [MONEY, `${MONEY_SRC}// tweak\n`], [LIMITS, "export const cap = 101;\n"]] as const) {
+      expect(activeWith({}, { [file]: src }).errors.join("\n"), file).toMatch(/engine pin: pack R09\.example v1: the engine changed/);
+    }
+    // A type-only dependency is erased at runtime and not pinned.
+    expect(activeWith({}, { [TYPES]: "export type T = 2;\n" }).errors).toEqual([]);
+  });
+
+  it("an active pack must record engineRoots (including its pack file) and engineClosureSha256", () => {
+    expect(activeWith({ engineRoots: undefined }).errors.join("\n")).toMatch(/records no engineRoots/);
+    expect(activeWith({ engineRoots: [ENGINE] }).errors.join("\n")).toMatch(/engineRoots must include the pack file/);
+    expect(activeWith({ engineClosureSha256: undefined }).errors.join("\n")).toMatch(/records no engineClosureSha256 \(current closure: [0-9a-f]{64}, 4 files\)/);
+    expect(activeWith({}, { [MONEY]: null }).errors.join("\n")).toMatch(/cannot read convex\/lib\/money_example/);
+  });
+
+  it("a reviewed pack that is not active needs no pin", () => {
+    expect(run({ manifest: manifest("reviewed", { engineRoots: undefined, engineClosureSha256: undefined }) }).errors).toEqual([]);
+  });
+});
+
 describe("check-rule-packs: verification.ts", () => {
   const good = { lastVerifiedAt: "2026-09-23", sha256: sha("x"), method: "fetch" };
   const src = (v: Record<string, unknown>) => `export const VERIFICATION = ${JSON.stringify(v)} as const;\n`;
@@ -285,6 +342,16 @@ describe("check-rule-packs: BASE resolution in a real git repository", () => {
     expect(readAtRev(dir, first, "m.json")).toBe('{"v":1}');
     expect(readAtRev(dir, first, "missing.json")).toBeNull();
     expect(readAtRev(dir, "f".repeat(40), "m.json")).toBeUndefined();
+  });
+});
+
+describe("deploy gate (DA-B-6, D191)", () => {
+  it("deploy:dev runs check-rule-packs, typecheck and the tests before `convex dev --once`; no script runs `convex deploy`", async () => {
+    const { readFileSync } = await import("node:fs");
+    const scripts = JSON.parse(readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")).scripts as Record<string, string>;
+    const steps = scripts["deploy:dev"].split("&&").map((x) => x.trim());
+    expect(steps).toEqual(["node scripts/check-rule-packs.mjs", "npm run typecheck", "vitest run", "convex dev --once"]);
+    for (const [name, cmd] of Object.entries(scripts)) expect(cmd, name).not.toMatch(/convex\s+deploy/);
   });
 });
 

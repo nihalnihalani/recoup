@@ -4,6 +4,7 @@ import { useId, useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Doc } from "../../../convex/_generated/dataModel";
 import { deliveryOf, type SendStatus } from "../../lib/delivery";
+import { formatMinor } from "../../lib/money";
 import { ErrorBox } from "../States";
 import { ClaimIcon } from "./icons";
 import {
@@ -204,15 +205,23 @@ type PrepareCode = Extract<FunctionReturnType<typeof api.drafts.prepareSend>, { 
  */
 type Pending =
   | { kind: "ack_window"; message: string }
+  | { kind: "ack_amount"; message: string; estimate: { amountMinor: number; currency: string } | undefined }
   | { kind: "ack_content"; message: string; findings: string[] }
   | { kind: "blocked"; message: string }
   | { kind: "review"; message: string }
   | { kind: "retry_later"; message: string };
 
-function pendingFor(code: PrepareCode | "outcome_known", message: string, findings: string[] | undefined): Pending {
+function pendingFor(
+  code: PrepareCode | "outcome_known",
+  message: string,
+  findings: string[] | undefined,
+  estimate?: { amountMinor: number; currency: string },
+): Pending {
   switch (code) {
     case "window_may_have_passed":
       return { kind: "ack_window", message };
+    case "amount_exceeds_estimate":
+      return { kind: "ack_amount", message, estimate };
     case "unverified_content":
       return { kind: "ack_content", message, findings: findings ?? [] };
     case "outcome_not_approvable":
@@ -245,6 +254,7 @@ export function Composer({
   const prepareSend = useMutation(api.drafts.prepareSend);
   const approveAndSend = useMutation(api.drafts.approveAndSend);
   const resendAfterUnknown = useMutation(api.drafts.resendAfterUnknown);
+  const adjustExpected = useMutation(api.claims.adjustExpected);
   // The store's reply has to come back to this user, so a claim email goes out from their own Recoup
   // inbox. It is created on the first send rather than at sign-up (idempotent: returns the existing one).
   const ensureInbox = useAction(api.profiles.ensureInbox);
@@ -266,6 +276,7 @@ export function Composer({
   // belong to the old text); the window acknowledgment is about the claim, not the words, so it stays.
   const [ackWindow, setAckWindow] = useState(false);
   const [ackContent, setAckContent] = useState(false);
+  const [ackAmount, setAckAmount] = useState(false);
   const [resendAcknowledged, setResendAcknowledged] = useState(false);
 
   const sent = draft.outboundId !== undefined;
@@ -294,22 +305,25 @@ export function Composer({
     }
   }
 
-  const approval = (acks: { window: boolean; content: boolean }) => ({
+  type Acks = { window: boolean; content: boolean; amount?: boolean };
+
+  const approval = (acks: Acks) => ({
     draftId: draft._id,
     to,
     subject,
     body,
     ...(acks.window ? { acknowledgeWindowRisk: true } : {}),
     ...(acks.content ? { acknowledgeUnverifiedContent: true } : {}),
+    ...(acks.amount ? { acknowledgeAmountAboveEstimate: true } : {}),
   });
 
   /** §6: prepareSend ALWAYS runs first; only its `preparedHash` (with the user's acknowledgments) is sent. */
-  async function send(acks: { window: boolean; content: boolean }) {
+  async function send(acks: Acks) {
     setPending(null);
     await ensureInbox({});
     const prepared = await prepareSend(approval(acks));
     if (!prepared.ok) {
-      setPending(pendingFor(prepared.code, prepared.message, prepared.findings));
+      setPending(pendingFor(prepared.code, prepared.message, prepared.findings, prepared.estimate));
       return;
     }
     await approveAndSend({
@@ -322,7 +336,7 @@ export function Composer({
   }
 
   /** S-M03-1 / DA-A-31: a new attempt after an unknown outcome, acknowledged, with the full checks on the server. */
-  async function resend(acks: { window: boolean; content: boolean }) {
+  async function resend(acks: Acks) {
     if (!draft.outboundId) return;
     setPending(null);
     const result = await resendAfterUnknown({
@@ -332,10 +346,14 @@ export function Composer({
       recipientConfirmed,
       acknowledgedOutboundId: draft.outboundId,
     });
-    if (!result.ok) setPending(pendingFor(result.code, result.message, "findings" in result ? result.findings : undefined));
+    if (!result.ok) {
+      setPending(
+        pendingFor(result.code, result.message, "findings" in result ? result.findings : undefined, "estimate" in result ? result.estimate : undefined),
+      );
+    }
   }
 
-  const act = (acks: { window: boolean; content: boolean }) => (unknownOutcome ? resend(acks) : send(acks));
+  const act = (acks: Acks) => (unknownOutcome ? resend(acks) : send(acks));
 
   // Label on the left at sm and up, stacked above the field on a phone.
   const row = "grid grid-cols-1 gap-1.5 sm:grid-cols-[5rem_minmax(0,1fr)] sm:gap-3";
@@ -427,13 +445,26 @@ export function Composer({
           onAckWindow={() =>
             void run(async () => {
               setAckWindow(true);
-              await act({ window: true, content: ackContent });
+              await act({ window: true, content: ackContent, amount: ackAmount });
             })
           }
           onAckContent={() =>
             void run(async () => {
               setAckContent(true);
-              await act({ window: ackWindow, content: true });
+              await act({ window: ackWindow, content: true, amount: ackAmount });
+            })
+          }
+          claimedMinor={claim.expectedCents}
+          onAckAmount={() =>
+            void run(async () => {
+              setAckAmount(true);
+              await act({ window: ackWindow, content: ackContent, amount: true });
+            })
+          }
+          onAdjustAmount={(estimateMinor) =>
+            void run(async () => {
+              await adjustExpected({ claimId: claim._id, expectedCents: estimateMinor, reason: "Adjusted to Recoup's current estimate" });
+              await act({ window: ackWindow, content: ackContent });
             })
           }
         />
@@ -459,7 +490,7 @@ export function Composer({
             type="button"
             disabled={busy || !resendAcknowledged}
             className={primaryButtonClass}
-            onClick={() => void run(() => act({ window: ackWindow, content: ackContent }))}
+            onClick={() => void run(() => act({ window: ackWindow, content: ackContent, amount: ackAmount }))}
           >
             {busy ? "Sending…" : "Send again"}
           </button>
@@ -490,7 +521,7 @@ export function Composer({
               type="button"
               disabled={busy || pending?.kind === "blocked"}
               className={primaryButtonClass}
-              onClick={() => void run(() => send({ window: ackWindow, content: ackContent }))}
+              onClick={() => void run(() => send({ window: ackWindow, content: ackContent, amount: ackAmount }))}
             >
               {busy ? "Sending…" : "Approve & send"}
             </button>
@@ -511,14 +542,52 @@ function PendingPanel({
   busy,
   onAckWindow,
   onAckContent,
+  claimedMinor,
+  onAckAmount,
+  onAdjustAmount,
 }: {
   pending: Pending;
   busy: boolean;
   onAckWindow: () => void;
   onAckContent: () => void;
+  /** The claim's asked amount, in the estimate's currency (the server compares only same-currency amounts). */
+  claimedMinor: number;
+  onAckAmount: () => void;
+  onAdjustAmount: (estimateMinor: number) => void;
 }) {
   const box = "space-y-2.5 rounded-xl border px-3.5 py-3 text-sm";
   switch (pending.kind) {
+    case "ack_amount": {
+      // DA-B-2: the claim asks more than Recoup's exact estimate — adjust it, or send the full amount knowingly.
+      const estimate = pending.estimate;
+      if (estimate === undefined) {
+        return (
+          <div role="alert" className={`${box} border-yellow-500/40 bg-yellow-500/10 text-gray-900`}>
+            <p>{pending.message}</p>
+            <button type="button" disabled={busy} className={secondaryButtonClass} onClick={onAckAmount}>
+              Send the full amount anyway
+            </button>
+          </div>
+        );
+      }
+      const claimed = formatMinor(claimedMinor, estimate.currency);
+      const estimated = formatMinor(estimate.amountMinor, estimate.currency);
+      return (
+        <div role="alert" className={`${box} border-yellow-500/40 bg-yellow-500/10 text-gray-900`}>
+          <p>
+            This claim asks {claimed}; Recoup's current estimate is {estimated}.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" disabled={busy} className={secondaryButtonClass} onClick={() => onAdjustAmount(estimate.amountMinor)}>
+              Adjust to {estimated}
+            </button>
+            <button type="button" disabled={busy} className={secondaryButtonClass} onClick={onAckAmount}>
+              Send {claimed} anyway
+            </button>
+          </div>
+        </div>
+      );
+    }
     case "ack_window":
       return (
         <div role="alert" className={`${box} border-yellow-500/40 bg-yellow-500/10 text-gray-900`}>

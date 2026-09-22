@@ -46,14 +46,14 @@ afterEach(() => {
 });
 
 /** An active purchase with one item, an accepted lower observation, a 14-day policy and an inbox. */
-async function world(t: T, userId: Id<"users">, o: { isExample?: boolean } = {}) {
+async function world(t: T, userId: Id<"users">, o: { isExample?: boolean; qty?: number; expectedCents?: number } = {}) {
   return await t.run(async (ctx) => {
     await ctx.db.insert("profiles", { userId, inboxId: "inbox_1", inboxEmail: "me@agentmail.to" });
     const purchaseId = await ctx.db.insert("purchases", {
       userId, merchant: "Acme", merchantDomain: DOMAIN, purchasedAt: PURCHASED, currency: "USD", status: "active",
       ...(o.isExample ? { isExample: true } : {}),
     });
-    const itemId = await ctx.db.insert("items", { purchaseId, userId, name: "Jacket", unitCents: 12_000, qty: 1, productUrl: PRODUCT, returned: false });
+    const itemId = await ctx.db.insert("items", { purchaseId, userId, name: "Jacket", unitCents: 12_000, qty: o.qty ?? 1, productUrl: PRODUCT, returned: false });
     const priceCheckId = await ctx.db.insert("priceChecks", {
       itemId, userId, observedCents: 9_500, currency: "USD", confidence: 0.92, variantMatch: "exact", observedAt: NOW - 60_000, sourceUrl: PRODUCT,
     });
@@ -64,7 +64,7 @@ async function world(t: T, userId: Id<"users">, o: { isExample?: boolean } = {})
     });
     const transactionId = await ensurePurchaseTransaction(ctx, purchaseId);
     const claimId = await ctx.db.insert("claims", {
-      purchaseId, itemId, userId, type: "price_adjustment", expectedCents: 2_500, status: "detected", token: "AB12CD", version: 1,
+      purchaseId, itemId, userId, type: "price_adjustment", expectedCents: o.expectedCents ?? 2_500, status: "detected", token: "AB12CD", version: 1,
       windowEndsAt: WINDOW_END, policyId, openedFromPriceCheckId: priceCheckId, ...(o.isExample ? { isExample: true } : {}),
     });
     return { purchaseId, itemId, transactionId, claimId, priceCheckId };
@@ -344,5 +344,147 @@ describe("SEC-AI-4: details the server did not supply block approval", () => {
     expect(unverifiedContent("Refund $999.00 to x@evil.example, call (555) 123-4567, or visit http://bit.ly/abc", allowed)).toEqual([
       "link http://bit.ly/abc", "email x@evil.example", "phone (555) 123-4567", "amount $999.00",
     ]);
+  });
+});
+
+// ===========================================================================
+// M13b (D190): DA checkpoint B — DA-B-1, DA-B-2, DA-B-5 (Appendix B repros B1–B4, inverted)
+// ===========================================================================
+
+describe("DA-B-1: approveAndSend re-reads the window clock and pack activation (pure reads, no evaluation)", () => {
+  async function preparedJustBeforeWindowEnd(t: T, linked: boolean) {
+    if (!linked) setTestActivations([]);
+    const a = await signedIn(t, "A");
+    const w = await world(t, a.userId);
+    if (linked) await link(t, w.purchaseId);
+    const draftId = await draftFor(t, a.userId, w.claimId);
+    vi.setSystemTime(WINDOW_END - 60_000);
+    const res = await prepare(a.as, draftId);
+    if (!res.ok) throw new Error(`prepare refused: ${res.code}`);
+    return { a, w, draftId, preparedHash: res.preparedHash };
+  }
+
+  for (const linked of [true, false]) {
+    it(`B1 inverted (${linked ? "linked" : "unlinked"}): prepared before the window end, sent after → the acknowledgment is required, then it sends`, async () => {
+      const t = setup();
+      const { a, w, draftId, preparedHash } = await preparedJustBeforeWindowEnd(t, linked);
+      expect((await claimOf(t, w.claimId)).opportunityId !== undefined).toBe(linked);
+      vi.setSystemTime(WINDOW_END + 60_000);
+      await expect(approve(a.as, draftId, { preparedHash })).rejects.toThrow(/Acknowledge/);
+      // The hash prepared without the acknowledgment is not the approval of a late ask.
+      await expect(approve(a.as, draftId, { preparedHash, acknowledgeWindowRisk: true })).rejects.toThrow(/Review the claim again/);
+      expect(send).not.toHaveBeenCalled();
+      expect(await prepare(a.as, draftId)).toMatchObject({ ok: false, code: "window_may_have_passed" });
+      const again = await prepare(a.as, draftId, { acknowledgeWindowRisk: true });
+      if (!again.ok) throw new Error(`prepare refused: ${again.code}`);
+      await approve(a.as, draftId, { preparedHash: again.preparedHash, acknowledgeWindowRisk: true });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((await claimOf(t, w.claimId)).version).toBe(1);
+    });
+  }
+
+  it("B3 inverted: the pack is withdrawn between prepare and send → no send (rule_withdrawn), even with the old hash", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const w = await world(t, a.userId);
+    await link(t, w.purchaseId);
+    const draftId = await draftFor(t, a.userId, w.claimId);
+    const res = await prepare(a.as, draftId);
+    if (!res.ok) throw new Error("prepare refused");
+    setTestActivations([{ ruleId: R01_V1_RULE_ID, version: 1, status: "withdrawn", decision: "D999" }]);
+    await expect(approve(a.as, draftId, { preparedHash: res.preparedHash })).rejects.toThrow(/withdrawn/);
+    expect(send).not.toHaveBeenCalled();
+    // The next review supersedes the opportunity and says so.
+    expect(await prepare(a.as, draftId)).toMatchObject({ ok: false, code: "rule_withdrawn" });
+  });
+});
+
+describe("DA-B-2: a claim asking more than the rule's exact estimate is flagged before sending", () => {
+  async function twoUnitCase(t: T) {
+    const a = await signedIn(t, "A");
+    const w = await world(t, a.userId, { qty: 2, expectedCents: 5_000 });
+    await link(t, w.purchaseId);
+    // The user corrects the quantity to 1 through the purchase (re-evaluated in the same mutation, M11d).
+    await a.as.mutation(api.purchases.confirm, {
+      purchaseId: w.purchaseId, merchant: "Acme", merchantDomain: DOMAIN, purchasedAt: PURCHASED,
+      items: [{ itemId: w.itemId, name: "Jacket", unitCents: 12_000, qty: 1, productUrl: PRODUCT }],
+    });
+    const claim = await claimOf(t, w.claimId);
+    expect(claim.expectedCents).toBe(5_000);
+    const body = "Hello, the Jacket I bought is now listed lower. Could you refund the $50.00 difference? Thank you.";
+    const draftId = await draftFor(t, a.userId, w.claimId, body);
+    return { a, w, draftId, body, version: claim.version };
+  }
+
+  it("B4 inverted: qty 2→1 on an open 5,000 claim → amount_exceeds_estimate carrying the 2,500 estimate; nothing sent", async () => {
+    const t = setup();
+    const { a, draftId, body } = await twoUnitCase(t);
+    const res = await prepare(a.as, draftId, { body });
+    expect(res).toMatchObject({ ok: false, code: "amount_exceeds_estimate", estimate: { amountMinor: 2_500, currency: "USD" } });
+    if (res.ok) throw new Error("unreachable");
+    expect(res.message).toMatch(/USD 2,500|2,500|25\.00/);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("acknowledged, the claimed amount can still be sent (never a hard block)", async () => {
+    const t = setup();
+    const { a, draftId, body, version } = await twoUnitCase(t);
+    const res = await prepare(a.as, draftId, { body, acknowledgeAmountAboveEstimate: true });
+    if (!res.ok) throw new Error(`prepare refused: ${res.code}`);
+    await expect(approve(a.as, draftId, { body, claimVersion: version, preparedHash: res.preparedHash })).rejects.toThrow(/amount/i);
+    await approve(a.as, draftId, { body, claimVersion: version, preparedHash: res.preparedHash, acknowledgeAmountAboveEstimate: true });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("after adjustExpected(2,500) a new draft prepares without the prompt", async () => {
+    const t = setup();
+    const { a, w } = await twoUnitCase(t);
+    await a.as.mutation(api.claims.adjustExpected, { claimId: w.claimId, expectedCents: 2_500, reason: "Adjusted to Recoup's estimate" });
+    const draftId = await draftFor(t, a.userId, w.claimId);
+    expect(await prepare(a.as, draftId)).toMatchObject({ ok: true, findings: [] });
+  });
+
+  it("the shared predicate: exact_formula, same two-decimal currency, estimate strictly below the claim", async () => {
+    const { amountExceedsEstimate } = await import("./lib/amountReview");
+    const amount = (m: number, currency = "USD", basis = "exact_formula") => ({ estimate: { amountMinor: m, currency }, basis });
+    expect(amountExceedsEstimate({ expectedCents: 5_000, currency: "USD" }, amount(2_500))).toEqual({
+      exceeds: true, estimate: { amountMinor: 2_500, currency: "USD" }, claimed: { amountMinor: 5_000, currency: "USD" },
+    });
+    expect(amountExceedsEstimate({ expectedCents: 2_500, currency: "USD" }, amount(2_500)).exceeds).toBe(false);
+    expect(amountExceedsEstimate({ expectedCents: 2_000, currency: "USD" }, amount(2_500)).exceeds).toBe(false);
+    expect(amountExceedsEstimate({ expectedCents: 5_000, currency: "USD" }, amount(2_500, "USD", "documented_total")).exceeds).toBe(false);
+    expect(amountExceedsEstimate({ expectedCents: 5_000, currency: "EUR" }, amount(2_500)).exceeds).toBe(false);
+    expect(amountExceedsEstimate({ expectedCents: 5_000, currency: null }, amount(2_500)).exceeds).toBe(false);
+    expect(amountExceedsEstimate({ expectedCents: 5_000, currency: "JPY" }, amount(2_500, "JPY")).exceeds).toBe(false); // cents ≠ yen
+    expect(amountExceedsEstimate({ expectedCents: 5_000, currency: "USD" }, null).exceeds).toBe(false);
+  });
+});
+
+describe("DA-B-5: the content check catches the B2 forms", () => {
+  const allowed = { emails: new Set([CONTACT]), urls: new Set<string>(), hosts: new Set([DOMAIN]), amountsMinor: new Set([2_500]) };
+  for (const body of [
+    "Please refund USD 450 today.",
+    "Please refund 450$ today.",
+    "Please refund four hundred fifty dollars.",
+    "Verify at refund-portal.example/verify before replying.",
+    "Write to claims [at] evil.example with my card details.",
+  ]) {
+    it(`flags: ${body}`, () => {
+      expect(unverifiedContent(body, allowed).length).toBeGreaterThan(0);
+    });
+  }
+
+  it("names what it found, and obfuscated addresses are read as addresses", () => {
+    expect(unverifiedContent("Write to claims [at] evil.example or refunds(at)evil.example.", allowed)).toEqual([
+      "email claims@evil.example", "email refunds@evil.example",
+    ]);
+    expect(unverifiedContent("Please refund USD 450 or 450$.", allowed)).toEqual(["amount USD 450", "amount 450$"]);
+    expect(unverifiedContent("Verify at refund-portal.example/verify.", allowed)).toEqual(["link refund-portal.example/verify"]);
+    expect(unverifiedContent("Send four hundred fifty dollars.", allowed)).toEqual(["amount four hundred fifty dollars"]);
+  });
+
+  it("server-supplied forms still pass: the store's own bare domain, its amount in any spelling, ordinary prose", () => {
+    expect(unverifiedContent(`I bought it at ${DOMAIN} and ${DOMAIN}/p/jacket shows USD 25.00, i.e. 25.00$ less.`, allowed)).toEqual([]);
+    expect(unverifiedContent("Thanks.Regards, e.g. soon. I bought it at the store. Order 2 of 3.", allowed)).toEqual([]);
   });
 });

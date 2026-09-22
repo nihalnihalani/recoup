@@ -44,9 +44,17 @@
 //     revises fixtures and hashes freely until review. Immutability starts
 //     at `reviewed` (README rule 1; contract §2.7 "any existing manifest
 //     entry with status >= reviewed").
-//  7. ENGINE_VERSION: stubbed. TODO(M20): recompute the SHA-256 of the
-//     evaluator import closure and compare it with
-//     convex/lib/rules/engineVersion.ts (contract §2.7 "Engine versioning").
+//  7. Engine pin (DA-B-6, D190/D193; contract §2.7 "Engine versioning",
+//     DA-A-23 pulled forward): every effectively ACTIVE pack's manifest entry
+//     records `engineRoots` (repo paths: the pack file plus the modules that
+//     build and resolve its input and the outcome/deadline engine) and
+//     `engineClosureSha256`. The closure is the transitive closure of RELATIVE
+//     value imports from those roots within convex/ (type-only imports are
+//     erased at runtime and skipped; _generated/** and *.test.ts are never
+//     followed); its hash is SHA-256 over the sorted lines
+//     "<path>\t<sha256 of the file>\n". Editing any file in the closure
+//     (e.g. lib/rules/outcome.ts or lib/money.ts) without recording the new
+//     pin fails. `--print-engine-closure` prints each active pack's closure.
 //
 // BASE for check 6, first match wins:
 //   a. `--base <rev>` or env RULE_PACKS_BASE. CI sets it to the push's
@@ -137,6 +145,63 @@ export function readExportedLiteral(sourceText, exportName, fileLabel) {
     }
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Engine closure (check 7)
+// ---------------------------------------------------------------------------
+
+/** Relative VALUE module specifiers of a TypeScript source (type-only imports/exports are skipped). */
+export function relativeImports(sourceText, fileLabel) {
+  const sf = ts.createSourceFile(fileLabel, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const out = [];
+  for (const st of sf.statements) {
+    let spec = null;
+    if (ts.isImportDeclaration(st)) {
+      if (st.importClause?.isTypeOnly) continue;
+      const named = st.importClause?.namedBindings;
+      // `import { type A, type B } from "x"` with no default import is type-only too.
+      if (st.importClause && !st.importClause.name && named && ts.isNamedImports(named) && named.elements.length > 0 && named.elements.every((e) => e.isTypeOnly)) continue;
+      spec = st.moduleSpecifier;
+    } else if (ts.isExportDeclaration(st) && st.moduleSpecifier) {
+      if (st.isTypeOnly) continue;
+      spec = st.moduleSpecifier;
+    }
+    if (spec && ts.isStringLiteral(spec) && spec.text.startsWith(".")) out.push(spec.text);
+  }
+  return out;
+}
+
+const followable = (rel) => rel.startsWith("convex/") && !rel.startsWith("convex/_generated/") && !/\.test\.tsx?$/.test(rel);
+
+/**
+ * The engine closure of `roots` (repo-relative paths): every file reachable through relative value imports, within
+ * convex/ (excluding _generated/** and tests). Returns the sorted files with their hashes and the closure hash, or
+ * the missing files.
+ */
+export function engineClosure(roots, readRepoFile) {
+  const seen = new Map();
+  const missing = [];
+  const queue = [...roots];
+  while (queue.length > 0) {
+    const rel = queue.shift();
+    if (seen.has(rel) || !followable(rel)) continue;
+    const bytes = readRepoFile(rel);
+    if (!bytes) {
+      missing.push(rel);
+      continue;
+    }
+    seen.set(rel, sha256Hex(bytes));
+    for (const spec of relativeImports(bytes.toString("utf8"), rel)) {
+      const base = path.posix.normalize(path.posix.join(path.posix.dirname(rel), spec));
+      const target = [base, `${base}.ts`, `${base}.tsx`, `${base}/index.ts`].find((c) => /\.tsx?$/.test(c) && readRepoFile(c));
+      if (target) queue.push(target);
+      else if (followable(`${base}.ts`)) missing.push(`${base} (imported by ${rel})`);
+    }
+  }
+  const files = [...seen.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const sha256 = sha256Hex(files.map(([f, h]) => `${f}\t${h}\n`).join(""));
+  return { files, sha256, missing };
 }
 
 // ---------------------------------------------------------------------------
@@ -357,12 +422,32 @@ export function checkRulePacks(input) {
     }
   }
 
-  // 7. ENGINE_VERSION (stub)
-  notes.push(
-    input.engineVersionPresent
-      ? `TODO(M20): ${PATHS.engineVersion} exists but ENGINE_VERSION recomputation is not implemented yet; not checked`
-      : "ENGINE_VERSION: no engine yet (check arrives with M20)",
-  );
+  // 7. engine pin for every effectively active pack (DA-B-6)
+  let pinned = 0;
+  for (const a of active) {
+    const pack = packs.find((p) => p.key === `${a.ruleId}@${a.version}`);
+    if (!pack) continue; // reported by check 4
+    const label = `engine pin: ${pack.label}`;
+    const roots = pack.entry.engineRoots;
+    const recorded = pack.entry.engineClosureSha256;
+    if (!Array.isArray(roots) || roots.length === 0 || roots.some((r) => typeof r !== "string")) {
+      errors.push(`${label} is active but records no engineRoots (the pack file + its snapshot builder, resolve, and the outcome/deadline engine)`);
+      continue;
+    }
+    if (pack.entry.packFile !== undefined && !roots.includes(pack.entry.packFile)) errors.push(`${label}: engineRoots must include the pack file ${pack.entry.packFile}`);
+    const closure = engineClosure(roots, readRepoFile);
+    if (closure.missing.length) errors.push(`${label}: cannot read ${closure.missing.join(", ")}`);
+    if (typeof recorded !== "string" || !/^[0-9a-f]{64}$/.test(recorded)) {
+      errors.push(`${label} is active but records no engineClosureSha256 (current closure: ${closure.sha256}, ${closure.files.length} files)`);
+    } else if (recorded !== closure.sha256) {
+      errors.push(
+        `${label}: the engine changed (closure of ${closure.files.length} files hashes to ${closure.sha256.slice(0, 12)}…, recorded ${recorded.slice(0, 12)}…). ` +
+          "An engine change alters the active pack's behaviour: review it, re-run the pack's fixtures, and record the new engineClosureSha256 (node scripts/check-rule-packs.mjs --print-engine-closure).",
+      );
+    } else pinned += 1;
+  }
+  notes.push(active.length === 0 ? "engine pin: no active pack to pin" : `engine pin: ${pinned}/${active.length} active pack(s) match their recorded engine closure`);
+  if (input.engineVersionPresent) notes.push(`${PATHS.engineVersion} exists; its ENGINE_VERSION is not compared (the closure pin above is the check)`);
 
   return { errors, notes, activeCount: active.length };
 }
@@ -448,6 +533,18 @@ function main() {
   });
   errors.push(...result.errors);
 
+  if (argv.includes("--print-engine-closure")) {
+    const manifest = JSON.parse(readText(PATHS.manifest));
+    const readRepoFile = (rel) => (existsSync(path.join(repoRoot, rel)) ? readFileSync(path.join(repoRoot, rel)) : null);
+    for (const p of packEntries(manifest)) {
+      if (!Array.isArray(p.entry.engineRoots)) continue;
+      const c = engineClosure(p.entry.engineRoots, readRepoFile);
+      console.log(`${p.label}: engineClosureSha256 ${c.sha256} (${c.files.length} files)`);
+      for (const [f, h] of c.files) console.log(`  ${h}  ${f}`);
+      for (const m of c.missing) console.log(`  MISSING ${m}`);
+    }
+    return;
+  }
   console.log(`[check-rule-packs] base: ${base.rev ? `${base.rev.slice(0, 12)} (${base.how})` : base.how}`);
   for (const n of result.notes) console.log(`[check-rule-packs] ${n}`);
   if (errors.length) {
