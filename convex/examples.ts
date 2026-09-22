@@ -3,6 +3,7 @@ import { mutation } from "./_generated/server";
 import { requireUserId } from "./lib/access";
 import { openClaim } from "./claims";
 import { windowEndsAt } from "./lib/ledger";
+import { ensurePurchaseTransaction } from "./transactions";
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -33,7 +34,11 @@ export const load = mutation({
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
     const existing = mine.filter((p) => p.isExample);
-    if (existing.length > 0) return { loaded: false, purchaseIds: existing.map((p) => p._id) };
+    if (existing.length > 0) {
+      // DA-A-35: examples loaded before wave 1 have no transaction yet; give them one (idempotent, ≤ 2 rows).
+      for (const p of existing) await ensurePurchaseTransaction(ctx, p._id);
+      return { loaded: false, purchaseIds: existing.map((p) => p._id) };
+    }
 
     const now = Date.now();
 
@@ -65,6 +70,8 @@ export const load = mutation({
       status: "active",
       isExample: true,
     });
+    // DA-A-35: a direct purchase insert creates its own transaction, which copies `isExample`.
+    await ensurePurchaseTransaction(ctx, dropPurchase);
     const jacket = await ctx.db.insert("items", {
       purchaseId: dropPurchase,
       userId,
@@ -151,6 +158,7 @@ export const load = mutation({
       status: "active",
       isExample: true,
     });
+    await ensurePurchaseTransaction(ctx, audioPurchase);
     const headphones = await ctx.db.insert("items", {
       purchaseId: audioPurchase,
       userId,

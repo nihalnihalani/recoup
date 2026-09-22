@@ -14,6 +14,7 @@ import { boundedLine } from "./lib/text";
 import { clearItemSchedule } from "./lib/schedule";
 import { schedulePolicyFetch } from "./policies";
 import { assertCoarseNow } from "./watches";
+import { ensurePurchaseTransaction } from "./transactions";
 import schema, { processedStatus, verdictValidator } from "./schema";
 import {
   MAX_ITEMS_PER_PURCHASE,
@@ -145,6 +146,8 @@ export const create = mutation({
     for (const it of cleanItems) {
       await ctx.db.insert("items", { ...it, purchaseId, userId, returned: false });
     }
+    // Contract §2.2 / DA-A-35: every purchase gets its category-neutral transaction in the same mutation.
+    await ensurePurchaseTransaction(ctx, purchaseId);
     // F-AUD-9/D27: `isExample` is not a public argument here (examples are
     // seeded only by `examples.ts`'s direct `db.insert`, D04) -- a client
     // can no longer mark its own purchase as an example to dodge its own
@@ -214,6 +217,8 @@ export const confirm = mutation({
     for (const { itemId, ...fields } of cleanItems) {
       await ctx.db.patch(itemId, fields);
     }
+    // Contract §2.2: confirming re-syncs (or, for a legacy purchase, lazily creates) the transaction mirror.
+    await ensurePurchaseTransaction(ctx, args.purchaseId);
     // C3(d)/D107: confirming is exactly the moment a needs_review item's
     // permanent-vs-transient classification can flip (it gains a
     // purchasedAt/productUrl, or its purchase becomes "active") -- un-stamp
@@ -285,6 +290,8 @@ export const remove = mutation({
       if (c.purchaseId === purchaseId) await cancelPending(ctx, c._id);
     }
     await ctx.db.patch(purchaseId, { status: "archived" });
+    // The transaction mirrors the purchase's status, so an archived purchase never leaves an active transaction.
+    await ensurePurchaseTransaction(ctx, purchaseId);
     return null;
   },
 });
