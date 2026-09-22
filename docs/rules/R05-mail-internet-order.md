@@ -89,9 +89,9 @@ Cancellation of the unshipped order and a **prompt refund** of the amount tender
 
 Let `T` = end of the applicable shipping time (§4).
 
-1. **No delay notice, not shipped by `T`** → the seller must deem the order cancelled and make a prompt refund (435.2(c)(5)). Right to refund vests at `T` (assumption A3: vesting = the first moment after `T` without shipment).
+1. **No delay notice, not shipped by `T`** → the seller must deem the order cancelled and make a prompt refund (435.2(c)(5)). Right to refund vests when `T` ends without shipment (assumption A3: vesting **date** = the calendar day after the last day of `T`).
 2. **Delay-option notice received ≤ `T`, definite revised date `R` with `R ≤ T + 30 days`:** buyer silence = consent to ship by `R` (435.2(b)(1)(ii)). Buyer may cancel any time before shipment → refund vests on the seller's receipt of the cancellation (435.2(c)(1)). Not shipped by `R` → the seller must offer a **renewed** option before `R`; silence to a renewed option = **rejection** → cancellation if not shipped by `R` (435.2(b)(2)(ii), (c)(3)).
-3. **Delay-option notice with `R > T + 30 days` or "indefinite":** the order is **automatically cancelled** unless shipped within 30 days of `T` or the buyer **expressly consented** within those 30 days (435.2(b)(1)(iii), (c)(2)). Refund vests at `T + 30 days`.
+3. **Delay-option notice with `R > T + 30 days` or "indefinite":** the order is **automatically cancelled** unless shipped within 30 days of `T` or the buyer **expressly consented** within those 30 days (435.2(b)(1)(iii), (c)(2)). Refund vests when `T + 30 days` ends without shipment or express consent (vesting date = the next calendar day, A3).
 4. **Notice sent after `T`** is not a valid first delay-option notice ("in no event later than said applicable time", 435.2(b)(1)) → treat as case 1.
 5. **Buyer consented to an indefinite delay** → continuing right to cancel before shipment (435.2(b)(1)(iii)(B)).
 6. **Seller decides not to ship** → prompt refund (435.2(b)(4), (c)(4)).
@@ -225,5 +225,5 @@ FTC business-guide passages FTC-MITOR-G1…G6 are in `sources/federal-web-pages-
 
 - A1: Day counts in §4 are calendar days; day 30 inclusive.
 - A2: "Working days" / seller "business days" = Mon–Fri excluding 5 U.S.C. 6103 federal holidays.
-- A3: Refund right vests at the first instant the §8 condition holds.
+- A3: Vesting date = the calendar day after the last day of the applicable period (`T`, `R`, or `T + 30 days`); for a buyer cancellation, the date the seller receives it; for a seller decision not to ship, the date of that notice.
 - A4: For a range representation, the upper bound governs.
