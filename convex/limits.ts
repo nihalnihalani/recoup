@@ -90,7 +90,7 @@ export type Budget = {
   global?: { kind: GlobalBudgetKind; units: number };
 };
 
-export type GlobalBudgetKind = "price_check" | "policy_fetch" | "drop_email" | "market_lookup" | "claim_email" | "inbound_extract";
+export type GlobalBudgetKind = "price_check" | "policy_fetch" | "drop_email" | "market_lookup" | "claim_email" | "inbound_extract" | "evidence_bytes";
 
 /**
  * Deployment-wide daily kill switches (usage rows with no userId), so the worst day is bounded in dollars whatever
@@ -110,6 +110,13 @@ export const GLOBAL_DAILY_BUDGETS: Record<GlobalBudgetKind, { max: number; label
   claim_email: { max: 100, label: "claim emails" },
   /** One unit = one inbound-email extraction model call; a refused paste becomes needs_review and is retried hourly (T01/D76). Global-only: no per-user counterpart. */
   inbound_extract: { max: 500, label: "reading pasted or forwarded emails" },
+  /**
+   * SEC-UP-8 (M13, lead-authorized): deployment-wide evidence upload BYTES per UTC day, charged from `_storage.size`
+   * after storing (DA-A-28f). Equal to `EVIDENCE_GLOBAL_DAILY_BYTES` below (a literal here because that constant is
+   * declared later in this module; `evidence.test.ts` asserts the two match). `ops.pauseKind("evidence_bytes")` is
+   * the operator kill switch: it pins today's row to max, so every finalize refuses.
+   */
+  evidence_bytes: { max: 2 * 1024 * 1024 * 1024, label: "document uploads" },
 };
 
 export const DAILY_BUDGETS = {
