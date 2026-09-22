@@ -6,8 +6,10 @@ import { ownedTransaction, requireUserId } from "./lib/access";
 import { getFactSpec, type FactSpec } from "./lib/facts/catalog";
 import { loadRetailSnapshot } from "./lib/facts/legacyRetail";
 import { resolveCell, type Cell, type CellSource, type ResolveRow } from "./lib/facts/resolve";
+import { evaluationScope } from "./lib/facts/subject";
 import { putFact, readLiveFacts, toResolveRow } from "./lib/facts/write";
 import { rateLimiter } from "./lib/rateLimits";
+import { evaluateTransaction } from "./opportunities";
 
 const sourceView = v.object({
   kind: v.union(
@@ -143,7 +145,7 @@ export const answer = mutation({
     if (spec !== null && backedByPurchase(txn, spec)) {
       throw new ConvexError(`This comes from your purchase record: edit the purchase to change it (${spec.key}).`);
     }
-    return await putFact(ctx, userId, {
+    const written = await putFact(ctx, userId, {
       transactionId: args.transactionId,
       subjectKey: args.subjectKey,
       key: args.key,
@@ -152,5 +154,11 @@ export const answer = mutation({
       source: { kind: "user" },
       ...(args.overridesObserved ? { overridesObserved: true } : {}),
     });
+    // C43 (M11d): re-evaluate in this same mutation so the opportunity card shows the new outcome reactively — scoped
+    // to the answered item, or the whole transaction for a transaction-level fact. Nothing written → nothing to do.
+    if (written.outcome !== "unchanged") {
+      await evaluateTransaction(ctx, txn._id, "fact_change", Date.now(), evaluationScope([args.subjectKey]));
+    }
+    return written;
   },
 });

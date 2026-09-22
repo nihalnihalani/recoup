@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseSubjectKey, subjectKey, subjectMatches, MAX_SUBJECT_ORDINAL } from "./subject";
+import { evaluationScope, parseSubjectKey, subjectKey, subjectMatches, MAX_SUBJECT_ORDINAL } from "./subject";
 
 describe("lib/facts/subject", () => {
   it("builds and parses each subject kind", () => {
@@ -39,5 +39,15 @@ describe("lib/facts/subject", () => {
     expect(subjectMatches("item:abc", "item:abd")).toBe(false);
     expect(subjectMatches("segment:*", "segment:3")).toBe(true);
     expect(subjectMatches("*", "incident:q")).toBe(true);
+  });
+});
+
+describe("evaluationScope (M11d)", () => {
+  it("item-only changes scope to those items; anything transaction-level evaluates everything", () => {
+    expect(evaluationScope(["item:a", "item:b", "item:a"])).toEqual({ subjects: ["item:a", "item:b"] });
+    expect(evaluationScope(["item:a", "txn"])).toEqual({});
+    expect(evaluationScope(["txn"])).toEqual({});
+    expect(evaluationScope(["segment:1"])).toEqual({});
+    expect(evaluationScope([])).toEqual({});
   });
 });

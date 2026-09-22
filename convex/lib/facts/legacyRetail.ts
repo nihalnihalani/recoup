@@ -83,11 +83,21 @@ export async function readLegacyRetail(
 ): Promise<LegacyRetailInput | null> {
   const purchase = await ctx.db.get(purchaseId);
   if (!purchase) return null;
-  const all = await ctx.db
-    .query("items")
-    .withIndex("by_purchase", (q) => q.eq("purchaseId", purchaseId))
-    .take(MAX_ITEMS_PER_PURCHASE);
-  const items = opts.itemIds === undefined ? all : all.filter((i) => opts.itemIds!.includes(i._id));
+  let items: Doc<"items">[];
+  if (opts.itemIds === undefined) {
+    items = await ctx.db
+      .query("items")
+      .withIndex("by_purchase", (q) => q.eq("purchaseId", purchaseId))
+      .take(MAX_ITEMS_PER_PURCHASE);
+  } else {
+    // Subject-scoped (DA-A-32, M11d): read only the requested items by id — a constant, not the whole purchase. An id
+    // that is missing, of another purchase or of another user is dropped, never read into the snapshot.
+    const wanted = [...new Set(opts.itemIds)].slice(0, MAX_ITEMS_PER_PURCHASE);
+    const got = await Promise.all(wanted.map((id) => ctx.db.get(id)));
+    items = got
+      .filter((i): i is Doc<"items"> => i !== null && i.purchaseId === purchaseId && i.userId === purchase.userId)
+      .sort((a, b) => a._creationTime - b._creationTime);
+  }
   const latestAccepted: LegacyRetailInput["latestAccepted"] = {};
   for (const item of items) {
     const newest = await ctx.db
