@@ -18,6 +18,8 @@ import { putFact, readCellRows, readLiveFacts } from "./lib/facts/write";
 
 const modules = import.meta.glob("./**/*.*s");
 const SUPERSEDED = 5_000;
+/** Each fixture seeds 5,000 rows (~0.3 s locally, slower under the full CI suite): explicit 30 s instead of vitest's 5 s. */
+const HEAVY_TEST_TIMEOUT_MS = 30_000;
 
 async function fixture() {
   const t = convexTest({ schema, modules, transactionLimits: true });
@@ -71,7 +73,7 @@ describe(`fact reads never scan superseded history (1 live row + ${SUPERSEDED} s
     expect(rows).toBe(2);
     expect(cell).toBeLessThanOrEqual(2);
     expect(live).toBeLessThanOrEqual(2);
-  });
+  }, HEAVY_TEST_TIMEOUT_MS);
 
   it("a correction through putFact reads a small constant number of documents", async () => {
     const { t, userId, transactionId, item } = await fixture();
@@ -85,7 +87,7 @@ describe(`fact reads never scan superseded history (1 live row + ${SUPERSEDED} s
     );
     // accountState (tombstone) + transaction + item + the live row (+ its re-read on patch) — never the 5,000.
     expect(read).toBeLessThanOrEqual(10);
-  });
+  }, HEAVY_TEST_TIMEOUT_MS);
 
   it("the public live listing (facts.list) stays within a small constant", async () => {
     const { as, transactionId } = await fixture();
@@ -94,5 +96,5 @@ describe(`fact reads never scan superseded history (1 live row + ${SUPERSEDED} s
     );
     // accountState + transaction + purchase + 1 item + its price checks (none) + the live row.
     expect(read).toBeLessThanOrEqual(10);
-  });
+  }, HEAVY_TEST_TIMEOUT_MS);
 });
