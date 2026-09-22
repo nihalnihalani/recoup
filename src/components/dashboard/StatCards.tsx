@@ -290,6 +290,16 @@ function RecoveryPanel({ summary }: { summary: RecoverySummary }) {
         </div>
       )}
 
+      {summary.unsupportedCurrencies.length > 0 && (
+        <p className="mt-4 text-sm text-gray-600">
+          {summary.unsupportedCurrencies
+            .map((row) => `${row.claims} ${row.claims === 1 ? "claim" : "claims"} in ${row.currency}`)
+            .join(", ")}{" "}
+          {summary.unsupportedCurrencies.length === 1 && summary.unsupportedCurrencies[0].claims === 1 ? "is" : "are"} not in
+          these totals: Recoup cannot total that currency yet. Each claim still shows its own amount.
+        </p>
+      )}
+
       {(summary.nonCash.length > 0 || strips.length > 0) && (
         <ul className="mt-4 flex flex-wrap gap-2 border-t border-dashed border-gray-200 pt-4 text-sm">
           {summary.nonCash.map((row) => (

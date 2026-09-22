@@ -7,6 +7,7 @@ import { sanitizeError } from "./lib/errors";
 import { logEvent } from "./lib/log";
 import { rateLimiter } from "./lib/rateLimits";
 import { isTombstoned } from "./lib/accountState";
+import { maskPans } from "./lib/pan";
 
 /** How much of a message body we keep for the retry payload (D14). */
 const MAX_TEXT_CHARS = 60_000;
@@ -110,11 +111,14 @@ export const onMessageReceived = internalMutation({
       const inboxId = str(message, "inbox_id", "inboxId");
       const messageId = str(message, "message_id", "messageId") ?? args.eventId;
       const threadId = str(message, "thread_id", "threadId");
-      const subject = str(message, "subject") ?? "";
-      const from = str(message, "from", "from_") ?? "";
-      const text = (
-        str(message, "extracted_text", "extractedText", "text", "preview") ?? ""
-      ).slice(0, MAX_TEXT_CHARS);
+      // D142 (contract §7 "Masking first"): card numbers are masked BEFORE the payload insert, so the stored
+      // payload, the evidence built from it, every log line and every model call only ever see `•••• 1234`. The
+      // AgentMail component's own raw copy is outside Recoup's reach (accepted and disclosed, D142). The subject
+      // keeps its `[RC-XXXXXX]` token: a claim token is six characters, far too short to be masked.
+      const subject = maskPans(str(message, "subject") ?? "");
+      const from = maskPans(str(message, "from", "from_") ?? "");
+      // Masked BEFORE truncating, so a card number straddling the cut is never left half-visible.
+      const text = maskPans(str(message, "extracted_text", "extractedText", "text", "preview") ?? "").slice(0, MAX_TEXT_CHARS);
 
       // Dedupe first: a redelivered webhook must not re-run intake (D10).
       const seen = await ctx.db

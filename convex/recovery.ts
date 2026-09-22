@@ -17,7 +17,9 @@
  *               excess comes off outstanding in the order potential → ready → sending → asked → promised
  *
  * Alternatives (components) count once across ALL tiles, including components with cases. Currencies are never
- * summed or converted. Examples are excluded (claims.isExample for ledger and non-cash rows, opportunities.isExample).
+ * summed or converted. Legacy `…Cents` fields are hundredths of the major unit for EVERY currency (HC-8), so a claim
+ * in a currency whose minor unit is not two decimals (JPY, KWD…) is never shown or summed as ISO minor units: it is
+ * left out of every money figure and reported under `unsupportedCurrencies` (D160 family, M15 finding). Examples are excluded (claims.isExample for ledger and non-cash rows, opportunities.isExample).
  * `not_yet_due` is never a money tile (only a count). Reads are bounded: claims `by_user` ≤ 200 and open opportunities
  * ≤ 200; a real cut reports `complete: false`. The query never reads the clock: `now` is a coarse client argument
  * used only for the "deadlines this week" strip. `purchases.board` totals are untouched (D145, D39).
@@ -28,7 +30,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { requireUserId } from "./lib/access";
 import { ASKED_DELIVERIES, delivery, isClosedForAsk, SENDING_DELIVERIES, type Delivery } from "./lib/claimState";
 import { balance, provisionalOutstanding, type LedgerEvent } from "./lib/ledger";
-import { claimCurrency } from "./lib/money";
+import { claimCurrency, isTwoDecimalCurrency } from "./lib/money";
 import { MAX_ITEMS_PER_PURCHASE, SUMMARY_MAX_CLAIMS, SUMMARY_MAX_OPEN_OPPORTUNITIES } from "./limits";
 import { legacyLossKeys } from "./opportunities";
 
@@ -228,6 +230,8 @@ const summaryShape = v.object({
     paidTotalPartial: v.boolean(),
   })),
   nonCash: v.array(v.object({ kind: v.string(), count: v.number() })),
+  /** Claims left out of every money figure because their currency is not two-decimal (legacy hundredths, HC-8). */
+  unsupportedCurrencies: v.array(v.object({ currency: v.string(), claims: v.number() })),
   counts: v.object({ notYetDue: v.number(), needsAnswers: v.number(), deadlinesThisWeek: v.number() }),
 });
 
@@ -285,11 +289,16 @@ export const summary = query({
     for (const c of claimRows) byItem.set(c.itemId, [...(byItem.get(c.itemId) ?? []), c]);
 
     const claims: SummaryClaim[] = [];
+    const unsupported = new Map<string, number>();
     for (const c of realClaims) {
       const purchase = await purchaseOf(c.purchaseId);
       if (purchase?.isExample) continue;
       const currency = claimCurrency(c, purchase);
       if (currency === null) continue;
+      if (!isTwoDecimalCurrency(currency)) {
+        unsupported.set(currency, (unsupported.get(currency) ?? 0) + 1);
+        continue;
+      }
       const events = await ctx.db.query("ledgerEvents").withIndex("by_claim", (q) => q.eq("claimId", c._id)).take(EVENTS_PER_CLAIM);
       if (events.length === EVENTS_PER_CLAIM) complete = false;
       const ledger: LedgerEvent[] = events.map((e) => ({ kind: e.kind, cents: e.cents }));
@@ -326,6 +335,7 @@ export const summary = query({
       if (o.nextDeadlineAt !== undefined && o.nextDeadlineAt >= now && o.nextDeadlineAt <= now + WEEK_MS) deadlinesThisWeek += 1;
       if (o.activeClaimId !== undefined || o.cashClass !== "cash" || o.estimate === undefined) continue;
       if (o.outcome !== "eligible" && o.outcome !== "likely_eligible") continue;
+      if (!isTwoDecimalCurrency(o.estimate.currency)) continue; // never produced by an active pack; defence in depth
       opps.push({
         id: o._id,
         currency: o.estimate.currency,
@@ -360,6 +370,7 @@ export const summary = query({
       complete,
       currencies: computeSummary(claims, opps, paid),
       nonCash: [...nonCashCounts.entries()].sort().map(([kind, count]) => ({ kind, count })),
+      unsupportedCurrencies: [...unsupported.entries()].sort().map(([currency, claims]) => ({ currency, claims })),
       counts: { notYetDue, needsAnswers, deadlinesThisWeek },
     };
   },

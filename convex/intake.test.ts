@@ -15,6 +15,9 @@ type T = ReturnType<typeof setup>;
 
 /** A queued intake event, as `inbound.onMessageReceived` would have left it. */
 async function queueEvent(t: T, userId: Id<"users">, externalId = "evt-1") {
+  // D174 (lead-approved fixture change, M13 / SEC-AI-6): the fixture models the account holder forwarding their own
+  // mail, so the queued user's account email is the fixture's `from` address.
+  await t.run(async (ctx) => await ctx.db.patch(userId, { email: "f@x.example" }));
   return await t.run(
     async (ctx) =>
       await ctx.db.insert("processedEvents", {

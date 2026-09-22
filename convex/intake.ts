@@ -14,6 +14,9 @@ import { processedRoute, processedStatus } from "./schema";
 import { requireUserId } from "./lib/access";
 import { extract } from "./lib/ai";
 import { InboundEmail, type InboundEmailT } from "./lib/schemas";
+
+/** The refund half of the extraction schema: a held `pendingRefund` is re-validated with it before use. */
+const RefundCandidate = InboundEmail.shape.refund.unwrap();
 import { normalizeDomain } from "./lib/policyText";
 import { assertPositiveCents, toCents } from "./lib/money";
 import { sanitizeError } from "./lib/errors";
@@ -23,6 +26,11 @@ import { parseProductUrl } from "./lib/watchUrl";
 import { cleanLine } from "./lib/text";
 import { charge, tryConsumeBudget, tryConsumeGlobalBudget } from "./lib/budget";
 import { isTombstoned } from "./lib/accountState";
+import { maskPans } from "./lib/pan";
+import { putFact, type PutFactInput } from "./lib/facts/write";
+import { subjectKey } from "./lib/facts/subject";
+import { ensurePurchaseTransaction } from "./transactions";
+import { recordTextEvidence, TEXT_EXTRACTOR_VERSION, type EvidenceProvenance } from "./evidence";
 import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS, MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER } from "./limits";
 
 /**
@@ -261,7 +269,9 @@ export const beginEvent = internalMutation({
       lastError: undefined,
     });
     const payload = (row.payload ?? {}) as Record<string, unknown>;
-    const read = (key: string) => (typeof payload[key] === "string" ? (payload[key] as string) : "");
+    // D142: nothing reaches the model unmasked. New payloads are masked at insert (`inbound`, `paste`); this also
+    // covers a row stored before masking existed.
+    const read = (key: string) => (typeof payload[key] === "string" ? maskPans(payload[key] as string) : "");
     return {
       userId: row.userId,
       subject: read("subject"),
@@ -337,10 +347,60 @@ export const processEvent = internalAction({
 // Writing the extraction
 // ---------------------------------------------------------------------------
 
+/** Where an intake event's content came from, and the evidence row that holds it (null at the evidence cap). */
+type IntakeSource = { evidenceId: Id<"evidence"> | null; provenance: EvidenceProvenance };
+
+/** SEC-AI-6 copy: said wherever an unverified sender's email is held back, so a person forwarding from a second address knows why. */
+export const UNVERIFIED_SENDER_NOTE = "It was sent from an address that isn't your account email";
+
+/**
+ * Writes the facts an email proposes as `extracted_candidate` rows through the single fact writer (`putFact`,
+ * contract §2.5), each citing the evidence row it came from. Candidates never satisfy a rule condition and never
+ * write money (SEC-AI-2/3); the user confirms them by confirming the purchase. A value the catalogue refuses (an order
+ * reference that is not a valid reference, say) is skipped: `putFact` checks everything before its first write, so a
+ * refusal leaves nothing behind, and the purchase row still carries what the user will review.
+ */
+async function proposeCandidates(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  transactionId: Id<"transactions">,
+  evidenceId: Id<"evidence">,
+  candidates: Array<{ subjectKey: string; key: string; value: PutFactInput["value"] }>,
+): Promise<number> {
+  let written = 0;
+  for (const c of candidates) {
+    try {
+      await putFact(ctx, userId, {
+        transactionId,
+        subjectKey: c.subjectKey,
+        key: c.key,
+        state: "extracted_candidate",
+        value: c.value,
+        source: {
+          kind: "evidence",
+          evidenceId,
+          locator: { kind: "whole_document" },
+          // The wave-1 extractor quotes nothing; quote verification arrives with M23 (DA-A-6).
+          quoteStatus: "unverified",
+          extractorVersion: TEXT_EXTRACTOR_VERSION,
+        },
+      });
+      written++;
+    } catch (err) {
+      if (!(err instanceof ConvexError)) throw err;
+    }
+  }
+  return written;
+}
+
 /**
  * An extracted order becomes a `needs_review` purchase (D25): the user
  * confirms merchant, date and every line item before anything is scraped or
  * claimed. A repeat of an order we already hold is refused outright (D22).
+ *
+ * M13 (contract §7): the purchase gets its transaction (`ensurePurchaseTransaction`, DA-A-35) and the email's values
+ * become candidate facts citing the evidence row. HC-9: a currency the email does not state clearly is never assumed:
+ * no currency candidate (or price candidate) is written, and the summary asks the user to confirm it.
  */
 async function applyOrder(
   ctx: MutationCtx,
@@ -348,6 +408,7 @@ async function applyOrder(
   userId: Id<"users">,
   sourceMessageId: string | undefined,
   order: NonNullable<InboundEmailT["order"]>,
+  source: IntakeSource,
 ) {
   const merchantDomain = normalizeDomain(order.merchantDomain);
   if (!merchantDomain) {
@@ -435,38 +496,69 @@ async function applyOrder(
   }
 
   const currency = safeCurrency(order.currency);
+  const merchant = cleanLine(order.merchant).slice(0, 120) || merchantDomain;
+  const purchasedAt = safeDate(order.purchasedAt);
   const purchaseId = await ctx.db.insert("purchases", {
     userId,
-    merchant: cleanLine(order.merchant).slice(0, 120) || merchantDomain,
+    merchant,
     merchantDomain,
     orderRef,
-    purchasedAt: safeDate(order.purchasedAt),
+    purchasedAt,
+    // The purchase row needs a currency; when the email gave none clearly this is a placeholder the user must
+    // confirm (HC-9). It is never a confirmed fact: the legacy adapter reads a purchase currency as a candidate unless
+    // `purchases.confirm` records the user's answer (DA-A-33).
     currency: currency ?? "USD",
     sourceMessageId,
     // D25: extraction never produces an active purchase.
     status: "needs_review",
   });
+  const itemIds: Id<"items">[] = [];
   for (const it of items) {
-    await ctx.db.insert("items", {
-      purchaseId,
-      userId,
-      name: it.name,
-      unitCents: it.unitCents,
-      qty: it.qty,
-      productUrl: it.productUrl,
-      // D15: only the user ever marks an item returned.
-      returned: false,
+    itemIds.push(
+      await ctx.db.insert("items", {
+        purchaseId,
+        userId,
+        name: it.name,
+        unitCents: it.unitCents,
+        qty: it.qty,
+        productUrl: it.productUrl,
+        // D15: only the user ever marks an item returned.
+        returned: false,
+      }),
+    );
+  }
+  // DA-A-35: every purchase insert gets its category-neutral transaction.
+  const transactionId = await ensurePurchaseTransaction(ctx, purchaseId);
+
+  if (source.evidenceId !== null) {
+    const txn = subjectKey.txn();
+    const candidates: Array<{ subjectKey: string; key: string; value: PutFactInput["value"] }> = [
+      { subjectKey: txn, key: "retail.merchant", value: { kind: "text", text: merchant } },
+    ];
+    if (orderRef) candidates.push({ subjectKey: txn, key: "retail.order_ref", value: { kind: "identifier", scheme: "order_ref", value: orderRef } });
+    if (purchasedAt !== undefined) candidates.push({ subjectKey: txn, key: "retail.purchase_date", value: { kind: "instant", epochMs: purchasedAt } });
+    if (currency) candidates.push({ subjectKey: txn, key: "retail.currency", value: { kind: "code", code: currency } });
+    items.forEach((it, i) => {
+      const s = subjectKey.item(itemIds[i]);
+      candidates.push({ subjectKey: s, key: "retail.item_name", value: { kind: "text", text: it.name } });
+      candidates.push({ subjectKey: s, key: "retail.quantity", value: { kind: "count", n: it.qty } });
+      // A price without a stated currency is not a value the email gave: no candidate (HC-9).
+      if (currency) {
+        candidates.push({ subjectKey: s, key: "retail.unit_price", value: { kind: "money", amountMinor: it.unitCents, currency } });
+      }
     });
+    await proposeCandidates(ctx, userId, transactionId, source.evidenceId, candidates);
   }
 
-  const note = currency ? "" : ` Currency was unclear, assumed USD.`;
+  const note = currency ? "" : " The email did not state a clear currency, so confirm it before anything is compared.";
+  const senderNote = source.provenance === "unverified_sender" ? ` ${UNVERIFIED_SENDER_NOTE}, so check every detail.` : "";
   const skippedNote =
     skipped.length > 0 ? ` Could not read ${skipped.join(", ")} — add ${skipped.length === 1 ? "it" : "them"} manually if needed.` : "";
   await finish(
     ctx,
     processedEventId,
     "needs_review",
-    `Order from ${cleanLine(order.merchant).slice(0, 120) || merchantDomain} with ${items.length} item${items.length === 1 ? "" : "s"} — confirm the details to start tracking it.${note}${skippedNote}`,
+    `Order from ${merchant} with ${items.length} item${items.length === 1 ? "" : "s"} — confirm the details to start tracking it.${note}${senderNote}${skippedNote}`,
   );
 }
 
@@ -542,6 +634,13 @@ function matchItem(
  * own confirmation ever creates `confirmed_credit`, even when the email says
  * the refund was posted). It never marks an item returned and never opens a
  * claim on an item the user has not marked returned (D15).
+ *
+ * M13:
+ * - SEC-AI-6 (D174): a refund email from an unverified sender — anyone but the account holder forwarding their own
+ *   mail — writes no ledger event and opens no claim. It becomes a needs_review candidate the USER can confirm
+ *   (`confirmRefundEmail`); the user's confirmation, never the sender, is what lets it write the promise.
+ * - HC-10: a credit whose currency is unclear or differs from the purchase's is refused (needs_review, no ledger
+ *   write). Recoup never converts currencies and never assumes one.
  */
 async function applyRefund(
   ctx: MutationCtx,
@@ -550,6 +649,7 @@ async function applyRefund(
   sourceMessageId: string | undefined,
   messageIdOrPasteHash: string,
   refund: NonNullable<InboundEmailT["refund"]>,
+  trust: { verified: boolean; confirmedByUser?: boolean },
 ) {
   const purchase = await matchPurchase(ctx, userId, refund);
   if (!purchase) {
@@ -558,6 +658,22 @@ async function applyRefund(
       processedEventId,
       "needs_review",
       "A refund email arrived but it could not be matched to one of your purchases.",
+    );
+    return;
+  }
+
+  if (!trust.verified) {
+    // Held as a candidate: the validated refund waits on the event for the user's confirmation. Nothing is written to
+    // the ledger or the claims until then. Retention clears the payload after 30 days; a later forward from the
+    // account email (or a paste) is then the way to record it.
+    const row = await ctx.db.get(processedEventId);
+    const payload = (row?.payload ?? {}) as Record<string, unknown>;
+    await ctx.db.patch(processedEventId, { payload: { ...payload, pendingRefund: refund } });
+    await finish(
+      ctx,
+      processedEventId,
+      "needs_review",
+      `A refund email about your ${purchase.merchant} order was held for review. ${UNVERIFIED_SENDER_NOTE}, so nothing was recorded. If it is genuine, confirm it here, or forward it again from your account email.`,
     );
     return;
   }
@@ -582,7 +698,6 @@ async function applyRefund(
 
   for (let i = 0; i < refund.credits.length; i++) {
     const credit = refund.credits[i];
-    const currency = safeCurrency(credit.currency) ?? purchase.currency;
     // D58: a non-positive or otherwise invalid credit amount is a per-credit
     // needs_review entry (via `unmatched` below), never a thrown error --
     // the same boundary assert the ledger itself uses (lib/money), not a
@@ -592,6 +707,18 @@ async function applyRefund(
       cents = assertPositiveCents(toCents(credit.amount), "credit amount");
     } catch {
       unmatched.push(`A credit with an unreadable amount (${credit.amount})`);
+      continue;
+    }
+    // HC-10: only a credit stated in the purchase's own currency can be recorded against it.
+    const currency = safeCurrency(credit.currency);
+    if (currency === null) {
+      unmatched.push(`A credit of ${(cents / 100).toFixed(2)} in an unclear currency was not recorded`);
+      continue;
+    }
+    if (currency !== purchase.currency) {
+      unmatched.push(
+        `Credit of ${money(cents, currency)} is in ${currency} but the purchase is in ${purchase.currency}; Recoup never converts currencies, so it was not recorded`,
+      );
       continue;
     }
     const item = matchItem(items, credit.itemName, cents);
@@ -650,7 +777,7 @@ async function applyRefund(
         claim,
         "promised_credit",
         cents,
-        `Merchant email says the refund is ${credit.state} (${sourceMessageId ?? "pasted email"})`,
+        `Merchant email says the refund is ${credit.state} (${sourceMessageId ?? "pasted email"})${trust.confirmedByUser ? "; confirmed by you" : ""}`,
         key,
         legacyKey,
       );
@@ -683,6 +810,32 @@ async function applyRefund(
   );
 }
 
+/** Longest `From` header examined; an address is at most 254 characters, a display name adds a little. */
+const MAX_FROM_CHARS = 512;
+
+/** The bare, lowercased address in a `From` header (`Name <a@b.c>` or `a@b.c`), or null. No regex over unbounded input. */
+export function senderAddress(from: string): string | null {
+  const bounded = from.slice(0, MAX_FROM_CHARS);
+  const open = bounded.lastIndexOf("<");
+  const close = bounded.lastIndexOf(">");
+  const bare = (open >= 0 && close > open ? bounded.slice(open + 1, close) : bounded).trim().toLowerCase();
+  const at = bare.indexOf("@");
+  if (at <= 0 || at !== bare.lastIndexOf("@") || at === bare.length - 1 || /\s/.test(bare) || bare.length > 254) return null;
+  return bare;
+}
+
+/**
+ * SEC-AI-6: true only when the email's sender is the account's own address. An account with no email on file has
+ * nothing to compare against and is NOT treated as verified (D174).
+ */
+async function isAccountSender(ctx: MutationCtx, userId: Id<"users">, from: string): Promise<boolean> {
+  const address = senderAddress(from);
+  if (address === null) return false;
+  const user = await ctx.db.get(userId);
+  const own = user?.email?.trim().toLowerCase();
+  return own !== undefined && own.length > 0 && own === address;
+}
+
 /**
  * The only writer in the intake lane. `parsed` is `v.any()` because it comes
  * from the model; it is narrowed by the zod schema on the first line and a
@@ -707,6 +860,23 @@ export const applyExtraction = internalMutation({
     const payload = (row.payload ?? {}) as Record<string, unknown>;
     const sourceMessageId =
       typeof payload.messageId === "string" ? payload.messageId : undefined;
+    const read = (key: string) => (typeof payload[key] === "string" ? (payload[key] as string) : "");
+
+    // SEC-AI-6: who stands behind this content. A paste is the user's own act; an email is the user's only when it
+    // comes from the account's own address (a forward from their mailbox). Anything else is an unverified sender.
+    const provenance: EvidenceProvenance =
+      row.kind === "paste" ? "user_pasted" : (await isAccountSender(ctx, row.userId, read("from"))) ? "user_forwarded" : "unverified_sender";
+    // §7: the (masked) email becomes evidence before anything is proposed from it.
+    const evidenceId = await recordTextEvidence(ctx, {
+      userId: row.userId,
+      kind: row.kind === "paste" ? "paste" : "email",
+      provenance,
+      text: read("text"),
+      headers: row.kind === "paste" ? undefined : { from: read("from"), subject: read("subject"), messageId: sourceMessageId },
+      processedEventId: args.processedEventId,
+      docType: parsed.kind === "order" ? "order_confirmation" : parsed.kind === "refund" ? "refund_notice" : "unknown",
+    });
+    const source: IntakeSource = { evidenceId, provenance };
     // A paste has no message id; its content hash is just as stable, so a re-run of the same paste is
     // recognised as "already applied" too (B5).
     const orderSourceId = sourceMessageId ?? (row.kind === "paste" ? row.externalId : undefined);
@@ -718,7 +888,7 @@ export const applyExtraction = internalMutation({
     const messageIdOrPasteHash = sourceMessageId ?? row.externalId;
 
     if (parsed.kind === "order" && parsed.order) {
-      await applyOrder(ctx, args.processedEventId, row.userId, orderSourceId, parsed.order);
+      await applyOrder(ctx, args.processedEventId, row.userId, orderSourceId, parsed.order, source);
       return null;
     }
     if (parsed.kind === "refund" && parsed.refund) {
@@ -729,6 +899,7 @@ export const applyExtraction = internalMutation({
         sourceMessageId,
         messageIdOrPasteHash,
         parsed.refund,
+        { verified: provenance !== "unverified_sender" },
       );
       return null;
     }
@@ -771,7 +942,8 @@ export const paste = action({
   returns: v.id("processedEvents"),
   handler: async (ctx, { text }): Promise<Id<"processedEvents">> => {
     const userId = await ctx.runQuery(internal.intake.requireActiveUserId, {});
-    const body = text.trim();
+    // D142 / contract §7: masked BEFORE hashing, storing or the model call, so a card number never reaches any of them.
+    const body = maskPans(text.trim());
     if (body.length < MIN_PASTE_CHARS) {
       throw new ConvexError("Paste the whole order or refund email, not just a line of it");
     }
@@ -816,7 +988,9 @@ export const createPasteEvent = internalMutation({
     // different user must not be handed somebody else's row.
     if (seen && seen.userId === args.userId) return seen._id;
     if (seen) throw new ConvexError("That email has already been processed");
-    if (args.text.length > MAX_PASTE_CHARS) throw new ConvexError("That email is too long to process");
+    // Defense in depth: `paste` already masked; an internal caller must not be able to store an unmasked card number.
+    const text = maskPans(args.text);
+    if (text.length > MAX_PASTE_CHARS) throw new ConvexError("That email is too long to process");
 
     // B5: one new paste is one model call. Charged here, in the transaction that schedules it, and only for a
     // paste that is really new; throws at the daily cap with nothing written.
@@ -829,7 +1003,7 @@ export const createPasteEvent = internalMutation({
       attempts: 0,
       userId: args.userId,
       route: "intake",
-      payload: { subject: "", text: args.text, from: "", messageId: null },
+      payload: { subject: "", text, from: "", messageId: null },
     });
     await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId });
     return processedEventId;
@@ -910,6 +1084,37 @@ export const retryEvent = mutation({
     });
     await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId });
     return null;
+  },
+});
+
+/**
+ * SEC-AI-6 (D174): the user confirms a refund email that came from an unverified sender. Only the owner can, only
+ * for an event holding such a candidate, and only once: the candidate is taken off the event in the same
+ * transaction, then applied exactly as a verified refund would be (same idempotency keys, same D15 attribution rules,
+ * same HC-10 currency refusal), with the ledger evidence noting the user confirmed it. A foreign or missing event →
+ * the identical "Event not found".
+ */
+export const confirmRefundEmail = mutation({
+  args: { processedEventId: v.id("processedEvents") },
+  returns: v.object({ status: processedStatus, summary: v.union(v.string(), v.null()) }),
+  handler: async (ctx, { processedEventId }) => {
+    const userId = await requireUserId(ctx);
+    const row = await ctx.db.get(processedEventId);
+    if (!row || row.userId !== userId) throw new ConvexError("Event not found");
+    const payload = (row.payload ?? {}) as Record<string, unknown>;
+    if (row.route !== "intake" || row.status !== "needs_review" || payload.pendingRefund === undefined) {
+      throw new ConvexError("This email has no refund waiting for your confirmation");
+    }
+    const refund = RefundCandidate.parse(payload.pendingRefund);
+    const { pendingRefund: _taken, ...rest } = payload;
+    await ctx.db.patch(processedEventId, { payload: rest });
+    const sourceMessageId = typeof payload.messageId === "string" ? payload.messageId : undefined;
+    await applyRefund(ctx, processedEventId, userId, sourceMessageId, sourceMessageId ?? row.externalId, refund, {
+      verified: true,
+      confirmedByUser: true,
+    });
+    const after = await ctx.db.get(processedEventId);
+    return { status: after!.status, summary: after!.summary ?? null };
   },
 });
 

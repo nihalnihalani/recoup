@@ -24,6 +24,7 @@ function summary(overrides: Partial<RecoverySummary> = {}): RecoverySummary {
     complete: true,
     currencies: [],
     nonCash: [],
+    unsupportedCurrencies: [],
     counts: { notYetDue: 0, needsAnswers: 0, deadlinesThisWeek: 0 },
     ...overrides,
   };
@@ -124,6 +125,11 @@ describe("StatCards money (DA-A-34, QA-2)", () => {
     expect(card.textContent).toContain("the example is never counted");
     expect(card.textContent).not.toMatch(/\$|USD/);
     expect(screen.getByText(/checks supported recovery paths/)).toBeDefined();
+  });
+
+  it("names the claims left out because their currency is not two-decimal, instead of showing them as money", () => {
+    renderCards(summary({ unsupportedCurrencies: [{ currency: "JPY", claims: 2 }] }));
+    expect(screen.getByText(/2 claims in JPY are not in these totals/)).toBeDefined();
   });
 
   it("shows non-cash remedies and not-yet-due paths as counts, never as money", () => {

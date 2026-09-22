@@ -30,12 +30,14 @@ import { tryConsumeBudget, tryConsumeGlobalBudget, utcDay } from "./lib/budget";
 import { isFlagOn } from "./lib/flags";
 import { logEvent } from "./lib/log";
 import { isHeicFamily, type SniffedMime } from "./lib/sniff";
+import { maskPans } from "./lib/pan";
 import {
   EVIDENCE_BYTES_PER_USER_PER_DAY,
   EVIDENCE_UPLOADS_PER_DAY,
   GLOBAL_DAILY_BUDGETS,
   MAX_EVIDENCE_FILE_NAME_CHARS,
   MAX_EVIDENCE_ROWS_PER_USER,
+  MAX_EVIDENCE_TEXT_CHARS,
 } from "./limits";
 
 export type EvidenceDocType = Infer<typeof evidenceDocType>;
@@ -196,6 +198,104 @@ export async function findByHash(
     active: rows.find((r) => r.retention === "active") ?? null,
     cleared: rows.find((r) => r.retention === "content_deleted") ?? null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Text evidence: forwarded and pasted email (contract §7; D142; SEC-AI-6)
+// ---------------------------------------------------------------------------
+
+/** Tags every fact and evidence row the wave-1 inbound-email extraction (`intake.processEvent`) produced. */
+export const TEXT_EXTRACTOR_VERSION = "intake_email_v1";
+
+export type EvidenceProvenance = Doc<"evidence">["provenance"];
+
+async function sha256HexOf(text: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  let hex = "";
+  for (const b of digest) hex += b.toString(16).padStart(2, "0");
+  return hex;
+}
+
+/**
+ * §2.6: the content hash of text evidence is the hex SHA-256 of the MASKED, whitespace-normalized text, so the same
+ * email forwarded twice, or forwarded and pasted, is one row, and a card number never reaches the hash (D142).
+ */
+export async function textContentHash(text: string): Promise<string> {
+  return await sha256HexOf(maskPans(text).replace(/\s+/g, " ").trim());
+}
+
+/** Provenance a later, identical submission may upgrade to: the user now stands behind content a stranger sent. */
+const USER_PROVENANCE: ReadonlySet<EvidenceProvenance> = new Set<EvidenceProvenance>(["user_forwarded", "user_pasted"]);
+
+/**
+ * Records one forwarded or pasted email as evidence and returns its id, or null when the account is at its evidence
+ * row cap (intake then continues without it; nothing is lost that the processed event does not still hold).
+ *
+ * Everything stored is masked first (D142). Dedupe is owner-scoped on the content hash against ACTIVE rows; a row
+ * whose content retention cleared is revived with the new text and a fresh `receivedAt` (DA-A-20, D163). If the same
+ * content first arrived from an unverified sender and the user now forwards or pastes it themselves, the row's
+ * provenance is upgraded — the user, not the sender, now stands behind it (SEC-AI-6).
+ */
+export async function recordTextEvidence(
+  ctx: MutationCtx,
+  input: {
+    userId: Id<"users">;
+    kind: "email" | "paste";
+    provenance: EvidenceProvenance;
+    text: string;
+    headers?: { from?: string; subject?: string; date?: string; messageId?: string };
+    processedEventId: Id<"processedEvents">;
+    docType: EvidenceDocType;
+  },
+): Promise<Id<"evidence"> | null> {
+  const text = maskPans(input.text).slice(0, MAX_EVIDENCE_TEXT_CHARS);
+  const contentHash = await textContentHash(text);
+  const headers =
+    input.headers === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(input.headers)
+            .filter(([, v]) => typeof v === "string" && v.length > 0)
+            .map(([k, v]) => [k, maskPans(v as string).slice(0, 500)]),
+        );
+  const now = Date.now();
+  const classified = input.docType !== "unknown" && input.docType !== "other";
+  const { active, cleared } = await findByHash(ctx, input.userId, contentHash);
+  if (active !== null) {
+    if (active.provenance === "unverified_sender" && USER_PROVENANCE.has(input.provenance)) {
+      await ctx.db.patch(active._id, { provenance: input.provenance });
+    }
+    return active._id;
+  }
+  if (cleared !== null && (cleared.kind === "email" || cleared.kind === "paste")) {
+    await ctx.db.patch(cleared._id, {
+      text,
+      retention: "active",
+      receivedAt: now,
+      processedEventId: input.processedEventId,
+      ...(USER_PROVENANCE.has(input.provenance) ? { provenance: input.provenance } : {}),
+    });
+    return cleared._id;
+  }
+  if (!(await reserveEvidenceRow(ctx, input.userId))) return null;
+  return await ctx.db.insert("evidence", {
+    userId: input.userId,
+    kind: input.kind,
+    docType: input.docType,
+    ...(classified ? { docTypeDeclaredBy: "classifier" as const } : {}),
+    sourceChannel: input.kind === "email" ? "agentmail_forward" : "paste",
+    provenance: input.provenance,
+    processedEventId: input.processedEventId,
+    contentHash,
+    text,
+    ...(headers !== undefined && Object.keys(headers).length > 0 ? { headers } : {}),
+    receivedAt: now,
+    extractionStatus: "succeeded",
+    extractionAttempts: 1,
+    extractorVersion: TEXT_EXTRACTOR_VERSION,
+    hasTextLayer: true,
+    retention: "active",
+  });
 }
 
 // ---------------------------------------------------------------------------

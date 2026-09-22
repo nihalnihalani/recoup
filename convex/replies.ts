@@ -37,9 +37,14 @@ const SYSTEM = [
 /**
  * Two addresses count as the same party when the domains match or one is a
  * subdomain of the other (`mail.acme.com` answering for `acme.com`).
+ *
+ * S-M03-6 (M13): a side with no parseable address is NOT the merchant. The
+ * inbox address is known to every merchant Recoup has written to, so a reply
+ * whose `From` carries no address (or a claim with nothing to compare against)
+ * is marked `senderMismatch` -- sender unverified -- instead of being trusted.
  */
-function sameParty(a: string | null, b: string | null): boolean {
-  if (!a || !b) return true;
+export function sameParty(a: string | null, b: string | null): boolean {
+  if (!a || !b) return false;
   if (a === b) return true;
   return a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
 }
