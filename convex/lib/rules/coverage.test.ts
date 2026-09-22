@@ -7,10 +7,11 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("./registry", async () => await import("./testRegistry"));
 
 import { ACTIVATIONS } from "./activation";
-import { SCENARIOS_BY_CATEGORY } from "./applicable";
+import { IMPLEMENTED_PACKS, resolveActivePacks, SCENARIOS_BY_CATEGORY } from "./applicable";
 import { coverageRows, pathsNotChecked, SCENARIO_TITLES } from "./coverage";
 import * as registry from "./registry";
 import { resetTestRegistry, setTestActivations } from "./testRegistry";
+import { LIVE_VERIFICATIONS } from "./verification";
 
 describe("coverage (production activation only)", () => {
   it("the mocked registry reports R01 v1 active (the C3 seam works)…", () => {
@@ -25,6 +26,16 @@ describe("coverage (production activation only)", () => {
       expect(r01.status).toBe("not_checked");
       expect(coverageRows().some((r) => r.status === "implemented_verified")).toBe(false);
     }
+  });
+
+  it("DA-B-14 (D196): an active pack without a live-verification record is implemented_live_unverified, never implemented_verified", () => {
+    expect(LIVE_VERIFICATIONS).toEqual([]); // stays empty this mission
+    const active = resolveActivePacks(ACTIVATIONS, IMPLEMENTED_PACKS);
+    expect(active.length).toBeGreaterThan(0); // R01 v1 is active (D186): the check below is not vacuous
+    for (const pack of active) {
+      expect(coverageRows().find((r) => r.scenarioId === pack.scenarioId)).toMatchObject({ status: "implemented_live_unverified", ruleId: pack.ruleId });
+    }
+    expect(coverageRows().some((r) => r.status === "implemented_verified")).toBe(false);
   });
 
   it("the test registry can be narrowed and reset", () => {

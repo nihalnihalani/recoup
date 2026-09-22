@@ -779,7 +779,7 @@ export const dismiss = mutation({
 const coverageRow = v.object({
   scenarioId: schema.tables.opportunities.validator.fields.scenarioId,
   title: v.string(),
-  status: v.union(v.literal("implemented_verified"), v.literal("not_checked")),
+  status: v.union(v.literal("implemented_verified"), v.literal("implemented_live_unverified"), v.literal("not_checked")),
   reason: v.string(),
   ruleId: v.optional(v.string()),
   version: v.optional(v.number()),

@@ -113,6 +113,10 @@ describe("read budgets (transactionLimits: true)", () => {
           const claimId = await ctx.db.insert("claims", { purchaseId, itemId, userId, type: "price_adjustment", expectedCents: 1_000, status: "sent", token: `B${p}_${i}`, version: 1 });
           await ctx.db.insert("ledgerEvents", { claimId, userId, kind: "promised_credit", cents: 1_000, evidence: "reply" });
           await ctx.db.insert("drafts", { claimId, userId, version: 1, claimVersion: 1, to: "help@acme.example", subject: "s", body: "b", agentmailMessageId: `m${p}_${i}` });
+          // DA-B-13: the refused check reads replies per open claim (an auto-reply, then a question: still asked).
+          for (const classification of ["other", "question"] as const) {
+            await ctx.db.insert("replies", { claimId, userId, messageId: `r${p}_${i}_${classification}`, from: "help@acme.example", classification, summary: "s", senderMismatch: false, receivedAt: NOW });
+          }
           await ctx.db.insert("opportunities", {
             userId, transactionId, scenarioId: "R01", remedyKey: "price_difference", subjectKey: `item:${itemId}`,
             dedupeKey: `${transactionId}|R01|price_difference|item:${itemId}|-`, status: "open", ruleId: "R01.retail_price_adjustment",

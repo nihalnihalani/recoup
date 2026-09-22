@@ -1,14 +1,17 @@
 /**
  * Scenario coverage (contract §2.7, §9; D145 DA-A-11 (c)/(d)). Reads the lead-owned `activation.ts` DIRECTLY — never
- * `registry.ts` or `testRegistry.ts` — so a coverage row can reach `implemented_verified` only from a pack the lead
- * activated, even when a test mocks the registry. No row carries an amount: the "Paths not checked / source not
- * verified" list is honest coverage, not an estimate.
+ * `registry.ts` or `testRegistry.ts` — so a coverage row reports a pack only when the lead activated it, even when a
+ * test mocks the registry. An activated pack is `implemented_live_unverified` (activation is local verification
+ * only) until the lead records a matching live verification in `verification.LIVE_VERIFICATIONS`; only then is it
+ * `implemented_verified` (DA-B-14, D196). No row carries an amount: the "Paths not checked / source not verified"
+ * list is honest coverage, not an estimate.
  */
 import { ACTIVATIONS } from "./activation";
 import { IMPLEMENTED_PACKS, resolveActivePacks, SCENARIOS_BY_CATEGORY } from "./applicable";
 import type { ScenarioId, TransactionCategory } from "./types";
+import { LIVE_VERIFICATIONS, type LiveVerification } from "./verification";
 
-export type CoverageStatus = "implemented_verified" | "not_checked";
+export type CoverageStatus = "implemented_verified" | "implemented_live_unverified" | "not_checked";
 
 export interface CoverageRow {
   scenarioId: ScenarioId;
@@ -79,17 +82,30 @@ const NOT_CHECKED: Readonly<Record<ScenarioId, string>> = Object.freeze({
 
 const ALL_SCENARIOS = Object.keys(SCENARIO_TITLES) as ScenarioId[];
 
-/** One row per scenario R01–R25, from `activation.ts` only. */
+/** A well-formed live-verification record for exactly this pack version (a malformed one promotes nothing). */
+function liveVerified(ruleId: string, version: number, records: readonly LiveVerification[]): boolean {
+  return records.some(
+    (r) =>
+      r.ruleId === ruleId && r.version === version && /^\d{4}-\d{2}-\d{2}$/.test(r.verifiedOn) && /^D\d+$/.test(r.decision) &&
+      r.deployment.trim() !== "" && r.evidence.trim() !== "",
+  );
+}
+
+/** One row per scenario R01–R25, from `activation.ts` and `LIVE_VERIFICATIONS` only. */
 export function coverageRows(): CoverageRow[] {
   const active = resolveActivePacks(ACTIVATIONS, IMPLEMENTED_PACKS);
   return ALL_SCENARIOS.map((scenarioId) => {
     const pack = active.filter((p) => p.scenarioId === scenarioId).sort((a, b) => b.version - a.version)[0];
-    return pack
-      ? {
-          scenarioId, title: SCENARIO_TITLES[scenarioId], status: "implemented_verified" as const,
-          reason: `Checked by ${pack.ruleId} v${pack.version}.`, ruleId: pack.ruleId, version: pack.version,
-        }
-      : { scenarioId, title: SCENARIO_TITLES[scenarioId], status: "not_checked" as const, reason: NOT_CHECKED[scenarioId] };
+    if (!pack) return { scenarioId, title: SCENARIO_TITLES[scenarioId], status: "not_checked" as const, reason: NOT_CHECKED[scenarioId] };
+    const verified = liveVerified(pack.ruleId, pack.version, LIVE_VERIFICATIONS);
+    return {
+      scenarioId, title: SCENARIO_TITLES[scenarioId],
+      status: verified ? ("implemented_verified" as const) : ("implemented_live_unverified" as const),
+      reason: verified
+        ? `Checked by ${pack.ruleId} v${pack.version}; verified live.`
+        : `Checked by ${pack.ruleId} v${pack.version}; verified locally, live verification pending.`,
+      ruleId: pack.ruleId, version: pack.version,
+    };
   });
 }
 

@@ -16,7 +16,7 @@ const tile = (amountMinor: number, provisionalMinor = 0, components = amountMino
   provisionalMinor,
   components,
 });
-const emptyTiles = { potential: tile(0), ready: tile(0), sendingOrUnknown: tile(0), asked: tile(0), promised: tile(0) };
+const emptyTiles = { potential: tile(0), ready: tile(0), sendingOrUnknown: tile(0), asked: tile(0), refused: tile(0), promised: tile(0) };
 
 function summary(overrides: Partial<RecoverySummary> = {}): RecoverySummary {
   return {
@@ -55,8 +55,8 @@ describe("StatCards money (DA-A-34, QA-2)", () => {
     renderCards(
       summary({
         currencies: [
-          { currency: "USD", recoveredMinor: 12_000, overCreditMinor: 0, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: false, paidTotalPartial: false },
-          { currency: "EUR", recoveredMinor: 5_000, overCreditMinor: 0, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: false, paidTotalPartial: false },
+          { currency: "USD", recoveredMinor: 12_000, overCreditMinor: 0, extraCreditedMinor: 0, possibleDoubleCreditMinor: 0, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: false, paidTotalPartial: false },
+          { currency: "EUR", recoveredMinor: 5_000, overCreditMinor: 0, extraCreditedMinor: 0, possibleDoubleCreditMinor: 0, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: false, paidTotalPartial: false },
         ],
       }),
     );
@@ -76,7 +76,9 @@ describe("StatCards money (DA-A-34, QA-2)", () => {
             currency: "USD",
             recoveredMinor: 0,
             overCreditMinor: 0,
-            tiles: { potential: tile(2_500), ready: tile(0), sendingOrUnknown: tile(0), asked: tile(4_000, 1_500), promised: tile(0) },
+            extraCreditedMinor: 0,
+            possibleDoubleCreditMinor: 0,
+            tiles: { potential: tile(2_500), ready: tile(0), sendingOrUnknown: tile(0), asked: tile(4_000, 1_500), refused: tile(0), promised: tile(0) },
             askedUserReportedMinor: 0,
             cappedAtPaidTotal: false,
             paidTotalPartial: false,
@@ -99,7 +101,7 @@ describe("StatCards money (DA-A-34, QA-2)", () => {
     renderCards(
       summary({
         currencies: [
-          { currency: "USD", recoveredMinor: 6_000, overCreditMinor: 2_000, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: true, paidTotalPartial: true },
+          { currency: "USD", recoveredMinor: 6_000, overCreditMinor: 2_000, extraCreditedMinor: 0, possibleDoubleCreditMinor: 2_000, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: true, paidTotalPartial: true },
         ],
       }),
     );
@@ -111,7 +113,7 @@ describe("StatCards money (DA-A-34, QA-2)", () => {
     renderCards(
       summary({
         currencies: [
-          { currency: "JPY", recoveredMinor: 1_200, overCreditMinor: 0, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: false, paidTotalPartial: false },
+          { currency: "JPY", recoveredMinor: 1_200, overCreditMinor: 0, extraCreditedMinor: 0, possibleDoubleCreditMinor: 0, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: false, paidTotalPartial: false },
         ],
       }),
     );

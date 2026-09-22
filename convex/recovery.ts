@@ -8,17 +8,25 @@
  *   net       = max(0, confirmed − debited)
  *   lossAll   = max(claim expected, opportunity estimate) over K     lossOpen = the same over OPEN members
  *   recovered = min(Σ net, lossAll)                                   excess = Σ net − recovered (never erased)
+ *   excess split (D195/D196, DA-B-8): RED `possibleDoubleCredit` when ≥ 2 claims in K have net > 0; otherwise
+ *               NEUTRAL `extraCredited` ("more than you asked — often tax or shipping"). A single refund that
+ *               includes tax or shipping is recovered money, never a suspected double credit.
  *   outstanding = K has an open member ? max(0, lossOpen − recovered) : 0
- *   tile(K)   = furthest state over open members: promised > asked > sending_or_unknown > ready > potential;
- *               `ready` is the CATCH-ALL for every open claim not in a higher tile (C4)
+ *   tile(K)   = furthest state over open members: promised > refused > asked > sending_or_unknown > ready > potential;
+ *               `ready` is the CATCH-ALL for every open claim not in a higher tile (C4). `refused` (DA-B-13, D196,
+ *               display only): an open claim whose newest classified reply is a refusal with no later promise or
+ *               credit — "the merchant said no; no money yet" (wave 2 moves `denied` to closed-for-ask)
  *   provisional(K) = min(outstanding(K), Σ provisional) — shown "of which provisional" inside tile(K)
  *   per-transaction cap (D145, D188), per transaction per currency, against its confirmed paid total P (retail: a
  *               confirmed `retail.order_total`, else Σ unit × qty labelled `paidTotalPartial`):
- *               1. Recovered: Σ recovered ≤ P — confirmed money above what was paid moves to the over-credit line
- *                  (visible, never dropped; mission §6). The ledger is untouched: display/accounting only.
+ *               1. Recovered: Σ recovered ≤ P — confirmed money above what was paid moves off Recovered (visible,
+ *                  never dropped; mission §6). It is RED when P is a confirmed order total, or when ≥ 2 credited
+ *                  claims on the transaction exceed an item-only P; otherwise (one credited claim over an item-only
+ *                  total, which is known to be low) it is NEUTRAL extra credit (D196). The ledger is untouched.
  *               2. Outstanding: Σ (recovered + outstanding) ≤ P — the rest comes off outstanding in the order
  *                  potential → ready → sending → asked → promised (an unpaid ask is trimmed, never an over-credit)
  *
+ * Invariants per currency: I2 recovered + overCredit = Σ net; I2b extraCredited + possibleDoubleCredit = overCredit.
  * Alternatives (components) count once across ALL tiles, including components with cases. Currencies are never
  * summed or converted. Legacy `…Cents` fields are hundredths of the major unit for EVERY currency (HC-8), so a claim
  * in a currency whose minor unit is not two decimals (JPY, KWD…) is never shown or summed as ISO minor units: it is
@@ -37,10 +45,10 @@ import { claimCurrency, isTwoDecimalCurrency } from "./lib/money";
 import { MAX_ITEMS_PER_PURCHASE, SUMMARY_MAX_CLAIMS, SUMMARY_MAX_OPEN_OPPORTUNITIES } from "./limits";
 import { legacyLossKeys } from "./opportunities";
 
-export const TILES = ["potential", "ready", "sendingOrUnknown", "asked", "promised"] as const;
+export const TILES = ["potential", "ready", "sendingOrUnknown", "asked", "refused", "promised"] as const;
 export type Tile = (typeof TILES)[number];
-/** Highest first: the furthest state wins (DA-A-17). */
-const TILE_RANK: Record<Tile, number> = { potential: 0, ready: 1, sendingOrUnknown: 2, asked: 3, promised: 4 };
+/** Highest first: the furthest state wins (DA-A-17; `refused` between asked and promised, D196). */
+const TILE_RANK: Record<Tile, number> = { potential: 0, ready: 1, sendingOrUnknown: 2, asked: 3, refused: 4, promised: 5 };
 
 export interface SummaryClaim {
   id: string;
@@ -54,6 +62,8 @@ export interface SummaryClaim {
   provisionalMinor: number;
   delivery: Delivery;
   closedForAsk: boolean;
+  /** DA-B-13: the newest classified reply is a refusal and no promise or credit was recorded after it. */
+  refused: boolean;
   /** The transaction the paid money sits on (`purchase:<id>` for retail, else `txn:<id>`). */
   anchor: string | null;
 }
@@ -79,7 +89,12 @@ export interface Component {
   lossKeys: string[];
   anchor: string | null;
   recovered: number;
-  excess: number;
+  /** Confirmed money above the loss or the paid cap, NEUTRAL: one credited claim got more than it asked (D196). */
+  extraCredited: number;
+  /** Confirmed money above the loss or the paid cap, RED: ≥ 2 credits on one loss, or above a confirmed paid total. */
+  possibleDoubleCredit: number;
+  /** Claims in the component with net > 0. */
+  credited: number;
   outstanding: number;
   provisional: number;
   /** Null when the component has no open member. */
@@ -90,7 +105,12 @@ export interface Component {
 export interface CurrencySummary {
   currency: string;
   recoveredMinor: number;
+  /** @deprecated display only the two parts (`extraCreditedMinor`, `possibleDoubleCreditMinor`); D196. Their sum. */
   overCreditMinor: number;
+  /** Neutral: more came back than was asked on a single credited claim (often tax or shipping). */
+  extraCreditedMinor: number;
+  /** Red: ≥ 2 credited claims on one loss, or confirmed money above what was paid. */
+  possibleDoubleCreditMinor: number;
   tiles: Record<Tile, { amountMinor: number; provisionalMinor: number; components: number }>;
   askedUserReportedMinor: number;
   cappedAtPaidTotal: boolean;
@@ -128,11 +148,14 @@ export function components(claims: readonly SummaryClaim[], opps: readonly Summa
     const lossOpen = Math.max(0, ...openClaims.map((c) => c.expectedMinor), ...os.map((o) => o.estimateMinor));
     const sumNet = cs.reduce((a, c) => a + netOf(c), 0);
     const recovered = Math.min(sumNet, lossAll);
+    const credited = cs.filter((c) => netOf(c) > 0).length;
+    const excess = sumNet - recovered;
     const hasOpen = openClaims.length > 0 || os.length > 0;
     const outstanding = hasOpen ? Math.max(0, lossOpen - recovered) : 0;
     let tile: Tile | null = null;
     if (hasOpen) {
       if (openClaims.some((c) => c.status === "promised" && c.promisedMinor > netOf(c))) tile = "promised";
+      else if (openClaims.some((c) => c.refused)) tile = "refused";
       else if (openClaims.some((c) => ASKED_DELIVERIES.has(c.delivery))) tile = "asked";
       else if (openClaims.some((c) => SENDING_DELIVERIES.has(c.delivery))) tile = "sendingOrUnknown";
       else if (openClaims.length > 0) tile = "ready"; // C4: the catch-all for any open claim
@@ -148,7 +171,10 @@ export function components(claims: readonly SummaryClaim[], opps: readonly Summa
       lossKeys: [...new Set(members.flatMap((m) => (m.kind === "claim" ? m.c.lossKeys : m.o.lossKeys)))],
       anchor: anchors[0] ?? null,
       recovered,
-      excess: sumNet - recovered,
+      // D196: red only when ≥ 2 claims in the component were credited; one claim's extra is neutral.
+      extraCredited: credited >= 2 ? 0 : excess,
+      possibleDoubleCredit: credited >= 2 ? excess : 0,
+      credited,
       outstanding,
       provisional: Math.min(outstanding, provisionalSum),
       tile,
@@ -159,8 +185,9 @@ export function components(claims: readonly SummaryClaim[], opps: readonly Summa
 
 /**
  * Applies the per-transaction paid-total cap (D145, D188). Mutates the components; returns flags. First confirmed
- * money: Σ recovered on the transaction is capped at P and the excess moves to `excess` (the over-credit line), so
- * I2 (recovered + over-credit = Σ net) still holds. Then outstanding, lowest tile first, until Σ (recovered +
+ * money: Σ recovered on the transaction is capped at P and the rest moves off Recovered — to `possibleDoubleCredit`
+ * when P is a confirmed order total or ≥ 2 credited claims on the transaction exceed an item-only P, else to
+ * `extraCredited` (D196) — so I2 and I2b still hold. Then outstanding, lowest tile first, until Σ (recovered +
  * outstanding) ≤ P (I4).
  */
 export function applyPaidCap(comps: Component[], paid: ReadonlyMap<string, PaidTotal>, currency: string): { capped: boolean; partial: boolean } {
@@ -175,8 +202,10 @@ export function applyPaidCap(comps: Component[], paid: ReadonlyMap<string, PaidT
       capped = true;
       if (p.partial) partial = true;
     };
-    // 1. Confirmed money never shows above what was paid; the excess stays visible as over-credit (D188).
+    // 1. Confirmed money never shows above what was paid; the excess stays visible (D188). Red only above a confirmed
+    // total, or when ≥ 2 credited claims on the transaction exceed an item-only total (D196).
     let overRecovered = ks.reduce((a, k) => a + k.recovered, 0) - p.amountMinor;
+    const red = !p.partial || ks.reduce((a, k) => a + k.credited, 0) >= 2;
     if (overRecovered > 0) {
       const byKey = [...ks].sort((a, b) => (a.lossKeys.join("|") < b.lossKeys.join("|") ? -1 : 1));
       for (const k of byKey) {
@@ -184,7 +213,8 @@ export function applyPaidCap(comps: Component[], paid: ReadonlyMap<string, PaidT
         const cut = Math.min(k.recovered, overRecovered);
         if (cut > 0) {
           k.recovered -= cut;
-          k.excess += cut;
+          if (red) k.possibleDoubleCredit += cut;
+          else k.extraCredited += cut;
           overRecovered -= cut;
           mark();
         }
@@ -227,10 +257,14 @@ export function computeSummary(
       tiles[k.tile].components += 1;
       if (k.userReportedOnly) askedUserReportedMinor += k.outstanding;
     }
+    const extraCreditedMinor = comps.reduce((a, k) => a + k.extraCredited, 0);
+    const possibleDoubleCreditMinor = comps.reduce((a, k) => a + k.possibleDoubleCredit, 0);
     return {
       currency,
       recoveredMinor: comps.reduce((a, k) => a + k.recovered, 0),
-      overCreditMinor: comps.reduce((a, k) => a + k.excess, 0),
+      overCreditMinor: extraCreditedMinor + possibleDoubleCreditMinor,
+      extraCreditedMinor,
+      possibleDoubleCreditMinor,
       tiles,
       askedUserReportedMinor,
       cappedAtPaidTotal: capped,
@@ -250,8 +284,11 @@ const summaryShape = v.object({
   currencies: v.array(v.object({
     currency: v.string(),
     recoveredMinor: v.number(),
+    /** Deprecated for display: the sum of the two parts below (D196). */
     overCreditMinor: v.number(),
-    tiles: v.object({ potential: tileShape, ready: tileShape, sendingOrUnknown: tileShape, asked: tileShape, promised: tileShape }),
+    extraCreditedMinor: v.number(),
+    possibleDoubleCreditMinor: v.number(),
+    tiles: v.object({ potential: tileShape, ready: tileShape, sendingOrUnknown: tileShape, asked: tileShape, refused: tileShape, promised: tileShape }),
     askedUserReportedMinor: v.number(),
     cappedAtPaidTotal: v.boolean(),
     paidTotalPartial: v.boolean(),
@@ -266,6 +303,8 @@ const summaryShape = v.object({
 const EVENTS_PER_CLAIM = 200;
 /** Drafts read per claim for the delivery projection. */
 const DRAFTS_PER_CLAIM = 20;
+/** Replies read per open claim, newest first, to find the newest classified one (DA-B-13). */
+const REPLIES_PER_CLAIM = 20;
 const WEEK_MS = 7 * 86_400_000;
 const COARSE_MS = 300_000;
 
@@ -288,6 +327,26 @@ async function retailPaidTotal(ctx: QueryCtx, purchase: Doc<"purchases">): Promi
   const items = await ctx.db.query("items").withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id)).take(MAX_ITEMS_PER_PURCHASE);
   if (items.length === 0) return null;
   return { amountMinor: items.reduce((a, i) => a + i.unitCents * i.qty, 0), currency: purchase.currency, partial: true };
+}
+
+/** Money arriving after a refusal undoes it (DA-B-13): a promise, a confirmed credit or a provisional credit. */
+const UNDOES_REFUSAL: ReadonlySet<Doc<"ledgerEvents">["kind"]> = new Set(["promised_credit", "confirmed_credit", "provisional_credit"]);
+
+/**
+ * DA-B-13 (D196): the claim's newest CLASSIFIED reply ("other" is auto-replies, receipts, marketing) is a refusal and
+ * no promise or credit was recorded after it. Newest by insertion order on `replies.by_claim`, compared with the
+ * ledger's insertion times. `cut` when the bounded read found no classified reply but may have missed one.
+ */
+async function refusedState(
+  ctx: QueryCtx,
+  claimId: Id<"claims">,
+  events: readonly Doc<"ledgerEvents">[],
+): Promise<{ refused: boolean; cut: boolean }> {
+  const replies = await ctx.db.query("replies").withIndex("by_claim", (q) => q.eq("claimId", claimId)).order("desc").take(REPLIES_PER_CLAIM);
+  const newest = replies.find((r) => r.classification !== "other");
+  if (!newest) return { refused: false, cut: replies.length === REPLIES_PER_CLAIM };
+  if (newest.classification !== "refusal") return { refused: false, cut: false };
+  return { refused: !events.some((e) => UNDOES_REFUSAL.has(e.kind) && e._creationTime > newest._creationTime), cut: false };
 }
 
 export const summary = query({
@@ -331,6 +390,13 @@ export const summary = query({
       const ledger: LedgerEvent[] = events.map((e) => ({ kind: e.kind, cents: e.cents }));
       const b = balance(c.expectedCents, ledger);
       const drafts = await ctx.db.query("drafts").withIndex("by_claim", (q) => q.eq("claimId", c._id)).order("desc").take(DRAFTS_PER_CLAIM);
+      const closedForAsk = isClosedForAsk(c);
+      let refused = false;
+      if (!closedForAsk) {
+        const r = await refusedState(ctx, c._id, events);
+        refused = r.refused;
+        if (r.cut) complete = false;
+      }
       claims.push({
         id: c._id,
         currency,
@@ -342,7 +408,8 @@ export const summary = query({
         promisedMinor: b.promised,
         provisionalMinor: provisionalOutstanding(ledger),
         delivery: delivery(c, { drafts }),
-        closedForAsk: isClosedForAsk(c),
+        closedForAsk,
+        refused,
         anchor: `purchase:${c.purchaseId}`,
       });
     }

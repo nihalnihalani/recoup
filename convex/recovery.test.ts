@@ -13,7 +13,7 @@ import { pinClockEach, setup, signedIn } from "./test.setup";
 
 const claim = (o: Partial<SummaryClaim> & Pick<SummaryClaim, "id" | "expectedMinor" | "lossKeys">): SummaryClaim => ({
   currency: "USD", status: "detected", confirmedMinor: 0, debitedMinor: 0, promisedMinor: 0, provisionalMinor: 0,
-  delivery: "none", closedForAsk: false, anchor: "purchase:p1", ...o,
+  delivery: "none", closedForAsk: false, refused: false, anchor: "purchase:p1", ...o,
 });
 const opp = (o: Partial<SummaryOpportunity> & Pick<SummaryOpportunity, "id" | "estimateMinor" | "lossKeys">): SummaryOpportunity => ({
   currency: "USD", anchor: "purchase:p1", ...o,
@@ -66,6 +66,7 @@ describe("DA-A-4 (D145): alternatives count once across ALL tiles; per-transacti
     ]);
     expect(s.recoveredMinor).toBe(4_000);
     expect(s.overCreditMinor).toBe(4_000);
+    expect([s.extraCreditedMinor, s.possibleDoubleCreditMinor]).toEqual([0, 4_000]); // D196: ≥ 2 credits on one loss → red
     expect(TILES.every((t) => s.tiles[t].amountMinor === 0)).toBe(true);
   });
 
@@ -87,6 +88,7 @@ describe("D188 (QA-M16-1): confirmed money per transaction per currency never ex
     const s = usd([confirmed("pa", "item:i:price_diff:1", 2_000), confirmed("rf", "item:i:return_credit", 4_000)], [], paid(4_000));
     expect(s.recoveredMinor).toBe(4_000);
     expect(s.overCreditMinor).toBe(2_000); // visible, never dropped (mission §6)
+    expect([s.extraCreditedMinor, s.possibleDoubleCreditMinor]).toEqual([0, 2_000]); // two credited claims exceed it → red
     expect(s.cappedAtPaidTotal).toBe(true);
     expect(s.paidTotalPartial).toBe(true); // item totals only: "cap based on item prices only"
     expect(TILES.every((t) => s.tiles[t].amountMinor === 0)).toBe(true);
@@ -95,6 +97,7 @@ describe("D188 (QA-M16-1): confirmed money per transaction per currency never ex
   it("a confirmed order total (not partial) caps the same way, without the partial label", () => {
     const s = usd([confirmed("pa", "a", 2_000), confirmed("rf", "b", 4_000)], [], paid(4_500, "USD", false));
     expect([s.recoveredMinor, s.overCreditMinor, s.cappedAtPaidTotal, s.paidTotalPartial]).toEqual([4_500, 1_500, true, false]);
+    expect([s.extraCreditedMinor, s.possibleDoubleCreditMinor]).toEqual([0, 1_500]); // above a CONFIRMED total → red
   });
 
   it("with no excess nothing changes: 2,000 + 1,000 confirmed on a 4,000 purchase", () => {
@@ -171,6 +174,74 @@ describe("DA-A-17 / C4: disjoint, exhaustive tiles by furthest state; provisiona
   });
 });
 
+describe("DA-B-8 (D195/D196): the excess splits into neutral extra credit and red possible double credit", () => {
+  const itemOnly = (amountMinor: number) => new Map([["purchase:p1", { amountMinor, currency: "USD", partial: true }]]);
+  const orderTotal = (amountMinor: number) => new Map([["purchase:p1", { amountMinor, currency: "USD", partial: false }]]);
+  const credited = (id: string, key: string, expected: number, got: number, currency = "USD") =>
+    claim({ id, expectedMinor: expected, lossKeys: [key], status: "confirmed", closedForAsk: true, confirmedMinor: got, currency });
+  const parts = (s: ReturnType<typeof usd>) => [s.recoveredMinor, s.extraCreditedMinor, s.possibleDoubleCreditMinor, s.overCreditMinor];
+
+  it("S1: a 25.00 price adjustment refunded as 27.00 (tax too) → Recovered 25.00, neutral 2.00, nothing red", () => {
+    expect(parts(usd([credited("pa", "item:i:price_diff:1", 2_500, 2_700)], [], itemOnly(12_000)))).toEqual([2_500, 200, 0, 200]);
+  });
+
+  it("S2: a 120.00 return refunded as 129.60 over an item-only 120.00 total → Recovered 120.00, neutral 9.60, nothing red", () => {
+    expect(parts(usd([credited("rf", "item:i:return_credit", 12_000, 12_960)], [], itemOnly(12_000)))).toEqual([12_000, 960, 0, 960]);
+  });
+
+  it("a price adjustment plus a full return on one item → the excess over the item total is red", () => {
+    const s = usd([credited("pa", "item:i:price_diff:1", 2_500, 2_500), credited("rf", "item:i:return_credit", 12_000, 12_000)], [], itemOnly(12_000));
+    expect(parts(s)).toEqual([12_000, 0, 2_500, 2_500]);
+  });
+
+  it("an item-only total never turns ONE claim's credit red: 5,000 asked and credited over a 4,000 item-only total → neutral", () => {
+    expect(parts(usd([credited("rf", "item:i:return_credit", 5_000, 5_000)], [], itemOnly(4_000)))).toEqual([4_000, 1_000, 0, 1_000]);
+  });
+
+  it("above a CONFIRMED order total even one claim's credit is red", () => {
+    expect(parts(usd([credited("rf", "item:i:return_credit", 5_000, 5_000)], [], orderTotal(4_000)))).toEqual([4_000, 0, 1_000, 1_000]);
+  });
+
+  it("one claim's extra within a confirmed order total stays neutral (tax refunded inside what was paid)", () => {
+    expect(parts(usd([credited("rf", "item:i:return_credit", 12_000, 12_960)], [], orderTotal(12_960)))).toEqual([12_000, 960, 0, 960]);
+  });
+
+  it("two credited claims on one loss → red even with no paid total", () => {
+    expect(parts(usd([credited("a", "k", 4_000, 4_000), credited("b", "k", 4_000, 1_000)]))).toEqual([4_000, 0, 1_000, 1_000]);
+  });
+
+  it("mixed currencies stay separate: USD red and EUR neutral never mix, never sum", () => {
+    const rows = computeSummary(
+      [credited("u1", "a", 3_000, 3_000), credited("u2", "b", 3_000, 3_000), credited("e1", "c", 2_500, 2_700, "EUR")],
+      [],
+      itemOnly(4_000),
+    );
+    const byCur = Object.fromEntries(rows.map((r) => [r.currency, [r.recoveredMinor, r.extraCreditedMinor, r.possibleDoubleCreditMinor]]));
+    expect(byCur).toEqual({ EUR: [2_500, 200, 0], USD: [4_000, 0, 2_000] });
+  });
+});
+
+describe("DA-B-13 (D196): refused — the merchant said no, no money yet — inside the disjoint tile set", () => {
+  const sent = (o: Partial<SummaryClaim> & Pick<SummaryClaim, "id">) => claim({ expectedMinor: 4_000, lossKeys: ["k"], status: "sent", delivery: "sent", ...o });
+
+  it("a sent claim whose newest classified reply is a refusal → refused, not asked", () => {
+    const s = usd([sent({ id: "a", refused: true })]);
+    expect(s.tiles.refused).toEqual({ amountMinor: 4_000, provisionalMinor: 0, components: 1 });
+    expect(s.tiles.asked.amountMinor).toBe(0);
+  });
+
+  it("precedence promised > refused > asked on one loss", () => {
+    expect(usd([sent({ id: "a", refused: true }), sent({ id: "b" })]).tiles.refused.amountMinor).toBe(4_000);
+    const p = usd([sent({ id: "a", refused: true }), sent({ id: "b", status: "promised", promisedMinor: 4_000 })]);
+    expect([p.tiles.promised.amountMinor, p.tiles.refused.amountMinor]).toEqual([4_000, 0]);
+  });
+
+  it("a refused claim that is closed for asking sits in no tile", () => {
+    const s = usd([sent({ id: "a", refused: true, status: "dismissed", closedForAsk: true })]);
+    expect(TILES.every((t) => s.tiles[t].components === 0)).toBe(true);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Property sweep (I1–I5) over the C4 generator
 // ---------------------------------------------------------------------------
@@ -189,6 +260,7 @@ const DELIVERIES: Delivery[] = ["none", "draft", "approved", "queued", "accepted
 describe("I1–I5 per currency over the C4 generator (every status × delivery × promised ≶ net × provisional × linked opp)", () => {
   it("holds on 3,000 generated ledgers", () => {
     const rnd = mulberry32(20260923);
+    let refusedComponents = 0;
     const pick = <T,>(xs: readonly T[]) => xs[Math.floor(rnd() * xs.length)];
     let componentsWithOpen = 0;
     for (let run = 0; run < 3_000; run++) {
@@ -207,7 +279,7 @@ describe("I1–I5 per currency over the C4 generator (every status × delivery �
         claims.push(claim({
           id: `c${i}`, currency: pick(["USD", "EUR"]), status, expectedMinor: expected, lossKeys: [pick(keyPool)],
           confirmedMinor: confirmed, debitedMinor: debited, promisedMinor: promised, provisionalMinor: pick([0, 0, 800]),
-          delivery: pick(DELIVERIES), closedForAsk: status === "confirmed", anchor: pick(["purchase:p1", "purchase:p2"]),
+          delivery: pick(DELIVERIES), closedForAsk: status === "confirmed", refused: rnd() < 0.25, anchor: pick(["purchase:p1", "purchase:p2"]),
         }));
       }
       const nOpps = Math.floor(rnd() * 3); // an unlinked opportunity sharing a claim's key, or its own loss
@@ -228,14 +300,35 @@ describe("I1–I5 per currency over the C4 generator (every status × delivery �
         // I3: disjoint AND exhaustive — each component with an open member is in exactly one tile.
         expect(tileCount).toBe(withOpen.length);
         expect(withOpen.every((k) => k.tile !== null)).toBe(true);
+        // C4 precedence (D196): promised > refused > asked > sendingOrUnknown > ready > potential.
+        for (const k of withOpen) {
+          const open = k.claims.filter((c) => !c.closedForAsk);
+          const promised = open.some((c) => c.status === "promised" && c.promisedMinor > Math.max(0, c.confirmedMinor - c.debitedMinor));
+          if (!promised && open.some((c) => c.refused)) expect(k.tile).toBe("refused");
+          if (k.tile === "refused") expect(open.some((c) => c.refused) && !promised).toBe(true);
+        }
+        refusedComponents += withOpen.filter((k) => k.tile === "refused").length;
         // I2: Recovered + Over-credit = Σ net.
         expect(cur.recoveredMinor + cur.overCreditMinor).toBe(cs.reduce((a, c) => a + Math.max(0, c.confirmedMinor - c.debitedMinor), 0));
+        // I2b (D196): extra credit + possible double credit = over-credit, neither negative.
+        expect(cur.extraCreditedMinor + cur.possibleDoubleCreditMinor).toBe(cur.overCreditMinor);
+        expect(Math.min(cur.extraCreditedMinor, cur.possibleDoubleCreditMinor)).toBeGreaterThanOrEqual(0);
+        // D196 red rule: red only with ≥ 2 credited claims in one component, or a paid total that applies and is
+        // confirmed, or item-only with ≥ 2 credited claims on the transaction.
+        if (cur.possibleDoubleCreditMinor > 0) {
+          const pp = paid.get("purchase:p1");
+          const credited = (c: SummaryClaim) => c.confirmedMinor - c.debitedMinor > 0;
+          const twoInOne = comps.some((k) => k.claims.filter(credited).length >= 2);
+          const onP1 = comps.filter((k) => k.anchor === "purchase:p1").reduce((a, k) => a + k.claims.filter(credited).length, 0);
+          const byCap = pp !== undefined && pp.currency === cur.currency && (!pp.partial || onP1 >= 2);
+          expect(twoInOne || byCap).toBe(true);
+        }
         // I1: Σ tiles = Σ outstanding (uncapped outstanding is an upper bound; capping only lowers it).
         const uncapped = comps.reduce((a, k) => a + k.outstanding, 0);
         expect(tileSum).toBeLessThanOrEqual(uncapped);
         if (!cur.cappedAtPaidTotal) expect(tileSum).toBe(uncapped);
-        // I4 (D188): per transaction per currency, Σ (recovered + outstanding) ≤ the paid total after the cap —
-        // confirmed money included; anything above it sits on the over-credit line.
+        // I4 (D188, D196): per transaction per currency, Σ (recovered + outstanding) ≤ the paid total after the cap —
+        // confirmed money included; anything above it sits on the extra-credit or possible-double-credit line.
         const p = paid.get("purchase:p1");
         if (p && p.currency === cur.currency) {
           const capped = components(cs, os);
@@ -250,6 +343,7 @@ describe("I1–I5 per currency over the C4 generator (every status × delivery �
       }
     }
     expect(componentsWithOpen).toBeGreaterThan(1_000); // the generator really exercises open components
+    expect(refusedComponents).toBeGreaterThan(100); // …and the refused tile
   });
 
   it("I4 exactly: after the cap, Σ (recovered + outstanding) on a capped transaction ≤ its paid total", () => {
@@ -316,6 +410,53 @@ describe("recovery.summary (query)", () => {
     await claimRow(t, userId, w, { expected: 4_000, status: "confirmed", confirmed: 4_000, type: "return_credit" });
     const usdRow = (await as.query(api.recovery.summary, { now: NOW })).currencies.find((c) => c.currency === "USD")!;
     expect([usdRow.recoveredMinor, usdRow.overCreditMinor, usdRow.cappedAtPaidTotal, usdRow.paidTotalPartial]).toEqual([4_000, 2_000, true, true]);
+    expect([usdRow.extraCreditedMinor, usdRow.possibleDoubleCreditMinor]).toEqual([0, 2_000]); // D196: two credits over the item → red
+  });
+
+  it("DA-B-8 S1 end to end: one 25.00 price adjustment refunded as 27.00 → Recovered 25.00, neutral 2.00, nothing red", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const w = await seedItem(t, userId);
+    await claimRow(t, userId, w, { expected: 2_500, status: "confirmed", confirmed: 2_700 });
+    const usdRow = (await as.query(api.recovery.summary, { now: NOW })).currencies.find((c) => c.currency === "USD")!;
+    expect([usdRow.recoveredMinor, usdRow.extraCreditedMinor, usdRow.possibleDoubleCreditMinor, usdRow.overCreditMinor]).toEqual([2_500, 200, 0, 200]);
+  });
+
+  async function sentClaim(t: T, userId: Id<"users">) {
+    const w = await seedItem(t, userId);
+    const claimId = await claimRow(t, userId, w, { expected: 4_000, status: "sent" });
+    await t.run((ctx) => ctx.db.insert("drafts", { claimId, userId, version: 1, claimVersion: 1, to: "help@acme.example", subject: "s", body: "b", agentmailMessageId: `m-${claimId}` }));
+    const reply = (classification: "refusal" | "other" | "question") =>
+      t.run((ctx) => ctx.db.insert("replies", { claimId, userId, messageId: `r-${classification}-${Math.random()}`, from: "help@acme.example", classification, summary: "s", senderMismatch: false, receivedAt: NOW }));
+    const event = (kind: "promised_credit" | "confirmed_credit", cents: number) =>
+      t.run((ctx) => ctx.db.insert("ledgerEvents", { claimId, userId, kind, cents, evidence: "test" }));
+    return { claimId, reply, event };
+  }
+
+  it("DA-B-13: newest classified reply a refusal → `refused`; an auto-reply after it changes nothing; a later credit undoes it", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const { reply, event } = await sentClaim(t, userId);
+    const tiles = async () => (await as.query(api.recovery.summary, { now: NOW })).currencies[0].tiles;
+    expect(await tiles()).toMatchObject({ asked: { amountMinor: 4_000 }, refused: { amountMinor: 0 } });
+    await reply("refusal");
+    expect(await tiles()).toMatchObject({ asked: { amountMinor: 0 }, refused: { amountMinor: 4_000, components: 1 } });
+    await reply("other"); // auto-replies, receipts, marketing are not a classified answer
+    expect(await tiles()).toMatchObject({ refused: { amountMinor: 4_000 } });
+    await event("confirmed_credit", 1_000); // money after the refusal: no longer "said no"
+    expect(await tiles()).toMatchObject({ refused: { amountMinor: 0 }, asked: { amountMinor: 3_000 } });
+  });
+
+  it("DA-B-13: a promise recorded BEFORE the refusal does not undo it; a newer question does", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const { reply, event } = await sentClaim(t, userId);
+    const tiles = async () => (await as.query(api.recovery.summary, { now: NOW })).currencies[0].tiles;
+    await event("promised_credit", 4_000);
+    await reply("refusal");
+    expect(await tiles()).toMatchObject({ refused: { amountMinor: 4_000 }, asked: { amountMinor: 0 } });
+    await reply("question");
+    expect(await tiles()).toMatchObject({ refused: { amountMinor: 0 }, asked: { amountMinor: 4_000 } });
   });
 
   it("examples are excluded (claims, their ledger and non-cash rows, and example opportunities)", async () => {
