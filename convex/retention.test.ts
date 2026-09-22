@@ -11,6 +11,8 @@ import {
   RETENTION_STASH_DAYS,
   RETENTION_UNVERIFIED_DAYS,
 } from "./limits";
+import { EVALUATION_PRUNE_PAGE, EVIDENCE_RETENTION_PAGE, ORPHAN_SWEEP_OPS_KEY, ORPHAN_SWEEP_PAGE, RECOVERY_RETENTION_OPS_KEY } from "./retention";
+import { EVALUATION_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, ORPHAN_BLOB_MIN_AGE_HOURS } from "./lib/privacyFacts";
 
 /**
  * `_creationTime` is stamped by convex-test's mock backend off the REAL wall
@@ -457,5 +459,461 @@ describe("retention.sweep — never touches financial/case history", () => {
       policies: (await ctx.db.query("policies").collect()).length,
     }));
     expect(after).toEqual(before);
+  });
+});
+
+// ===========================================================================
+// M14 (contract rev 5 §2.6, §8): transaction-recovery retention. A separate
+// resumable sweep (`retention.sweepRecovery`, opsState key
+// RECOVERY_RETENTION_OPS_KEY) clears evidence content (DA-A-7) and prunes old
+// evaluations (DA-A-32); `retention.sweepOrphanBlobs` deletes unreferenced
+// blobs (SEC-UP-7, DA-A-28(d)). Everything below is additive: no test above
+// this line was changed, and `retention.sweep` itself is untouched.
+// ===========================================================================
+
+type RecoveryCall = { table: string; deleted: number; patched: number; done: boolean };
+
+async function runRecoveryCycle(t: T, maxCalls = 60): Promise<RecoveryCall[]> {
+  const calls: RecoveryCall[] = [];
+  for (let i = 0; i < maxCalls; i++) {
+    const res = await t.mutation(internal.retention.sweepRecovery, {});
+    calls.push(res);
+    if (res.done) return calls;
+  }
+  throw new Error(`retention.sweepRecovery did not complete a cycle within ${maxCalls} calls: ${JSON.stringify(calls)}`);
+}
+
+async function seedRetailTransaction(t: T, userId: Id<"users">, status: "active" | "archived" = "active") {
+  return await t.run(async (ctx) => {
+    const purchaseId = await ctx.db.insert("purchases", { userId, merchant: "Acme", merchantDomain: "acme.example", currency: "USD", status: "active" });
+    const itemId = await ctx.db.insert("items", { purchaseId, userId, name: "Widget", unitCents: 12_000, qty: 1, returned: false });
+    const transactionId = await ctx.db.insert("transactions", {
+      userId, category: "retail_order", status, counterpartyName: "Acme", currency: "USD", purchaseId, liveFactCount: 0,
+    });
+    return { purchaseId, itemId, transactionId };
+  });
+}
+
+type EvidenceSeed = {
+  kind?: "email" | "paste" | "upload" | "manual_note" | "system_capture";
+  transactionId?: Id<"transactions">;
+  pinnedAt?: number;
+  withBlob?: boolean;
+  hash?: string;
+};
+
+let evidenceCounter = 0;
+async function seedEvidence(t: T, userId: Id<"users">, seed: EvidenceSeed = {}) {
+  const kind = seed.kind ?? "email";
+  const hash = seed.hash ?? String(++evidenceCounter).padStart(64, "e");
+  return await t.run(async (ctx) => {
+    const storageId = seed.withBlob || kind === "upload" ? await ctx.storage.store(new Blob([`bytes ${hash}`])) : undefined;
+    const evidenceId = await ctx.db.insert("evidence", {
+      userId, transactionId: seed.transactionId, kind, docType: "order_confirmation",
+      sourceChannel: kind === "email" ? "agentmail_forward" : kind === "upload" ? "upload" : kind === "paste" ? "paste" : "manual",
+      provenance: kind === "email" ? "user_forwarded" : kind === "upload" ? "user_uploaded" : "user_pasted",
+      storageId, contentHash: hash, fileName: kind === "upload" ? "receipt.pdf" : undefined,
+      text: kind === "upload" ? undefined : "Order 112-0000000-0000000 total USD 120.00",
+      headers: kind === "email" ? { from: "orders@acme.example", subject: "Your Acme order", date: "Mon, 21 Sep 2026 10:00:00 +0000" } : undefined,
+      receivedAt: Date.now(), pinnedAt: seed.pinnedAt, extractionStatus: "succeeded", extractionAttempts: 1,
+      extractionSummary: "Acme order, total USD 120.00", retention: "active",
+    });
+    return { evidenceId, storageId };
+  });
+}
+
+async function blobExists(t: T, storageId: Id<"_storage">): Promise<boolean> {
+  return (await t.run((ctx) => ctx.db.system.get("_storage", storageId))) !== null;
+}
+
+async function evidenceRow(t: T, id: Id<"evidence">) {
+  return await t.run((ctx) => ctx.db.get(id));
+}
+
+const PAST_EVIDENCE_WINDOW_MS = (EVIDENCE_RETENTION_DAYS + 1) * DAY_MS;
+
+describe("M14 DA-A-7 — evidence retention (retention.sweepRecovery)", () => {
+  it("forwarded order, no case → text cleared at 30 days, quotes and headers kept", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { transactionId } = await seedRetailTransaction(t, userId);
+    const { evidenceId } = await seedEvidence(t, userId, { kind: "email", transactionId });
+    const factId = await t.run((ctx) =>
+      ctx.db.insert("facts", {
+        userId, transactionId, subjectKey: "txn", key: "retail.total", state: "user_confirmed",
+        value: { kind: "money", amountMinor: 12_000, currency: "USD" },
+        source: { kind: "evidence", evidenceId, locator: { kind: "text_span", start: 29, end: 39, quote: "USD 120.00" }, quoteStatus: "verified", extractorVersion: "x1" },
+        recordedAt: Date.now(),
+      }),
+    );
+    const before = await evidenceRow(t, evidenceId);
+
+    vi.advanceTimersByTime(PAST_EVIDENCE_WINDOW_MS);
+    await runRecoveryCycle(t);
+
+    const after = await evidenceRow(t, evidenceId);
+    expect(after?.retention).toBe("content_deleted");
+    expect(after?.text).toBeUndefined();
+    expect(after?.extractionSummary).toBeUndefined();
+    expect(after?.headers).toEqual(before?.headers);
+    expect(after?.contentHash).toBe(before?.contentHash);
+    const fact = await t.run((ctx) => ctx.db.get(factId));
+    expect(fact?.source).toMatchObject({ kind: "evidence", locator: { quote: "USD 120.00" } });
+  });
+
+  it("with a claim → kept (a claim on the transaction, or for retail a claim on its purchase; a dismissed claim counts)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const linked = await seedRetailTransaction(t, userId);
+    const retail = await seedRetailTransaction(t, userId);
+    const dismissed = await seedRetailTransaction(t, userId);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("claims", {
+        purchaseId: linked.purchaseId, itemId: linked.itemId, userId, type: "price_adjustment", expectedCents: 500, status: "sent",
+        token: "tok-linked", version: 1, transactionId: linked.transactionId,
+      });
+      // Legacy retail claim: no transactionId, found only through claims.by_purchase_type.
+      await ctx.db.insert("claims", {
+        purchaseId: retail.purchaseId, itemId: retail.itemId, userId, type: "price_adjustment", expectedCents: 500, status: "detected",
+        token: "tok-retail", version: 1,
+      });
+      await ctx.db.insert("claims", {
+        purchaseId: dismissed.purchaseId, itemId: dismissed.itemId, userId, type: "price_adjustment", expectedCents: 500, status: "dismissed",
+        token: "tok-dismissed", version: 1, transactionId: dismissed.transactionId,
+      });
+    });
+    const ids = [
+      (await seedEvidence(t, userId, { kind: "email", transactionId: linked.transactionId })).evidenceId,
+      (await seedEvidence(t, userId, { kind: "paste", transactionId: retail.transactionId })).evidenceId,
+      (await seedEvidence(t, userId, { kind: "email", transactionId: dismissed.transactionId })).evidenceId,
+    ];
+    const upload = await seedEvidence(t, userId, { kind: "upload", transactionId: linked.transactionId });
+
+    vi.advanceTimersByTime(PAST_EVIDENCE_WINDOW_MS);
+    await runRecoveryCycle(t);
+
+    for (const id of ids) {
+      const row = await evidenceRow(t, id);
+      expect(row?.retention, id).toBe("active");
+      expect(row?.text, id).toBe("Order 112-0000000-0000000 total USD 120.00");
+    }
+    expect((await evidenceRow(t, upload.evidenceId))?.retention).toBe("active");
+    expect(await blobExists(t, upload.storageId!)).toBe(true);
+  });
+
+  it("pinned → kept", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { transactionId } = await seedRetailTransaction(t, userId);
+    const pinnedEmail = await seedEvidence(t, userId, { kind: "email", transactionId, pinnedAt: Date.now() });
+    const pinnedUpload = await seedEvidence(t, userId, { kind: "upload", pinnedAt: Date.now() }); // unattached, but kept
+
+    vi.advanceTimersByTime(PAST_EVIDENCE_WINDOW_MS);
+    await runRecoveryCycle(t);
+
+    expect((await evidenceRow(t, pinnedEmail.evidenceId))?.text).toBe("Order 112-0000000-0000000 total USD 120.00");
+    expect((await evidenceRow(t, pinnedUpload.evidenceId))?.retention).toBe("active");
+    expect(await blobExists(t, pinnedUpload.storageId!)).toBe(true);
+  });
+
+  it("younger than the window → untouched; manual_note and system_capture rows are never touched", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const note = await seedEvidence(t, userId, { kind: "manual_note" });
+    const capture = await seedEvidence(t, userId, { kind: "system_capture" });
+    vi.advanceTimersByTime(PAST_EVIDENCE_WINDOW_MS);
+    const young = await seedEvidence(t, userId, { kind: "email" }); // received "today"
+    vi.advanceTimersByTime((EVIDENCE_RETENTION_DAYS - 1) * DAY_MS);
+
+    await runRecoveryCycle(t);
+
+    for (const { evidenceId } of [note, capture, young]) {
+      const row = await evidenceRow(t, evidenceId);
+      expect(row?.retention, evidenceId).toBe("active");
+      expect(row?.text, evidenceId).toBe("Order 112-0000000-0000000 total USD 120.00");
+    }
+  });
+
+  it("paste text follows the same rule, and a blob attached to email or paste evidence is deleted with the text", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const paste = await seedEvidence(t, userId, { kind: "paste" });
+    const emailWithBlob = await seedEvidence(t, userId, { kind: "email", withBlob: true });
+
+    vi.advanceTimersByTime(PAST_EVIDENCE_WINDOW_MS);
+    await runRecoveryCycle(t);
+
+    expect(await evidenceRow(t, paste.evidenceId)).toMatchObject({ retention: "content_deleted" });
+    expect((await evidenceRow(t, paste.evidenceId))?.text).toBeUndefined();
+    const email = await evidenceRow(t, emailWithBlob.evidenceId);
+    expect(email?.retention).toBe("content_deleted");
+    expect(email?.storageId).toBeUndefined();
+    expect(await blobExists(t, emailWithBlob.storageId!)).toBe(false);
+  });
+
+  it("uploads: kept while attached to a non-archived transaction; an unattached upload, or one on an archived transaction, is cleared at 30 days with its blob", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const open = await seedRetailTransaction(t, userId, "active");
+    const archived = await seedRetailTransaction(t, userId, "archived");
+    const attached = await seedEvidence(t, userId, { kind: "upload", transactionId: open.transactionId });
+    const onArchived = await seedEvidence(t, userId, { kind: "upload", transactionId: archived.transactionId });
+    const unattached = await seedEvidence(t, userId, { kind: "upload" });
+
+    vi.advanceTimersByTime(PAST_EVIDENCE_WINDOW_MS);
+    await runRecoveryCycle(t);
+
+    expect((await evidenceRow(t, attached.evidenceId))?.retention).toBe("active");
+    expect(await blobExists(t, attached.storageId!)).toBe(true);
+    for (const cleared of [onArchived, unattached]) {
+      const row = await evidenceRow(t, cleared.evidenceId);
+      expect(row?.retention).toBe("content_deleted");
+      expect(row?.storageId).toBeUndefined();
+      expect(row?.fileName).toBe("receipt.pdf"); // metadata stays; content goes
+      expect(await blobExists(t, cleared.storageId!)).toBe(false);
+    }
+  });
+
+  it("DA-A-20 retention side: a cleared row keeps its contentHash and stays findable by (userId, contentHash), so a re-upload can revive it", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const hash = "ab".repeat(32);
+    const { evidenceId } = await seedEvidence(t, userId, { kind: "upload", hash });
+
+    vi.advanceTimersByTime(PAST_EVIDENCE_WINDOW_MS);
+    await runRecoveryCycle(t);
+
+    const match = await t.run((ctx) =>
+      ctx.db.query("evidence").withIndex("by_user_and_content_hash", (q) => q.eq("userId", userId).eq("contentHash", hash)).unique(),
+    );
+    expect(match?._id).toBe(evidenceId);
+    expect(match?.retention).toBe("content_deleted");
+  });
+
+  it("a cleared row is never processed again, and the sweep never writes the ledger, claims, drafts, replies, purchases or facts", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { transactionId, purchaseId, itemId } = await seedRetailTransaction(t, userId);
+    await t.run(async (ctx) => {
+      const claimId = await ctx.db.insert("claims", { purchaseId, itemId, userId, type: "price_adjustment", expectedCents: 500, status: "confirmed", token: "tok-l", version: 1, transactionId });
+      await ctx.db.insert("ledgerEvents", { claimId, userId, kind: "confirmed_credit", cents: 500, evidence: "stmt", currency: "USD" });
+      await ctx.db.insert("drafts", { claimId, userId, version: 1, claimVersion: 1, to: "s@acme.example", subject: "s", body: "b" });
+      await ctx.db.insert("replies", { claimId, userId, messageId: "m1", from: "s@acme.example", classification: "credit_issued", summary: "done", senderMismatch: false, receivedAt: Date.now() });
+    });
+    const orphanEmail = await seedEvidence(t, userId, { kind: "email" });
+
+    const snapshot = () =>
+      t.run(async (ctx) => {
+        const out: Record<string, unknown[]> = {};
+        for (const table of ["ledgerEvents", "claims", "drafts", "replies", "purchases", "items", "facts", "transactions"] as const) {
+          out[table] = await ctx.db.query(table).collect();
+        }
+        return out;
+      });
+    const before = await snapshot();
+
+    vi.advanceTimersByTime(PAST_EVIDENCE_WINDOW_MS);
+    const first = await runRecoveryCycle(t);
+    expect(first.reduce((n, c) => n + c.patched, 0)).toBe(1);
+    const cleared = await evidenceRow(t, orphanEmail.evidenceId);
+
+    vi.advanceTimersByTime(DAY_MS);
+    const second = await runRecoveryCycle(t);
+    expect(second.reduce((n, c) => n + c.patched + c.deleted, 0)).toBe(0);
+    expect(await evidenceRow(t, orphanEmail.evidenceId)).toEqual(cleared);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("a row whose blob is already gone is cleared without throwing", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const upload = await seedEvidence(t, userId, { kind: "upload" });
+    await t.run((ctx) => ctx.storage.delete(upload.storageId!));
+
+    vi.advanceTimersByTime(PAST_EVIDENCE_WINDOW_MS);
+    await runRecoveryCycle(t);
+
+    expect((await evidenceRow(t, upload.evidenceId))?.retention).toBe("content_deleted");
+  });
+
+  it("bounded (at most EVIDENCE_RETENTION_PAGE rows per call) and resumable (the cursor persists across calls)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const TOTAL = EVIDENCE_RETENTION_PAGE * 2 + 3;
+    for (let i = 0; i < TOTAL; i++) await seedEvidence(t, userId, { kind: "paste" });
+
+    vi.advanceTimersByTime(PAST_EVIDENCE_WINDOW_MS);
+    const first = await t.mutation(internal.retention.sweepRecovery, {});
+    expect(first).toMatchObject({ table: "evidence", patched: EVIDENCE_RETENTION_PAGE, done: false });
+    const cursor = await t.run((ctx) => ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", RECOVERY_RETENTION_OPS_KEY)).unique());
+    expect(cursor?.cursor).toBeTruthy();
+    expect(cursor?.updatedAt).toBe(Date.now());
+
+    const rest = await runRecoveryCycle(t);
+    for (const c of rest) expect(c.patched + c.deleted).toBeLessThanOrEqual(EVIDENCE_RETENTION_PAGE);
+    expect(first.patched + rest.reduce((n, c) => n + c.patched, 0)).toBe(TOTAL);
+    const rows = await t.run((ctx) => ctx.db.query("evidence").collect());
+    expect(rows.every((r) => r.retention === "content_deleted" && r.text === undefined)).toBe(true);
+  });
+});
+
+async function seedOpportunity(t: T, userId: Id<"users">) {
+  const { transactionId, itemId } = await seedRetailTransaction(t, userId);
+  return await t.run((ctx) =>
+    ctx.db.insert("opportunities", {
+      userId, transactionId, scenarioId: "R01", remedyKey: "price_difference", subjectKey: `item:${itemId}`,
+      dedupeKey: `${transactionId}|R01|price_difference|item:${itemId}|-`, status: "open", ruleId: "r01", ruleVersion: 1,
+      outcome: "needs_facts", authorityClass: "merchant_promise", remedyType: "price_difference", cashClass: "cash",
+      lossKeys: [], lastEvaluatedAt: Date.now(),
+    }),
+  );
+}
+
+async function seedEvaluation(t: T, userId: Id<"users">, opportunityId: Id<"opportunities">, tag: string) {
+  return await t.run((ctx) =>
+    ctx.db.insert("evaluations", {
+      userId, opportunityId, scenarioId: "R01", ruleId: "r01", ruleVersion: 1, factSnapshotHash: tag.padEnd(64, "f"), resultHash: tag.padEnd(64, "r"),
+      evaluatedAt: Date.now(), trigger: "observation", outcome: "needs_facts",
+      dimensions: { applies: "pass", factsKnown: "unknown", evidenceSupports: "unknown", windowOpen: "pass", amountCalculable: "unknown", readyForApproval: "fail" },
+      conditions: [], missingFacts: [], assumptions: [], disqualifierIds: [], amount: null, deadlines: [], sourceRefs: [], overlap: [],
+      nextAction: { kind: "none", reason: "test" }, explanation: [],
+    }),
+  );
+}
+
+const PAST_EVALUATION_WINDOW_MS = (EVALUATION_RETENTION_DAYS + 1) * DAY_MS;
+
+describe("M14 DA-A-32 — evaluation pruning (retention.sweepRecovery)", () => {
+  it("prunes evaluations older than the window that are not current and whose opportunity has no claim", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const opportunityId = await seedOpportunity(t, userId);
+    const old1 = await seedEvaluation(t, userId, opportunityId, "a");
+    const old2 = await seedEvaluation(t, userId, opportunityId, "b");
+    const current = await seedEvaluation(t, userId, opportunityId, "c");
+    await t.run((ctx) => ctx.db.patch(opportunityId, { currentEvaluationId: current }));
+
+    vi.advanceTimersByTime(PAST_EVALUATION_WINDOW_MS);
+    const calls = await runRecoveryCycle(t);
+
+    expect(calls.reduce((n, c) => n + c.deleted, 0)).toBe(2);
+    expect(await t.run((ctx) => ctx.db.get(old1))).toBeNull();
+    expect(await t.run((ctx) => ctx.db.get(old2))).toBeNull();
+    expect(await t.run((ctx) => ctx.db.get(current))).not.toBeNull();
+  });
+
+  it("never prunes the current evaluation, one referenced by an approval binding, or one of a case-linked opportunity; a younger one is kept too", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    // Case-linked through claims.by_opportunity, with an approved draft binding an OLD, non-current evaluation.
+    const linkedOpp = await seedOpportunity(t, userId);
+    const bound = await seedEvaluation(t, userId, linkedOpp, "bound");
+    const linkedOther = await seedEvaluation(t, userId, linkedOpp, "linked");
+    const linkedCurrent = await seedEvaluation(t, userId, linkedOpp, "lcur");
+    await t.run(async (ctx) => {
+      const opp = (await ctx.db.get(linkedOpp))!;
+      const txn = (await ctx.db.get(opp.transactionId))!;
+      const itemId = (await ctx.db.query("items").withIndex("by_purchase", (q) => q.eq("purchaseId", txn.purchaseId!)).first())!._id;
+      const claimId = await ctx.db.insert("claims", {
+        purchaseId: txn.purchaseId!, itemId, userId, type: "price_adjustment", expectedCents: 500, status: "drafted", token: "tok-b", version: 1,
+        transactionId: txn._id, opportunityId: linkedOpp,
+      });
+      await ctx.db.patch(linkedOpp, { currentEvaluationId: linkedCurrent });
+      await ctx.db.insert("drafts", {
+        claimId, userId, version: 1, claimVersion: 1, to: "s@acme.example", subject: "s", body: "b", approvedAt: Date.now(), approvedHash: "h".repeat(64),
+        binding: { contextHash: "c".repeat(64), claimVersion: 1, amount: { amountMinor: 500, currency: "USD" }, opportunityId: linkedOpp, evaluationId: bound, attachments: [] },
+      });
+    });
+    // activeClaimId alone (defense in depth, e.g. a claim row not yet linked back).
+    const activeOpp = await seedOpportunity(t, userId);
+    const activeOld = await seedEvaluation(t, userId, activeOpp, "act");
+    await t.run(async (ctx) => {
+      const anyClaim = (await ctx.db.query("claims").first())!;
+      await ctx.db.patch(activeOpp, { activeClaimId: anyClaim._id });
+    });
+    // A lone opportunity: old current kept, a younger non-current kept.
+    const loneOpp = await seedOpportunity(t, userId);
+    const loneCurrent = await seedEvaluation(t, userId, loneOpp, "cur");
+    await t.run((ctx) => ctx.db.patch(loneOpp, { currentEvaluationId: loneCurrent }));
+
+    vi.advanceTimersByTime(PAST_EVALUATION_WINDOW_MS);
+    const young = await seedEvaluation(t, userId, loneOpp, "young");
+    await runRecoveryCycle(t);
+
+    for (const id of [bound, linkedOther, linkedCurrent, activeOld, loneCurrent, young]) {
+      expect(await t.run((ctx) => ctx.db.get(id)), id).not.toBeNull();
+    }
+  });
+
+  it("bounded (at most EVALUATION_PRUNE_PAGE rows per call) and resumable", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const opportunityId = await seedOpportunity(t, userId);
+    const TOTAL = EVALUATION_PRUNE_PAGE + 7;
+    for (let i = 0; i < TOTAL; i++) await seedEvaluation(t, userId, opportunityId, `p${i}`);
+
+    vi.advanceTimersByTime(PAST_EVALUATION_WINDOW_MS);
+    const calls = await runRecoveryCycle(t);
+    for (const c of calls) expect(c.deleted + c.patched).toBeLessThanOrEqual(Math.max(EVALUATION_PRUNE_PAGE, EVIDENCE_RETENTION_PAGE));
+    expect(calls.filter((c) => c.table === "evaluations" && c.deleted > 0).length).toBeGreaterThan(1);
+    expect(await t.run((ctx) => ctx.db.query("evaluations").collect())).toHaveLength(0);
+  });
+});
+
+async function runOrphanCycle(t: T, maxCalls = 60) {
+  const calls: Array<{ scanned: number; deleted: number; done: boolean }> = [];
+  for (let i = 0; i < maxCalls; i++) {
+    const res = await t.mutation(internal.retention.sweepOrphanBlobs, {});
+    calls.push(res);
+    if (res.done) return calls;
+  }
+  throw new Error(`retention.sweepOrphanBlobs did not complete a cycle within ${maxCalls} calls`);
+}
+
+describe("M14 SEC-UP-7 / DA-A-28(d) — orphan blob sweep (retention.sweepOrphanBlobs)", () => {
+  it("deletes an unreferenced blob older than 24 h; keeps a referenced blob however old, and an unreferenced blob younger than 24 h", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const orphan = await t.run((ctx) => ctx.storage.store(new Blob(["abandoned upload"])));
+    const referenced = await seedEvidence(t, userId, { kind: "upload" });
+    vi.advanceTimersByTime(ORPHAN_BLOB_MIN_AGE_HOURS * 3_600_000 + 60_000);
+    const young = await t.run((ctx) => ctx.storage.store(new Blob(["upload in flight"])));
+    vi.advanceTimersByTime(60_000);
+
+    await runOrphanCycle(t);
+
+    expect(await blobExists(t, orphan)).toBe(false);
+    expect(await blobExists(t, referenced.storageId!)).toBe(true);
+    expect(await blobExists(t, young)).toBe(true);
+    const ops = await t.run((ctx) => ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", ORPHAN_SWEEP_OPS_KEY)).unique());
+    expect(ops?.updatedAt).toBe(Date.now()); // M1B's ops.backlog reads the age of this row
+  });
+
+  it("a referenced blob is never deleted: 200 days and many cycles later it is still there", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const referenced = await seedEvidence(t, userId, { kind: "upload" });
+    for (let day = 0; day < 4; day++) {
+      vi.advanceTimersByTime(50 * DAY_MS);
+      await runOrphanCycle(t);
+    }
+    expect(await blobExists(t, referenced.storageId!)).toBe(true);
+  });
+
+  it("bounded (at most ORPHAN_SWEEP_PAGE blobs per call) and resumable across calls", async () => {
+    const t = setup();
+    const TOTAL = ORPHAN_SWEEP_PAGE * 2 + 5;
+    const ids = await t.run(async (ctx) => {
+      const out: Id<"_storage">[] = [];
+      for (let i = 0; i < TOTAL; i++) out.push(await ctx.storage.store(new Blob([`orphan ${i}`])));
+      return out;
+    });
+    vi.advanceTimersByTime(ORPHAN_BLOB_MIN_AGE_HOURS * 3_600_000 + 60_000);
+
+    const calls = await runOrphanCycle(t);
+    expect(calls.length).toBeGreaterThan(2);
+    for (const c of calls) expect(c.scanned).toBeLessThanOrEqual(ORPHAN_SWEEP_PAGE);
+    expect(calls.reduce((n, c) => n + c.deleted, 0)).toBe(TOTAL);
+    for (const id of ids) expect(await blobExists(t, id)).toBe(false);
   });
 });

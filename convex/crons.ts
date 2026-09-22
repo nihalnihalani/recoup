@@ -75,4 +75,23 @@ crons.interval("account re-drive", { hours: 24 }, internal.account.reDriveStuckD
  */
 crons.interval("agentmail outbound cleanup", { hours: 24 }, internal.mailPurge.cleanupFinalizedOutbound, {});
 
+/**
+ * Transaction-recovery retention (M14; DA-A-7, D146, DA-A-32). Clears
+ * email/paste evidence text and unattached uploads 30 days after receipt
+ * unless a claim or the user keeps them, then prunes old evaluations that
+ * nothing references. `retention.sweepRecovery` self-reschedules one
+ * bounded page at a time until the cycle is done, like `retention.sweep`,
+ * but with its own cursor (opsState `retentionRecovery`). See
+ * convex/retention.ts.
+ */
+crons.interval("recovery retention sweep", { hours: 24 }, internal.retention.sweepRecovery, {});
+
+/**
+ * Orphan blob sweep (M14; SEC-UP-7, DA-A-28(d)). Deletes `_storage` blobs
+ * older than 24 h that no field registered in `lib/blobRefs.ts` references,
+ * e.g. an upload whose finalize never ran. Self-reschedules page by page
+ * (opsState `orphanSweep`, whose age M1B's `ops.backlog` reports).
+ */
+crons.interval("orphan blob sweep", { hours: 24 }, internal.retention.sweepOrphanBlobs, {});
+
 export default crons;

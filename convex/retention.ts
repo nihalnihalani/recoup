@@ -10,7 +10,10 @@ import {
   RETENTION_PAYLOAD_DAYS,
   RETENTION_STASH_DAYS,
   RETENTION_UNVERIFIED_DAYS,
+  PROCESSED_EVENTS_PAGE,
 } from "./limits";
+import { EVALUATION_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, EVIDENCE_TEXT_KINDS, ORPHAN_BLOB_MIN_AGE_HOURS } from "./lib/privacyFacts";
+import { deleteBlobIfPresent, isBlobReferenced } from "./lib/blobRefs";
 
 /**
  * D75: a resumable, bounded data-retention sweep. NEVER touches
@@ -376,5 +379,307 @@ export const sweep = internalMutation({
     }
 
     return { table, deleted: result.deleted, patched: result.patched, done: cycleComplete };
+  },
+});
+
+// ===========================================================================
+// M14 (contract rev 5 §2.6, §8): transaction-recovery retention.
+//
+// Two more resumable sweeps, each with its OWN opsState row and daily cron
+// (`crons.ts`), deliberately separate from `sweep` above:
+//  - `sweep`'s `STEPS` order and `{ step, page }` cursor are mirrored by hand
+//    in `ops.ts` (`RETENTION_STEPS`) and pinned by existing tests, so inserting
+//    steps there would shift every index under a live cursor;
+//  - a failure here (a blob delete, a new table's validator) cannot stall
+//    the D75 sweep, and vice versa.
+// Both follow `sweep`'s design: one bounded page per call, the cursor
+// persisted before any self-reschedule, `updatedAt` stamped on every page
+// (M1B's `ops.backlog` reports the row's age), and a stop after the page
+// that completes a cycle until the next cron firing.
+//
+// **Stable page bounds.** Each cycle fixes `startedAt` in its cursor, and
+// every window's cutoff derives from it, so each `.paginate()` range stays
+// identical across the calls of one cycle and a continuation cursor is
+// always resumed against the exact query that produced it. A cycle that
+// stalls for days just uses an older cutoff, which clears less, never more.
+// ===========================================================================
+
+/** opsState key of `sweepRecovery`'s cursor (exported for `ops.backlog`, M1B). */
+export const RECOVERY_RETENTION_OPS_KEY = "retentionRecovery";
+/** opsState key of `sweepOrphanBlobs`'s cursor (the key M1B's `ops.backlog` reads). */
+export const ORPHAN_SWEEP_OPS_KEY = "orphanSweep";
+
+/** `sweepRecovery`'s cycle order. Evidence first: it is the privacy promise (D146); evaluation pruning is housekeeping (DA-A-32). */
+export const RECOVERY_STEPS = ["evidence", "evaluations"] as const;
+
+/**
+ * Evidence rows per call: `text` holds up to 60,000 chars (§2.6), the same
+ * worst case `PROCESSED_EVENTS_PAGE` is sized for (6b-6), plus one
+ * transaction read and at most two one-row claim reads per distinct
+ * transaction.
+ */
+export const EVIDENCE_RETENTION_PAGE = PROCESSED_EVENTS_PAGE;
+/** Evaluation rows per call: the same byte budget as `account.ts`'s `EVALUATION_PAGE` (bounded §2.4 arrays, ~100 KB/row worst case). */
+export const EVALUATION_PRUNE_PAGE = 50;
+/**
+ * `_storage` rows per call. A blob's own row is tiny, but checking whether a
+ * blob is referenced reads the referencing document itself (an evidence row
+ * of up to ~180 KB), so this page is sized like the evidence one.
+ */
+export const ORPHAN_SWEEP_PAGE = 25;
+
+type CycleCursor = { step: number; page: string | null; startedAt: number };
+
+/** A fresh cycle (step 0, no page) always restamps `startedAt`; a malformed cursor restarts the cycle. */
+function parseCycleCursor(raw: string | undefined, stepCount: number, now: number): CycleCursor {
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as Partial<CycleCursor>;
+      const step = parsed.step ?? 0;
+      const page = typeof parsed.page === "string" ? parsed.page : null;
+      const startedAt = parsed.startedAt;
+      if (Number.isInteger(step) && step >= 0 && step < stepCount && typeof startedAt === "number" && Number.isFinite(startedAt) && startedAt <= now) {
+        if (step === 0 && page === null) return { step: 0, page: null, startedAt: now };
+        return { step, page, startedAt };
+      }
+    } catch {
+      // Malformed/foreign cursor value: start the cycle over.
+    }
+  }
+  return { step: 0, page: null, startedAt: now };
+}
+
+async function writeCycleCursor(ctx: MutationCtx, key: string, cursor: CycleCursor, now: number): Promise<void> {
+  const row = await ctx.db
+    .query("opsState")
+    .withIndex("by_key", (q) => q.eq("key", key))
+    .unique();
+  const serialized = JSON.stringify(cursor);
+  if (row) await ctx.db.patch(row._id, { cursor: serialized, updatedAt: now });
+  else await ctx.db.insert("opsState", { key, cursor: serialized, updatedAt: now });
+}
+
+async function readCycleCursor(ctx: MutationCtx, key: string, stepCount: number, now: number): Promise<CycleCursor> {
+  const row = await ctx.db
+    .query("opsState")
+    .withIndex("by_key", (q) => q.eq("key", key))
+    .unique();
+  return parseCycleCursor(row?.cursor, stepCount, now);
+}
+
+// ---------------------------------------------------------------------------
+// Evidence (DA-A-7, D145, D146; contract §2.6 "Retention")
+// ---------------------------------------------------------------------------
+
+const EVIDENCE_TEXT_KIND_SET = new Set<string>(EVIDENCE_TEXT_KINDS);
+
+type TransactionRetentionView = { hasCase: boolean; archived: boolean } | null;
+
+/**
+ * "Has a case" (§2.6): any claim, in any status, referencing the transaction
+ * through `claims.by_transaction_and_status`, or, for retail, any claim on
+ * its purchase through `claims.by_purchase_type` (legacy claims carry no
+ * `transactionId`). Read-only: never writes claims.
+ */
+async function transactionRetentionView(ctx: MutationCtx, transactionId: Id<"transactions">): Promise<TransactionRetentionView> {
+  const txn = await ctx.db.get(transactionId);
+  if (!txn) return null;
+  const byTransaction = await ctx.db
+    .query("claims")
+    .withIndex("by_transaction_and_status", (q) => q.eq("transactionId", transactionId))
+    .first();
+  let hasCase = byTransaction !== null;
+  if (!hasCase && txn.purchaseId) {
+    const purchaseId = txn.purchaseId;
+    const byPurchase = await ctx.db
+      .query("claims")
+      .withIndex("by_purchase_type", (q) => q.eq("purchaseId", purchaseId))
+      .first();
+    hasCase = byPurchase !== null;
+  }
+  return { hasCase, archived: txn.status === "archived" };
+}
+
+/**
+ * Whether an `active` evidence row past the window is kept. The rules,
+ * verbatim from §2.6 and published through `lib/privacyFacts.ts`:
+ *  - email/paste: kept only if pinned or its transaction has a case;
+ *  - upload: also kept while attached to a transaction that is not archived;
+ *  - `manual_note`/`system_capture`: out of scope, never touched.
+ */
+async function keepEvidence(
+  ctx: MutationCtx,
+  row: Doc<"evidence">,
+  cache: Map<Id<"transactions">, TransactionRetentionView>,
+): Promise<boolean> {
+  const isText = EVIDENCE_TEXT_KIND_SET.has(row.kind);
+  if (!isText && row.kind !== "upload") return true;
+  if (row.pinnedAt !== undefined) return true;
+  if (row.transactionId === undefined) return false;
+  let view = cache.get(row.transactionId);
+  if (view === undefined) {
+    view = await transactionRetentionView(ctx, row.transactionId);
+    cache.set(row.transactionId, view);
+  }
+  if (view === null) return false; // dangling link: treated as unattached
+  if (view.hasCase) return true;
+  return row.kind === "upload" && !view.archived;
+}
+
+/**
+ * Clears one row's content: the blob (if any, and if still present), then
+ * `text`, the storage link and the extraction summary (derived from the
+ * content), all in this mutation. `headers`, `contentHash` (DA-A-20: a
+ * re-upload of the same bytes revives the row) and metadata such as
+ * `fileName` stay. Facts, with their ≤ 300-char locator quotes, live in
+ * their own table and are never touched here.
+ */
+async function clearEvidenceContent(ctx: MutationCtx, row: Doc<"evidence">): Promise<void> {
+  if (row.storageId) await deleteBlobIfPresent(ctx, row.storageId);
+  await ctx.db.patch(row._id, { text: undefined, storageId: undefined, extractionSummary: undefined, retention: "content_deleted" });
+}
+
+async function sweepEvidenceStep(ctx: MutationCtx, page: string | null, startedAt: number): Promise<StepResult> {
+  const cutoff = startedAt - EVIDENCE_RETENTION_DAYS * DAY_MS;
+  // Only `active` rows received before the cutoff: a cleared row leaves this range for good.
+  const result = await ctx.db
+    .query("evidence")
+    .withIndex("by_retention_and_received_at", (q) => q.eq("retention", "active").lt("receivedAt", cutoff))
+    .paginate({ cursor: page, numItems: EVIDENCE_RETENTION_PAGE });
+  const cache = new Map<Id<"transactions">, TransactionRetentionView>();
+  let patched = 0;
+  for (const row of result.page) {
+    if (await keepEvidence(ctx, row, cache)) continue;
+    await clearEvidenceContent(ctx, row);
+    patched++;
+  }
+  return { isDone: result.isDone, continueCursor: result.continueCursor, deleted: 0, patched };
+}
+
+// ---------------------------------------------------------------------------
+// Evaluations (DA-A-32; contract §8 "Retention")
+// ---------------------------------------------------------------------------
+
+type OpportunityRetentionView = { currentEvaluationId?: Id<"evaluations">; caseLinked: boolean };
+
+/**
+ * Keep reasons for an opportunity's evaluations:
+ *  - `currentEvaluationId`: the one the card shows;
+ *  - `caseLinked`: `activeClaimId` is set, or any claim references the
+ *    opportunity through `claims.by_opportunity`.
+ * `caseLinked` also covers every approval binding: `drafts.binding` is
+ * written only on a draft of a claim linked to that opportunity, so a bound
+ * evaluation's opportunity always has a claim. `packets.binding` (wave 2)
+ * sits on the same claims. A missing opportunity keeps only the claim check.
+ */
+async function opportunityRetentionView(ctx: MutationCtx, opportunityId: Id<"opportunities">): Promise<OpportunityRetentionView> {
+  const opp = await ctx.db.get(opportunityId);
+  if (opp?.activeClaimId) return { currentEvaluationId: opp.currentEvaluationId, caseLinked: true };
+  const claim = await ctx.db
+    .query("claims")
+    .withIndex("by_opportunity", (q) => q.eq("opportunityId", opportunityId))
+    .first();
+  return { currentEvaluationId: opp?.currentEvaluationId, caseLinked: claim !== null };
+}
+
+async function pruneEvaluationsStep(ctx: MutationCtx, page: string | null, startedAt: number): Promise<StepResult> {
+  const cutoff = startedAt - EVALUATION_RETENTION_DAYS * DAY_MS;
+  const result = await ctx.db
+    .query("evaluations")
+    .withIndex("by_creation_time", (q) => q.lt("_creationTime", cutoff))
+    .paginate({ cursor: page, numItems: EVALUATION_PRUNE_PAGE });
+  const cache = new Map<Id<"opportunities">, OpportunityRetentionView>();
+  let deleted = 0;
+  for (const row of result.page) {
+    if (row.evaluatedAt >= cutoff) continue; // belt and braces next to `_creationTime`
+    let view = cache.get(row.opportunityId);
+    if (!view) {
+      view = await opportunityRetentionView(ctx, row.opportunityId);
+      cache.set(row.opportunityId, view);
+    }
+    if (view.currentEvaluationId === row._id || view.caseLinked) continue;
+    await ctx.db.delete(row._id);
+    deleted++;
+  }
+  return { isDone: result.isDone, continueCursor: result.continueCursor, deleted, patched: 0 };
+}
+
+async function runRecoveryStep(ctx: MutationCtx, step: (typeof RECOVERY_STEPS)[number], page: string | null, startedAt: number): Promise<StepResult> {
+  switch (step) {
+    case "evidence":
+      return sweepEvidenceStep(ctx, page, startedAt);
+    case "evaluations":
+      return pruneEvaluationsStep(ctx, page, startedAt);
+  }
+}
+
+/**
+ * One bounded page of the transaction-recovery retention cycle (evidence,
+ * then evaluations). Never touches the ledger, claims, drafts, replies,
+ * purchases, transactions or facts (contract §8). Same return shape as
+ * `sweep`.
+ */
+export const sweepRecovery = internalMutation({
+  args: {},
+  returns: v.object({ table: v.string(), deleted: v.number(), patched: v.number(), done: v.boolean() }),
+  handler: async (ctx) => {
+    const now = Date.now();
+    const cursor = await readCycleCursor(ctx, RECOVERY_RETENTION_OPS_KEY, RECOVERY_STEPS.length, now);
+    const table = RECOVERY_STEPS[cursor.step];
+
+    const result = await runRecoveryStep(ctx, table, cursor.page, cursor.startedAt);
+
+    const stepDone = result.isDone;
+    const cycleComplete = stepDone && cursor.step === RECOVERY_STEPS.length - 1;
+    const next: CycleCursor = stepDone
+      ? { step: cycleComplete ? 0 : cursor.step + 1, page: null, startedAt: cursor.startedAt }
+      : { step: cursor.step, page: result.continueCursor, startedAt: cursor.startedAt };
+    await writeCycleCursor(ctx, RECOVERY_RETENTION_OPS_KEY, next, now);
+
+    if (!cycleComplete) await ctx.scheduler.runAfter(0, internal.retention.sweepRecovery, {});
+    return { table, deleted: result.deleted, patched: result.patched, done: cycleComplete };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Orphan blobs (SEC-UP-7, DA-A-28(d); contract §2.6 "Orphan sweep")
+// ---------------------------------------------------------------------------
+
+/**
+ * One bounded page of `_storage` blobs created before the cycle's cutoff
+ * (`startedAt − ORPHAN_BLOB_MIN_AGE_HOURS`). Each blob that no
+ * `BLOB_REFERENCES` field references is deleted. The age floor covers the
+ * upload window: the upload httpAction stores the blob, then its finalize
+ * mutation binds it, so a blob younger than 24 h may still be about to gain
+ * its row. A referenced blob is never deleted. The reference check and the
+ * delete run in one transaction, so a finalize that binds the blob
+ * concurrently conflicts with this mutation instead of racing it.
+ */
+export const sweepOrphanBlobs = internalMutation({
+  args: {},
+  returns: v.object({ scanned: v.number(), deleted: v.number(), done: v.boolean() }),
+  handler: async (ctx) => {
+    const now = Date.now();
+    const cursor = await readCycleCursor(ctx, ORPHAN_SWEEP_OPS_KEY, 1, now);
+    const cutoff = cursor.startedAt - ORPHAN_BLOB_MIN_AGE_HOURS * 3_600_000;
+
+    const result = await ctx.db.system
+      .query("_storage")
+      .withIndex("by_creation_time", (q) => q.lt("_creationTime", cutoff))
+      .paginate({ cursor: cursor.page, numItems: ORPHAN_SWEEP_PAGE });
+    let deleted = 0;
+    for (const blob of result.page) {
+      if (await isBlobReferenced(ctx, blob._id)) continue;
+      await ctx.storage.delete(blob._id);
+      deleted++;
+    }
+
+    const next: CycleCursor = result.isDone
+      ? { step: 0, page: null, startedAt: cursor.startedAt }
+      : { step: 0, page: result.continueCursor, startedAt: cursor.startedAt };
+    await writeCycleCursor(ctx, ORPHAN_SWEEP_OPS_KEY, next, now);
+
+    if (!result.isDone) await ctx.scheduler.runAfter(0, internal.retention.sweepOrphanBlobs, {});
+    return { scanned: result.page.length, deleted, done: result.isDone };
   },
 });
