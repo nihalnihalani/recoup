@@ -31,7 +31,9 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | M06 | 0 | opus-product-architect | M05 | Contract rev 4: all pre-wave-1 changes (DA-A-1..5,7,8,9,11,13..17,21) + D142 + D143 + D145 rulings; pre-wave-2 items written as specified text; new tasks for pack review, source re-verification, R01 v2, R10/R13/R18/R19–R25, deadline attention, diagnostics, copy consistency | docs/team/contracts/2026-09-23-M01-*.md | verified (044b20d, rev 4, 1,266 lines, §13 changelog; R4-1..4 confirmed D146) |
 | M07 | 0 | opus-devils-advocate | M06 | Recheck rev 4 against the pre-wave-1 required changes only | docs/reviews/2026-09-23-da-checkpoint-A.md (addendum) | in_progress |
 | M08 | 1 | opus-qa-engineer | – | Test infra + CI: DOM env for *.test.tsx (QA-13), rule-fixture loader (hash + alias), twoUsers/clock helpers + time-bomb lint test, CI lint 0 / floor / e2e typecheck / concurrency / env-driven e2e fixtures | vitest.config.mts, package.json, package-lock.json, convex/test.setup.ts, convex/testing/**, src/test/**, .github/workflows/ci.yml, scripts/check-test-count.mjs, e2e/fixtures.ts, playwright.config.ts, docs/reviews/2026-09-23-M08-test-infra.md | in_progress |
-| M09 | 1 | opus-rules-reviewer | – | Independent spec-level review of R01–R05 against captured primary text + blind fixture check (activation gate, DA-A-11) | docs/reviews/2026-09-23-rules-review-R01-R05.md | in_progress |
+| M09 | 1 | opus-rules-reviewer | – | Independent spec-level review of R01–R05 against captured primary text + blind fixture check (activation gate, DA-A-11) | docs/reviews/2026-09-23-rules-review-R01-R05.md | verified (8fd1e3f; R01 reject-resubmit, R02–R05 approve-with-changes; rulings D147) |
+| M2D | 1 | opus-rules-researcher | M09, M1C | Apply M09's 27 edits + R01 window-event redesign + fixture construction fixes; capture every uncaptured normative source; D147 rulings | docs/rules/** | pending (after M1C) |
+| M09b | 1 | opus-rules-reviewer | M2D | Re-review of revised specs/fixtures; activation gate | docs/reviews/2026-09-23-rules-review-R01-R05.md (addendum) | pending |
 
 ---
 
