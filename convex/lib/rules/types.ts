@@ -361,6 +361,10 @@ export interface RulePack<S, P, C extends CaseContext = CaseContext> {
   requirements: readonly FactRequirement[];
   fixturesPath: string;
   knownLimitations: readonly string[];
+  /** rev 5 (C1): deadline ids whose passing is acknowledgeable at send time and never material (R01 v1's window only). */
+  lateAskDeadlineIds: readonly string[];
+  /** Overlap relations this pack declares (§3.3); undeclared intersections are `alternative` at case opening (D145). */
+  overlap: readonly OverlapDecl[];
   evaluate: Evaluator<S, P, C>;
 }
 
