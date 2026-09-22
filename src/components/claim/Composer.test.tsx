@@ -8,7 +8,7 @@
 import { getFunctionName, type FunctionReference } from "convex/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Doc, Id } from "../../../convex/_generated/dataModel";
-import { fireEvent, render, screen, waitFor } from "../../test/dom";
+import { fireEvent, render, screen, waitFor, within } from "../../test/dom";
 import { Composer } from "./Composer";
 
 type Call = Record<string, unknown>;
@@ -157,7 +157,7 @@ describe("Composer: prepareSend before every send", () => {
     prepareSend.mockImplementationOnce(async () => ({ ok: false, code: "outcome_not_approvable", message: "Recoup's check no longer supports this claim (not eligible)." }));
     renderComposer();
     approve();
-    expect((await screen.findByRole("alert")).textContent).toContain("no longer supports this claim");
+    expect((await screen.findByRole("region", { name: "Not sent" })).textContent).toContain("no longer supports this claim");
     expect((screen.getByRole("button", { name: "Approve & send" }) as HTMLButtonElement).disabled).toBe(true);
     expect(approveAndSend).not.toHaveBeenCalled();
   });
@@ -166,7 +166,7 @@ describe("Composer: prepareSend before every send", () => {
     prepareSend.mockImplementationOnce(async () => ({ ok: false, code, message: "Something changed." }));
     renderComposer();
     approve();
-    expect((await screen.findByRole("alert")).textContent).toContain("Review the claim again");
+    expect((await screen.findByRole("region", { name: "Nothing was sent: review the claim again" })).textContent).toContain("Something changed.");
     expect(approveAndSend).not.toHaveBeenCalled();
   });
 
@@ -174,7 +174,7 @@ describe("Composer: prepareSend before every send", () => {
     prepareSend.mockImplementationOnce(async () => ({ ok: false, code: "rate_limited", message: "Too many checks in a minute. Wait a moment and try again." }));
     renderComposer();
     approve();
-    expect((await screen.findByRole("status")).textContent).toContain("Wait a moment");
+    expect((await screen.findByRole("region", { name: "Not sent yet" })).textContent).toContain("Wait a moment");
     expect(approveAndSend).not.toHaveBeenCalled();
   });
 
@@ -185,6 +185,46 @@ describe("Composer: prepareSend before every send", () => {
     renderComposer();
     approve();
     expect((await screen.findByRole("alert")).textContent).toContain("Confirm this recipient before sending");
+  });
+});
+
+describe("Composer: refusals are reachable by keyboard (DA-B-12) and acknowledgments are per refusal (DA-B-11)", () => {
+  it("moves focus to the refusal's heading, describes the send button, and puts the safe action before 'Send anyway'", async () => {
+    prepareSend.mockImplementationOnce(async () => ({ ok: false, code: "window_may_have_passed", message: "The store's price-adjustment window may have passed." }));
+    renderComposer();
+    const approveButton = screen.getByRole("button", { name: "Approve & send" });
+    approveButton.focus();
+    fireEvent.click(approveButton);
+    const heading = await screen.findByRole("heading", { name: "The store's window may have passed" });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+
+    const panel = screen.getByRole("region", { name: "The store's window may have passed" });
+    const buttons = within(panel).getAllByRole("button").map((b) => b.textContent);
+    expect(buttons).toEqual(["Keep editing", "Send anyway — the store's price-adjustment window may have passed"]);
+    const description = approveButton.getAttribute("aria-describedby");
+    expect(description && document.getElementById(description)?.textContent).toContain("may have passed");
+
+    // The safe action closes the refusal and puts the user back in the message, sending nothing.
+    fireEvent.click(within(panel).getByRole("button", { name: "Keep editing" }));
+    expect(document.activeElement).toBe(screen.getByLabelText("Message"));
+    expect(screen.queryByRole("region", { name: "The store's window may have passed" })).toBeNull();
+    expect(approveAndSend).not.toHaveBeenCalled();
+  });
+
+  it("a content acknowledgment does not carry over to findings the user has not seen", async () => {
+    prepareSend
+      .mockImplementationOnce(async () => ({ ok: false, code: "unverified_content", message: "Check these.", findings: ["a@x.example"] }))
+      .mockImplementationOnce(async () => ({ ok: false, code: "rate_limited", message: "Too many checks in a minute." }))
+      .mockImplementationOnce(async () => ({ ok: false, code: "unverified_content", message: "Check these.", findings: ["b@y.example"] }));
+    renderComposer();
+    approve();
+    fireEvent.click(await screen.findByRole("button", { name: "I checked these details — send anyway" }));
+    await screen.findByRole("region", { name: "Not sent yet" });
+    approve();
+    expect(await screen.findByText("b@y.example")).toBeDefined();
+    // The third prepare was asked WITHOUT the earlier acknowledgment, so finding B had to be shown.
+    expect(prepareSend.mock.calls[2][0]).not.toHaveProperty("acknowledgeUnverifiedContent");
+    expect(approveAndSend).not.toHaveBeenCalled();
   });
 });
 
@@ -211,7 +251,7 @@ describe("Composer: after an unknown outcome (S-M03-1, DA-A-31)", () => {
     renderComposer(unknownDraft(), unknownClaim());
     fireEvent.click(screen.getByRole("checkbox", { name: "I understand the earlier message may already have arrived" }));
     fireEvent.click(screen.getByRole("button", { name: "Send again" }));
-    expect((await screen.findByRole("alert")).textContent).toContain("was sent after all");
+    expect((await screen.findByRole("region", { name: "Nothing was sent: review the claim again" })).textContent).toContain("was sent after all");
   });
 
   it("a resend can need the window acknowledgment too", async () => {
@@ -240,10 +280,11 @@ describe("Composer: amount_exceeds_estimate (DA-B-2)", () => {
     prepareSend.mockImplementationOnce(exceeds);
     renderComposer(draft(), claim({ expectedCents: 5_000 }));
     approve();
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain(`This claim asks ${usd(5_000)}; Recoup's current estimate is ${usd(2_500)}.`);
-    expect(screen.getByRole("button", { name: `Adjust to ${usd(2_500)}` })).toBeDefined();
-    expect(screen.getByRole("button", { name: `Send ${usd(5_000)} anyway` })).toBeDefined();
+    const panel = await screen.findByRole("region", { name: "This claim asks more than Recoup's estimate" });
+    expect(panel.textContent).toContain(`This claim asks ${usd(5_000)}; Recoup's current estimate is ${usd(2_500)}.`);
+    // DA-B-12: the safe action (adjust) comes first in DOM and tab order, then the explicit acknowledgment.
+    expect(within(panel).getAllByRole("button").map((b) => b.textContent)).toEqual([`Adjust to ${usd(2_500)}`, `Send ${usd(5_000)} anyway`]);
+    await waitFor(() => expect(document.activeElement).toBe(within(panel).getByRole("heading")));
     expect(approveAndSend).not.toHaveBeenCalled();
     expect(adjustExpected).not.toHaveBeenCalled();
   });
@@ -270,7 +311,7 @@ describe("Composer: amount_exceeds_estimate (DA-B-2)", () => {
     expect(adjustExpected.mock.calls[0][0]).toMatchObject({ claimId: "c1", expectedCents: 2_500 });
     expect(calls).toEqual(["prepareSend", "adjustExpected", "prepareSend"]);
     expect(prepareSend.mock.calls[1][0]).not.toHaveProperty("acknowledgeAmountAboveEstimate");
-    expect((await screen.findByRole("alert")).textContent).toContain("Review the claim again");
+    expect((await screen.findByRole("region", { name: "Nothing was sent: review the claim again" })).textContent).toContain("The claim changed");
     expect(approveAndSend).not.toHaveBeenCalled();
   });
 });
