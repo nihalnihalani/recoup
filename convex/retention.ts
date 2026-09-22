@@ -88,8 +88,20 @@ type StepResult = { isDone: boolean; continueCursor: string; deleted: number; pa
 
 const TERMINAL_EVENT_STATUSES = new Set<Doc<"processedEvents">["status"]>(["succeeded", "failed"]);
 
+/**
+ * M14b (D163): this step pages `PROCESSED_EVENTS_PAGE` (25) rows, not
+ * `RETENTION_PAGE` (200). It must read each row, payload included, before
+ * it can decide anything, and a payload holds up to 60,000 chars
+ * (`inbound.ts` MAX_TEXT_CHARS): about 180 KB of 3-byte UTF-8 (CJK). Two
+ * hundred such rows is ~36 MB, and even 100 (~18 MB) exceed Convex's 16 MiB
+ * per-transaction read limit. The call then threw on the same persisted
+ * cursor every day, which stalled the whole cycle for good. 25 rows is the
+ * budget 6b-6 derived for this table in `account.ts` (see
+ * `PROCESSED_EVENTS_PAGE` in limits.ts). Every other step keeps
+ * `RETENTION_PAGE`: their rows are small.
+ */
 async function sweepProcessedEvents(ctx: MutationCtx, page: string | null, now: number): Promise<StepResult> {
-  const result = await ctx.db.query("processedEvents").paginate({ cursor: page, numItems: RETENTION_PAGE });
+  const result = await ctx.db.query("processedEvents").paginate({ cursor: page, numItems: PROCESSED_EVENTS_PAGE });
   const cutoff = now - RETENTION_PAYLOAD_DAYS * DAY_MS;
   let patched = 0;
   for (const row of result.page) {
