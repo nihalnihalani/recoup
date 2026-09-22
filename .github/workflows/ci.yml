@@ -9,11 +9,20 @@ on:
 permissions:
   contents: read
 
-# A second push to the same PR/branch cancels the still-running check for the
-# previous one instead of queuing behind it.
+# M08 (QA-12): pull requests are grouped by ref, so a newer push to the same PR
+# cancels the superseded run. Pushes to main are grouped by commit SHA and
+# never cancel each other. Before this, a docs-only push cancelled the
+# in-flight run for the code commit before it, so that commit was only ever
+# verified as part of a later tree. (GitHub also cancels a PENDING run when
+# a newer one queues in the same group, so cancel-in-progress: false alone
+# would not have been enough.)
+# A paths filter that skips docs-only pushes was rejected: the suite reads
+# docs/rules/** (fixture JSON, manifest.json, README.md via
+# convex/testing/ruleFixtures.loader.test.ts), and a "docs-only" commit
+# (72fe1a2, R01.json) did turn main red on 2026-09-23.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   checks:
@@ -49,17 +58,19 @@ jobs:
       - name: typecheck
         run: npm run typecheck
 
-      # --max-warnings pinned to the CURRENT warning count, not 0: there is
-      # one pre-existing oxlint warning in convex/lib/passage.ts
-      # (eslint(no-useless-escape)), owned by another lane (T16 per
-      # docs/team/DECISIONS.md D88), which T17 must not touch or suppress.
-      # TODO(T16): fix convex/lib/passage.ts:25 and drop this to
-      # --max-warnings=0.
+      # M08 (QA-9/D144): the Playwright specs and fixtures were never
+      # type-checked in CI.
+      - name: typecheck:e2e
+        run: npm run typecheck:e2e
+
+      # M08 (D144): zero warnings. The one pre-existing warning
+      # (convex/lib/passage.ts, T16) is gone, so any new warning fails CI.
       - name: lint
-        run: npm run lint -- --max-warnings=1
+        run: npm run lint -- --max-warnings=0
 
       # Enforced test gate: runs vitest itself with --reporter=json and fails
-      # on any failing test, fewer than 600 total tests, or any file that
+      # on any failing test, fewer than the floor in
+      # scripts/check-test-count.mjs (DEFAULT_MIN_COUNT), or any file that
       # collected 0 tests. Replaces the old `vitest run --passWithNoTests`,
       # which would exit 0 on an empty/misconfigured suite.
       - name: test (with minimum-count gate)
@@ -89,12 +100,14 @@ jobs:
           CONVEX_URL: ${{ secrets.CODEGEN_CHECK_CONVEX_URL }}
           CONVEX_ADMIN_KEY: ${{ secrets.CODEGEN_CHECK_CONVEX_ADMIN_KEY }}
 
-  # T20 (P10 browser acceptance suite) has not landed yet, so this job is a
-  # no-op until an e2e/ directory exists in the tree it runs against. Once
-  # T20 adds it, this job installs Playwright and runs the suite, but only
-  # against E2E_* secrets pointing at a disposable Convex dev deployment --
-  # never against the shared dev deployment, and never printing secret
-  # values to the log.
+  # P10 browser acceptance suite (T20). Runs only when the E2E_CONVEX_URL and
+  # E2E_DEPLOY_KEY repo secrets exist. They must point at a DEDICATED E2E
+  # deployment: never the shared dev deployment adorable-lion-138 and never
+  # production cool-oyster-399 (docs/ops/RELEASE.md §4). e2e/fixtures.ts
+  # refuses both, and refuses a URL/key pair naming two different
+  # deployments. That deployment needs E2E_SEED_ENABLED=true and this
+  # commit's functions deployed. This job does NOT deploy functions.
+  # Secret values are never echoed.
   e2e:
     name: e2e
     needs: checks
@@ -102,54 +115,50 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: check for e2e/
-        id: e2e_dir
-        run: |
-          if [ -d "e2e" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "e2e/ does not exist yet (T20 pending) -- skipping this job's remaining steps."
-          fi
-
-      - uses: actions/setup-node@v5
-        if: steps.e2e_dir.outputs.present == 'true'
-        with:
-          node-version-file: ".nvmrc"
-          cache: "npm"
-
-      - name: npm ci
-        if: steps.e2e_dir.outputs.present == 'true'
-        run: npm ci
-
-      - name: install Playwright browsers
-        if: steps.e2e_dir.outputs.present == 'true'
-        run: npx playwright install --with-deps chromium
-
       - name: check for e2e secrets
         id: e2e_secrets
-        if: steps.e2e_dir.outputs.present == 'true'
         run: |
           if [ -n "$HAS_URL" ] && [ -n "$HAS_KEY" ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "E2E_CONVEX_URL / E2E_DEPLOY_KEY are not configured -- skipping the Playwright run. (Never echoing secret values.)"
+            echo "::warning title=e2e skipped::E2E_CONVEX_URL / E2E_DEPLOY_KEY are not configured; the Playwright suite did NOT run (docs/ops/RELEASE.md §4)."
+            echo "### e2e: SKIPPED, Playwright did not run (E2E_CONVEX_URL / E2E_DEPLOY_KEY secrets not configured)" >> "$GITHUB_STEP_SUMMARY"
           fi
         env:
           HAS_URL: ${{ secrets.E2E_CONVEX_URL }}
           HAS_KEY: ${{ secrets.E2E_DEPLOY_KEY }}
 
+      - uses: actions/setup-node@v5
+        if: steps.e2e_secrets.outputs.present == 'true'
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: npm ci
+        if: steps.e2e_secrets.outputs.present == 'true'
+        run: npm ci
+
+      - name: install Playwright browsers
+        if: steps.e2e_secrets.outputs.present == 'true'
+        run: npx playwright install --with-deps chromium
+
+      # e2e/fixtures.ts uses E2E_DEPLOY_KEY as the Convex CLI's
+      # CONVEX_DEPLOY_KEY for seeding. playwright.config.ts gives the dev
+      # server VITE_CONVEX_URL = E2E_CONVEX_URL unless E2E_BASE_URL points at
+      # an already running app. E2E_ALLOW_UNKNOWN_DEPLOYMENT acknowledges
+      # that the CI deployment is not the local default.
       - name: run Playwright suite
-        if: steps.e2e_dir.outputs.present == 'true' && steps.e2e_secrets.outputs.present == 'true'
+        if: steps.e2e_secrets.outputs.present == 'true'
         run: npx playwright test
         env:
           E2E_CONVEX_URL: ${{ secrets.E2E_CONVEX_URL }}
           E2E_DEPLOY_KEY: ${{ secrets.E2E_DEPLOY_KEY }}
           E2E_BASE_URL: ${{ secrets.E2E_BASE_URL }}
+          E2E_ALLOW_UNKNOWN_DEPLOYMENT: "true"
 
       - name: upload playwright report
-        if: always() && steps.e2e_dir.outputs.present == 'true' && steps.e2e_secrets.outputs.present == 'true'
+        if: always() && steps.e2e_secrets.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
