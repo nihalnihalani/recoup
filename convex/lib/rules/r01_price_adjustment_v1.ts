@@ -5,8 +5,12 @@
  * What it evaluates. One purchased item against the merchant's price-adjustment policy snapshot that `latestPolicy()`
  * selects today (N7: the newest user-confirmed snapshot, else the newest). The framework logic cites no external legal
  * source (D145 d); every number below is a LEGACY PARITY value, reproduced exactly from the code at `5cc326d`:
- *   - an observation counts only if it is a single price > 0, variantMatch "exact", in the purchase currency, with
- *     confidence ≥ 0.7, and not below round(10 % of the unit price paid) (priceWatch.rejectionReason/implausiblyCheap);
+ *   - an observation counts only if it is a VETTED PRICE CHECK — an `observed` cell sourced from a price check
+ *     (`legacy_price_check` / `price_check`) that carries its acceptance metadata — and it is a single price > 0,
+ *     variantMatch "exact", in the purchase currency, with confidence ≥ 0.7, and not below round(10 % of the unit
+ *     price paid) (priceWatch.rejectionReason/implausiblyCheap; contract §2.7's definition of the fact). Any other
+ *     observed-price value — an extracted candidate, an evidence- or user-sourced value, a value without metadata —
+ *     is "not accepted" and counts as missing (M18 item 1);
  *   - a drop qualifies when (unit − observed) ≥ max(100, round(unit × 2 %)); the ask is drop × quantity
  *     (lib/ledger.priceDropCents);
  *   - after confirmed (paid) claims totalling S, the ask is drop × qty − S and opens only when it is
@@ -15,6 +19,12 @@
  *     now ≤ end (lib/ledger.windowEndsAt).
  * Two-decimal currencies only (DA-A-13 carve-out via `isTwoDecimalCurrency`); a 0- or 3-decimal currency, which the
  * legacy flow mis-scales by 100 (HC-8), is `unsupported` — the one intentional divergence from legacy (D160).
+ * After a denial (DA-A-22, wave 2) the ask is (deniedObserved − observed) × qty; when a paid claim also exists on the
+ * item the ask is the SMALLER of that and the paid-claim remainder — the spec is silent on the combination, so v1 takes
+ * the conservative reading and never re-asks money already paid (M18 N2).
+ *
+ * Status. This file declares `lifecycle: "researched"`; the lead's activation entry and the manifest decide the real
+ * status (M18 N6), never this field.
  *
  * Outcome. Best is `likely_eligible` (never `eligible`): the temporal assumption A-T1/A-T2 is always present (§2.7,
  * README rule 3's R01 v1 exception). `retail.policy_confirmed`, `retail.policy_temporal` and `retail.currency` are
@@ -77,13 +87,22 @@ export const R01_V1_WINDOW_ID = "r01.v1.window";
 /** rev 5 (C1): the only acknowledgeable deadline. */
 export const R01_V1_ACKNOWLEDGEABLE: ReadonlySet<string> = new Set([R01_V1_WINDOW_ID]);
 
-/** Legacy parity parameters (see the module doc for the code each one reproduces). */
+/**
+ * R01 v1 parameters. Each cites its spec/fixture basis first and the legacy line it reproduces second (M18 item 2).
+ * The window itself is not a parameter here: its length is the policy snapshot's `windowDays` (the parameter source,
+ * N7), counted in whole 24-hour periods — spec §5 last bullet; R01.json `conventions.window`; O15/HC-11; lateAsk C1.
+ * The currency gate is D160 / DA-A-13 (`isTwoDecimalCurrency`), not a number.
+ */
 export interface R01Params {
+  /** Drop floor, minor units. Basis: R01.json `conventions.threshold` + contract §2.7 parity (KM1). Legacy: `ledger.priceDropCents` `Math.max(100, …)`. */
   thresholdFloorMinor: number;
+  /** Drop threshold, % of the unit price paid. Basis: R01.json `conventions.threshold` (and `conventions.after_settled_claim` for the remainder) + contract §2.7 (KM1). Legacy: `Math.round(unitCents * 0.02)`. */
   thresholdPercent: number;
+  /** Minimum extraction confidence of an accepted observation. Basis: R01.json `conventions.observation` + D16 + contract §2.7 ("confidence ≥ 0.7"). Legacy: `priceWatch.MIN_CONFIDENCE`. */
   minConfidence: number;
+  /** An observation below this % of the unit price paid is implausible. Basis: R01.json `conventions.observation` + D16. Legacy: `priceWatch.MIN_PLAUSIBLE_FRACTION`. */
   minPlausiblePercent: number;
-  /** A-T1 when the snapshot was retrieved within ± this many days of the purchase (inclusive). */
+  /** A-T1 when the snapshot was retrieved within ± this many days of the purchase (inclusive), else A-T2. Basis: contract §2.7 "Reconciliation for R01 v1" + README rule 3 (R01 v1 exception); R01.json `conventions.temporal_assumptions`. New in v1 (no legacy line). */
   temporalToleranceDays: number;
 }
 
@@ -142,6 +161,9 @@ export interface R01CaseContext extends CaseContext {
 
 const DAY_MS = 86_400_000;
 const TXN = "txn";
+/** The sources of a vetted price check: the legacy adapter's accepted `priceChecks` row, or a stored price-check fact. */
+const VETTED_OBSERVATION_SOURCES: ReadonlySet<string> = new Set(["legacy_price_check", "price_check"]);
+const NOT_VETTED = "That price was not read from a vetted price check of this item";
 
 function group(n: number): string {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -176,7 +198,7 @@ export function r01ObservationRejection(
 ): string | null {
   if (meta?.isRange) return "Page shows a price range, not a single price";
   if (!Number.isSafeInteger(obs.amountMinor) || obs.amountMinor <= 0) return "The page does not show a price";
-  if (meta && meta.variantMatch !== undefined && meta.variantMatch !== "exact") {
+  if (meta && meta.variantMatch !== "exact") {
     return meta.variantMatch === "none" ? "The page does not price this product" : "Could not tell which variant the price is for";
   }
   if (!obs.currency) return "The page does not state a currency";
@@ -269,12 +291,21 @@ function core(s: R01Snapshot, cc: R01CaseContext, p: R01Params, now: number): Co
     meta = { variantMatch: "exact", confidence: 1, isRange: false, observedAt: opening.observedAt };
   }
   const obsMoney = money(observedCell);
-  const rejection = obsMoney && isKnown(observedCell) ? r01ObservationRejection(obsMoney, meta, purchaseCurrency, unit?.amountMinor ?? null, p) : null;
+  // M18 item 1: only a VETTED price check counts as the accepted observation (contract §2.7). Every other usable value
+  // (a candidate, an evidence- or user-sourced value, a value without the check's metadata) is "not accepted".
+  const vetted = observedCell.status === "observed" && VETTED_OBSERVATION_SOURCES.has(observedCell.source.kind) && meta !== null;
+  const rejection = obsMoney === null
+    ? null
+    : !vetted
+      ? NOT_VETTED
+      : r01ObservationRejection(obsMoney, meta, purchaseCurrency, unit?.amountMinor ?? null, p);
   const observed = obsMoney && rejection === null ? obsMoney : null;
-  // A rejected reading is not an observation (D16): for the missing-fact list the cell counts as missing.
-  const obsForUnknown: Cell = rejection !== null
+  // A rejected or unvetted reading — and a conflict among unvetted values — is not an observation (D16, §2.7): for the
+  // condition and missing-fact lists the cell counts as missing, never as an unconfirmed candidate it was not.
+  const obsFact: Cell = observed === null && (rejection !== null || observedCell.status === "conflicting")
     ? { subjectKey: observedCell.subjectKey, key: observedCell.key, status: "missing", known: false, capsOutcomeAt: null }
     : observedCell;
+  const obsForUnknown = obsFact;
 
   // Policy (the parameter source) and the legacy window.
   const policy = s.policy;
@@ -292,7 +323,7 @@ function core(s: R01Snapshot, cc: R01CaseContext, p: R01Params, now: number): Co
   const returnedCond = computed("r01.v1.item_not_returned", "The item has not been returned", "applicability", s.itemReturned ? "fail" : "pass", []);
   const obsCond = computed(
     "r01.v1.observation_accepted", "An accepted price check of this exact item, in the purchase currency", "evidence",
-    observed !== null ? "pass" : "unknown", [observedCell],
+    observed !== null ? "pass" : "unknown", [obsFact],
     { unknown: [obsForUnknown], note: rejection ?? undefined, neededFor: ["drop"] },
   );
 
@@ -323,10 +354,17 @@ function core(s: R01Snapshot, cc: R01CaseContext, p: R01Params, now: number): Co
       }
     }
     // DA-A-22 (wave 2): after a denial only the new difference below the denied observation is asked.
-    if (dropResult === "pass" && cc.deniedObservedMinor !== undefined) {
+    // With a paid claim on the item too, the ask is the smaller of the two readings (spec silent; conservative, M18 N2).
+    if (dropResult === "pass" && settledResult === "pass" && cc.deniedObservedMinor !== undefined) {
       const diff = Math.max(0, cc.deniedObservedMinor - observed.amountMinor) * qty;
-      estimate = diff > 0 ? diff : null;
-      formula = diff > 0 ? `(${group(cc.deniedObservedMinor)} denied observation - ${group(observed.amountMinor)}) x ${qty}` : "";
+      const remaining = perUnit * qty - settled;
+      const ask = settled > 0 ? Math.min(diff, remaining) : diff;
+      estimate = ask > 0 ? ask : null;
+      formula = ask <= 0
+        ? ""
+        : settled > 0 && remaining < diff
+          ? `(${group(unit.amountMinor)} - ${group(observed.amountMinor)}) x ${qty} - ${group(settled)} settled (less than the denied-claim difference)`
+          : `(${group(cc.deniedObservedMinor)} denied observation - ${group(observed.amountMinor)}) x ${qty}`;
     }
   }
   const dropUnknown: Cell[] = [
@@ -336,11 +374,11 @@ function core(s: R01Snapshot, cc: R01CaseContext, p: R01Params, now: number): Co
   ];
   const dropCond = computed(
     "r01.v1.drop_meets_threshold", "The lower price is at least max($1, 2%) below the unit price paid", "requirement",
-    dropResult, [s.unitPrice, observedCell, s.quantity], { unknown: dropUnknown, neededFor: ["drop", "amount"] },
+    dropResult, [s.unitPrice, obsFact, s.quantity], { unknown: dropUnknown, neededFor: ["drop", "amount"] },
   );
   const settledCond = computed(
     "r01.v1.not_already_claimed", "The drop has not already been claimed and paid", "requirement",
-    settledResult, [s.unitPrice, observedCell, s.quantity], { unknown: dropUnknown, neededFor: ["amount"] },
+    settledResult, [s.unitPrice, obsFact, s.quantity], { unknown: dropUnknown, neededFor: ["amount"] },
   );
   const windowResult: Tri = deadline === null ? "unknown" : deadline.status === "open" ? "pass" : deadline.status === "passed" ? "fail" : "unknown";
   const windowCond = computed(
@@ -354,7 +392,7 @@ function core(s: R01Snapshot, cc: R01CaseContext, p: R01Params, now: number): Co
 
   const required: Cell[] = [s.purchaseDate, s.unitPrice, s.quantity];
   const requiredUsable = required.every((c) => c.status === "candidate" || c.known) && observed !== null;
-  const usedCandidates = [...required, observedCell].some((c) => c.status === "candidate");
+  const usedCandidates = [...required, obsFact].some((c) => c.status === "candidate");
   if (s.itemReturned) explanation.push("The item was returned, so a price adjustment does not apply.");
   if (rejection) explanation.push(`The latest price check was not used: ${rejection}.`);
 
@@ -516,8 +554,12 @@ function substitute(s: R01Snapshot, cell: Cell): R01Snapshot {
 export function evaluateR01V1(input: EvaluationInput<R01Snapshot, R01Params, R01CaseContext>): EvaluationResult {
   const { snapshot: s, pack, caseContext: cc, now } = input;
   const p = pack.params;
-  const decisive: Cell[] = [s.purchaseDate, s.unitPrice, s.quantity, ...(cc.activeClaim?.opening ? [] : [s.observedPrice])];
-  const conflicting = decisive.filter((c) => c.status === "conflicting");
+  // Candidate testing covers the purchase facts. The observed price takes part only in 5a (a confirmed value against
+  // the price check); a candidates-only conflict on it is not a vetted price check at all → "not accepted" (M18 item 1).
+  const decisive: Cell[] = [s.purchaseDate, s.unitPrice, s.quantity];
+  const obs = s.observedPrice;
+  const obsConfirmedConflict = !cc.activeClaim?.opening && obs.status === "conflicting" && obs.conflict.kind !== "candidates";
+  const conflicting = [...decisive.filter((c) => c.status === "conflicting"), ...(obsConfirmedConflict ? [obs] : [])];
 
   let final: Core;
   let flags: Flags;
@@ -656,8 +698,10 @@ export function r01AutoOpen(
 ): R01AutoOpen {
   if (result.outcome === "deadline_passed" || result.outcome === "source_unverified") return { opens: false, note: "No open price window" };
   if (result.outcome === "not_eligible") {
-    const already = result.conditions.some((c) => c.id === "r01.v1.not_already_claimed" && c.result === "fail");
-    return { opens: false, note: already ? "Drop already claimed" : "Drop below threshold" };
+    const failed = (id: string) => result.conditions.some((c) => c.id === id && c.result === "fail");
+    // A returned item has no open price window (legacy `watchWindow` wording), whatever the drop (M18 N4).
+    if (failed("r01.v1.item_not_returned")) return { opens: false, note: "No open price window" };
+    return { opens: false, note: failed("r01.v1.not_already_claimed") ? "Drop already claimed" : "Drop below threshold" };
   }
   if (result.outcome === "unsupported") return { opens: false, note: "Currency not supported for price adjustments" };
   if (result.outcome !== "eligible" && result.outcome !== "likely_eligible") return { opens: false };
@@ -688,7 +732,8 @@ export const r01PriceAdjustmentV1: RulePack<R01Snapshot, R01Params, R01CaseConte
   ruleId: R01_V1_RULE_ID,
   scenarioId: "R01",
   version: R01_V1_VERSION,
-  lifecycle: "reviewed",
+  // Informative only: the lead's activation entry + the manifest decide status (M18 N6).
+  lifecycle: "researched",
   authority: { class: "merchant_promise", subtype: "merchant published price-adjustment policy (legacy snapshot tier)" },
   jurisdiction: "US (per merchant)",
   categories: ["retail_order"],
@@ -714,8 +759,10 @@ export const r01PriceAdjustmentV1: RulePack<R01Snapshot, R01Params, R01CaseConte
   knownLimitations: [
     "L1: legacy per-purchase policy snapshots are not versioned packs; the best outcome is likely_eligible.",
     "Windows are whole 24-hour periods from the purchase instant, not calendar days (O15); R01 v2 (M37) reads calendar days.",
-    "Which event must fall inside the window (drop, request or both) is not modelled in v1 (D147); the late send is warned, never refused.",
+    "Which event must fall inside the window (drop, request or both) is not modelled in v1 (M09 R01.6-2, implemented in R01 v2); the late send is warned, never refused.",
     "Two-decimal currencies only (D160).",
+    "Merchants may pay an adjustment by credit rather than cash (e.g. Apple AP-1 'refund or credit'); v1 counts it as cash (cashClass, legacy parity) — R01 v2's remedy_form resolves it.",
+    "Only a vetted price check is an accepted observation; an extracted or user-entered price never drives an amount (contract §2.7).",
   ],
   evaluate: evaluateR01V1,
 };
