@@ -44,6 +44,15 @@ export const LOG_KINDS = [
   "scheduler_backlog",
   "market_failed",
   "migration_progress",
+  // M1B (P12/C58), contract §11.1:
+  /** An evaluation threw in `recordEvaluation`'s catch path; emitted by `ops.recordRuleEvaluationFailure` alongside its per-day counter. */
+  "rule_evaluation_failed",
+  /** A rule-source re-verification/refresh could not confirm a pinned source (fetch refused, host changed, hash drift). */
+  "source_verification_failed",
+  /** Every accepted OR refused `ops.setFlag` call (`outcome: "applied" | "refused"`). */
+  "flag_changed",
+  /** A gated path refused to extract a document because a flag (`lib/flags.ts`) is off, e.g. `live_document_extraction` (D145). */
+  "extraction_refused",
 ] as const;
 
 export type LogKind = (typeof LOG_KINDS)[number];

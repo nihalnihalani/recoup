@@ -1,13 +1,47 @@
 /**
- * Operator controls and diagnostics (P12, T22). Every export here is
- * internal -- an operator drives these through `npx convex run` with an
- * admin key (`docs/ops/RUNBOOK.md`), never a public client.
+ * Operator controls and diagnostics (P12, T22; M1B for C58). Every registered
+ * function here is internal. An operator drives them through
+ * `npx convex run` with an admin key (`docs/ops/RUNBOOK.md`), never from a
+ * public client; `ops.test.ts` fails if any export becomes public.
+ *
+ * M1B adds:
+ *  - `setFlag`, `getFlag` and `flagAudit`, over `lib/flags.ts`. `setFlag`
+ *    is the ONLY flag writer, and it refuses to enable an approval-gated flag
+ *    (`live_document_extraction`, D145) without an `approvalRef` naming the
+ *    DECISIONS entry that records the user's approval.
+ *  - `recordRuleEvaluationFailure(ctx, …)`, a plain helper M12's
+ *    `recordEvaluation` catch path calls. It keeps per-UTC-day `opsState`
+ *    counters and writes a redacted `rule_evaluation_failed` line.
+ *  - `staleSourcePacks(packs, verification, now)`, pure: verification
+ *    records against refresh windows.
+ *  - `backlog` fields `asOf`, `flags`, `ruleEvaluationFailures`,
+ *    `staleSources`, `extraction`, `orphanSweep` and `recoveryRetention`,
+ *    all computed at the `now` argument.
  */
 import { ConvexError, v } from "convex/values";
-import { internalMutation, internalQuery } from "./_generated/server";
+import { internalMutation, internalQuery, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import { GLOBAL_DAILY_BUDGETS, MARKET_CLAIM_STALE_MS, type GlobalBudgetKind } from "./limits";
 import { utcDay } from "./lib/budget";
+import {
+  FLAGS,
+  FLAG_NAMES,
+  flagAuditKey,
+  flagAuditPrefix,
+  flagAuditPrefixEnd,
+  flagAuditSeq,
+  flagKey,
+  flagNameValidator,
+  flagRow,
+  flagStateValidator,
+  normalizeApprovalRef,
+  readFlag,
+} from "./lib/flags";
+import { logEvent } from "./lib/log";
+
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
 
 function assertGlobalBudgetKind(kind: string): asserts kind is GlobalBudgetKind {
   if (!Object.prototype.hasOwnProperty.call(GLOBAL_DAILY_BUDGETS, kind)) {
@@ -93,6 +127,329 @@ function summarize(rowCount: number, limit: number): { count: number; truncated:
 }
 
 // ---------------------------------------------------------------------------
+// M1B: rule-evaluation failure counters (P12/C58)
+// ---------------------------------------------------------------------------
+
+/** `opsState` key prefix of the per-UTC-day counter rows: `ruleEvalFailures:YYYY-MM-DD`. */
+const RULE_EVAL_FAILURES_PREFIX = "ruleEvalFailures:";
+/** Distinct `ruleId@version` labels kept per day (and in `backlog`'s merged view); the rest fold into `"other"`. */
+const MAX_RULE_LABELS = 32;
+const MAX_RULE_ID_CHARS = 100;
+/** Days `backlog.ruleEvaluationFailures` covers, ending at (and including) `asOf`'s UTC day. */
+const RULE_FAILURE_WINDOW_DAYS = 7;
+
+/**
+ * What M12's `recordEvaluation` catch path passes to
+ * `recordRuleEvaluationFailure`. Every field is sanitized, never trusted.
+ */
+export type RuleEvaluationFailure = {
+  /** The mutation's clock (`Date.now()` in the calling mutation). A non-finite value falls back to `Date.now()`. */
+  now: number;
+  scenarioId: string;
+  ruleId: string;
+  ruleVersion: number;
+  /** Whatever was caught. It reaches only the redacted log line, never the database. */
+  error: unknown;
+  trigger?: string;
+  transactionId?: Id<"transactions">;
+  opportunityId?: Id<"opportunities">;
+};
+
+type FailureCounter = { count: number; byRule: Record<string, number>; lastAt: number | null };
+
+function stripControl(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+}
+
+function boundedText(value: unknown, max: number): string {
+  return typeof value === "string" ? stripControl(value).slice(0, max) : "";
+}
+
+function ruleLabel(ruleId: unknown, ruleVersion: unknown): string {
+  const id = boundedText(ruleId, MAX_RULE_ID_CHARS) || "unknown";
+  const version = typeof ruleVersion === "number" && Number.isInteger(ruleVersion) && ruleVersion >= 0 ? String(ruleVersion) : "?";
+  return `${id}@${version}`;
+}
+
+function parseFailureCounter(cursor: string | undefined): FailureCounter {
+  const empty: FailureCounter = { count: 0, byRule: {}, lastAt: null };
+  if (cursor === undefined) return empty;
+  try {
+    const parsed = JSON.parse(cursor) as { count?: unknown; byRule?: unknown; lastAt?: unknown };
+    if (typeof parsed !== "object" || parsed === null || typeof parsed.count !== "number" || !Number.isFinite(parsed.count)) return empty;
+    const byRule: Record<string, number> = {};
+    if (typeof parsed.byRule === "object" && parsed.byRule !== null && !Array.isArray(parsed.byRule)) {
+      for (const [label, n] of Object.entries(parsed.byRule as Record<string, unknown>)) {
+        if (typeof n === "number" && Number.isFinite(n) && n > 0) byRule[label] = n;
+      }
+    }
+    return {
+      count: Math.max(0, parsed.count),
+      byRule,
+      lastAt: typeof parsed.lastAt === "number" && Number.isFinite(parsed.lastAt) ? parsed.lastAt : null,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+function failureCounterKey(day: string): string {
+  return `${RULE_EVAL_FAILURES_PREFIX}${day}`;
+}
+
+/**
+ * **API for M12.** Call this in the `catch` of `recordEvaluation` (or of
+ * `evaluateTransaction`'s per-scenario loop) when evaluating one rule throws:
+ *
+ * ```ts
+ * import { recordRuleEvaluationFailure } from "./ops";
+ * try {
+ *   result = evaluate(pack, snapshot, now);
+ * } catch (error) {
+ *   await recordRuleEvaluationFailure(ctx, { now, scenarioId, ruleId: pack.ruleId, ruleVersion: pack.version, error, trigger, transactionId });
+ *   continue; // or return a manual_review result -- but do NOT rethrow
+ * }
+ * ```
+ *
+ * It (1) writes one redacted `rule_evaluation_failed` log line through
+ * `logEvent`, carrying the caught error, and (2) increments the per-UTC-day
+ * counter row `ruleEvalFailures:<YYYY-MM-DD>` in `opsState`. That row holds
+ * `{ count, byRule: { "<ruleId>@<version>": n }, lastAt }`, with at most 32
+ * labels and the rest in `"other"`. `ops.backlog.ruleEvaluationFailures`
+ * reads it.
+ *
+ * - **It never throws.** It is built for a catch path, so every input is
+ *   sanitized and any internal failure is swallowed after one log attempt.
+ * - **The counter is part of the calling transaction.** If the caller
+ *   rethrows, the mutation rolls back and the count is lost (the log line
+ *   survives). Record, then continue or return.
+ * - **Nothing personal is stored.** The counter holds only labels and
+ *   counts. The error reaches only the redacted log line.
+ * - **One hot row per day.** Concurrent failures on the same day conflict
+ *   and retry under OCC. That is acceptable because failures are rare by
+ *   construction.
+ */
+export async function recordRuleEvaluationFailure(ctx: MutationCtx, input: RuleEvaluationFailure): Promise<void> {
+  try {
+    const at = typeof input.now === "number" && Number.isFinite(input.now) ? input.now : Date.now();
+    const day = utcDay(at);
+    const label = ruleLabel(input.ruleId, input.ruleVersion);
+    logEvent("rule_evaluation_failed", {
+      day,
+      scenarioId: boundedText(input.scenarioId, 8),
+      ruleId: boundedText(input.ruleId, MAX_RULE_ID_CHARS),
+      ruleVersion: typeof input.ruleVersion === "number" && Number.isFinite(input.ruleVersion) ? input.ruleVersion : null,
+      trigger: input.trigger === undefined ? undefined : boundedText(input.trigger, 40),
+      transactionId: input.transactionId,
+      opportunityId: input.opportunityId,
+      error: input.error,
+    });
+
+    const key = failureCounterKey(day);
+    const row = await ctx.db
+      .query("opsState")
+      .withIndex("by_key", (q) => q.eq("key", key))
+      .first();
+    const counter = parseFailureCounter(row?.cursor);
+    counter.count += 1;
+    const labelled = Object.keys(counter.byRule).filter((l) => l !== "other").length;
+    const slot = label in counter.byRule || labelled < MAX_RULE_LABELS ? label : "other";
+    counter.byRule[slot] = (counter.byRule[slot] ?? 0) + 1;
+    counter.lastAt = counter.lastAt === null ? at : Math.max(counter.lastAt, at);
+    const cursor = JSON.stringify(counter);
+    if (row) await ctx.db.patch(row._id, { cursor, updatedAt: at });
+    else await ctx.db.insert("opsState", { key, cursor, updatedAt: at });
+  } catch (error) {
+    try {
+      logEvent("rule_evaluation_failed", { stage: "failure_counter_write", error });
+    } catch {
+      // Nothing left to do; never throw from a catch path.
+    }
+  }
+}
+
+const ruleEvaluationFailuresShape = v.object({
+  windowDays: v.number(),
+  total: v.number(),
+  /** One entry per UTC day, newest (asOf's day) first. */
+  days: v.array(v.object({ day: v.string(), count: v.number() })),
+  /** `ruleId@version` labels across the window, most failures first; at most 32 plus `"other"`. */
+  byRule: v.array(v.object({ rule: v.string(), count: v.number() })),
+  lastAt: v.union(v.number(), v.null()),
+});
+
+/** Bounded: exactly `RULE_FAILURE_WINDOW_DAYS` indexed point reads. */
+async function readRuleEvaluationFailures(ctx: Pick<QueryCtx, "db">, asOf: number) {
+  const days: Array<{ day: string; count: number }> = [];
+  const merged = new Map<string, number>();
+  let lastAt: number | null = null;
+  for (let i = 0; i < RULE_FAILURE_WINDOW_DAYS; i++) {
+    const day = utcDay(asOf - i * DAY_MS);
+    const row = await ctx.db
+      .query("opsState")
+      .withIndex("by_key", (q) => q.eq("key", failureCounterKey(day)))
+      .first();
+    const counter = parseFailureCounter(row?.cursor);
+    days.push({ day, count: counter.count });
+    for (const [label, n] of Object.entries(counter.byRule)) merged.set(label, (merged.get(label) ?? 0) + n);
+    if (counter.lastAt !== null) lastAt = lastAt === null ? counter.lastAt : Math.max(lastAt, counter.lastAt);
+  }
+  const sorted = [...merged.entries()]
+    .filter(([label]) => label !== "other")
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const byRule = sorted.slice(0, MAX_RULE_LABELS).map(([rule, count]) => ({ rule, count }));
+  const folded = sorted.slice(MAX_RULE_LABELS).reduce((sum, [, n]) => sum + n, 0) + (merged.get("other") ?? 0);
+  if (folded > 0) byRule.push({ rule: "other", count: folded });
+  return {
+    windowDays: RULE_FAILURE_WINDOW_DAYS,
+    total: days.reduce((sum, d) => sum + d.count, 0),
+    days,
+    byRule,
+    lastAt,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// M1B: stale-source packs (README rule 3; contract §2.7 "Refresh and staleness")
+// ---------------------------------------------------------------------------
+
+/** One active pack's refresh window and pinned sources (manifest `refreshDays` + `sources`). */
+export type RuleSourceWindow = {
+  ruleId: string;
+  version: number;
+  refreshDays: number;
+  sourceIds: readonly string[];
+};
+
+/**
+ * `lib/rules/verification.ts`'s shape (lead-owned): per `sourceId`, when it
+ * was last verified. The value is a date-only `"YYYY-MM-DD"` string (read as
+ * UTC midnight, the conservative end of that day), an ISO instant, or epoch ms.
+ */
+export type SourceVerification = Readonly<Record<string, { readonly lastVerifiedAt: string | number }>>;
+
+export type StaleSourceStatus = "never_verified" | "stale" | "due_soon";
+
+export type StaleSourcePack = {
+  ruleId: string;
+  version: number;
+  refreshDays: number;
+  status: StaleSourceStatus;
+  /** The earliest window end among the pack's verified sources; `null` when none is verified or the window is unusable. */
+  windowEndsAt: number | null;
+  /** The pack's sources that are not fresh. */
+  sourceIds: string[];
+};
+
+const staleSourcePackShape = v.object({
+  ruleId: v.string(),
+  version: v.number(),
+  refreshDays: v.number(),
+  status: v.union(v.literal("never_verified"), v.literal("stale"), v.literal("due_soon")),
+  windowEndsAt: v.union(v.number(), v.null()),
+  sourceIds: v.array(v.string()),
+});
+
+/** "Due soon" starts this many days before a window ends, capped at a quarter of the window, so a 7-day window warns 1.75 days out. */
+const DUE_SOON_MAX_DAYS = 7;
+const SEVERITY: Record<StaleSourceStatus | "fresh", number> = { never_verified: 3, stale: 2, due_soon: 1, fresh: 0 };
+
+function verifiedAtMs(raw: unknown): number | null {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === "string") {
+    const ms = Date.parse(raw);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  return null;
+}
+
+/**
+ * Pure. Lists the packs that need the lead's `scripts/verify-rule-sources.mjs`
+ * run, most urgent first (never_verified, stale, due_soon, then ruleId).
+ * Packs whose sources are all fresh are omitted.
+ *
+ * - **never_verified:** a pinned source has no verification record, or an
+ *   unparsable one (README rule 8: no current source record means
+ *   `source_unverified`).
+ * - **stale:** `now > lastVerifiedAt + refreshDays days`. An evaluation now
+ *   returns `source_unverified` (`sourceStale`). A pack without a usable
+ *   (positive, finite) window can never be shown fresh, so it is stale too.
+ * - **due_soon:** inside the last `min(7, refreshDays / 4)` days of the
+ *   window. Exactly at the window end is still due_soon, not stale.
+ *
+ * `now` should be coarse (`backlog` passes `asOf`). M12's `sourceStale`
+ * uses the same boundary, `now > lastVerifiedAt + refreshDays days`.
+ */
+export function staleSourcePacks(
+  packs: readonly RuleSourceWindow[],
+  verification: SourceVerification,
+  now: number,
+): StaleSourcePack[] {
+  const out: StaleSourcePack[] = [];
+  for (const pack of packs) {
+    const windowMs = pack.refreshDays * DAY_MS;
+    if (!(Number.isFinite(windowMs) && windowMs > 0)) {
+      out.push({ ruleId: pack.ruleId, version: pack.version, refreshDays: pack.refreshDays, status: "stale", windowEndsAt: null, sourceIds: [...pack.sourceIds] });
+      continue;
+    }
+    const dueSoonMs = Math.min(DUE_SOON_MAX_DAYS * DAY_MS, windowMs / 4);
+    let worst: StaleSourceStatus | "fresh" = "fresh";
+    let windowEndsAt: number | null = null;
+    const lapsed: string[] = [];
+    for (const sourceId of pack.sourceIds) {
+      const record = Object.prototype.hasOwnProperty.call(verification, sourceId) ? verification[sourceId] : undefined;
+      const verifiedAt = verifiedAtMs(record?.lastVerifiedAt);
+      let status: StaleSourceStatus | "fresh";
+      if (verifiedAt === null) {
+        status = "never_verified";
+      } else {
+        const end = verifiedAt + windowMs;
+        windowEndsAt = windowEndsAt === null ? end : Math.min(windowEndsAt, end);
+        status = now > end ? "stale" : now > end - dueSoonMs ? "due_soon" : "fresh";
+      }
+      if (status !== "fresh") lapsed.push(sourceId);
+      if (SEVERITY[status] > SEVERITY[worst]) worst = status;
+    }
+    if (worst !== "fresh") {
+      out.push({ ruleId: pack.ruleId, version: pack.version, refreshDays: pack.refreshDays, status: worst, windowEndsAt, sourceIds: lapsed });
+    }
+  }
+  return out.sort((a, b) => SEVERITY[b.status] - SEVERITY[a.status] || a.ruleId.localeCompare(b.ruleId) || a.version - b.version);
+}
+
+/**
+ * The stale-source diagnostic's inputs. Wave 1 has neither the production
+ * registry (`lib/rules/registry.ts`, M12) nor `lib/rules/verification.ts`
+ * (lead), and R01 v1, the only wave-1 pack, has no refresh window (§2.7
+ * "Reconciliation for R01 v1"). So there is nothing to check, and
+ * `backlog.staleSources.inputsWired` reports `false`.
+ *
+ * **Wiring (whoever holds ops.ts once those modules land; C58 is
+ * M1B/M29):** return `wired: true` and build `packs` from the active packs
+ * (ruleId, version, manifest `refreshDays`, `sources`) and `verification`
+ * from `verification.ts`. Add a backlog test with one pack past its window.
+ */
+function ruleSourceInputs(): { wired: boolean; packs: RuleSourceWindow[]; verification: SourceVerification } {
+  return { wired: false, packs: [], verification: {} };
+}
+
+// ---------------------------------------------------------------------------
+// M1B: orphan-sweep cursor age (SEC-UP-7; M14 writes the row)
+// ---------------------------------------------------------------------------
+
+/**
+ * `opsState` keys whose `updatedAt` M14's sweeps patch on every page, the
+ * cycle-completing page included. Each row is absent before its first run.
+ * Confirmed with M14. They equal `retention.ts`'s exported
+ * `ORPHAN_SWEEP_OPS_KEY` / `RECOVERY_RETENTION_OPS_KEY`: switch to importing
+ * those once M14 has landed (they do not exist on main yet). Only the age is
+ * read; the cursor JSON is never parsed here.
+ */
+const ORPHAN_SWEEP_OPS_KEY = "orphanSweep";
+const RECOVERY_RETENTION_OPS_KEY = "retentionRecovery";
+
+// ---------------------------------------------------------------------------
 // retention cursor diagnostic (D112 RUNBOOK/ops item, T24b)
 // ---------------------------------------------------------------------------
 
@@ -143,9 +500,21 @@ function parseRetentionCursor(raw: string | undefined): { step: number; page: st
  * (`insights.ts`'s `truncated` flag, D101).
  */
 export const backlog = internalQuery({
-  args: { scanLimit: v.optional(v.number()) },
+  args: {
+    scanLimit: v.optional(v.number()),
+    /**
+     * M1B: the instant to report at. Pass it. Queries must not read the wall
+     * clock (guidelines; mission P06). If it is omitted, `Date.now()` is used
+     * once, which is kept only so a one-shot `npx convex run ops:backlog` and
+     * pre-M1B callers still work. Every M1B section is computed at this value
+     * (`asOf` is it floored to the hour), never at the server clock.
+     */
+    now: v.optional(v.number()),
+  },
   returns: v.object({
     now: v.number(),
+    /** M1B: `now` floored to the hour, the coarse instant the stale-source and rule-failure sections use. */
+    asOf: v.number(),
     /** Active watches whose `nextCheckAt` is due but a sweep tick has not yet picked them up (`watches.sweep`, `by_status_nextCheck`). */
     dueWatches: countShape,
     /** Owned items whose `nextCheckAt` is due but a tick has not yet picked them up (`priceWatch.runAll`, `by_nextCheck`). */
@@ -182,10 +551,39 @@ export const backlog = internalQuery({
      * `account.ts`) -- most of it is ordinary in-flight purge, not stuck.
      */
     deletions: v.object({ stuck: v.number(), deletingTotal: v.number() }),
+    /** M1B (D145): every flag's effective state, in `FLAG_NAMES` order, including `live_document_extraction` and its `approvalRef`. `invalid` marks a row that reads as OFF because it was not written by `setFlag`. */
+    flags: v.array(flagStateValidator),
+    /** M1B (P12/C58): `recordEvaluation` failures from the per-UTC-day counters, over the `windowDays` days ending at `asOf` (newest first). */
+    ruleEvaluationFailures: ruleEvaluationFailuresShape,
+    /**
+     * M1B (P12/C58, README rule 3): active packs whose sources are past, or
+     * within 7 days of, their refresh window at `asOf`. `inputsWired` is
+     * false until the production registry (M12) and
+     * `lib/rules/verification.ts` (lead) exist and are wired in
+     * `ruleSourceInputs`. Until then nothing is checked, and this says so
+     * instead of reporting "all fresh".
+     */
+    staleSources: v.object({
+      asOf: v.number(),
+      inputsWired: v.boolean(),
+      checkedPacks: v.number(),
+      packs: v.array(staleSourcePackShape),
+    }),
+    /**
+     * M1B (DA-A-8, D145): evidence waiting on the user (`awaiting_doc_type`, which is never extracted),
+     * pending extraction (`queued`, `running`) and `failed`. Each is bounded like every other count.
+     */
+    extraction: v.object({ awaitingDocType: countShape, queued: countShape, running: countShape, failed: countShape }),
+    /** M1B (SEC-UP-7): age of the orphan-blob sweep's `opsState` row (`ORPHAN_SWEEP_OPS_KEY`), `null` before its first run. */
+    orphanSweep: v.object({ ageMs: v.union(v.number(), v.null()) }),
+    /** M1B (DA-A-7): age of the evidence/evaluation retention sweep's `opsState` row (`RECOVERY_RETENTION_OPS_KEY`), `null` before its first run. The older `retention` field above is the pre-wave-1 sweep. */
+    recoveryRetention: v.object({ ageMs: v.union(v.number(), v.null()) }),
   }),
-  handler: async (ctx, { scanLimit }) => {
+  handler: async (ctx, { scanLimit, now: nowArg }) => {
     const limit = scanLimit !== undefined && scanLimit > 0 ? Math.floor(scanLimit) : DEFAULT_SCAN_LIMIT;
-    const now = Date.now();
+    if (nowArg !== undefined && !Number.isFinite(nowArg)) throw new ConvexError("now must be a finite epoch-ms time");
+    const now = nowArg ?? Date.now();
+    const asOf = Math.floor(now / HOUR_MS) * HOUR_MS;
 
     // Only `active` watches are ever swept (`watches.sweep`); `paused` watches are deliberately excluded from automatic checks.
     const dueWatchRows = await ctx.db
@@ -235,8 +633,47 @@ export const backlog = internalQuery({
     // T18.5 (D124 B5) for the identical reason.
     const deletions: { stuck: number; deleting: number } = await ctx.runQuery(internal.account.stuckDeletions, {});
 
+    // ---- M1B ----
+    const flags = [];
+    for (const name of FLAG_NAMES) flags.push(await readFlag(ctx, name));
+
+    const ruleEvaluationFailures = await readRuleEvaluationFailures(ctx, asOf);
+
+    const sourceInputs = ruleSourceInputs();
+    const staleSources = {
+      asOf,
+      inputsWired: sourceInputs.wired,
+      checkedPacks: sourceInputs.packs.length,
+      packs: staleSourcePacks(sourceInputs.packs, sourceInputs.verification, asOf),
+    };
+
+    const countExtraction = async (status: "awaiting_doc_type" | "queued" | "running" | "failed") => {
+      const rows = await ctx.db
+        .query("evidence")
+        .withIndex("by_extraction_status_and_extraction_started_at", (q) => q.eq("extractionStatus", status))
+        .take(limit + 1);
+      return summarize(rows.length, limit);
+    };
+    const extraction = {
+      awaitingDocType: await countExtraction("awaiting_doc_type"),
+      queued: await countExtraction("queued"),
+      running: await countExtraction("running"),
+      failed: await countExtraction("failed"),
+    };
+
+    const sweepAge = async (key: string) => {
+      const row = await ctx.db
+        .query("opsState")
+        .withIndex("by_key", (q) => q.eq("key", key))
+        .first();
+      return { ageMs: row ? now - row.updatedAt : null };
+    };
+    const orphanSweep = await sweepAge(ORPHAN_SWEEP_OPS_KEY);
+    const recoveryRetention = await sweepAge(RECOVERY_RETENTION_OPS_KEY);
+
     return {
       now,
+      asOf,
       dueWatches: summarize(dueWatchRows.length, limit),
       dueItems: summarize(dueItemRows.length, limit),
       processedEventsFailed: summarize(failedEventRows.length, limit),
@@ -249,6 +686,12 @@ export const backlog = internalQuery({
         stalled: retentionMidCycle && retentionCursorAgeMs > RETENTION_STALL_MS,
       },
       deletions: { stuck: deletions.stuck, deletingTotal: deletions.deleting },
+      flags,
+      ruleEvaluationFailures,
+      staleSources,
+      extraction,
+      orphanSweep,
+      recoveryRetention,
     };
   },
 });
@@ -293,5 +736,145 @@ export const resetRetentionCursor = internalMutation({
       await ctx.db.insert("opsState", { key: RETENTION_OPS_KEY, cursor, updatedAt: now });
     }
     return previous;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// M1B: feature flags (lib/flags.ts). setFlag is the ONLY writer.
+// ---------------------------------------------------------------------------
+
+const MAX_REASON_CHARS = 500;
+const DEFAULT_AUDIT_LIMIT = 20;
+const MAX_AUDIT_LIMIT = 100;
+
+function cleanReason(raw: string | undefined): string | null {
+  if (raw === undefined) return null;
+  const cleaned = stripControl(raw).slice(0, MAX_REASON_CHARS);
+  return cleaned.length > 0 ? cleaned : null;
+}
+
+/**
+ * Operator-only flag switch (D145; contract §2.6 "Live extraction").
+ * Internal: `npx convex run ops:setFlag '{"name":"live_document_extraction","on":true,"approvalRef":"D<n>"}'`.
+ *
+ * - **Enabling an approval-gated flag** (all current flags; see `FLAGS`)
+ *   requires `approvalRef` to name the DECISIONS entry where the lead
+ *   recorded the user's explicit data-flow approval: `D<digits>`, optionally
+ *   followed by a note (`normalizeApprovalRef`). Anything else is refused.
+ *   The refusal writes a `flag_changed` line with `outcome: "refused"` and
+ *   throws, so nothing is stored.
+ * - **Disabling never needs a reference.** Turning a gate off is always safe.
+ *   The stored `approvalRef` is cleared.
+ * - **Every accepted call, a no-op included,** appends one audit row
+ *   (`flagAudit:<name>:<seq>`, read by `flagAudit`) and one `flag_changed`
+ *   line with `outcome: "applied"`. The audit row holds from/to,
+ *   approvalRef, the bounded `reason`, and the time.
+ */
+export const setFlag = internalMutation({
+  args: {
+    name: flagNameValidator,
+    on: v.boolean(),
+    approvalRef: v.optional(v.string()),
+    reason: v.optional(v.string()),
+  },
+  returns: v.object({
+    name: flagNameValidator,
+    from: v.boolean(),
+    to: v.boolean(),
+    /** The reference the flag is now ON under; `null` when it is now OFF. */
+    approvalRef: v.union(v.string(), v.null()),
+    auditSeq: v.number(),
+    changed: v.boolean(),
+  }),
+  handler: async (ctx, { name, on, approvalRef: rawApprovalRef, reason: rawReason }) => {
+    const now = Date.now();
+    const current = await readFlag(ctx, name);
+    const approvalRef = normalizeApprovalRef(rawApprovalRef);
+
+    if (on && FLAGS[name].requiresApproval && approvalRef === null) {
+      logEvent("flag_changed", { flag: name, from: current.on, to: true, outcome: "refused", refusal: "approval_ref_required" });
+      throw new ConvexError(
+        `Refusing to enable ${name}: approvalRef must name the DECISIONS entry that records the user's explicit approval ("D<n>" or "D<n>: note"). D145: this flag stays off until the user approves the data flow.`,
+      );
+    }
+
+    const storedRef = on ? approvalRef : null;
+    const cursor = JSON.stringify({ on, approvalRef: storedRef });
+    const row = await flagRow(ctx, name);
+    if (row) await ctx.db.patch(row._id, { cursor, updatedAt: now });
+    else await ctx.db.insert("opsState", { key: flagKey(name), cursor, updatedAt: now });
+
+    const lastAudit = await ctx.db
+      .query("opsState")
+      .withIndex("by_key", (q) => q.gte("key", flagAuditPrefix(name)).lt("key", flagAuditPrefixEnd(name)))
+      .order("desc")
+      .first();
+    const auditSeq = (lastAudit ? (flagAuditSeq(name, lastAudit.key) ?? 0) : 0) + 1;
+    const reason = cleanReason(rawReason);
+    await ctx.db.insert("opsState", {
+      key: flagAuditKey(name, auditSeq),
+      cursor: JSON.stringify({ from: current.on, to: on, approvalRef, reason, at: now }),
+      updatedAt: now,
+    });
+
+    const changed = current.on !== on;
+    logEvent("flag_changed", { flag: name, from: current.on, to: on, outcome: "applied", approvalRef, auditSeq, changed });
+    return { name, from: current.on, to: on, approvalRef: storedRef, auditSeq, changed };
+  },
+});
+
+/**
+ * One flag's state, the same value `isFlagOn` gates on. This is how an
+ * **action** checks a flag (actions have no `ctx.db`):
+ * `const { on } = await ctx.runQuery(internal.ops.getFlag, { name: "live_document_extraction" })`.
+ * Prefer re-checking in the mutation that commits the gated work too.
+ */
+export const getFlag = internalQuery({
+  args: { name: flagNameValidator },
+  returns: flagStateValidator,
+  handler: async (ctx, { name }) => await readFlag(ctx, name),
+});
+
+const flagAuditEntry = v.object({
+  seq: v.number(),
+  from: v.boolean(),
+  to: v.boolean(),
+  approvalRef: v.union(v.string(), v.null()),
+  reason: v.union(v.string(), v.null()),
+  at: v.number(),
+});
+
+/** A flag's audit trail, newest first. Bounded: `limit` defaults to 20 and is capped at 100. Unparsable rows are skipped. */
+export const flagAudit = internalQuery({
+  args: { name: flagNameValidator, limit: v.optional(v.number()) },
+  returns: v.array(flagAuditEntry),
+  handler: async (ctx, { name, limit }) => {
+    const take =
+      limit !== undefined && Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), MAX_AUDIT_LIMIT) : DEFAULT_AUDIT_LIMIT;
+    const rows = await ctx.db
+      .query("opsState")
+      .withIndex("by_key", (q) => q.gte("key", flagAuditPrefix(name)).lt("key", flagAuditPrefixEnd(name)))
+      .order("desc")
+      .take(take);
+    const out: Array<{ seq: number; from: boolean; to: boolean; approvalRef: string | null; reason: string | null; at: number }> = [];
+    for (const row of rows) {
+      const seq = flagAuditSeq(name, row.key);
+      if (seq === null || row.cursor === undefined) continue;
+      try {
+        const e = JSON.parse(row.cursor) as { from?: unknown; to?: unknown; approvalRef?: unknown; reason?: unknown; at?: unknown };
+        if (typeof e.from !== "boolean" || typeof e.to !== "boolean") continue;
+        out.push({
+          seq,
+          from: e.from,
+          to: e.to,
+          approvalRef: typeof e.approvalRef === "string" ? e.approvalRef : null,
+          reason: typeof e.reason === "string" ? e.reason : null,
+          at: typeof e.at === "number" ? e.at : row.updatedAt,
+        });
+      } catch {
+        // Skip a malformed (hand-edited) audit row rather than fail the whole read.
+      }
+    }
+    return out;
   },
 });
