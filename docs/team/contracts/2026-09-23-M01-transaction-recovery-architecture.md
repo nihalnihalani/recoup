@@ -772,7 +772,8 @@ export interface EvaluationResult {
                         values: { value: string; source: string }[]; sameAnswer: boolean }[];   // rev 5.3 (D152); kind is tagged
                         // by lib/facts/resolve.ts (M11); sameAnswer = every conflicting value yields the same outcome (candidate testing)
            contractCoverageInexact?: boolean; manualReviewReason?: string;
-           notYetDue?: { at?: string; when?: string } };   // rev 5.2: set by the pack only from KNOWN facts (e.g. ship-by date
+           notYetDue?: { at?: string; when?: string; userAction?: NextAction } };   // rev 5.4 (D154): userAction set when the awaited
+                                                            // event is something the USER controls (e.g. filing a baggage report)   // rev 5.2: set by the pack only from KNOWN facts (e.g. ship-by date
                                                             // confirmed and still in the future; MBR confirmed "not filed")
 }
 export type Evaluator<S, P> = (input: EvaluationInput<S, P>) => EvaluationResult;
@@ -791,8 +792,10 @@ export function deriveOutcome(d: Dimensions, f: Flags, assumptions: Assumption[]
 //        verdicts (a path that fails applicability or whose user deadline passed is not "not yet due"), above manual_review and
 //        needs_facts (a path that is not ripe is reported as such; its missingFacts are still listed so questions can be answered
 //        early). An UNKNOWN ripeness fact is not notYetDue — it is a missing fact → needs_facts. NEVER maps to not_eligible.
-//        result.reevaluate = f.notYetDue; nextAction = { kind: "wait", reevaluate }; amount may be computed but is never shown
-//        as owed (§5, §9).
+//        result.reevaluate = {at, when} from f.notYetDue; nextAction = f.notYetDue.userAction when the awaited event is the user's
+//        own action (rev 5.4, D154 — e.g. R04-03b: { kind: "add_evidence", docTypes: ["baggage_report"] } with the explanation
+//        "File a mishandled-baggage report with the airline, then add it here"), otherwise { kind: "wait", reevaluate }; amount may
+//        be computed but is never shown as owed (§5, §9).
 //  5 conflicts, split by WHO can resolve them (rev 5.3, D152):
 //    5a f.manualReviewReason, or a conflict of kind confirmed_vs_observed | confirmed_vs_confirmed
 //       -> "manual_review". The user cannot settle it by answering: a user_confirmed value contradicts an observed/system
@@ -800,9 +803,12 @@ export function deriveOutcome(d: Dimensions, f: Flags, assumptions: Assumption[]
 //       contradict. The explanation names both sources and what would resolve it (upload proof / correct the confirmation).
 //    5b a conflict of kind "candidates" (only extracted candidates disagree, or candidates disagree with nothing confirmed)
 //       -> "needs_facts". missingFacts gets reason "conflicting" and the question shows both values and their sources.
-//    5c every conflict has sameAnswer = true -> skip 5a/5b; the outcome stands but is capped at likely_eligible
-//       (PENDING M09b — until the reviewer signs off and the lead records it, M12 keeps 5c behind a single constant and the
-//       fixture variants for it are marked pending).
+//    5c DECIDED (rev 5.4, D154): if there is no 5a conflict and EVERY conflict is kind "candidates" with sameAnswer = true
+//       -> skip 5b; the outcome the rules give stands, CAPPED at likely_eligible. "Same answer" = same outcome AND same amount
+//       (identical estimate amountMinor + currency, or both null) across every conflicting value (candidate testing).
+//       The conflicting keys stay in missingFacts (reason "conflicting") so the user is still asked; only a confirmation lifts
+//       the cap. 5c applies only to candidate-vs-candidate conflicts: confirmed_vs_observed / confirmed_vs_confirmed are 5a.
+//       This is a fixed rule, not a configurable constant.
 //  6 d.applies === "unknown" || d.factsKnown === "unknown" -> "needs_facts"       (required-class facts only)
 //  7 f.contractCoverageInexact                            -> "possible_contract_benefit"
 //  8 d.evidenceSupports !== "pass" || assumptions.length > 0 -> "likely_eligible"  (DA-A-2 row: "only assumption-class unknowns → likely_eligible")
@@ -832,8 +838,16 @@ export interface DeadlineSpec {
   sourcePassageId: string;
 }
 export function computeDeadline(spec: DeadlineSpec, cells: CellLookup, now: number): DeadlineResult;
-//  anchor missing | candidate | user_unknown  -> "unknown_anchor" (dueAt undefined); + advisoryActBy if spec.advisoryWhenAnchorUnknown and that fact is known
-//  anchor conflicting                         -> "disputed_anchor" (basis lists each candidate)
+//  rev 5.4 (D154): a disputed or unconfirmed anchor NEVER produces a firm dueAt.
+//  anchor missing | user_unknown              -> "unknown_anchor", dueAt undefined; user obligor: advisoryActBy from
+//                                                spec.advisoryWhenAnchorUnknown when that fact is known (D143.3)
+//  anchor candidate (unconfirmed)             -> "unknown_anchor", dueAt undefined; user obligor: advisoryActBy = the due date the
+//                                                candidate would give, labelled "based on an unconfirmed date — confirm it";
+//                                                counterparty obligor: NO overdueSince
+//  anchor conflicting (any kind)              -> "disputed_anchor", dueAt undefined, basis lists each candidate with its source;
+//                                                user obligor: advisoryActBy = the EARLIEST candidate's due date, labelled;
+//                                                counterparty obligor: NO overdueSince until the anchor is resolved, even if every
+//                                                candidate's date has passed
 //  business days beyond the committed holiday table -> "beyond_calendar"
 //  tz unknown & local_end_of_day              -> dueLocalDate + dueAt at the earliest-ending zone in usZones.ts + assumption
 //  user obligor:        "open" | "passed"
@@ -865,7 +879,7 @@ export function computeDeadline(spec: DeadlineSpec, cells: CellLookup, now: numb
 - **Display** (mission §14): detected / needs facts / likely eligible / user verified / ready to send / **tracking** (the `track_automatic` case mode) / submitted (on the required channel) / paid / denied / escalated (wave 3) / expired (derived) / **not yet due** (rev 5.2).
 - **`not_yet_due` (rev 5.2, D147(6)):**
   - It is not approvable: `openCase`, `prepareSend` and `packets.approve` refuse it, and auto-open never fires.
-  - **It is never a card with an amount as owed.** The card shows "Check again on <date>" or "Check again after <event>", with no estimate in owed wording, and it is excluded from every money tile in `recovery.summary`: not Potential and not Ready. It is counted in a "Not yet due" count/strip.
+  - **It is never a card with an amount as owed.** When the awaited event is the user's own action, the card shows that action as its next step, for example "File a baggage report with the airline, then add it here" (rev 5.4, D154). Otherwise it shows "Check again on <date>" or "Check again after <event>", with no estimate in owed wording, and it is excluded from every money tile in `recovery.summary`: not Potential and not Ready. It is counted in a "Not yet due" count/strip.
   - **Re-evaluation:**
     - a `reevaluate.when` event is a fact change and re-evaluates on the normal `fact_change` trigger;
     - a `reevaluate.at` date is picked up by the wave-2 sweep (M29): `opportunities.reevaluateAt` (UTC ms, start of that local date) plus the index `by_status_and_reevaluate_at` are added in the wave-2 addendum (M20).
@@ -1068,7 +1082,9 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 | N5 (rev 5) | `claims.test.ts` · "provisional 4,000 outstanding + confirmCredit 1,000 without the flag → ProvisionalOutstanding, nothing written"; "with separateFromProvisional → recorded, provisional still 4,000"; "finalize path unchanged" | M10, M16 |
 | N6 (rev 5) | `drafts.test.ts` · "edit a legacy item's unitCents after approval → the binding's evaluation still shows the approved values"; `lib/facts/snapshot.test.ts` · "boundFactValues are canonical and bounded ≤ 32" | M11, M12, M13 |
 | N7 (rev 5) | `r01Parity.test.ts` · "a later confirmed snapshot with a different windowDays → v1 uses it (same as legacy) with assumption A-T2" (both modes) | M12, M16 |
-| D152 conflicts (rev 5.3) | `lib/rules/outcome.test.ts` · "two extracted candidates disagree, nothing confirmed → needs_facts; the missing fact has reason conflicting and the question lists both values with their evidence sources"; "user_confirmed delivery 3rd vs observed carrier tracking 9th → manual_review; the explanation names both sources and 'upload proof or correct your confirmation'"; "two confirmed values contradict → manual_review"; "same-answer candidates → outcome stands, capped at likely_eligible" (**marked pending M09b**); `lib/facts/resolve.test.ts` · "conflict kind tagged: candidates / confirmed_vs_observed / confirmed_vs_confirmed" | M11, M12 |
+| D152 conflicts (rev 5.3) | `lib/rules/outcome.test.ts` · "two extracted candidates disagree, nothing confirmed → needs_facts; the missing fact has reason conflicting and the question lists both values with their evidence sources"; "user_confirmed delivery 3rd vs observed carrier tracking 9th → manual_review; the explanation names both sources and 'upload proof or correct your confirmation'"; "two confirmed values contradict → manual_review"; **5c (decided rev 5.4, D154):** "candidates with the same outcome AND same amount → outcome stands, capped at likely_eligible, key still asked"; "same outcome, different amount → needs_facts (5b)"; "confirming the value lifts the cap"; "a candidates conflict plus a confirmed_vs_observed conflict → manual_review (5a wins)"; `lib/facts/resolve.test.ts` · "conflict kind tagged: candidates / confirmed_vs_observed / confirmed_vs_confirmed" | M11, M12 |
+| D154 anchors (rev 5.4) | `lib/deadlines/engine.test.ts` · "user deadline, conflicting anchor candidates → disputed_anchor, dueAt undefined, advisoryActBy = earliest candidate's due date, labelled"; "user deadline, single unconfirmed candidate anchor → unknown_anchor, no dueAt, advisoryActBy from the candidate, labelled"; "counterparty deadline, disputed anchor with every candidate past → no overdueSince, no escalate"; "counterparty deadline, anchor confirmed and past → overdue + escalate" | M12 |
+| D154 not_yet_due action (rev 5.4) | `lib/rules/outcome.test.ts` · "notYetDue with a userAction → nextAction is that action (R04-03b → add_evidence baggage_report)"; "notYetDue without one → nextAction wait (R05-04c)" | M12, M22 |
 | D147(6) engine (rev 5.2) | `lib/rules/outcome.test.ts` · "flags.notYetDue → not_yet_due; never not_eligible"; "applies fail + notYetDue → not_eligible (rule 3 wins)"; "user deadline passed + notYetDue → deadline_passed (rule 4 wins)"; "notYetDue + conflicting/missing facts → not_yet_due, missingFacts still listed"; "an unknown ripeness fact → needs_facts, not not_yet_due"; `opportunities.test.ts` · "not_yet_due → openCase refused with nextAction wait; no auto-open"; `recovery.test.ts` · "not_yet_due never appears in any money tile" | M12 |
 | D147(6) packs (rev 5.2) | M08 loader over `docs/rules/fixtures/R04.json` · **R04-03b** (MBR confirmed not filed → `not_yet_due`, `reevaluate.when` "MBR filed"); `R05.json` · **R05-04b** (`reevaluate.when`: buyer cancels before shipment), **R05-04c** (`reevaluate.at` 2026-10-11), **R05-05a/b** (`reevaluate.at` 2026-09-01), **R05-07** (`reevaluate.at` 2026-09-21) — all pass unmapped | M21 (R05), M22 (R04) |
 
@@ -1302,7 +1318,13 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 | O15 | 24 h multiples in R01 v1 | **Agreed** for parity; R01 v2 is M37 |
 | O16 | httpAction upload | **Agreed**, with DA-A-8/20/27/28 |
 
-**Pending M09b (rev 5.2, narrowed by D152 in rev 5.3).** D152 decides the divergent cases: rule 5a gives `manual_review` for a confirmed value against an observed or confirmed value, and rule 5b gives `needs_facts` for candidates only. **Still pending:** a `conflicting` decisive fact whose candidates **all yield the same answer**. Per D152 the outcome stands, capped at `likely_eligible` (rule 5c), but that awaits M09b's sign-off. README X2 currently says the outcome stands **uncapped**, and M09b checks the README and fixture alignment. M12 implements candidate-testing (evaluate once per candidate, compare outcomes) so the ruling is a one-line change in `deriveOutcome`. The fixture variants built for this case ("both candidates on the same side") are marked `pending M09b` in M12's run until the reviewer rules and the lead records it.
+**Conflict rule 5c — resolved (rev 5.4, D154).** M09b accepted it with four conditions, now in §4:
+- "same answer" = same outcome and same amount;
+- a disputed or unconfirmed anchor never produces a firm due date;
+- only confirmation lifts the `likely_eligible` cap;
+- the cap applies only to candidate-vs-candidate conflicts.
+
+README X2 and the fixtures are aligned by M2E and re-checked by M09c. The fixture variants built for this case ("both candidates on the same side") are marked `pending M09b` in M12's run until the reviewer rules and the lead records it.
 
 **Remaining items for the lead:**
 - **(R4-1)** Record the D83(5) wording amendment (§2.6).
@@ -1417,3 +1439,11 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 | Id | What changed | Section(s) / task |
 |---|---|---|
 | D152 | `deriveOutcome` rule 5 split by who can resolve the conflict: 5a `manual_review` (user_confirmed vs observed/system, or confirmed vs confirmed; explanation names both sources and the fix); 5b `needs_facts` (candidates only; question shows both values and sources); 5c same-answer candidates → outcome stands capped at `likely_eligible` — still **pending M09b**; conflict kind tagged in `resolve.ts` | §4, §10, §12 · M11, M12 |
+
+### 13.6 Rev 5.4 (M06f, D154)
+
+| Id | What changed | Section(s) / task |
+|---|---|---|
+| D154 (5c) | Rule 5c decided and fixed (no configurable constant): candidate-only conflicts with the same outcome AND same amount → outcome stands, capped at `likely_eligible`; the key is still asked; only confirmation lifts the cap; 5a unchanged | §4, §10, §12 · M12 |
+| D154 (anchors) | A disputed or unconfirmed anchor never yields `dueAt`: user deadlines show a labelled `advisoryActBy` (earliest candidate); counterparty deadlines show no `overdueSince` until the anchor is resolved | §4, §10 · M12 |
+| D154 (not_yet_due) | When re-evaluation waits on a user-controlled action, `nextAction` is that action (pack-declared `notYetDue.userAction`), not `wait` | §4, §5, §10 · M12, M22 |
