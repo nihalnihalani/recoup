@@ -295,6 +295,15 @@ export const nextAction = v.union(
   v.object({ kind: v.literal("none"), reason: v.string() }),
   /** rev 5.2: `not_yet_due` → "check again on <date>" / "after <event>". */
   v.object({ kind: v.literal("wait"), reevaluate }),
+  /**
+   * DA-B-2 (D193): a linked claim asks more than the re-evaluated exact_formula estimate — adjust or acknowledge
+   * before sending. Money is never bare: ISO minor units in `currency`, the claim's own currency (never emitted when
+   * the claim's and the estimate's currencies differ).
+   */
+  v.object({
+    kind: v.literal("review_amount"), claimId: v.id("claims"), claimedMinor: v.number(), estimateMinor: v.number(),
+    currency: v.string(),
+  }),
 );
 export const nonCashKind = v.union(
   v.literal("voucher"), v.literal("points"), v.literal("repair"), v.literal("replacement"),
