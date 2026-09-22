@@ -63,6 +63,17 @@ jobs:
       - name: typecheck:e2e
         run: npm run typecheck:e2e
 
+      # M19 (contract §2.7, D146 R4-4): rule-pack consistency. Checks
+      # manifest <-> activation.ts <-> DECISIONS, that reviewed pack files are
+      # unchanged, and that reviewed manifest hashes and ACTIVATIONS are
+      # append-only relative to the push's previous tip (or the PR base). The
+      # script fetches that commit itself if this shallow checkout lacks it.
+      # verify-rule-sources.mjs is on-demand only and must never run in CI.
+      - name: check-rule-packs
+        run: node scripts/check-rule-packs.mjs
+        env:
+          RULE_PACKS_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+
       # M08 (D144): zero warnings. The one pre-existing warning
       # (convex/lib/passage.ts, T16) is gone, so any new warning fails CI.
       - name: lint
