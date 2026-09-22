@@ -9,7 +9,9 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   CONTRACT_OUTCOMES,
+  FACT_STATES,
   FIXTURE_OUTCOME_ALIASES,
+  PENDING_OUTCOMES,
   REPO_ROOT,
   RuleFixtureError,
   fixtureRelPath,
@@ -26,7 +28,28 @@ import {
   type RuleFixtureFile,
 } from "./ruleFixtures.loader";
 
-const SCENARIOS = ["R02", "R03", "R04", "R05"] as const;
+/** Every manifest-registered fixture file (new files are covered automatically). */
+const SCENARIOS: readonly string[] = Object.keys(readRulesManifest().fixtures)
+  .map((p) => p.match(/\/([A-Za-z0-9_-]+)\.json$/)![1])
+  .sort();
+
+/**
+ * Known data gaps are ratchets: a test fails on a NEW entry, never on a fixed
+ * one (the rules researcher can fix fixtures without touching this file;
+ * whoever next edits it should then shrink the list).
+ */
+function expectOnlyKnown(found: readonly string[], known: readonly string[], what: string) {
+  expect(found.filter((f) => !known.includes(f)), `new ${what}`).toEqual([]);
+}
+
+/**
+ * Mission §17 category groups a file does not cover yet. R01 v1 (72fe1a2)
+ * tags no case missing_fact or contradictory_fact; contract §9's activation
+ * gate needs every group, so this is reported to the lead in the M08 doc.
+ */
+const KNOWN_CATEGORY_GAPS: Readonly<Record<string, readonly string[]>> = {
+  R01: ["missing_fact", "contradictory_fact"],
+};
 
 function byId(file: RuleFixtureFile, id: string): RuleFixtureCase {
   const found = file.cases.find((c) => c.id === id);
@@ -43,9 +66,10 @@ function outcomesOf(c: RuleFixtureCase): string[] {
 // ---------------------------------------------------------------------------
 
 describe("rule fixtures: committed files (docs/rules/fixtures)", () => {
-  it("loads every manifest-registered file (hash-checked), and only R02–R05 are registered today", () => {
+  it("loads every manifest-registered file (hash-checked), R01–R05 included", () => {
     const files = loadAllRuleFixtures();
     expect(files.map((f) => f.scenario)).toEqual([...SCENARIOS]);
+    expect(SCENARIOS).toEqual(expect.arrayContaining(["R01", "R02", "R03", "R04", "R05"]));
     const manifest = readRulesManifest();
     for (const f of files) expect(f.sha256).toBe(manifest.fixtures[f.relPath]);
   });
@@ -67,18 +91,20 @@ describe("rule fixtures: committed files (docs/rules/fixtures)", () => {
       expect(file.cases.length).toBeGreaterThanOrEqual(file.sourceCaseCount);
     });
 
-    it("covers every mission §17 category group", () => {
-      expect(missingRequiredCategories(file)).toEqual([]);
+    it("covers every mission §17 category group (except the pinned known gaps)", () => {
+      expectOnlyKnown(missingRequiredCategories(file), KNOWN_CATEGORY_GAPS[scenario] ?? [], `${scenario} category gap`);
     });
 
-    it("gives every runnable fixture a unique id, an offset clock, a finite now, facts, and contract outcomes only", () => {
+    it("gives every runnable fixture a unique id, an offset clock, a finite now, facts, and contract (or flagged pending) outcomes only", () => {
       expect(new Set(file.cases.map((c) => c.id)).size).toBe(file.cases.length);
       for (const c of file.cases) {
         expect(c.clock, c.id).toMatch(/(Z|[+-]\d{2}:\d{2})$/);
         expect(c.now, c.id).toBe(Date.parse(c.clock));
         expect(Number.isFinite(c.now), c.id).toBe(true);
         expect(Object.keys(c.facts).length, c.id).toBeGreaterThan(0);
-        for (const o of outcomesOf(c)) expect(CONTRACT_OUTCOMES as readonly string[], c.id).toContain(o);
+        const pending = outcomesOf(c).filter((o) => !(CONTRACT_OUTCOMES as readonly string[]).includes(o));
+        expectOnlyKnown(pending, PENDING_OUTCOMES, `${c.id} outcome outside the contract`);
+        expect(c.pendingContractOutcome, c.id).toBe(pending.length > 0);
       }
     });
 
@@ -96,67 +122,70 @@ describe("rule fixtures: committed files (docs/rules/fixtures)", () => {
     });
   });
 
-  describe("resolution semantics on real cases", () => {
-    const r02 = loadRuleFixtureFile("R02");
-    const r04 = loadRuleFixtureFile("R04");
-    const r05 = loadRuleFixtureFile("R05");
+  // Data-independent property check: the loader's output equals a direct
+  // reading of the raw JSON under the documented rules. It holds for any
+  // revision of the fixtures (M2D edits them), so it never pins data values.
+  describe.each(SCENARIOS)("%s resolution matches the raw file under the documented rules", (scenario) => {
+    type RawCase = {
+      id: string;
+      clock?: string;
+      source?: unknown;
+      action?: string;
+      context?: Record<string, unknown>;
+      facts?: Record<string, unknown>;
+      facts_from?: string;
+      facts_override?: Record<string, unknown>;
+      expected?: { outcome?: string; results?: Array<{ outcome: string }> };
+      variants?: Array<{
+        id: string;
+        clock?: string;
+        source?: unknown;
+        action?: string;
+        change?: Record<string, unknown>;
+        context_change?: Record<string, unknown>;
+        expected: { outcome?: string; results?: Array<{ outcome: string }> };
+      }>;
+    };
+    const file = loadRuleFixtureFile(scenario);
+    const raw = JSON.parse(readFileSync(path.join(REPO_ROOT, fixtureRelPath(scenario)), "utf8")) as { cases: RawCase[] };
+    const rawById = new Map(raw.cases.map((c) => [c.id, c]));
+    const resolve = (id: string): Record<string, unknown> => {
+      const c = rawById.get(id)!;
+      return c.facts ?? { ...resolve(c.facts_from!), ...(c.facts_override ?? {}) };
+    };
+    const mapOutcome = (o: string) => ((PENDING_OUTCOMES as readonly string[]).includes(o) ? o : FIXTURE_OUTCOME_ALIASES[o]);
+    const mappedOutcomes = (e: { outcome?: string; results?: Array<{ outcome: string }> }) =>
+      e.outcome !== undefined ? [mapOutcome(e.outcome)] : (e.results ?? []).map((r) => mapOutcome(r.outcome));
 
-    it("facts_from + empty facts_override copies the referenced case's facts; case-level source applies (R02-11 ← R02-01)", () => {
-      const base = byId(r02, "R02-01");
-      const stale = byId(r02, "R02-11");
-      expect(stale.facts).toEqual(base.facts);
-      expect(base.source).toBeNull();
-      expect(stale.source).toEqual({ last_verified_on: "2026-07-01", refresh_window_days: 30 });
-      expect(stale.expected.outcome).toBe("source_unverified");
+    it("one runnable fixture per case-with-expected plus one per variant", () => {
+      const expectedCount = raw.cases.reduce((n, c) => n + (c.expected ? 1 : 0) + (c.variants?.length ?? 0), 0);
+      expect(file.cases.length).toBe(expectedCount);
     });
 
-    it("a case without top-level expected is not runnable; its variants are, with `change` applied over facts_from (R04-02)", () => {
-      expect(r04.cases.some((c) => c.id === "R04-02")).toBe(false);
-      const ids = r04.cases.filter((c) => c.caseId === "R04-02").map((c) => c.id);
-      expect(ids).toEqual(["R04-02a", "R04-02b", "R04-02c"]);
-      const origin = byId(r04, "R04-01");
-      const v = byId(r04, "R04-02b");
-      expect(v.variantId).toBe("R04-02b");
-      expect(v.clock).toBe("2026-09-23T12:00:00-07:00"); // inherited from the case
-      expect(v.facts.bag_delivered_or_picked_up_at.value).toBe("2026-09-13T09:40:00-07:00");
-      const { bag_delivered_or_picked_up_at: _changed, ...rest } = v.facts;
-      const { bag_delivered_or_picked_up_at: _original, ...originRest } = origin.facts;
-      expect(rest).toEqual(originRest);
-      expect(v.annotations.delay).toBe("12h00m");
-    });
-
-    it("variant clocks override the case clock (R05-05 has no case clock; R05-04c overrides R05-04's)", () => {
-      expect(r05.cases.some((c) => c.id === "R05-05")).toBe(false);
-      expect(byId(r05, "R05-05a").clock).toBe("2026-08-30T12:00:00-04:00");
-      expect(byId(r05, "R05-05c").now).toBe(Date.parse("2026-09-01T09:00:00-04:00"));
-      const base = byId(r05, "R05-04");
-      const later = byId(r05, "R05-04c");
-      expect(base.clock).toBe("2026-10-12T12:00:00-04:00");
-      expect(later.clock).toBe("2026-10-05T12:00:00-04:00");
-      expect(later.facts).toEqual(base.facts); // `change: {}`
-    });
-
-    it("variant source and clock both override (R02-10b)", () => {
-      const v = byId(r02, "R02-10b");
-      expect(v.source).toEqual({ last_verified_on: "2026-09-23", refresh_window_days: 30 });
-      expect(v.clock).toBe("2027-07-08T12:00:00-04:00");
-      expect(byId(r02, "R02-10").source).toBeNull();
-    });
-
-    it("maps likely_eligible_missing_evidence → likely_eligible and keeps the original wording (R04-04)", () => {
-      const c = byId(r04, "R04-04");
-      expect(c.expected.outcome).toBe("likely_eligible");
-      expect((c.expectedAsWritten as { outcome: string }).outcome).toBe("likely_eligible_missing_evidence");
-    });
-
-    it("maps every per-path outcome of a multi-path expectation (R04-05)", () => {
-      const c = byId(r04, "R04-05");
-      expect(c.expected.outcome).toBeUndefined();
-      expect(c.expected.results?.map((r) => [r.path, r.outcome])).toEqual([
-        ["R04.a", "eligible"],
-        ["R04.b", "likely_eligible"],
-      ]);
-      expect(c.expected.relationship).toBe("complementary_distinct_loss_lines");
+    it("facts, clock, source, context, action and outcomes follow facts_from/override, change and variant-wins", () => {
+      for (const c of raw.cases) {
+        if (c.expected) {
+          const got = byId(file, c.id);
+          expect(got.facts, c.id).toEqual(resolve(c.id));
+          expect(got.clock, c.id).toBe(c.clock);
+          expect(got.source, c.id).toEqual(c.source ?? null);
+          expect(got.context, c.id).toEqual(c.context ?? {});
+          expect(got.action, c.id).toBe(c.action ?? "evaluate");
+          expect(got.expectedAsWritten, c.id).toEqual(c.expected);
+          expect(outcomesOf(got), c.id).toEqual(mappedOutcomes(c.expected));
+        }
+        for (const v of c.variants ?? []) {
+          const got = byId(file, v.id);
+          expect(got.caseId, v.id).toBe(c.id);
+          expect(got.facts, v.id).toEqual({ ...resolve(c.id), ...(v.change ?? {}) });
+          expect(got.clock, v.id).toBe(v.clock ?? c.clock);
+          expect(got.source, v.id).toEqual(v.source ?? c.source ?? null);
+          expect(got.context, v.id).toEqual({ ...(c.context ?? {}), ...(v.context_change ?? {}) });
+          expect(got.action, v.id).toBe(v.action ?? c.action ?? "evaluate");
+          expect(got.expectedAsWritten, v.id).toEqual(v.expected);
+          expect(outcomesOf(got), v.id).toEqual(mappedOutcomes(v.expected));
+        }
+      }
     });
   });
 
@@ -164,8 +193,9 @@ describe("rule fixtures: committed files (docs/rules/fixtures)", () => {
     // Conventions: "Missing facts are state=missing with value null". R02-05's
     // delay_cause_controllable is {value: "unknown", state: "missing"}; reported
     // to the rules owner (M08 doc). A NEW occurrence fails here.
+    // README cross-pack rule 2 now states it; M2D fixes R02-05.
     const found = SCENARIOS.flatMap((s) => missingFactsWithValues(loadRuleFixtureFile(s)));
-    expect(found).toEqual(["R02-05.delay_cause_controllable"]);
+    expectOnlyKnown(found, ["R02-05.delay_cause_controllable"], "missing fact with a value");
   });
 
   it("advisory ratchet: only the known amount_minor has no currency beside it", () => {
@@ -173,20 +203,34 @@ describe("rule fixtures: committed files (docs/rules/fixtures)", () => {
     // no currency (the conventions define money as amount_minor + ISO-4217);
     // reported to the rules owner (M08 doc). A NEW occurrence fails here.
     const found = SCENARIOS.flatMap((s) => moneyWithoutCurrency(loadRuleFixtureFile(s)));
-    expect(found).toEqual(["R04-04 expected.amount.excluded[0]"]);
+    expectOnlyKnown(found, ["R04-04 expected.amount.excluded[0]"], "amount_minor without currency");
   });
 
-  it("the alias table matches docs/rules/README.md 'Outcome vocabulary mapping' and every file's vocabulary", () => {
+  it("the alias table matches docs/rules/README.md 'Outcome vocabulary mapping'; pending rows are known; files use only known names", () => {
     const readme = readFileSync(path.join(REPO_ROOT, "docs/rules/README.md"), "utf8");
     const section = readme.split(/^### Outcome vocabulary mapping\s*$/m)[1]?.split(/^#{1,3} /m)[0];
     expect(section, "README section '### Outcome vocabulary mapping' not found").toBeDefined();
-    const rows = [...(section ?? "").matchAll(/^\|\s*`([a-z_]+)`\s*\|\s*`([a-z_]+)`/gm)].map((m) => [m[1], m[2]]);
-    expect(rows.length).toBeGreaterThan(0);
-    expect(Object.fromEntries(rows)).toEqual({ ...FIXTURE_OUTCOME_ALIASES });
-    for (const s of SCENARIOS) {
-      expect([...loadRuleFixtureFile(s).outcomeVocabulary].sort()).toEqual(Object.keys(FIXTURE_OUTCOME_ALIASES).sort());
-    }
+    const tableRows = (section ?? "").split("\n").filter((l) => /^\|\s*`[a-z_]+`/.test(l));
+    const mapped = tableRows.flatMap((l) => {
+      const m = l.match(/^\|\s*`([a-z_]+)`[^|]*\|\s*`([a-z_]+)`/);
+      return m ? [[m[1], m[2]] as const] : [];
+    });
+    const pending = tableRows.filter((l) => /\|\s*\*\*none yet\*\*/.test(l)).map((l) => l.match(/`([a-z_]+)`/)![1]);
+    expect(mapped.length + pending.length, "every README row is either mapped or 'none yet'").toBe(tableRows.length);
+    expect(Object.fromEntries(mapped)).toEqual({ ...FIXTURE_OUTCOME_ALIASES });
+    expectOnlyKnown(pending, PENDING_OUTCOMES, "README 'none yet' outcome the loader does not know");
+    const known = [...Object.keys(FIXTURE_OUTCOME_ALIASES), ...PENDING_OUTCOMES];
+    for (const s of SCENARIOS) expectOnlyKnown(loadRuleFixtureFile(s).outcomeVocabulary, known, `${s} vocabulary entry`);
     expect([...new Set(Object.values(FIXTURE_OUTCOME_ALIASES))].sort()).toEqual([...CONTRACT_OUTCOMES].sort());
+  });
+
+  it("accepts every fact state docs/rules/README.md 'Fixture format' documents", () => {
+    const readme = readFileSync(path.join(REPO_ROOT, "docs/rules/README.md"), "utf8");
+    const m = readme.match(/state ∈ ([a-z_ |]+)/);
+    expect(m, "README 'state ∈ …' list not found").not.toBeNull();
+    const documented = m![1].split("|").map((x) => x.trim()).filter(Boolean);
+    expect(documented.length).toBeGreaterThanOrEqual(5);
+    expectOnlyKnown(documented, FACT_STATES, "README fact state the loader rejects");
   });
 });
 
@@ -230,7 +274,7 @@ describe("rule fixtures: drift fails loudly", () => {
 // Synthetic documents: resolution rules and every validation failure
 // ---------------------------------------------------------------------------
 
-const VOCAB = Object.keys(FIXTURE_OUTCOME_ALIASES);
+const VOCAB = [...Object.keys(FIXTURE_OUTCOME_ALIASES), ...PENDING_OUTCOMES];
 const fact = (value: unknown, type = "string", state = "user_confirmed") => ({ type, value, state });
 
 function doc(cases: unknown[]) {
@@ -272,6 +316,39 @@ describe("rule fixtures: synthetic documents", () => {
     expect(facts("RX-03")).toEqual({ a: "A", b: "B2", c: "C3" });
   });
 
+  it("variant context_change replaces named context entries; action defaults to evaluate; source record 'missing' and tier load", () => {
+    const d = {
+      ...doc([
+        kase("RX-01", {
+          context: { claims: [], history: { low: 1 } },
+          variants: [
+            { id: "RX-01a", action: "send_existing_claim", context_change: { claims: [{ status: "drafted" }] }, expected: { outcome: "deadline_passed" } },
+            { id: "RX-01b", source: { record: "missing" }, expected: { outcome: "source_unverified" } },
+          ],
+        }),
+      ]),
+      tier: "v1 legacy tier",
+    };
+    const file = parseRuleFixtureDocument(d, { scenario: "RX", relPath: "synthetic/RX.json" });
+    expect(file.tier).toBe("v1 legacy tier");
+    expect(byId(file, "RX-01").action).toBe("evaluate");
+    expect(byId(file, "RX-01").context).toEqual({ claims: [], history: { low: 1 } });
+    expect(byId(file, "RX-01a").action).toBe("send_existing_claim");
+    expect(byId(file, "RX-01a").context).toEqual({ claims: [{ status: "drafted" }], history: { low: 1 } });
+    expect(byId(file, "RX-01b").source).toEqual({ record: "missing" });
+    expect(byId(file, "RX-01b").context).toEqual({ claims: [], history: { low: 1 } });
+  });
+
+  it("maps likely_eligible_missing_evidence → likely_eligible per path and keeps the verbatim block", () => {
+    const file = parse([
+      kase("RX-01", { expected: { results: [{ path: "a", outcome: "eligible" }, { path: "b", outcome: "likely_eligible_missing_evidence" }], relationship: "distinct" } }),
+    ]);
+    const c = byId(file, "RX-01");
+    expect(c.expected.results?.map((r) => [r.path, r.outcome])).toEqual([["a", "eligible"], ["b", "likely_eligible"]]);
+    expect(c.expected.relationship).toBe("distinct");
+    expect(JSON.stringify(c.expectedAsWritten)).toContain("likely_eligible_missing_evidence");
+  });
+
   it("variant change replaces/adds facts for that variant only; the base case is unaffected", () => {
     const file = parse([
       kase("RX-01", {
@@ -308,11 +385,27 @@ describe("rule fixtures: synthetic documents", () => {
     ["fractional money inside expected", [kase("RX-01", { expected: { outcome: "eligible", amount: { estimate: { amount_minor: 1.5, currency: "USD" } } } })], /money at amount.estimate: amount_minor must be an integer/],
     ["a non-ISO currency inside expected", [kase("RX-01", { expected: { outcome: "eligible", amount: [{ amount_minor: 100, currency: "$" }] } })], /money at amount\[0\]: currency must be an ISO-4217 code/],
     ["a lower-case currency", [kase("RX-01", { facts: { m: fact({ amount_minor: 100, currency: "usd" }, "money") } })], /does not match type money/],
+    ["an unknown source shape", [kase("RX-01", { source: { record: "stale" } })], /source/],
   ];
 
   it.each(failures)("throws RuleFixtureError on %s", (_label, cases, message) => {
     expect(() => parse(cases)).toThrow(RuleFixtureError);
     expect(() => parse(cases)).toThrow(message);
+  });
+
+  it("passes a README 'none yet' outcome through unmapped and flags the fixture (not_yet_due, D147(6))", () => {
+    const file = parse([
+      kase("RX-01", {
+        expected: undefined,
+        variants: [
+          { id: "RX-01a", expected: { outcome: "not_yet_due", reevaluate_at: "2026-10-11" } },
+          { id: "RX-01b", expected: { outcome: "not_eligible" } },
+        ],
+      }),
+    ]);
+    expect(byId(file, "RX-01a").expected.outcome).toBe("not_yet_due");
+    expect(byId(file, "RX-01a").pendingContractOutcome).toBe(true);
+    expect(byId(file, "RX-01b").pendingContractOutcome).toBe(false);
   });
 
   it("rejects a vocabulary entry the alias table does not know", () => {

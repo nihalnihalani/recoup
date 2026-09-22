@@ -20,13 +20,16 @@
  *    `facts_from` + `facts_override` copy another case's resolved facts,
  *    then replace the named ones. A variant's `change` replaces the named
  *    facts for that variant only. `clock` and `source` on a variant override
- *    the case. A case with a top-level `expected` is itself runnable; each
+ *    the case; `context_change` replaces named `context` entries; `action`
+ *    defaults to "evaluate". A case with a top-level `expected` is itself runnable; each
  *    variant is runnable and must carry its own `expected` (nothing is
  *    inherited, and nothing is ever computed).
  *  - **Vocabulary.** Fixture outcome names map to the M01 contract's
  *    `evaluationOutcome` through the README alias table
- *    (`likely_eligible_missing_evidence` → `likely_eligible`). An unknown
- *    name throws. The verbatim `expected` stays in `expectedAsWritten`.
+ *    (`likely_eligible_missing_evidence` → `likely_eligible`). A README
+ *    "none yet" outcome (`not_yet_due`) passes through unmapped and marks the
+ *    fixture `pendingContractOutcome`. Any other unknown name throws. The
+ *    verbatim `expected` stays in `expectedAsWritten`.
  *
  * `now` is `Date.parse(clock)`. Inject it; evaluators never read the wall
  * clock (D138, README "Every fixture clock must be injected as `now`").
@@ -81,6 +84,18 @@ export const FIXTURE_OUTCOME_ALIASES: Readonly<Record<string, ContractOutcome>> 
   unsupported: "unsupported",
 });
 
+/**
+ * Fixture outcomes the README lists with "none yet" in the contract column:
+ * the name is valid in a fixture but the contract has no value for it, so it
+ * is passed through unmapped (never folded into another outcome) and the
+ * fixture is marked `pendingContractOutcome`. Evaluator tests should
+ * `it.todo`/skip those until the architect adds the outcome, then this entry
+ * moves into CONTRACT_OUTCOMES + FIXTURE_OUTCOME_ALIASES.
+ */
+export const PENDING_OUTCOMES = ["not_yet_due"] as const; // D147(6), README "Outcome vocabulary mapping"
+export type PendingOutcome = (typeof PENDING_OUTCOMES)[number];
+export type FixtureOutcome = ContractOutcome | PendingOutcome;
+
 /** Mission §17 fixture categories every rule file must cover (contract §9 activation gate, §10). Each entry lists the accepted category tags. */
 export const REQUIRED_CATEGORY_GROUPS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   positive: ["positive"],
@@ -89,14 +104,15 @@ export const REQUIRED_CATEGORY_GROUPS: Readonly<Record<string, readonly string[]
   contradictory_fact: ["contradictory_fact"],
   boundary_time: ["boundary_time"],
   unsupported: ["unsupported_jurisdiction", "unsupported_product", "unsupported_payment"],
-  stale_or_missing_source: ["stale_source", "stale_or_changing_source"],
+  stale_or_missing_source: ["stale_source", "stale_or_changing_source", "missing_source"],
   exclusion: ["exclusion"],
   duplicate_evaluation: ["duplicate_evaluation"],
   overlapping_remedy: ["overlapping_remedy"],
 });
 
-export const FACT_TYPES = ["enum", "string", "datetime", "date", "boolean", "integer", "money", "money[]", "object", "array"] as const;
-export const FACT_STATES = ["user_confirmed", "extracted_candidate", "derived", "missing", "conflicting"] as const;
+export const FACT_TYPES = ["enum", "string", "datetime", "date", "boolean", "integer", "money", "money[]", "observation", "object", "array"] as const;
+/** docs/rules/README.md "Fixture format" state list (cross-pack rule 2 maps each to a contract cell status). */
+export const FACT_STATES = ["user_confirmed", "observed", "derived", "extracted_candidate", "conflicting", "missing", "assumption"] as const;
 
 export type FixtureFact = {
   type: (typeof FACT_TYPES)[number];
@@ -105,13 +121,16 @@ export type FixtureFact = {
   candidates?: ReadonlyArray<{ value: unknown } & Record<string, unknown>>;
 } & Record<string, unknown>;
 
-export type FixtureSource = { last_verified_on: string; refresh_window_days: number; note?: string };
+/** Source-state override: a last-verified date + refresh window, or README cross-pack rule 8 (X5) "no current source record". */
+export type FixtureSource =
+  | { last_verified_on: string; refresh_window_days: number; note?: string }
+  | { record: "missing"; note?: string };
 
-export type FixturePathResult = { path: string; outcome: ContractOutcome } & Record<string, unknown>;
+export type FixturePathResult = { path: string; outcome: FixtureOutcome } & Record<string, unknown>;
 
-/** A fixture's `expected`, verbatim except that every outcome is in the contract vocabulary. */
+/** A fixture's `expected`, verbatim except that every outcome is in the contract vocabulary (or a pending outcome, see PENDING_OUTCOMES). */
 export type FixtureExpected = Record<string, unknown> &
-  ({ outcome: ContractOutcome; results?: undefined } | { outcome?: undefined; results: FixturePathResult[] });
+  ({ outcome: FixtureOutcome; results?: undefined } | { outcome?: undefined; results: FixturePathResult[] });
 
 /** One runnable fixture: a case with a top-level `expected`, or one variant. Deep-frozen. */
 export type RuleFixtureCase = {
@@ -128,10 +147,16 @@ export type RuleFixtureCase = {
   now: number;
   /** Source-freshness override, or null for "verified current" (file conventions). */
   source: FixtureSource | null;
+  /** What the fixture exercises: `"evaluate"` (default) or e.g. R01's `"send_existing_claim"`. */
+  action: string;
   facts: Readonly<Record<string, FixtureFact>>;
+  /** Non-fact state (existing claims, prior opportunities, ShopSavvy history): the case's `context` with the variant's `context_change` applied. `{}` when absent. Not copied by `facts_from`. */
+  context: Readonly<Record<string, unknown>>;
   expected: FixtureExpected;
+  /** True when any expected outcome is in PENDING_OUTCOMES (no contract value yet). */
+  pendingContractOutcome: boolean;
   expectedAsWritten: unknown;
-  /** Descriptive fields the loader does not interpret (`context`, `mission_domain_fixture`, `delta`, `day`, `delay`). */
+  /** Descriptive fields the loader does not interpret (`mission_domain_fixture`, `window_end`, `applies_from`, `delta`, `day`, `delay`, `drop`). */
   annotations: Readonly<Record<string, unknown>>;
   justification: unknown;
 };
@@ -143,6 +168,8 @@ export type RuleFixtureFile = {
   ruleId: string;
   ruleVersion: number;
   spec: string;
+  /** R01's evaluation tier label, else null. */
+  tier: string | null;
   outcomeVocabulary: readonly string[];
   sourceCaseCount: number;
   variantCount: number;
@@ -180,6 +207,8 @@ const valueSchemaByType: Record<FixtureFact["type"], z.ZodTypeAny> = {
   integer: z.number().int(),
   money,
   "money[]": z.array(money),
+  // R01 price observation: money plus variantMatch/confidence/isRange/… (accepted or rejected by the evaluator).
+  observation: money,
   object: z.record(z.unknown()),
   array: z.array(z.unknown()),
 };
@@ -214,9 +243,10 @@ const factSchema = z
 
 const factsSchema = z.record(factSchema);
 
-const sourceSchema = z
-  .object({ last_verified_on: isoDate, refresh_window_days: z.number().int().positive(), note: z.string().optional() })
-  .strict();
+const sourceSchema = z.union([
+  z.object({ last_verified_on: isoDate, refresh_window_days: z.number().int().positive(), note: z.string().optional() }).strict(),
+  z.object({ record: z.literal("missing"), note: z.string().optional() }).strict(),
+]);
 
 const pathResultSchema = z.object({ path: z.string().min(1), outcome: z.string() }).passthrough();
 const expectedSchema = z
@@ -225,8 +255,8 @@ const expectedSchema = z
   .refine((e) => (e.outcome === undefined) !== (e.results === undefined), "expected needs exactly one of `outcome` or `results`");
 
 /** Keys the loader does not interpret, carried through as annotations. Anything else unknown is an error. */
-const CASE_ANNOTATION_KEYS = ["context", "mission_domain_fixture"] as const;
-const VARIANT_ANNOTATION_KEYS = ["delta", "day", "delay"] as const;
+const CASE_ANNOTATION_KEYS = ["mission_domain_fixture", "window_end", "applies_from"] as const;
+const VARIANT_ANNOTATION_KEYS = ["delta", "day", "delay", "drop"] as const;
 
 const variantSchema = z
   .object({
@@ -234,11 +264,14 @@ const variantSchema = z
     change: factsSchema.optional(),
     clock: clock.optional(),
     source: sourceSchema.optional(),
+    action: z.string().min(1).optional(),
+    context_change: z.record(z.unknown()).optional(),
     expected: expectedSchema.optional(),
     justification: z.unknown().optional(),
     delta: z.unknown().optional(),
     day: z.unknown().optional(),
     delay: z.unknown().optional(),
+    drop: z.unknown().optional(),
   })
   .strict();
 
@@ -255,9 +288,12 @@ const caseSchema = z
     facts_override: factsSchema.optional(),
     expected: expectedSchema.optional(),
     variants: z.array(variantSchema).optional(),
+    action: z.string().min(1).optional(),
+    context: z.record(z.unknown()).optional(),
     justification: z.unknown().optional(),
-    context: z.unknown().optional(),
     mission_domain_fixture: z.unknown().optional(),
+    window_end: z.unknown().optional(),
+    applies_from: z.unknown().optional(),
   })
   .strict();
 
@@ -266,6 +302,7 @@ const documentSchema = z
     schema: z.literal("recoup.rule-fixtures/v1"),
     rule_id: z.string().min(1),
     rule_version: z.string().regex(/^v[1-9]\d*$/),
+    tier: z.string().min(1).optional(),
     spec: z.string().min(1),
     construction: z.unknown(),
     conventions: z.object({ outcome_vocabulary: z.array(z.string()).min(1), loader: z.string().min(1) }).passthrough(),
@@ -306,10 +343,15 @@ function formatZodError(err: z.ZodError): string {
 // Pure parsing / resolution (no I/O)
 // ---------------------------------------------------------------------------
 
-function toContractOutcome(fixtureOutcome: string, vocabulary: readonly string[], where: string): ContractOutcome {
+function isPendingOutcome(name: string): name is PendingOutcome {
+  return (PENDING_OUTCOMES as readonly string[]).includes(name);
+}
+
+function toContractOutcome(fixtureOutcome: string, vocabulary: readonly string[], where: string): FixtureOutcome {
   if (!vocabulary.includes(fixtureOutcome)) {
     throw new RuleFixtureError(where, `outcome "${fixtureOutcome}" is not in this file's conventions.outcome_vocabulary`);
   }
+  if (isPendingOutcome(fixtureOutcome)) return fixtureOutcome;
   const mapped = FIXTURE_OUTCOME_ALIASES[fixtureOutcome];
   if (!mapped) throw new RuleFixtureError(where, `outcome "${fixtureOutcome}" has no contract mapping (docs/rules/README.md alias table)`);
   return mapped;
@@ -380,7 +422,7 @@ export function parseRuleFixtureDocument(
   const d = parsed.data;
   const vocabulary = d.conventions.outcome_vocabulary;
   for (const name of vocabulary) {
-    if (!FIXTURE_OUTCOME_ALIASES[name]) {
+    if (!FIXTURE_OUTCOME_ALIASES[name] && !isPendingOutcome(name)) {
       throw new RuleFixtureError(where, `conventions.outcome_vocabulary entry "${name}" has no contract mapping (docs/rules/README.md alias table)`);
     }
   }
@@ -438,11 +480,12 @@ export function parseRuleFixtureDocument(
     };
     const caseAnnotations = Object.fromEntries(CASE_ANNOTATION_KEYS.filter((k) => c[k] !== undefined).map((k) => [k, c[k]]));
 
-    const push = (item: Omit<RuleFixtureCase, "now">, rawExpected: ParsedExpected, itemWhere: string) => {
+    const push = (item: Omit<RuleFixtureCase, "now" | "pendingContractOutcome">, rawExpected: ParsedExpected, itemWhere: string) => {
       assertMoneyShapes(item.facts, itemWhere);
       assertMoneyShapes(rawExpected, itemWhere);
       const now = Date.parse(item.clock);
-      cases.push(deepFreeze({ ...item, now }));
+      const outcomes = item.expected.outcome !== undefined ? [item.expected.outcome] : item.expected.results.map((r) => r.outcome);
+      cases.push(deepFreeze({ ...item, now, pendingContractOutcome: outcomes.some(isPendingOutcome) }));
     };
 
     if (c.expected !== undefined) {
@@ -455,7 +498,9 @@ export function parseRuleFixtureDocument(
           variantId: null,
           clock: c.clock,
           source: c.source ?? null,
+          action: c.action ?? "evaluate",
           facts: clone(caseFacts),
+          context: clone(c.context ?? {}),
           expected: normalizeExpected(c.expected, vocabulary, itemWhere),
           expectedAsWritten: clone(c.expected),
           annotations: clone(caseAnnotations),
@@ -478,7 +523,9 @@ export function parseRuleFixtureDocument(
           variantId: v.id,
           clock: vClock,
           source: v.source ?? c.source ?? null,
+          action: v.action ?? c.action ?? "evaluate",
           facts: { ...clone(caseFacts), ...(clone(v.change ?? {}) as Record<string, FixtureFact>) },
+          context: { ...clone(c.context ?? {}), ...clone(v.context_change ?? {}) },
           expected: normalizeExpected(v.expected, vocabulary, itemWhere),
           expectedAsWritten: clone(v.expected),
           annotations: clone({ ...caseAnnotations, ...variantAnnotations }),
@@ -497,6 +544,7 @@ export function parseRuleFixtureDocument(
     ruleId: d.rule_id,
     ruleVersion: Number(d.rule_version.slice(1)),
     spec: d.spec,
+    tier: d.tier ?? null,
     outcomeVocabulary: [...vocabulary],
     sourceCaseCount: d.cases.length,
     variantCount,
