@@ -10,9 +10,9 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 |---|---|---|---|
 | Lead | this session | – | active |
 | Product architect | opus-product-architect | 0 | idle (M01 delivered) |
-| Rules researcher | opus-rules-researcher | 0 | active |
+| Rules researcher | opus-rules-researcher | 0 | idle (M02 delivered) |
 | Security & privacy reviewer | opus-security-privacy-reviewer | 0 | idle (M03 delivered) |
-| QA engineer | opus-qa-engineer | 0 | active |
+| QA engineer | opus-qa-engineer | 0 | idle (M04 delivered) |
 | Devil's advocate | opus-devils-advocate | 0 (M05) | active |
 | Backend / ingestion / travel / commerce / benefits / frontend engineers | opus-* | 1+ | pending |
 | Release auditor | opus-release-auditor | 5 | pending |
@@ -23,9 +23,9 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 |---|---|---|---|---|---|---|
 | M00 | 0 | lead | – | Baseline at 18f3b46: runtime/model probe, gates | docs/team/** | verified (VERIFICATION.md 2026-09-23) |
 | M01 | 0 | opus-product-architect | – | Current-state map + smallest compatible transaction/evidence/fact/incident/rule/opportunity/case architecture; migration + IA; per-slice acceptance | docs/team/contracts/2026-09-23-M01-*.md | review (ca01232, 1,002 lines; lead read §1, §2.1–2.4, §11, §12; DA checkpoint A in progress; rulings on O1–O15 after M05) |
-| M02 | 0 | opus-rules-researcher | – | First-party rule research: Phase-1 rule specs R01–R05 with captured passages + fixtures; triage R06–R25 sources | docs/rules/** | in_progress |
+| M02 | 0 | opus-rules-researcher | – | First-party rule research: Phase-1 rule specs R01–R05 with captured passages + fixtures; triage R06–R25 sources | docs/rules/** | verified (9a1e913, c6bb660, 6c429c8; lead verified §260.2/§254.4/§1026.13/§435 passages and 12/12 source SHA-256; all packs `researched`, none active) |
 | M03 | 0 | opus-security-privacy-reviewer | – | P01/P02/P08/P09 reclassification on current revision; public endpoint inventory delta; threat model for upload/documents/new channels/sensitive domains | docs/reviews/2026-09-23-security-baseline.md | verified (793fc29; 367/367 P-suites; 7 throwaway repros; lead confirmed S-M03-1 in component source lib.ts:190-200) |
-| M04 | 0 | opus-qa-engineer | – | Fix the dated-`now` test time-bomb (tracking.test.ts ×2) and sweep for others; P03–P07/P10–P12 reclassification; test-harness inventory | convex/*.test.ts (fixture-clock fixes only), docs/reviews/2026-09-23-qa-baseline.md | in_progress |
+| M04 | 0 | opus-qa-engineer | – | Fix the dated-`now` test time-bomb (tracking.test.ts ×2) and sweep for others; P03–P07/P10–P12 reclassification; test-harness inventory | convex/*.test.ts (fixture-clock fixes only), docs/reviews/2026-09-23-qa-baseline.md | verified (f128bf4 time-bomb fix, lead re-ran tracking 13/13; 19499cf QA baseline) |
 | M05 | 0 | opus-devils-advocate | M01 | Checkpoint A: adversarial review of the M01 contract before implementation | docs/reviews/2026-09-23-da-checkpoint-A.md | in_progress |
 
 ---
