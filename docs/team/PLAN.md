@@ -584,7 +584,7 @@ release-candidate.md: commit SHA, tag `rc-<date>`, node/npm versions, lockfile s
 | ID | Owner | Status |
 |---|---|---|
 | M10 | opus-backend-engineer | in_progress (commit 1 schema 92993cb landed) |
-| M11 | opus-backend-engineer-2 | in_progress (from 92993cb) |
+| M11 | opus-backend-engineer-2 | verified (9d269a9; D164) · M11b in_progress (legacy-key answers, factsAnswer rate limit) |
 | M12 | opus-backend-engineer-3 | in_progress (pure modules first; integration after M10 ledger/claims + M11) |
 | M13 | opus-ingestion-integrations-engineer | pending (M10–M12, M1B) |
 | M14 | opus-backend-engineer-5 | verified (593de88; D163) · M14b in_progress (D75 sweep wedge) |
