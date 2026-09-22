@@ -1,7 +1,9 @@
 /**
  * M14 (SEC-UP-7, DA-A-28(d), contract rev 5 §2.6): the registry of every
- * application table field that references a `_storage` blob, plus the two
- * helpers every blob-deleting path shares.
+ * application table field that references a `_storage` blob, the reference
+ * check the orphan sweep uses, and (M14c, D173) the per-user lifetime
+ * stored-bytes counter plus `releaseEvidenceBlob`, the one place an evidence
+ * row gives up its blob.
  *
  * Why a registry: the daily orphan sweep (`retention.sweepOrphanBlobs`)
  * deletes every `_storage` blob older than `ORPHAN_BLOB_MIN_AGE_HOURS` that
@@ -22,7 +24,8 @@
  * component-held files are outside this registry by construction.
  */
 import type { MutationCtx, QueryCtx } from "../_generated/server";
-import type { Id, TableNames } from "../_generated/dataModel";
+import type { Doc, Id, TableNames } from "../_generated/dataModel";
+import { MAX_EVIDENCE_BYTES_PER_USER } from "../limits";
 
 export type BlobReference = {
   /** The table holding the reference. */
@@ -49,16 +52,71 @@ export async function isBlobReferenced(ctx: QueryCtx | MutationCtx, storageId: I
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Lifetime stored-bytes counter (D173, M14c)
+// ---------------------------------------------------------------------------
+
 /**
- * Deletes the blob if it still exists and reports whether it did. A missing
- * blob is not an error. It is the state a crash between "blob deleted" and
- * "row deleted/patched" leaves behind (SEC-DEL-2), and `ctx.storage.delete`
- * on a missing id throws, so every caller that re-runs after such a crash
- * must go through this check to converge.
+ * Per-user bytes of evidence blobs currently stored, on one never-reset `usage` row
+ * `{ userId, day: STORED_BYTES_DAY, kind: STORED_BYTES_KIND }` (the same "lifetime" shape as M13's
+ * `evidence_rows` count). It enforces `MAX_EVIDENCE_BYTES_PER_USER`:
+ *  - charged by `evidence.finalizeUpload` (M13) through `chargeStoredBytes`, for `_storage.size`, only when a blob
+ *    is actually bound (a new row or a DA-A-20 revive; never a duplicate or a refusal);
+ *  - released through `releaseEvidenceBlob` wherever a row loses its blob: retention's `clearEvidenceContent` and
+ *    the account purge's `deleteEvidencePage`. The orphan sweep releases nothing, because an orphan was never
+ *    bound and so never charged.
+ * The account purge deletes the row itself with every other `usage` row.
+ *
+ * No backfill: evidence uploads are new in this mission and no deployment holds uploaded evidence from before the
+ * counter existed, so every account starts correctly at 0 (D173).
  */
-export async function deleteBlobIfPresent(ctx: MutationCtx, storageId: Id<"_storage">): Promise<boolean> {
-  const meta = await ctx.db.system.get("_storage", storageId);
-  if (meta === null) return false;
-  await ctx.storage.delete(storageId);
+export const STORED_BYTES_DAY = "lifetime";
+export const STORED_BYTES_KIND = "evidence_stored_bytes";
+
+async function storedBytesRow(ctx: QueryCtx | MutationCtx, userId: Id<"users">): Promise<Doc<"usage"> | null> {
+  return await ctx.db
+    .query("usage")
+    .withIndex("by_user_day_kind", (q) => q.eq("userId", userId).eq("day", STORED_BYTES_DAY).eq("kind", STORED_BYTES_KIND))
+    .first();
+}
+
+/** The user's counted stored bytes (0 before the first charge). */
+export async function storedBytes(ctx: QueryCtx | MutationCtx, userId: Id<"users">): Promise<number> {
+  return (await storedBytesRow(ctx, userId))?.count ?? 0;
+}
+
+/**
+ * Charges `bytes` against `MAX_EVIDENCE_BYTES_PER_USER`, all or nothing: returns false and writes nothing when the
+ * charge would exceed the cap. For M13's `finalizeUpload`.
+ */
+export async function chargeStoredBytes(ctx: MutationCtx, userId: Id<"users">, bytes: number): Promise<boolean> {
+  if (!Number.isFinite(bytes) || bytes < 0) throw new Error("chargeStoredBytes: bytes must be a finite, non-negative number");
+  const row = await storedBytesRow(ctx, userId);
+  const used = row?.count ?? 0;
+  if (used + bytes > MAX_EVIDENCE_BYTES_PER_USER) return false;
+  if (row) await ctx.db.patch(row._id, { count: used + bytes });
+  else await ctx.db.insert("usage", { userId, day: STORED_BYTES_DAY, kind: STORED_BYTES_KIND, count: bytes });
   return true;
+}
+
+/** Releases `bytes`, clamped at 0. Never creates the row: with nothing counted there is nothing to release. */
+export async function releaseStoredBytes(ctx: MutationCtx, userId: Id<"users">, bytes: number): Promise<void> {
+  if (!Number.isFinite(bytes) || bytes <= 0) return;
+  const row = await storedBytesRow(ctx, userId);
+  if (!row || row.count === 0) return;
+  await ctx.db.patch(row._id, { count: Math.max(0, row.count - bytes) });
+}
+
+/**
+ * The one place an evidence row gives up its blob. It deletes the blob if it is still present, and releases the
+ * bytes `finalizeUpload` charged for it (`sizeBytes`, recorded from `_storage.size`; the live `_storage` size if
+ * that field is somehow missing). The CALLER must, in this same mutation, clear the row's `storageId` or delete the
+ * row. The release is keyed on that transition, not on whether the blob physically existed. A retried call finds
+ * the row without a `storageId` (or gone) and never reaches this function again, so bytes are never released twice.
+ */
+export async function releaseEvidenceBlob(ctx: MutationCtx, row: Doc<"evidence">): Promise<void> {
+  if (!row.storageId) return;
+  const meta = await ctx.db.system.get("_storage", row.storageId);
+  if (meta !== null) await ctx.storage.delete(row.storageId);
+  await releaseStoredBytes(ctx, row.userId, row.sizeBytes ?? meta?.size ?? 0);
 }

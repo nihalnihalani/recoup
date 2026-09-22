@@ -124,7 +124,7 @@ import { accountStateStatus } from "./schema";
 import { requireUserId } from "./lib/access";
 import { sanitizeError } from "./lib/errors";
 import { rateLimiter } from "./lib/rateLimits";
-import { deleteBlobIfPresent } from "./lib/blobRefs";
+import { releaseEvidenceBlob } from "./lib/blobRefs";
 import { RETENTION_PAGE, PROCESSED_EVENTS_PAGE, STUCK_DELETION_AGE_MS, STUCK_DELETION_REDRIVE_PAGE } from "./limits";
 
 const CONFIRMATION_PHRASE = "delete my account";
@@ -741,15 +741,17 @@ async function deleteMailLogPage(ctx: MutationCtx, userId: Id<"users">, cursor: 
  * without its blob or a blob without its row.
  *
  * Resumable: a row whose blob is already gone (a crash's aftermath, an
- * operator's manual delete) is not an error. `deleteBlobIfPresent` checks
+ * operator's manual delete) is not an error. `releaseEvidenceBlob` checks
  * `_storage` first, because `ctx.storage.delete` on a missing id throws and
- * would otherwise wedge this step for good.
+ * would otherwise wedge this step for good. It also releases the row's bytes
+ * from the lifetime stored-bytes counter (D173).
  */
 async function deleteEvidencePage(ctx: MutationCtx, userId: Id<"users">, cursor: string | null, numItems: number): Promise<{ deleted: number; isDone: boolean; continueCursor: string }> {
   const page = await paginateByUser(ctx, "evidence", "by_user_and_content_hash", userId, cursor, numItems);
   for (const row of page.page) {
-    const storageId = (row as Doc<"evidence">).storageId;
-    if (storageId) await deleteBlobIfPresent(ctx, storageId);
+    // D173: the blob goes, and its bytes leave the lifetime stored-bytes counter, in the same mutation that deletes
+    // the row, so a retried page finds the row gone and releases nothing twice.
+    await releaseEvidenceBlob(ctx, row as Doc<"evidence">);
     await deleteRow(ctx, row);
   }
   return { deleted: page.page.length, isDone: page.isDone, continueCursor: page.continueCursor };

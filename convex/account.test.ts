@@ -7,6 +7,7 @@ import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { inboxTransport } from "./account";
 import { EXPORT_EXEMPT, EXPORT_TABLE_NAMES, OUTSIDE_PURGE_STEPS, PURGE_STEPS } from "./account";
+import { chargeStoredBytes, storedBytes } from "./lib/blobRefs";
 import { WRONG_CREDENTIALS_MESSAGE } from "./auth";
 import { rateLimiter } from "./lib/rateLimits";
 import { RETENTION_PAGE, PROCESSED_EVENTS_PAGE, STUCK_DELETION_AGE_MS, STUCK_DELETION_REDRIVE_PAGE } from "./limits";
@@ -1972,4 +1973,54 @@ describe("M14 SEC-DEL-2 — purge removes the transaction-recovery tables and th
     expect(done).toBe(true);
     expect(await t.run((ctx) => ctx.db.query("evidence").collect())).toHaveLength(0);
   }, 60_000);
+});
+
+// ===========================================================================
+// M14c (D173): the purge releases each evidence blob's bytes from the lifetime
+// stored-bytes counter with its row; a retried page releases nothing twice;
+// the counter row itself is purged with every other `usage` row.
+// ===========================================================================
+
+describe("M14c (D173) — purge and the lifetime stored-bytes counter", () => {
+  it("the evidence step releases each row's sizeBytes with its blob, a retried evidence page releases nothing twice, and no counter row survives the purge", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 3; i++) {
+        const storageId = await ctx.storage.store(new Blob([`file ${i}`]));
+        await ctx.db.insert("evidence", {
+          userId: a.userId, kind: "upload", docType: "receipt", sourceChannel: "upload", provenance: "user_uploaded", storageId,
+          contentHash: String(i).padStart(64, "c"), sizeBytes: 1_000, receivedAt: T0, extractionStatus: "store_only", extractionAttempts: 0, retention: "active",
+        });
+      }
+      // 500 more than A's three rows: bytes the purge's evidence step must NOT release.
+      await chargeStoredBytes(ctx, a.userId, 3_500);
+      await chargeStoredBytes(ctx, b.userId, 2_000);
+    });
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+
+    const progressTable = async () =>
+      (await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first()))?.progress?.table;
+    for (let calls = 0; calls < 60 && (await progressTable()) !== "transactions"; calls++) {
+      await t.mutation(internal.account.purgeStep, { userId: a.userId });
+    }
+    expect(await progressTable()).toBe("transactions"); // the evidence step is done
+    expect(await t.run((ctx) => storedBytes(ctx, a.userId))).toBe(500);
+
+    // Retry the evidence step from its start, as a re-run after a lost ack would: the rows are gone, nothing is released again.
+    await t.run(async (ctx) => {
+      const row = (await ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first())!;
+      await ctx.db.patch(row._id, { progress: { table: "evidence" } });
+    });
+    await t.mutation(internal.account.purgeStep, { userId: a.userId });
+    expect(await t.run((ctx) => storedBytes(ctx, a.userId))).toBe(500);
+
+    let done = false;
+    for (let calls = 0; !done && calls < 80; calls++) done = (await t.mutation(internal.account.purgeStep, { userId: a.userId })).done;
+    expect(done).toBe(true);
+    const usageRows = await t.run((ctx) => ctx.db.query("usage").collect());
+    expect(usageRows.filter((r) => r.userId === a.userId)).toEqual([]);
+    expect(await t.run((ctx) => storedBytes(ctx, b.userId))).toBe(2_000);
+  });
 });
