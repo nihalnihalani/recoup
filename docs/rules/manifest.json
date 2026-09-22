@@ -8,10 +8,65 @@
       "ruleId": "R01.retail_price_adjustment",
       "scenarioId": "R01",
       "version": 1,
-      "lifecycle": "researched",
+      "lifecycle": "reviewed",
+      "packFile": "convex/lib/rules/r01_price_adjustment_v1.ts",
+      "packFileSha256": "c0ea84d560a6665691d19beecdfed1d31307ac7c52ac86435d66daddfe0bce50",
+      "reviewer": "opus-rules-reviewer",
+      "reviewedAt": "2026-09-23",
+      "reviews": {
+        "spec": [
+          {
+            "task": "M09",
+            "commit": "8fd1e3f"
+          },
+          {
+            "task": "M09b",
+            "commit": "4bcf07b"
+          },
+          {
+            "task": "M09c",
+            "commit": "337b4b1"
+          }
+        ],
+        "code": [
+          {
+            "task": "M18",
+            "commit": "6b7ac08",
+            "verdict": "changes_required"
+          },
+          {
+            "task": "M18b",
+            "commit": "444f0f5",
+            "verdict": "approve_for_activation"
+          }
+        ],
+        "note": "reviewed = independently reviewed against the captured first-party text and the approved spec; not legal certification. Activation is the lead's ACTIVATIONS entry. The nested merchantPacks (R01 v2 tier) are NOT covered by this review and stay researched."
+      },
       "spec": "docs/rules/R01-retail-price-adjustment.md",
       "fixtures": "docs/rules/fixtures/R01.json",
       "sources": [],
+      "fixturesTier": "v1 legacy snapshot tier (contract rev 4 \u00a72.7, task M1C)",
+      "dates": {
+        "published": "n/a (merchant pages)",
+        "effective": "per merchant pack (Best Buy 2026-09-02; others not displayed)",
+        "compliance": "n/a"
+      }
+    },
+    {
+      "ruleId": "R01v2.retail_price_adjustment.merchant_packs",
+      "scenarioId": "R01v2",
+      "version": 1,
+      "lifecycle": "researched",
+      "spec": "docs/rules/R01-retail-price-adjustment.md",
+      "fixtures": "docs/rules/fixtures/R01v2.json",
+      "tier": "R01 v2 reviewed merchant-pack tier (wave 3)",
+      "sources": [],
+      "refreshDays": 7,
+      "dates": {
+        "published": "n/a",
+        "effective": "per merchant pack",
+        "compliance": "n/a"
+      },
       "merchantPacks": [
         {
           "ruleId": "R01.bestbuy.all_channels",
@@ -138,29 +193,7 @@
           "url": "https://www.homedepot.com/c/price-match-and-price-check",
           "status": "no pack \u2192 unsupported"
         }
-      ],
-      "fixturesTier": "v1 legacy snapshot tier (contract rev 4 \u00a72.7, task M1C)",
-      "dates": {
-        "published": "n/a (merchant pages)",
-        "effective": "per merchant pack (Best Buy 2026-09-02; others not displayed)",
-        "compliance": "n/a"
-      }
-    },
-    {
-      "ruleId": "R01v2.retail_price_adjustment.merchant_packs",
-      "scenarioId": "R01v2",
-      "version": 1,
-      "lifecycle": "researched",
-      "spec": "docs/rules/R01-retail-price-adjustment.md",
-      "fixtures": "docs/rules/fixtures/R01v2.json",
-      "tier": "R01 v2 reviewed merchant-pack tier (wave 3)",
-      "sources": [],
-      "refreshDays": 7,
-      "dates": {
-        "published": "n/a",
-        "effective": "per merchant pack",
-        "compliance": "n/a"
-      }
+      ]
     },
     {
       "ruleId": "R02.airline_fare_refund.us_dot",

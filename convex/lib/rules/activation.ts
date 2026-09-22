@@ -14,4 +14,6 @@
  */
 export type Activation = { ruleId: string; version: number; status: "active" | "withdrawn"; decision: string };
 
-export const ACTIVATIONS: readonly Activation[] = [];
+export const ACTIVATIONS: readonly Activation[] = [
+  { ruleId: "R01.retail_price_adjustment", version: 1, status: "active", decision: "D186" },
+];

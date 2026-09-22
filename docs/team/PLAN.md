@@ -584,14 +584,14 @@ release-candidate.md: commit SHA, tag `rc-<date>`, node/npm versions, lockfile s
 | ID | Owner | Status |
 |---|---|---|
 | M10 | opus-backend-engineer | verified (ad18d14; D165) |
-| M11 | opus-backend-engineer-2 | verified (9d269a9; D164) · M11b verified (3779a1e; D167) |
+| M11 | opus-backend-engineer-2 | verified (9d269a9; D164) · M11b verified (3779a1e; D167) · M11d verified (90acfee; D180) |
 | M12 | opus-backend-engineer-3 | verified (04e9a17; D179) |
-| M13 | opus-ingestion-integrations-engineer | in_progress (deliverables 1–3 on main: b395d43, d5b6204, b327c12; 4 = prepareSend + stored-bytes charge) |
+| M13 | opus-ingestion-integrations-engineer | verified (4 deliverables; 1cf3f63; D182) |
 | M14 | opus-backend-engineer-5 | verified (593de88; D163) · M14b verified (2f72232; D166) · M14c verified (18b4c3b; D176) |
 | M15 | opus-frontend-ux-engineer | in_progress (independent parts first) |
-| M16 | opus-qa-engineer | pending (M10–M15) |
+| M16 | opus-qa-engineer | in_progress (backend parts; browser spec after M15) |
 | M17 | opus-devils-advocate | pending (checkpoint B) |
-| M18 | opus-rules-reviewer | in_progress |
+| M18 | opus-rules-reviewer | changes_required (6b7ac08; D183) → M12b fix → M18b re-check |
 | M19 | opus-qa-engineer | verified (9c19b74, 1330ac1; D170) |
 | M1A | opus-ingestion-integrations-engineer-2 | verified (ccdd61f; 99/99; D149) |
 | M1B | opus-backend-engineer-4 | verified (34a2f87 via lead integration feaa52a; D156) |
