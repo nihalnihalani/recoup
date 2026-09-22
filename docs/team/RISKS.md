@@ -12,3 +12,11 @@
 | K08 | Sensitive domains (medical, financial statements) ingested without safeguards | medium | critical | R17 gated; statements parsed with minimum-necessary fields; retention/deletion extended to evidence | security | open |
 | K09 | Model substitution for teammates goes unnoticed | low | medium | alias probe (D135); first-line model report in every teammate report | lead | open |
 | K10 | Co-author (Charlie Gillet) pushes concurrently to main | medium | medium | fetch+merge (never rebase) before every push; no force-push | lead | open |
+| KM1 | R01 retrofit changes auto-open behaviour | medium | high | parity test against 5cc326d fixtures is a hard gate | backend + QA | open (M01) |
+| KM2 | widening ledger kinds silently counts new kinds as debits (`balance()` else-branch) | medium | critical | exhaustive switch in the same commit + every-kind test | backend | open (M01) |
+| KM3 | material-change version bumps invalidate drafts on price churn | medium | medium | materiality excludes estimate drift while a case is active; bump-count test | backend | open (M01) |
+| KM6 | upload abuse / cost | medium | high | tickets, rate limit, size/page caps, per-user storage cap, budgets, statements store-only | integrations + security | open (M01, M03) |
+| KM7 | rollback after the first scenario claim is unsafe | medium | medium | forward-fix policy; wave-2 deploy only after checkpoint C | lead | open (M01) |
+| KM8 | rule-pack immutability relies on a script CI cannot run (missing secrets) | medium | medium | lead runs `scripts/check-rule-packs.mjs` at every wave close | lead | open (M01) |
+| KM10 | a Phase-1 source cannot be verified | medium | high | pack stays `researched`; evaluator returns `source_unverified`; never marked implemented_verified | rules + lead | open (M01) |
+| KS1 | provider retry re-sends mail after a lost response (S-M03-1) | medium | high | retryAttempts 1; ambiguous → unknown | integrations | open (M03) |
