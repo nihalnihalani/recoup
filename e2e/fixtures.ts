@@ -242,11 +242,20 @@ export function leadEmailFor(projectName: string): string {
   return slug.length === 0 ? SEEDED_EMAIL : `e2e.lead.${slug}@example.com`;
 }
 
+/**
+ * How many times this worker has (re)created a lead account. `seedLead` resets the account, which deletes its
+ * sessions, so a worker-scoped page signed in under an earlier generation holds a dead session (M16 finding
+ * QA-M16-2): it keeps showing the old authenticated shell until its next full load, then lands on the sign-in
+ * screen. `leadPage` compares generations and signs in again when they differ.
+ */
+let leadSeedGeneration = 0;
+
 /** Seeds (after a clean reset) a fresh copy of the read-mostly lead fixture set at `email` (default `e2e.lead@example.com`; see `leadEmailFor` for the per-project address actually used by specs/fixtures below). */
 export function seedLead(email: string = SEEDED_EMAIL): SeedFixturesResult & { userId: string; email: string } {
   resetUser(email);
   const { userId } = seedUser(email, SEEDED_PASSWORD);
   const fixtures = seedFixtures(userId);
+  leadSeedGeneration += 1;
   return { userId, email, ...fixtures };
 }
 
@@ -266,6 +275,22 @@ export function newE2EEmail(): string {
 // ---------------------------------------------------------------------------
 // UI-driving helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * One explicit "the app has settled" wait (M16): after a full page load the app shows `AuthLoading`, then either
+ * the sign-in screen or the authenticated shell. Waits for whichever comes first within `budgetMs`, logs how long
+ * it took (so deployment latency shows up in the run log instead of as a mystery timeout), and says which.
+ */
+export async function waitForAppReady(page: Page, budgetMs = 20_000): Promise<"authenticated" | "signin"> {
+  const started = Date.now();
+  const shell = page.getByRole("navigation", { name: "Breadcrumb" });
+  const signIn = page.getByRole("heading", { name: "Welcome back" });
+  await expect(shell.or(signIn).first()).toBeVisible({ timeout: budgetMs });
+  const state = (await shell.isVisible().catch(() => false)) ? "authenticated" : "signin";
+  // eslint-disable-next-line no-console
+  console.log(`[e2e] app ready (${state}) in ${Date.now() - started} ms`);
+  return state;
+}
 
 /**
  * Visible once `<Authenticated>` has swapped the sign-in screen out for the
@@ -370,6 +395,9 @@ type Fixtures = {
   leadPage: Page;
 };
 
+/** The lead seed generation each worker-scoped page last signed in under (see `leadSeedGeneration`). */
+const signedInGeneration = new WeakMap<Page, number>();
+
 export const test = base.extend<Fixtures, { leadContext: BrowserContext }>({
   // Playwright requires the first parameter to be an object-destructuring
   // pattern (it statically parses the function source to infer fixture
@@ -414,21 +442,29 @@ export const test = base.extend<Fixtures, { leadContext: BrowserContext }>({
   ],
 
   leadPage: async ({ leadContext }, provide, testInfo) => {
-    // Sign in exactly once: a second `signInSeeded` on an already-authenticated
-    // page would just redundantly consume the rate limit, so only do it the
-    // first time this worker asks for the fixture. The breadcrumb landmark
-    // (see `expectAuthenticated`) is used rather than the sidebar's "Sign
-    // out" button because the latter is not visible until the mobile
-    // drawer is opened.
-    const alreadySignedIn = await leadContext
-      .pages()[0]
-      ?.getByRole("navigation", { name: "Breadcrumb" })
-      .isVisible()
-      .catch(() => false);
+    // Sign in once per lead ACCOUNT, not once per worker (M16, QA-M16-2). Every spec file's `beforeAll` runs
+    // `seedLead`, which recreates the account and deletes its sessions; the old check ("is the breadcrumb
+    // visible?") read a page still showing the previous account's shell, skipped the sign-in, and the spec's first
+    // navigation then landed on the sign-in screen: the first test of every spec after the first failed and passed
+    // on retry (a fresh worker). Now: same seed generation → reuse the page as before (one sign-in per spec file,
+    // well inside the per-email `authAttempt` limit); a newer generation → drop the dead session and sign in.
     const page = leadContext.pages()[0] ?? (await leadContext.newPage());
-    // Same project-scoped address every spec file's own `beforeAll` seeds
-    // via `seedLead(leadEmailFor(...))` -- see `leadEmailFor`'s doc comment.
-    if (!alreadySignedIn) await signInSeeded(page, leadEmailFor(testInfo.project.name));
+    const current =
+      signedInGeneration.get(page) === leadSeedGeneration &&
+      (await page.getByRole("navigation", { name: "Breadcrumb" }).isVisible().catch(() => false));
+    if (!current) {
+      await page.goto("/");
+      if ((await waitForAppReady(page)) === "authenticated") {
+        // A stale session can still render the shell until the server rejects it: clear it instead of waiting.
+        await page.evaluate(() => window.localStorage.clear());
+        await page.goto("/");
+        await waitForAppReady(page);
+      }
+      // Same project-scoped address every spec file's own `beforeAll` seeds
+      // via `seedLead(leadEmailFor(...))` -- see `leadEmailFor`'s doc comment.
+      await signInSeeded(page, leadEmailFor(testInfo.project.name));
+      signedInGeneration.set(page, leadSeedGeneration);
+    }
     await provide(page);
   },
 });
