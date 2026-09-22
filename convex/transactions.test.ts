@@ -37,7 +37,6 @@ const SOURCES = import.meta.glob<string>(["./**/*.ts", "!./**/*.test.ts", "!./_g
  * deletes its entry in the same commit that adds the call; the test below fails while an entry is stale.
  */
 const PENDING_ENSURE: Record<string, string> = {
-  "./intake.ts": "M13 — intake.applyOrder creates the needs_review purchase (contract §7)",
   "./testing.ts": "M16 — e2e seeders (contract §11.1 M16)",
 };
 
