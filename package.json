@@ -22,7 +22,8 @@
     "codegen:check": "node scripts/check-codegen.mjs",
     "smoke": "node scripts/smoke.mjs",
     "e2e": "playwright test",
-    "deploy": "npx @convex-dev/static-hosting deploy"
+    "deploy": "npx @convex-dev/static-hosting deploy",
+    "deploy:dev": "node scripts/check-rule-packs.mjs && npm run typecheck && vitest run && convex dev --once"
   },
   "dependencies": {
     "@agentmail/convex": "0.1.0",

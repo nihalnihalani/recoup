@@ -585,14 +585,16 @@ release-candidate.md: commit SHA, tag `rc-<date>`, node/npm versions, lockfile s
 |---|---|---|
 | M10 | opus-backend-engineer | verified (ad18d14; D165) |
 | M11 | opus-backend-engineer-2 | verified (9d269a9; D164) · M11b verified (3779a1e; D167) · M11d verified (90acfee; D180) |
-| M12 | opus-backend-engineer-3 | verified (04e9a17; D179) |
-| M13 | opus-ingestion-integrations-engineer | verified (4 deliverables; 1cf3f63; D182) |
+| M12 | opus-backend-engineer-3 | verified (04e9a17; D179) · M12c landed (9acc16b/01db658; QA-M16-1 paid cap; lead re-verify at wave close) · M12d part 1 landed (cb9969b/91f69de: DA-B-4, DA-B-7, DA-B-6a+b; D197) · part 2 pending M13b (review_amount + re-pin field) · M12e queued (DA-B-8/13/14; D195) |
+| M13 | opus-ingestion-integrations-engineer | verified (4 deliverables; 1cf3f63; D182) · M13b in_progress (DA-B-1/2/3/5; D190, D194; wave-1 close blocker) · M13c queued (DA-B-11; D195) |
 | M14 | opus-backend-engineer-5 | verified (593de88; D163) · M14b verified (2f72232; D166) · M14c verified (18b4c3b; D176) |
-| M15 | opus-frontend-ux-engineer | in_progress (independent parts first) |
-| M16 | opus-qa-engineer | in_progress (backend parts; browser spec after M15) |
-| M17 | opus-devils-advocate | pending (checkpoint B) |
-| M18 | opus-rules-reviewer | changes_required (6b7ac08; D183) → M12b fix → M18b re-check |
+| M15 | opus-frontend-ux-engineer | verified (886f918; D187) · M15b in_progress (refund one-tap in Settings [wave-1 close blocker], review_amount card, Composer amount ack polish; D194) · M15c queued (DA-B-8/9/10/12/13 UI; D195) |
+| M16 | opus-qa-engineer | in_progress (deliverables 1–4 on main, D188; browser spec + upload hash + locale fix next) |
+| M17 | opus-devils-advocate | verified: backend accept-with-conditions (dee6f9f; D190) · UI accept-with-conditions (78f718b; D195) · M17b recheck pending at wave close |
+| M18 | opus-rules-reviewer | verified: M18b approve_for_activation (444f0f5) → R01 v1 ACTIVE (71f1d2a, D186) |
 | M19 | opus-qa-engineer | verified (9c19b74, 1330ac1; D170) |
 | M1A | opus-ingestion-integrations-engineer-2 | verified (ccdd61f; 99/99; D149) |
 | M1B | opus-backend-engineer-4 | verified (34a2f87 via lead integration feaa52a; D156) |
 | M1C | opus-rules-researcher | done (72fe1a2; → M09b re-review with M2D) |
+| M21 | opus-commerce-payments-engineer | in_progress (early start D192: R05 then R03 pure packs; packets wait for M20) |
+| M22 | opus-travel-engineer | in_progress (early start D192: R02 then R04 pure packs; packets wait for M20) |

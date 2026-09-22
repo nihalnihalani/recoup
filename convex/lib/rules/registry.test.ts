@@ -60,12 +60,14 @@ describe("production registry (DA-A-11)", () => {
 describe("module boundaries (grep tests)", () => {
   const files = walk(path.join(REPO_ROOT, "convex"));
 
-  it("testRegistry is imported only by *.test.ts files", () => {
+  it("testRegistry is imported only by *.test.ts files (named, dynamic or bare side-effect imports)", () => {
     const offenders = files
       .filter((f) => !f.endsWith(".test.ts") && !f.endsWith("testRegistry.ts"))
       .filter((f) => {
         const code = readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-        return /from\s+["'][^"']*testRegistry["']|import\(\s*["'][^"']*testRegistry["']\s*\)/.test(code);
+        // `import … from "…testRegistry"`, a dynamic `import("…testRegistry")`, and a bare side-effect
+        // `import "…testRegistry"` (DA-B-4) all count.
+        return /from\s+["'][^"']*testRegistry["']|import\(\s*["'][^"']*testRegistry["']\s*\)|\bimport\s+["'][^"']*testRegistry["']/.test(code);
       })
       .map(rel);
     expect(offenders).toEqual([]);

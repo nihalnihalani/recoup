@@ -52,6 +52,7 @@ import { MAX_BOUND_FACTS, MAX_ITEMS_PER_PURCHASE, MAX_LOSS_KEYS } from "./limits
 import { openClaim } from "./claims";
 import { recordRuleEvaluationFailure } from "./ops";
 import { ensurePurchaseTransaction } from "./transactions";
+import { closurePatch } from "./lib/opportunityClosure";
 import { rateLimiter } from "./lib/rateLimits";
 
 export type EvaluationTrigger = Infer<typeof schema.tables.evaluations.validator.fields.trigger>;
@@ -324,21 +325,6 @@ export async function materialChange(
   const prevHash = await boundFactsHash(prev.boundFacts ?? []);
   if (prevHash !== nextBoundFactsHash) return "the facts the claim relies on changed";
   return null;
-}
-
-/**
- * Re-reads the opportunity's case: a confirmed (or non-cash resolved) claim closes it; a dismissed or denied one
- * reopens it (§2.8 Closing). Returns the patch to apply.
- */
-async function closurePatch(ctx: MutationCtx, opp: Doc<"opportunities">): Promise<Partial<Doc<"opportunities">>> {
-  if (!opp.activeClaimId) return {};
-  const claim = await ctx.db.get(opp.activeClaimId);
-  if (claim && !isClosedForAsk(claim)) return {};
-  // `nonCashResolvedAt` arrives with the wave-2 schema (M20, DA-A-18); read structurally until then.
-  if (claim && (claim.status === "confirmed" || (claim as { nonCashResolvedAt?: number }).nonCashResolvedAt !== undefined)) {
-    return { status: "closed", activeClaimId: undefined };
-  }
-  return { status: "open", activeClaimId: undefined };
 }
 
 export async function evaluateTransaction(

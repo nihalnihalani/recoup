@@ -42,7 +42,9 @@ test.describe("claims", () => {
     const messageCard = page.locator("section").filter({ has: page.getByRole("heading", { name: "Message to the store", level: 2 }) });
     await messageCard.getByRole("button", { name: "Write the message" }).click();
 
-    const errorAlert = messageCard.getByRole("alert");
+    // `.first()`: more than one alert can be on the card at once (M15 note: a real AI draft can also raise the
+    // SEC-AI-4 `unverified_content` notice), and a bare `getByRole("alert")` is a strict-mode error with two matches.
+    const errorAlert = messageCard.getByRole("alert").first();
     const toField = messageCard.getByLabel("To");
     await Promise.race([
       errorAlert.waitFor({ state: "visible", timeout: 30_000 }).catch(() => undefined),
@@ -58,7 +60,8 @@ test.describe("claims", () => {
 
       await toField.fill("someone-else@not-e2e-claim.example");
       await messageCard.getByRole("button", { name: "Approve & send" }).click();
-      await expect(messageCard.getByRole("alert")).toContainText("Confirm this recipient before sending");
+      // Match the refusal by its text, not "the only alert": an `unverified_content` notice may be shown beside it.
+      await expect(messageCard.getByRole("alert").filter({ hasText: "Confirm this recipient before sending" })).toBeVisible();
     } else {
       // FINDING: none -- expected, truthful outcome. The deployment's OpenAI
       // key is a placeholder (D83 item 3), so draft generation genuinely

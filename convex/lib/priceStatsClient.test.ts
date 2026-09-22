@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
 import { boughtVerdict, claimThresholdCents, priceStats } from "../../src/lib/priceStats";
+import { pinDefaultLocale } from "../../src/test/locale";
+
+// The verdict text is formatted in the machine's default locale; the assertions are en-US strings ("20.00").
+// Pinned (M16, D189): under LANG=de_DE.UTF-8 this file failed with "20,00 $ below what you paid".
+pinDefaultLocale("en-US");
 
 const DAY = 24 * 60 * 60 * 1000;
 const T0 = Date.UTC(2026, 8, 1);
