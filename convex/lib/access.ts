@@ -1,6 +1,6 @@
 import { ConvexError } from "convex/values";
 import { getAuthUserId } from "@convex-dev/auth/server";
-import type { Id } from "../_generated/dataModel";
+import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { isTombstoned } from "./accountState";
 
@@ -53,4 +53,73 @@ export async function ownedWatch(ctx: Ctx, watchId: Id<"watches">, userId: Id<"u
   const w = await ctx.db.get(watchId);
   if (!w || w.userId !== userId) throw new ConvexError("Watch not found");
   return w;
+}
+
+// ---------------------------------------------------------------------------
+// M10 (contract rev 5 §11.1; mission §6 Ownership). One indexed-by-id read per
+// helper (`ctx.db.get(table, id)`), no query. A missing row and another user's
+// row throw the IDENTICAL `ConvexError("<X> not found")`, so a caller learns
+// nothing about ids it does not own. A valid id is never authorization.
+// ---------------------------------------------------------------------------
+
+type OwnedTable = "transactions" | "evidence" | "facts" | "incidents" | "opportunities" | "evaluations" | "nonCashRemedies";
+
+async function ownedRow<T extends OwnedTable>(
+  ctx: Ctx,
+  table: T,
+  id: Id<T>,
+  userId: Id<"users">,
+  notFound: string,
+): Promise<Doc<T>> {
+  const row: Doc<T> | null = await ctx.db.get(table, id);
+  // Every OwnedTable declares a required `userId` (schema.ts); the generic Doc<T> cannot express that.
+  const owner = (row as unknown as { userId: Id<"users"> } | null)?.userId;
+  if (!row || owner !== userId) throw new ConvexError(notFound);
+  return row;
+}
+
+export async function ownedTransaction(ctx: Ctx, transactionId: Id<"transactions">, userId: Id<"users">) {
+  return await ownedRow(ctx, "transactions", transactionId, userId, "Transaction not found");
+}
+
+/** Returns the row whatever its `retention`; download/preview paths add their own content_deleted check (§2.6). */
+export async function ownedEvidence(ctx: Ctx, evidenceId: Id<"evidence">, userId: Id<"users">) {
+  return await ownedRow(ctx, "evidence", evidenceId, userId, "Evidence not found");
+}
+
+export async function ownedFact(ctx: Ctx, factId: Id<"facts">, userId: Id<"users">) {
+  return await ownedRow(ctx, "facts", factId, userId, "Fact not found");
+}
+
+export async function ownedIncident(ctx: Ctx, incidentId: Id<"incidents">, userId: Id<"users">) {
+  return await ownedRow(ctx, "incidents", incidentId, userId, "Incident not found");
+}
+
+export async function ownedOpportunity(ctx: Ctx, opportunityId: Id<"opportunities">, userId: Id<"users">) {
+  return await ownedRow(ctx, "opportunities", opportunityId, userId, "Opportunity not found");
+}
+
+export async function ownedEvaluation(ctx: Ctx, evaluationId: Id<"evaluations">, userId: Id<"users">) {
+  return await ownedRow(ctx, "evaluations", evaluationId, userId, "Evaluation not found");
+}
+
+export async function ownedNonCashRemedy(ctx: Ctx, remedyId: Id<"nonCashRemedies">, userId: Id<"users">) {
+  return await ownedRow(ctx, "nonCashRemedies", remedyId, userId, "Remedy not found");
+}
+
+/**
+ * DA-A-29: a record cited for a transaction must belong to THAT transaction. Call it after the owned* check
+ * (ownership is not re-read here). Returns `"same"`, or `"unlinked"` for a row with no `transactionId` when
+ * `allowUnlinked` is set (evidence may be cited while unlinked and is then linked on cite, §2.5). Anything else —
+ * another transaction's row, or an unlinked row where that is not allowed — throws
+ * `ConvexError("<label> belongs to a different transaction")`. Pure: no reads.
+ */
+export function assertSameTransaction(
+  transactionId: Id<"transactions">,
+  row: { transactionId?: Id<"transactions"> },
+  opts: { allowUnlinked?: boolean; label?: string } = {},
+): "same" | "unlinked" {
+  if (row.transactionId === transactionId) return "same";
+  if (row.transactionId === undefined && opts.allowUnlinked) return "unlinked";
+  throw new ConvexError(`${opts.label ?? "That record"} belongs to a different transaction`);
 }
