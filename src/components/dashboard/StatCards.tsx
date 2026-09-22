@@ -171,7 +171,7 @@ export function StatCards({
           value={recoveredLines.length > 0 ? <CurrencyLines lines={recoveredLines} /> : <span className="text-gray-500">—</span>}
           context={
             recoveredLines.length > 0
-              ? "back on your card, as you confirmed it"
+              ? "back to your card or account, as you confirmed it"
               : onlyExamples
                 ? "nothing yet — the example is never counted"
                 : "nothing confirmed back yet"
@@ -206,7 +206,7 @@ const TILES: readonly { key: TileKey; label: string; hint: string }[] = [
   { key: "potential", label: "Potential", hint: "estimated, not guaranteed" },
   { key: "ready", label: "Ready to ask", hint: "an open claim not sent yet" },
   { key: "sendingOrUnknown", label: "Sending or unknown", hint: "not confirmed as sent" },
-  { key: "asked", label: "Asked", hint: "sent or submitted, no answer yet" },
+  { key: "asked", label: "Asked", hint: "sent or submitted; no money yet" },
   { key: "promised", label: "Promised", hint: "promised to you; not received yet" },
 ];
 
