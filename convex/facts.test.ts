@@ -331,19 +331,50 @@ describe("putFact — supersede rules and the live count", () => {
 });
 
 describe("putFact — the live cap (DA-A-36)", () => {
+  // Heavy fixtures (≈1,000 rows seeded in one t.run): cheap locally (~0.1–0.3 s) but slower under the full CI suite,
+  // so they carry an explicit 30 s timeout instead of vitest's 5 s default.
+  const HEAVY_TEST_TIMEOUT_MS = 30_000;
+
   it("the 1,001st correction is accepted: superseded rows never count toward the cap", async () => {
     const t = setup();
     const r = await retail(t);
-    const q = { transactionId: r.transactionId, subjectKey: r.item, key: "retail.unit_price", state: "user_confirmed" as const, source: user };
-    for (let batch = 0; batch < 11; batch++) {
-      await t.run(async (ctx) => {
-        for (let i = 0; i < 91; i++) await putFact(ctx, r.userId, { ...q, value: usd(10_000 + batch * 91 + i) });
-      });
-    }
-    // 11 × 91 = 1,001 corrections of one cell.
+    // 1,000 corrections already made on one cell: 999 superseded rows + the current one (seeded directly — the cap
+    // rule is what is under test; the supersede path through the writer is exercised by the 50-correction test below).
+    await t.run(async (ctx) => {
+      let previous: Id<"facts"> | null = null;
+      for (let i = 0; i < MAX_LIVE_FACTS_PER_TRANSACTION; i++) {
+        const id: Id<"facts"> = await ctx.db.insert("facts", {
+          userId: r.userId, transactionId: r.transactionId, subjectKey: r.item, key: "retail.unit_price",
+          state: "user_confirmed", value: usd(10_000 + i), source: user, recordedAt: Date.now(),
+        });
+        if (previous !== null) await ctx.db.patch(previous, { state: "superseded", supersededBy: id });
+        previous = id;
+      }
+      await ctx.db.patch(r.transactionId, { liveFactCount: 1 });
+    });
+    expect(await rows(t, r.transactionId)).toHaveLength(MAX_LIVE_FACTS_PER_TRANSACTION);
+    // The 1,001st, through the real writer: rev 3 counted every row (1,000 + 1 > cap) and refused it.
+    const res = await put(t, r.userId, { transactionId: r.transactionId, subjectKey: r.item, key: "retail.unit_price", state: "user_confirmed", value: usd(9_999), source: user });
+    expect(res.outcome).toBe("inserted");
     const all = await rows(t, r.transactionId);
-    expect(all).toHaveLength(1_001);
-    expect(all.filter((x) => x.state !== "superseded")).toHaveLength(1);
+    expect(all).toHaveLength(MAX_LIVE_FACTS_PER_TRANSACTION + 1);
+    expect(all.filter((x) => x.state !== "superseded").map((x) => x._id)).toEqual([res.factId]);
+    expect(await liveCount(t, r.transactionId)).toBe(1);
+  }, HEAVY_TEST_TIMEOUT_MS);
+
+  it("50 corrections through putFact: each supersedes the last, one live row, liveFactCount stays 1", async () => {
+    const t = setup();
+    const r = await retail(t);
+    const q = { transactionId: r.transactionId, subjectKey: r.item, key: "retail.unit_price", state: "user_confirmed" as const, source: user };
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 50; i++) await putFact(ctx, r.userId, { ...q, value: usd(10_000 + i) });
+    });
+    const all = await rows(t, r.transactionId);
+    expect(all).toHaveLength(50);
+    const live = all.filter((x) => x.state !== "superseded");
+    expect(live.map((x) => x.value)).toEqual([usd(10_049)]);
+    // Every superseded row points at the correction that replaced it.
+    for (let i = 0; i < 49; i++) expect(all[i].supersededBy).toBe(all[i + 1]._id);
     expect(await liveCount(t, r.transactionId)).toBe(1);
   });
 
@@ -370,7 +401,7 @@ describe("putFact — the live cap (DA-A-36)", () => {
     expect((await put(t, r.userId, { ...obs, value: usd(7000) })).outcome).toBe("patched");
     expect((await put(t, r.userId, { ...obs, value: usd(6000) })).outcome).toBe("inserted");
     expect(await liveCount(t, r.transactionId)).toBe(MAX_LIVE_FACTS_PER_TRANSACTION);
-  });
+  }, HEAVY_TEST_TIMEOUT_MS);
 });
 
 describe("facts public functions (ownership, D142, DA-A-1)", () => {
