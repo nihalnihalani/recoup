@@ -1,23 +1,32 @@
 // @vitest-environment happy-dom
 /**
- * M15 (D164, DA-A-33, D167): the purchase details form sends an explicit, user-visible currency to
+ * M15 (D164, DA-A-33, D167; contract §9): the purchase details form sends an explicit, user-visible currency to
  * `purchases.confirm`, parses prices without floating point, and doubles as the edit path for facts the purchase
- * record backs (`?edit=details`).
+ * record backs (`?edit=details`); each item carries its recovery-path cards from `opportunities.forPurchase`, and
+ * the page lists the paths not checked.
  */
 import { getFunctionName, type FunctionReference } from "convex/server";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Id } from "../../convex/_generated/dataModel";
-import { fireEvent, render, screen, waitFor } from "../test/dom";
+import { fireEvent, render, screen, waitFor, within } from "../test/dom";
+import { view } from "../test/opportunityFixtures";
 import Purchase from "./Purchase";
 
 const confirm = vi.fn(async (_args: Record<string, unknown>) => null);
+const reevaluate = vi.fn(async (_args: Record<string, unknown>) => ({ evaluated: 1 }));
+const openCase = vi.fn(async (_args: Record<string, unknown>) => ({ ok: true, claimId: "c1", created: true }));
+const mutations: Record<string, unknown> = {
+  "purchases:confirm": confirm,
+  "opportunities:reevaluate": reevaluate,
+  "opportunities:openCase": openCase,
+};
 let queryResults: Record<string, unknown> = {};
 
 vi.mock("convex/react", () => ({
   useQuery: (ref: FunctionReference<"query">, args: unknown) =>
     args === "skip" ? undefined : queryResults[getFunctionName(ref)],
-  useMutation: (ref: FunctionReference<"mutation">) => (getFunctionName(ref) === "purchases:confirm" ? confirm : vi.fn()),
+  useMutation: (ref: FunctionReference<"mutation">) => mutations[getFunctionName(ref)] ?? vi.fn(),
   useAction: () => vi.fn(),
 }));
 
@@ -43,6 +52,7 @@ function purchaseData(status: "needs_review" | "active", opts: { currency?: stri
         purchaseId: PURCHASE_ID,
         userId: "u1",
         name: "Kettle",
+        productUrl: "https://northwind.example/kettle",
         unitCents: 4_999,
         qty: 1,
         returned: false,
@@ -67,6 +77,8 @@ function renderAt(path: string) {
 
 beforeEach(() => {
   confirm.mockClear();
+  reevaluate.mockClear();
+  openCase.mockClear();
   queryResults = {};
 });
 
@@ -138,5 +150,44 @@ describe("editing an active purchase (the answerVia purchases.confirm path, D167
     renderAt(`/purchases/${PURCHASE_ID}?edit=details`);
     expect((screen.getByLabelText("Currency") as HTMLInputElement).disabled).toBe(true);
     expect(screen.getByText(/A claim already uses this currency/)).toBeDefined();
+  });
+});
+
+describe("recovery paths on the purchase page (M12 queries)", () => {
+  it("shows the item's opportunity card beside it, the paths not checked, and wires its actions", async () => {
+    queryResults["purchases:get"] = purchaseData("active", { currency: "USD" });
+    queryResults["opportunities:forPurchase"] = {
+      opportunities: [view()],
+      pathsNotChecked: [{ scenarioId: "R06", title: "Card purchase protection", status: "not_checked", reason: "Needs the exact benefit guide." }],
+      truncated: false,
+    };
+    renderAt(`/purchases/${PURCHASE_ID}`);
+    const card = screen.getByRole("article", { name: "Retail price adjustment: recovery path" });
+    expect(within(card).getByText("Merchant or carrier promise")).toBeDefined();
+    expect(screen.getByText("Card purchase protection")).toBeDefined();
+
+    fireEvent.click(within(card).getByRole("button", { name: "Start a claim" }));
+    await waitFor(() => expect(openCase).toHaveBeenCalledWith({ opportunityId: "o1" }));
+    fireEvent.click(within(card).getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(reevaluate).toHaveBeenCalledWith({ purchaseId: PURCHASE_ID }));
+  });
+
+  it("sends a purchase-record question to the details form (?edit=details)", () => {
+    queryResults["purchases:get"] = purchaseData("active", { currency: "USD" });
+    queryResults["opportunities:forPurchase"] = {
+      opportunities: [
+        view({
+          outcome: "needs_facts",
+          amount: null,
+          missingFacts: [{ subjectKey: "txn", key: "retail.purchase_date", reason: "missing", class: "required", neededFor: ["outcome"] }],
+          nextAction: { kind: "none", reason: "Confirm the purchase details on the purchase page: retail.purchase_date." },
+        }),
+      ],
+      pathsNotChecked: [],
+      truncated: false,
+    };
+    renderAt(`/purchases/${PURCHASE_ID}`);
+    const link = screen.getByRole("link", { name: "Check it on the purchase details" });
+    expect(link.getAttribute("href")).toBe(`/purchases/${PURCHASE_ID}?edit=details`);
   });
 });

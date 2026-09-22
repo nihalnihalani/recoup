@@ -9,29 +9,28 @@ export type Delivery = {
   note: string;
 };
 
-// Mirrors convex/drafts.ts's TERMINAL_FAILURES: a bounced/rejected/failed
-// AgentMail status can still carry a message id (the send did leave our
-// outbox), so failure must be checked before the "has a message id -> Sent"
-// branch, not after it.
-const TERMINAL_STATUSES: readonly string[] = ["failed", "bounced", "rejected"];
+const UNKNOWN: Delivery = { reached: 2, tone: "unknown", note: "We couldn't confirm it was sent" };
+const SENDING: Delivery = { reached: 2, tone: "moving", note: "Sending…" };
 
-/** Pure delivery-state -> UI mapping for the claim Composer's send progress
- * rail (D13/D68). Exported on its own (not a component) so it stays testable
- * without pulling in JSX. */
+/**
+ * Pure delivery-state -> UI mapping for the claim Composer's send progress rail (D13/D68). Reads the server's
+ * owner-safe `outcome` (S-M03-1, M13): "Sent" only when the provider confirmed a message id; an ambiguous outcome
+ * is "we couldn't confirm it was sent", never a failure and never a success. Exported on its own (not a component)
+ * so it stays testable without pulling in JSX.
+ */
 export function deliveryOf(sendStatus: SendStatus | undefined, sendUnknown: boolean): Delivery {
   if (sendStatus === undefined) return { reached: 1, tone: "moving", note: "Checking" };
-  if (sendStatus === null) return { reached: 2, tone: "moving", note: "Sending…" };
-  if (TERMINAL_STATUSES.includes(sendStatus.status) || sendStatus.errorMessage) {
-    return {
-      reached: 2,
-      tone: "failed",
-      note: sendStatus.errorMessage ?? `Delivery ${sendStatus.status}`,
-    };
+  if (sendStatus === null) return sendUnknown ? UNKNOWN : SENDING;
+  switch (sendStatus.outcome) {
+    case "failed":
+      return { reached: 2, tone: "failed", note: sendStatus.errorMessage ?? `Delivery ${sendStatus.status}` };
+    case "sent":
+      return sendStatus.status === "complained"
+        ? { reached: 3, tone: "done", note: "Delivered, marked as spam" }
+        : { reached: 3, tone: "done", note: "Sent" };
+    case "unknown":
+      return UNKNOWN;
+    case "pending":
+      return sendUnknown ? UNKNOWN : SENDING;
   }
-  if (sendStatus.status === "complained") {
-    return { reached: 3, tone: "done", note: "Delivered, marked as spam" };
-  }
-  if (sendStatus.agentmailMessageId) return { reached: 3, tone: "done", note: "Sent" };
-  if (sendUnknown) return { reached: 2, tone: "unknown", note: "Delivery unknown — recheck" };
-  return { reached: 2, tone: "moving", note: "Sending…" };
 }

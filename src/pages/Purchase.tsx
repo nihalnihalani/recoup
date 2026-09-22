@@ -5,7 +5,9 @@ import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { WindowMeter } from "../components/charts/WindowMeter";
-import { ItemTracker } from "../components/purchase/ItemTracker";
+import { ItemTracker, type OpportunityWiring } from "../components/purchase/ItemTracker";
+import { CoverageList } from "../components/opportunity/CoverageList";
+import { OpportunityCard } from "../components/opportunity/OpportunityCard";
 import { RuleCard } from "../components/purchase/RuleCard";
 import { UntrackedTable } from "../components/purchase/UntrackedTable";
 import { CardHeading, DotChip, ReviewIcon } from "../components/purchase/parts";
@@ -365,6 +367,14 @@ export default function Purchase() {
   // purchase-record fact links to (`answerVia: "purchases.confirm"`, D167). A plain URL, so it survives a refresh.
   const [searchParams, setSearchParams] = useSearchParams();
   const editRequested = searchParams.get("edit") === "details";
+  // M12: recovery paths for this purchase's transaction (active packs only) and the paths not checked.
+  const recovery = useQuery(api.opportunities.forPurchase, purchaseId ? { purchaseId } : "skip");
+  const transactionId = recovery?.opportunities[0]?.opportunity.transactionId;
+  const hasQuestions = recovery?.opportunities.some((view) => (view.evaluation?.missingFacts.length ?? 0) > 0) ?? false;
+  const cells = useQuery(api.facts.list, transactionId !== undefined && hasQuestions ? { transactionId } : "skip");
+  const openCase = useMutation(api.opportunities.openCase);
+  const reevaluate = useMutation(api.opportunities.reevaluate);
+  const answerFact = useMutation(api.facts.answer);
 
   if (!purchaseId) return <Empty title="No purchase selected" />;
   if (data === undefined) return <Loading rows={4} />;
@@ -392,6 +402,27 @@ export default function Purchase() {
 
   const tracked = items.filter((item) => item.productUrl);
   const untracked = items.filter((item) => !item.productUrl);
+
+  const views = recovery?.opportunities ?? [];
+  const wiring: OpportunityWiring = {
+    all: views,
+    cells,
+    // D167: purchase-record facts are corrected on this page's details form.
+    purchaseEditHref: "?edit=details",
+    counterparty: purchase.merchant || purchase.merchantDomain || undefined,
+    openCase: (opportunityId) => openCase({ opportunityId }),
+    checkAgain: async () => {
+      await reevaluate({ purchaseId: purchase._id });
+    },
+    answer: async ({ subjectKey, key, value }) => {
+      if (transactionId === undefined) return;
+      await answerFact({ transactionId, subjectKey, key, value });
+    },
+  };
+  const itemViews = (itemId: string) => views.filter((view) => view.opportunity.subjectKey === `item:${itemId}`);
+  const otherViews = views.filter(
+    (view) => !items.some((item) => view.opportunity.subjectKey === `item:${item._id}` && item.productUrl),
+  );
 
   const ruleCard = (
     <RuleCard
@@ -457,10 +488,34 @@ export default function Purchase() {
                 // The rule belongs to the store, not the item: show it once,
                 // beside the first chart.
                 aside={index === 0 ? ruleCard : undefined}
+                opportunities={itemViews(item._id)}
+                wiring={wiring}
               />
             ))}
             {untracked.length > 0 && <UntrackedTable items={untracked} currency={currency} />}
             {tracked.length === 0 && <div className="col-span-full xl:col-span-6">{ruleCard}</div>}
+            {otherViews.length > 0 && (
+              <div className="col-span-full grid gap-6 lg:grid-cols-2">
+                {otherViews.map((view) => (
+                  <OpportunityCard
+                    key={view.opportunity._id}
+                    view={view}
+                    related={views}
+                    cells={cells}
+                    purchaseEditHref={wiring.purchaseEditHref}
+                    counterparty={wiring.counterparty}
+                    onOpenCase={() => openCase({ opportunityId: view.opportunity._id })}
+                    onCheckAgain={wiring.checkAgain}
+                    onAnswer={wiring.answer}
+                  />
+                ))}
+              </div>
+            )}
+            {recovery !== undefined && recovery.pathsNotChecked.length > 0 && (
+              <div className="col-span-full">
+                <CoverageList rows={recovery.pathsNotChecked} />
+              </div>
+            )}
           </>
         )}
       </div>
