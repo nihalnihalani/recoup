@@ -55,6 +55,11 @@
 //     "<path>\t<sha256 of the file>\n". Editing any file in the closure
 //     (e.g. lib/rules/outcome.ts or lib/money.ts) without recording the new
 //     pin fails. `--print-engine-closure` prints each active pack's closure.
+//     Re-pin protocol (D197): the entry also records `engineClosureDecision`
+//     ("D###"), the lead's re-pin decision, which must exist in DECISIONS.md.
+//     A lane whose change alters the closure runs the pack's fixtures
+//     unchanged, asks the lead for a re-pin decision id, and updates both the
+//     hash and the decision id in its own commit.
 //
 // BASE for check 6, first match wins:
 //   a. `--base <rev>` or env RULE_PACKS_BASE. CI sets it to the push's
@@ -441,10 +446,17 @@ export function checkRulePacks(input) {
       errors.push(`${label} is active but records no engineClosureSha256 (current closure: ${closure.sha256}, ${closure.files.length} files)`);
     } else if (recorded !== closure.sha256) {
       errors.push(
-        `${label}: the engine changed (closure of ${closure.files.length} files hashes to ${closure.sha256.slice(0, 12)}…, recorded ${recorded.slice(0, 12)}…). ` +
-          "An engine change alters the active pack's behaviour: review it, re-run the pack's fixtures, and record the new engineClosureSha256 (node scripts/check-rule-packs.mjs --print-engine-closure).",
+        `${label}: closure changed: run the pack's fixtures unchanged, then ask the lead for a re-pin decision id ` +
+          `(the closure of ${closure.files.length} files hashes to ${closure.sha256}, recorded ${recorded.slice(0, 12)}…; ` +
+          "record the new engineClosureSha256 and engineClosureDecision together; node scripts/check-rule-packs.mjs --print-engine-closure lists the files).",
       );
     } else pinned += 1;
+    const decision = pack.entry.engineClosureDecision;
+    if (typeof decision !== "string" || !/^D\d+$/.test(decision)) {
+      errors.push(`${label} is active but records no engineClosureDecision (the lead's re-pin decision id, e.g. "D193"; D197)`);
+    } else if (!decisions.has(decision)) {
+      errors.push(`${label}: engineClosureDecision ${decision} is not in ${PATHS.decisions}`);
+    }
   }
   notes.push(active.length === 0 ? "engine pin: no active pack to pin" : `engine pin: ${pinned}/${active.length} active pack(s) match their recorded engine closure`);
   if (input.engineVersionPresent) notes.push(`${PATHS.engineVersion} exists; its ENGINE_VERSION is not compared (the closure pin above is the check)`);
