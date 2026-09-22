@@ -338,6 +338,32 @@ No finding was raised without a violated requirement and a reproduced or code-tr
 
 ---
 
+## 7. Addendum (2026-09-23): M23 PDF text-layer library ruling (D145/D200)
+
+**Request:** `opus-ingestion-integrations-engineer`, note `docs/reviews/2026-09-23-M23-pdf-library.md` (M23 worktree; it will be committed with `lib/pdfText.ts`). The proposal is to pin `pdfjs-dist@6.3.289` exactly, for text only (`getTextContent`), in one `"use node"` action.
+
+**Ruling: OK-with-conditions.** The dependency may be added under the exact pin. Conditions P1–P4 gate acceptance of the M23 lane. P5–P6 gate the D145 flag, i.e. any live extraction of real users' documents.
+
+**What I verified, and how.**
+- Registry (`npm view`): version 6.3.289, Apache-2.0, integrity `sha512-ZHjSVpDa3D6izMq8/04lvkhkATUmL9px6ChPaXc1k6nU2Mrhlg1/7F0bdUqCwUjw3NsPTfPZsMDUU6ZIcRaeQw==`, 34,781,083 bytes unpacked, `engines.node >=22.13.0 || >=24`. Its one optional dependency is `@napi-rs/canvas ^1.0.0`. The latest version, 1.0.9 (MIT), has **no install or postinstall script** (only publish-time scripts); its binaries arrive as prebuilt optional platform packages that the lockfile pins by integrity.
+- GitHub advisory API:
+  - GHSA-hq66-cqwq-w95j (CVE-2026-16633, high): affects ≥ 5.6.83 and < 6.2.108. It needs `enableScripting` (default true) in a page context.
+  - GHSA-wgrm-67xf-hhpq (CVE-2024-4367, high): affects ≤ 4.1.392.
+  - GHSA-7jg2-jgv3-fmr4 (2018): old.
+  - 6.3.289 (released 2026-08-29) is past all three.
+- The rejection of `unpdf` (it bundles pdf.js ~6.1.200, inside CVE-2026-16633's range, invisible to `npm audit`) is sound.
+
+**Correction to the note (risk 1).** `src/display/node_utils.js` at tag `v6.3.289` runs `require("@napi-rs/canvas")` **eagerly at module load** in Node, to polyfill `DOMMatrix`/`Path2D`. So the native addon is loaded whenever `lib/pdfText.ts` imports pdf.js and the package is present; it is not loaded "only when rendering". This is acceptable, because the text path never hands canvas any document data. The note must say so, and P1 must hold.
+
+| ID | Condition | Proving test / evidence | Gates |
+|---|---|---|---|
+| P1 | Exact pin `"pdfjs-dist": "6.3.289"` in `dependencies` (no caret). `lib/pdfText.ts` imports only the legacy build and its worker. Grep test: `convex/**` contains no `render(`, `getOperatorList`, `getAnnotations`, `pdf.scripting`, `cMapUrl`, `standardFontDataUrl` or `url:` option for pdf.js. In Node, pdf.js resolves those URL options through `fs.readFile`, so they must stay unset. Text extraction must also work when `@napi-rs/canvas` cannot be loaded (the warn path). | grep test + `pdfText: extracts text with canvas unavailable` | lane acceptance |
+| P2 | Runtime. Add `convex.json` with `"node": { "nodeVersion": "22" }` (config owner). pdf.js 6.3.289 declares Node ≥ 22.13 and calls `process.getBuiltinModule`; the repo has no `convex.json` today, and I did not verify the platform default. Bump `engines.node` to `>=22.13 <23`. The extraction action reads the bytes itself with `ctx.storage.get` and never receives a PDF as an argument (the Node-action argument limit is 5 MiB, below the 10 MB upload cap). Prove bundling and a text extraction of a synthetic fixture on `adorable-lion-138` **before the lane is accepted**, not at release; if needed, fall back to `externalPackages`. | `npx convex run` output on dev, recorded in the lane report | lane acceptance |
+| P3 | Decompression-bomb pre-pass must cover **everything pdf.js decodes on the text path**. pdf.js recovers broken xrefs and wrong `/Length` values, so the pre-pass must scan the raw bytes for every `stream`…`endstream` region, not follow the xref. It caps the decoded output of every filter chain (for example `ASCII85Decode` then `FlateDecode`), covering content, `/ObjStm`, XRef, `ToUnicode`, embedded font and Form XObject streams. A stream whose filter the pre-pass cannot cap (`LZWDecode`, `RunLengthDecode`, unknown) → `unreadable`. **Any `/Encrypt` → `needs_unlocked_copy` before pdf.js sees the file**: owner-password-only PDFs open without a `PasswordException`, and their encrypted streams would bypass the pre-pass. | fixtures: Flate bomb, LZW bomb, RunLength bomb, A85→Flate chained bomb, bomb inside `/ObjStm`, bomb behind a wrong `/Length`, owner-password-only PDF → each `unreadable` or `needs_unlocked_copy`, with pdf.js never called (spy) | lane acceptance |
+| P4 | Time and size. pdf.js runs in-thread, so `Promise.race` cannot interrupt a CPU-bound page. Check the wall-clock budget between pages, and stop at the text cap incrementally rather than truncating afterwards. A run killed by the action timeout ends as `unreadable` through the existing lease and attempts ≤ 3; it is never retried forever. Recommended, not required: `worker_threads` with `resourceLimits`, `terminate()` on budget and `env: {}`, if Convex bundling allows a worker file. | `pdfText: stops at the page budget`; `evidence: a lease that never completes 3 times → unreadable` | lane acceptance |
+| P5 | Blast radius. Code execution inside the Node action process can read `process.env`, which holds `JWT_PRIVATE_KEY` (forged sessions for any user) and the OpenAI, AgentMail and Firecrawl keys. Before the D145 flag is ever enabled: add a CI gate (`npm audit --omit=dev --audit-level=high`, or a scripted GHSA check for `pdfjs-dist`) and adopt a patch rule (a pdf.js security release is applied within 7 days, or the flag goes off). | CI step + RUNBOOK line | D145 flag |
+| P6 | Security re-review of `lib/pdfText.ts` and its fixtures in the wave-2 security pass before the flag flips. Until then, only synthetic fixtures are parsed (uploads stay store-only for extraction purposes). | review record | D145 flag |
+
 ## Appendix A — repro tests (throwaway; run in the detached worktree, then removed)
 
 Condensed form of the throwaway `convex/zz_m03_repro.test.ts`. The block below was itself saved as `convex/zz_m03_appendix.test.ts` in the detached worktree at `5cc326d` and run with `npx vitest run convex/zz_m03_appendix.test.ts` → **7/7 pass** (each test asserts the current defective behaviour). Test ids in this document: A.1/A.2 = S-M03-1, A.3 = S-M03-4, A.4 = S-M03-5, A.5 = S-M03-3, A.6 = S-M03-6, A.7 = S-M03-2. Invert the assertions to use them as regression tests.
