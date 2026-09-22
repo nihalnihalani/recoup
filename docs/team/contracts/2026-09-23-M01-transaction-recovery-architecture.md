@@ -16,8 +16,9 @@ Author: `opus-product-architect`, self-reported model Opus 5.5 / `claude-opus-5-
   - M02's `docs/rules/README.md` field map and outcome aliases.
 
   §13 maps every finding and decision id to the section that addresses it.
+- **rev 5 (task M06b).** Applies the M07 recheck (`docs/reviews/2026-09-23-da-checkpoint-A.md` § "Recheck of rev 4 (M07)", `16b6a5a`) as ruled by **D148**: conditions C1–C5, N2, N3, N5, N6, N7, and the two wave-2 notes. Nothing else changed. §13.2 lists the rows.
 
-**Status.** Rev 4 is written for M07, the devil's advocate's recheck of the pre-wave-1 items. Wave 1 launches after M07. Nothing here claims that a proposed table, function, or rule already exists. **No legal threshold is set in this document.** Every legal number is a rule-pack parameter taken from M02's captured first-party passages under `docs/rules/**`, and each parameter cites its passage id.
+**Status.** Rev 5 is binding for wave 1 per D148. M10 is implementing from rev 4 + D148; the rev-5 deltas to M10's files were sent to the lead for forwarding. Nothing here claims that a proposed table, function, or rule already exists. **No legal threshold is set in this document.** Every legal number is a rule-pack parameter taken from M02's captured first-party passages under `docs/rules/**`, and each parameter cites its passage id.
 
 **Binding inputs this contract does not restate:**
 - the M03 security baseline `docs/reviews/2026-09-23-security-baseline.md` §3 (SEC-UP/SD/AI/CH/MF/DEL/RR controls) and its findings register;
@@ -242,6 +243,10 @@ export const manualChannel = v.union(v.literal("postal_mail"), v.literal("web_fo
 export const requiredChannel = v.union(v.literal("email"), manualChannel); // DA-A-9 (M10 — lib/claimState uses it in wave 1)
 
 export const factRef = v.object({ subjectKey: v.string(), key: v.string() });           // DA-A-15: values are hashed, not row ids
+/** rev 5 (N6): resolved cell status (§2.5) and a bound fact's value, stored so an approved basis stays displayable. */
+export const cellStatus = v.union(v.literal("confirmed"), v.literal("observed"), v.literal("derived"), v.literal("candidate"),
+  v.literal("conflicting"), v.literal("user_unknown"), v.literal("missing"));
+export const boundFactValue = v.object({ subjectKey: v.string(), key: v.string(), status: cellStatus, value: v.optional(factValue) });
 export const sourceRef = v.object({ sourceId: v.string(), passageId: v.string(), url: v.string(), effective: v.string() });
 export const conditionResult = v.object({
   id: v.string(), label: v.string(), result: tri,
@@ -390,6 +395,7 @@ export const approvalBinding = v.object({
     deadlines: v.array(deadlineResult), sourceRefs: v.array(sourceRef),
     overlap: v.array(v.object({ withScenario: scenarioId, withRemedyKey: v.string(), relation: overlapRelation })),
     nextAction, explanation: v.array(v.string()),
+    boundFacts: v.optional(v.array(boundFactValue)), // rev 5 (N6): the pack's bound-fact values (≤ 32); written on every row
   }).index("by_opportunity", ["opportunityId"]).index("by_user", ["userId"]),
   // Array bounds asserted by the single writer: conditions ≤ 64, missingFacts ≤ 32, assumptions ≤ 16, disqualifiers ≤ 16,
   // deadlines ≤ 8, sourceRefs ≤ 8, overlap ≤ 8, explanation ≤ 12.
@@ -512,10 +518,10 @@ export const recipientSource = v.union(v.literal("confirmed_policy_snapshot"), v
   - `provenance` is `user_forwarded` when the sender is the account address or the message is a forward the user sent to the inbox, `user_pasted` for a paste, and **`unverified_sender`** otherwise (SEC-AI-6). Facts from `unverified_sender` evidence are candidates only, never auto-confirmed, and never write ledger or case state.
 - **Card masking (D142, `lib/pan.ts`, M10).** A digit run is masked to `•••• <last4>` only if:
   - (a) it is Luhn-valid, **and**
-  - (b) it carries a card-network issuer prefix at that brand's length (Visa 4 at 13/16/19; Mastercard 51–55 and 2221–2720 at 16; Amex 34/37 at 15; Discover 6011, 644–649 and 65 at 16–19; JCB 3528–3589 at 16–19; Diners 36, 300–305 and 38–39 at 14–19; UnionPay 62 at 16–19), **and**
+  - (b) it carries a card-network issuer prefix at that brand's length (Visa 4 at **16/19 only** (rev 5, C5: a 13-digit Visa-prefix string is kept, because Frontier/Spirit e-tickets and EAN-13 codes 400–440 collide with it); Mastercard 51–55 and 2221–2720 at 16; Amex 34/37 at 15; Discover 6011, 644–649 and 65 at 16–19; JCB 3528–3589 at 16–19; Diners 36, 300–305 and 38–39 at 14–19; UnionPay 62 at 16–19), **and**
   - (c) its separators are single spaces or single hyphens only.
 
-  Typed identifiers never pass through the masker. Required tests: standard test PANs are masked in payload, evidence text, facts, export, logs and model input; **a Luhn-valid IMEI (352099001761481), a 13-digit e-ticket number, an Amazon-style `112-xxxxxxx-xxxxxxx` order ref and an EAN-13 survive unchanged.** **Accepted residual (D142):** the AgentMail component's own raw inbound copy cannot be masked by Recoup. It is purged on account deletion (D119) and **disclosed on the Privacy page** (M15).
+  Typed identifiers never pass through the masker. Required tests: standard test PANs are masked in payload, evidence text, facts, export, logs and model input; **these Luhn-valid samples survive unchanged (rev 5, C5; lead-verified in D148): IMEI `352099001761481`, 13-digit e-ticket `4221234567897`, order ref `112-3456789-1234562` and EAN-13 `4006381333932`.** A keep-test sample that is not Luhn-valid proves nothing and is not accepted. **Accepted residual (D142):** the AgentMail component's own raw inbound copy cannot be masked by Recoup. It is purged on account deletion (D119) and **disclosed on the Privacy page** (M15).
 - **Retention (DA-A-7, D145; M14 implements, M15 publishes the copy):**
   - **Email and paste text** is cleared (`text` removed, blob deleted if any, `retention: "content_deleted"`) at `receivedAt + RETENTION_EVIDENCE_DAYS`, **unless its transaction has a case or the row is pinned**. "Has a case" means any claim referencing the transaction through `claims.by_transaction_and_status`, or, for retail, any claim on its purchase through `by_purchase_type`.
     - After clearing, only `headers`, `contentHash` and the facts' locator quotes (≤ 300 chars each) persist.
@@ -555,9 +561,9 @@ export const recipientSource = v.union(v.literal("confirmed_policy_snapshot"), v
   - **active:** the lead records a DECISIONS entry **and** the one-line activation in `convex/lib/rules/activation.ts`. That data-only file is **lead-owned** and is checked by `scripts/check-rule-packs.mjs` against `docs/rules/manifest.json` and the DECISIONS id. "Active" means *independently reviewed against the captured first-party text*, never legal certification.
 - **Registries (D145 c/d).** `lib/rules/registry.ts` (production) returns a pack only when `activation.ts` marks it active. Test packs live in `lib/rules/testRegistry.ts`, which only `*.test.ts` files may import (grep test). `coverage.ts` reads only the production registry, so a coverage row cannot reach `implemented_verified` from a test pack. **No opportunity card exists without an active pack.** The transaction page shows a separate "Paths not checked / source not verified" list from `coverage.ts`, with no amounts (§9).
 - **Refresh and staleness (README rule 3).**
-  - `convex/lib/rules/verification.ts` is lead-owned data: `{ [sourceId]: { lastVerifiedAt, sha256 } }`. It is updated only after `scripts/verify-rule-sources.mjs` runs. That script is on-demand (the lead or operator runs it at wave close and before release). A hash drift writes `docs/rules/review-items/<date>-<sourceId>.md`, and the script **never edits logic**. Federal sites that refuse non-browser clients are re-verified manually and recorded with `method: "browser"`.
+  - `convex/lib/rules/verification.ts` is lead-owned data: `{ [sourceId]: { lastVerifiedAt, sha256 } }`. It is updated only after `scripts/verify-rule-sources.mjs` runs. That script is on-demand. **The lead runs it at every wave close, before release, and weekly while any slice's pack is active** (rev 5, D148 wave-2 note), so no pack reaches its refresh window unnoticed. A hash drift writes `docs/rules/review-items/<date>-<sourceId>.md`, and the script **never edits logic**. Federal sites that refuse non-browser clients are re-verified manually and recorded with `method: "browser"`.
   - An active pack evaluated past a source's refresh window → `source_unverified`, via the flag `sourceStale`.
-  - **Reconciliation for R01 v1 (D145 d).** R01 v1's framework logic cites no external legal source. Its parameter source is the **per-purchase** policy snapshot (immutable, D17), and the question that matters is *purchase-time applicability*, not whether the page is current. So README rule 3's 7-day merchant window applies to **reviewed merchant packs** (the R01 v2 tier). For the v1 snapshot tier, freshness is measured **relative to the purchase**:
+  - **Reconciliation for R01 v1 (D145 d).** R01 v1's framework logic cites no external legal source. Its parameter source is **exactly the snapshot `latestPolicy()` selects today**: the newest user-confirmed snapshot for (user, merchant, `price_adjustment`), otherwise the newest (rev 5, N7, D148). It is never "the snapshot nearest the purchase", which would change `windowDays` and break parity. A-T1/A-T2 are computed from **that** snapshot's `retrievedAt`. The question that matters is *purchase-time applicability*, not whether the page is current. So README rule 3's 7-day merchant window applies to **reviewed merchant packs** (the R01 v2 tier). For the v1 snapshot tier, freshness is measured **relative to the purchase**:
     - a snapshot retrieved within ±7 days of `purchasedAt` gets assumption A-T1 ("policy text retrieved within a week of your purchase; assumed to be the policy then");
     - otherwise it gets assumption A-T2 ("retrieved N days after purchase; the policy may have changed") and the next action "refresh policy".
 
@@ -567,6 +573,12 @@ export const recipientSource = v.union(v.literal("confirmed_policy_snapshot"), v
     - **assumption-class:** `retail.policy_confirmed` (the snapshot has not been confirmed by the user), `retail.policy_temporal` (A-T1/A-T2, always present in v1), and `retail.currency` (legacy currency not confirmed, DA-A-33).
 
     **So R01 v1's best outcome is `likely_eligible`, never `eligible`**, matching M02 R01 §1.4 and L1. That outcome is in `APPROVABLE_OUTCOMES`, so auto-open parity holds (DA-A-2).
+  - **R01 v1 bound facts (rev 5, C2, D148).** The approval binding (`boundFactsHash`, and `boundFacts` on the evaluation) covers exactly: unit price, quantity, item identity (item id + name), purchase date, claim amount (`claims.expectedCents` + currency), and **the observation the claim was opened on** (`openedFromPriceCheckId`: its `observedCents`, currency and `observedAt`, frozen). **It never covers the live observed-price cell**, so price checks on an open case never invalidate an approval (KM3).
+  - **Testing R01 before activation (rev 5, C3, D148).** Until the lead's activation commit, the production registry has no R01 v1, so `recordCheck` runs the legacy fallback. Every R01 behaviour test therefore runs in **both modes**:
+    - (a) the legacy fallback;
+    - (b) R01 v1 forced active through the test seam `vi.mock("./lib/rules/registry", …)`, which returns `testRegistry`'s R01 v1.
+
+    The seam lives only in `*.test.ts`, per the testRegistry import rule. **Wave 1 closes only after the lead re-runs the full suite at the activation commit**, with v1 active through the production registry.
 - **Temporal rule (D143.1)** applies to the **reviewed merchant tier** (R01 v2, wave 3): a displayed `effective_from` after the purchase date → `source_unverified`, no auto-open, and next action `ask_anyway`. Unknown → assumption-capped `likely_eligible`. The R01 parity gate covers the legacy/unknown tier only.
 - **Engine versioning (DA-A-23; M20, wave 2).**
   - `lib/rules/engineVersion.ts` exports `ENGINE_VERSION`, the SHA-256 of the evaluator import closure: types, outcome, conditions, deadlines + holiday/zone tables, facts resolve/snapshot/catalog, canonical.
@@ -584,10 +596,17 @@ export const recipientSource = v.union(v.literal("confirmed_policy_snapshot"), v
   5. upsert through `by_user_and_dedupe_key`;
   6. append an evaluation only when `resultHash` changed;
   7. project the evaluation onto the opportunity;
-  8. **materiality:** if `activeClaimId` is set and the change is material, bump `claims.version` and write a `claimNotes` row. Material means: the outcome leaves the approvable set, `ruleVersion` changes, `engineVersion` changes, a **user** deadline flips to passed, or `boundFactsHash` changes. Estimate drift while a case is active is **not** material.
+  8. **materiality:** if `activeClaimId` is set and the change is material, bump `claims.version` and write a `claimNotes` row. Material means any of:
+     - the outcome leaves the approvable set, **except** a `deadline_passed` whose only failing condition is a deadline spec marked `lateAskAcknowledgeable` (the R01 legacy window; rev 5, C1);
+     - `ruleVersion` or `engineVersion` changes;
+     - a **user** deadline flips to passed, **except** a `lateAskAcknowledgeable` one: the legacy R01 window closing is **not** material and bumps no version (C1, D148);
+     - `boundFactsHash` changes;
+     - **the scenario's pack is no longer active** (activation withdrawn; rev 5, N3). The first `evaluateTransaction` or `prepareSend` that finds it supersedes the opportunity (`status: "superseded"`), bumps `claims.version`, writes a claimNote ("R01 checks were withdrawn; review and approve again"), and the claim continues under the legacy send path.
+
+     Estimate drift while a case is active is **not** material.
 - **`recordCheck` order (R01):**
   1. insert the `priceChecks` row;
-  2. **if R01 v1 is active:** run `evaluateTransaction(subject item)` (this links any legacy claim), then auto-open through the `openCase` guard;
+  2. **if R01 v1 is active:** run `evaluateTransaction(subject item)` (this links any legacy claim), then auto-open through the `openCase` guard. **Auto-open stays closed past the window** (`deadline_passed` is not approvable for auto-open; M1C R01-05c). Only a user send with acknowledgment can go late (§6, C1);
   3. **if R01 v1 is not active:** run the **legacy path unchanged** (today's code, with no opportunity rows). This keeps deploy and revert safe. **Wave 1 closes only with R01 v1 active** (M18 + lead), so the vertical slice is real (DA-A-2, DA-A-11).
 - **`openCase({ opportunityId, claimedAmount? })`:**
   1. check ownership and the tombstone;
@@ -637,7 +656,9 @@ export const recipientSource = v.union(v.literal("confirmed_policy_snapshot"), v
 
 - **Ledger rewrite (M10, one commit):** an exhaustive switch with a `never` check. `provisional = Σ provisional_credit − Σ provisional_released`, asserted ≥ 0. `unresolved` is **unchanged**. Provisional kinds never change status.
 - **Finalize (DA-A-16).** `claims.finalizeProvisionalCredit({ claimId, cents, evidence, idempotencyKey })` writes `provisional_released` with key `${key}:release` and `confirmed_credit` with key `${key}:confirm`. Both go through the **one** helper `writeConfirmedCredit` that `confirmCredit` also uses. A retry dedupes both events.
-- **`confirmCredit` refuses while `provisional > 0`**, with "A provisional credit is outstanding — finalize it instead". The UI offers finalize.
+- **`confirmCredit` while `provisional > 0` (rev 5, N5, D148): the user chooses; a separate posting is never refused.** `confirmCredit` gains an optional `separateFromProvisional: true`.
+  - Without it, while provisional > 0, the mutation writes nothing and throws `ConvexError({ kind: "ProvisionalOutstanding", provisionalMinor })`. The UI then asks "Is this the provisional credit becoming final?" (→ `finalizeProvisionalCredit`) or "Is this a separate credit?" (→ `confirmCredit` with `separateFromProvisional: true`).
+  - With the flag, it records `confirmed_credit` normally and leaves `provisional` unchanged.
 - **Grep test:** the only production file containing an insert of `kind: "confirmed_credit"` is `convex/claims.ts`.
 - **Non-cash:** `claims.recordNonCashRemedy` (M10, wave 1) appends a promised or received row without changing status. **`claims.recordNonCashResolution`** (M20, wave 2; DA-A-18) appends a received row, sets `nonCashResolvedAt` (closed for ask and cash tiles; reminders cancelled), and for R02 also writes the acceptance fact (`air.alternative.accepted`, value "voucher accepted") and re-evaluates.
 
@@ -676,11 +697,14 @@ tile(K)           = furthest state over open members: promised > asked > sending
    promised            : a claim with promised > net and status promised
    asked               : delivery ∈ {sent, delivered, submission_recorded, user_reported} on the claim's requiredChannel (DA-A-9)
    sending_or_unknown  : delivery ∈ {queued, accepted, unknown, stalled}
-   ready               : a claim not yet sent (detected/drafted/packet_prepared/failed)
+   ready               : CATCH-ALL (rev 5, C4): every open claim not in a higher tile — incl. detected/drafted/packet_prepared/failed,
+                         reopened, a legacy `packet` without delivery evidence, and `promised` with promised ≤ net
    potential           : only opportunities
 provisionalOf(K)  = min(outstanding(K), Σ provisional)             // rendered "of which provisional" inside tile(K)
 per-transaction cap (D145): for each transaction T with a known confirmed paid total P(T)
-   (retail: Σ item unitCents×qty of an active purchase; air: confirmed air.total_paid; card: confirmed card.charge_amount),
+   (retail (rev 5, D148 wave-2 note): the confirmed order total incl. tax + shipping (fact `retail.order_total`, user_confirmed or derived
+    from confirmed facts) when known, else Σ item unitCents×qty with `paidTotalPartial: true` shown as "cap based on item prices only";
+    air: confirmed air.total_paid; card: confirmed card.charge_amount),
    if Σ_{K anchored on T} (recovered + outstanding) > P(T): reduce outstanding in order potential → ready → sending → asked → promised,
    set cappedAtPaidTotal
 closed-for-ask(claim) = status ∈ {confirmed, dismissed, denied} or nonCashResolvedAt set  (lib/claimState.isClosedForAsk)
@@ -697,7 +721,7 @@ closed-for-ask(claim) = status ∈ {confirmed, dismissed, denied} or nonCashReso
 **Invariants (property-tested per currency):**
 - (I1) Σ tiles = Σ_K outstanding(K).
 - (I2) Recovered + Over-credit = Σ_claims net.
-- (I3) The tiles are disjoint: every component is in exactly one tile.
+- (I3) The tiles are disjoint **and exhaustive**: every component with an open member is in exactly one tile. The property-test generator covers every claim status (detected, drafted, queued, sent, packet, promised, reopened, confirmed, dismissed) × delivery state × promised ≶ net × provisional 0/>0 × a linked opportunity or not (rev 5, C4).
 - (I4) For each capped transaction, Σ ≤ P(T).
 - (I5) No cap value and no non-cash face value appears in any sum.
 
@@ -752,7 +776,8 @@ export function deriveOutcome(d: Dimensions, f: Flags, assumptions: Assumption[]
 //  8 d.evidenceSupports !== "pass" || assumptions.length > 0 -> "likely_eligible"  (DA-A-2 row: "only assumption-class unknowns → likely_eligible")
 //  9 otherwise                                            -> "eligible"
 //  resultHash = sha256(canonical({outcome, dimensions, conditions[].{id,result}, missingFacts, assumptions[].id, amount,
-//                deadlines[].{id,status,dueAt,overdueSince,advisoryActBy}, nextAction.kind, ruleVersion, engineVersion}))  (DA-A-32)
+//                deadlines[].{id,status,dueAt,overdueSince,advisoryActBy}, nextAction.kind, ruleVersion, engineVersion,
+//                boundFactsHash}))  (DA-A-32; boundFactsHash added in rev 5 (N6) so a stored `boundFacts` is never stale)
 ```
 
 ```ts
@@ -770,6 +795,8 @@ export interface DeadlineSpec {
   mustBe: "received" | "sent" | "filed" | "paid" | "n_a";
   advisoryWhenAnchorUnknown?: { fromFactKey: string; offsetDays: number; label: string }; // D143.3 (R03: posting date + 60)
   appliesWhen?: ConditionNode;          // e.g. payment class selects the 7-business vs 20-calendar timer (D143.2)
+  lateAskAcknowledgeable?: true;        // rev 5 (C1): set ONLY on R01 v1's legacy window (merchant_promise, elapsed_24h_days).
+                                        // Passing it gives deadline_passed but is acknowledgeable at send time and not material.
   sourcePassageId: string;
 }
 export function computeDeadline(spec: DeadlineSpec, cells: CellLookup, now: number): DeadlineResult;
@@ -815,7 +842,16 @@ export function computeDeadline(spec: DeadlineSpec, cells: CellLookup, now: numb
 | Manual | `packets` + `submissions` | packet `approved` | a `submissions` row (user-recorded) | never claimed | `deliveryRecordedAt` + evidence only |
 | Tracking (`track_automatic`) | none | — | — | — | counterparty deadline tracked; overdue → escalate |
 
-- **Email approval (DA-A-14, DA-A-21).** A new public mutation **`drafts.prepareSend({ draftId, acknowledgeWindowRisk? })`**:
+- **Email approval (DA-A-14, DA-A-21).** A new public mutation **`drafts.prepareSend({ draftId, to, subject, body, acknowledgeWindowRisk? })`**.
+
+  **Check order (rev 5, N2, D148)**, the same checks as `approveAndSend` and in this order, all before any evaluation:
+  - `requireUserId`, which covers the tombstone;
+  - `ownedDraft` → `ownedClaim`, with the identical not-found and nothing written;
+  - the example refusal;
+  - `parseSingleEmail` on `to`;
+  - the per-user rate limiter `prepareSend` (bucket in `lib/rateLimits.ts`, M13; 60 per minute per user, from M03 §3.7's evaluate limit).
+
+  It then:
   1. re-evaluates the claim's opportunity (`approval_check`) and **commits** the result, including any material version bump and claimNote;
   2. **returns** `{ ok: true, preparedHash } | { ok: false, code, message }` and **never throws on a policy refusal**, so the persisted invalidation survives;
   3. charges nothing.
@@ -825,8 +861,18 @@ export function computeDeadline(spec: DeadlineSpec, cells: CellLookup, now: numb
   Refusal codes:
   - `outcome_not_approvable` (the one `APPROVABLE_OUTCOMES` allow-list);
   - `binding_changed`;
-  - `window_may_have_passed`: the claim's `windowEndsAt` < now without `acknowledgeWindowRisk`. It applies **identically to linked and unlinked R01 claims** (D145 O14 ruling), and **no hard refusal on the legacy window remains**.
-  - `example_claim`.
+  - `window_may_have_passed` (rev 5, C1, D148). This refusal is acknowledgeable, **identical for linked and unlinked R01 claims**, and never a hard refusal:
+    - For a **linked** claim, it is returned when the fresh evaluation is `deadline_passed` **and its only failing condition** is the `lateAskAcknowledgeable` R01 window. It is returned instead of `outcome_not_approvable`.
+    - For an **unlinked** claim, it is returned when `windowEndsAt` < now.
+    - With `acknowledgeWindowRisk: true`, the send proceeds as if approvable, with no version bump and no new draft required.
+    - Any other failing condition still returns `outcome_not_approvable`.
+  - `rule_withdrawn` (rev 5, N3): the linked claim's pack is no longer active. The first call supersedes the opportunity and bumps the version (§2.8). Later calls use the legacy path.
+  - `rate_limited`;
+  - `example_claim` (checked before any evaluation, per the check order above).
+
+  **`preparedHash`:**
+  - for a claim **with** an opportunity: `contextHash` (the binding) + to/subject/body + draftVersion;
+  - for a claim **without** one, or a superseded one (N2, D148): the hash of the existing binding {to, subject, body, claimVersion, draftVersion}, plus `acknowledgeWindowRisk` when it applies.
 
   **`drafts.approveAndSend` keeps its signature** (existing tests stay unmodified). For claims with `opportunityId`, or any claim past `windowEndsAt`, it requires the optional arg `preparedHash` to equal a read-only recomputation, and requires `acknowledgeWindowRisk` when applicable. On a mismatch it throws "Review the claim again", which loses nothing because prepareSend already persisted. Legacy claims inside their window are byte-identical to today. The UI (M15 Composer) always calls prepareSend first.
 - **S-M03-1:** `retryAttempts: 1`. Only a permanent AgentMail 4xx, a bounce or a rejection counts as terminal. Anything else is `unknown`, with the binding kept.
@@ -961,21 +1007,26 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 | Finding | Test (file · name) | Task |
 |---|---|---|
 | DA-A-1 | `lib/facts/resolve.test.ts` · "confirmed user_unknown → user_unknown", "candidate then user_unknown → user_unknown", "user_unknown then observed → observed", "confirmed value then user_unknown → user_unknown", "a known cell never carries user_unknown" | M11 |
-| DA-A-2 | `r01Parity.test.ts` · "unconfirmed policy + qualifying drop → exactly one claim"; `lib/rules/outcome.test.ts` · "only assumption-class unknowns → likely_eligible" | M12, M16 |
-| DA-A-3 | `opportunities.test.ts` · "legacy open claim + evaluation → Potential 0, claim linked, no second claim, recordCheck returns normally" | M12, M16 |
+| DA-A-2 | `r01Parity.test.ts` · "unconfirmed policy + qualifying drop → exactly one claim" **run in both modes (rev 5, C3)**; `lib/rules/outcome.test.ts` · "only assumption-class unknowns → likely_eligible" | M12, M16 |
+| DA-A-3 | `opportunities.test.ts` · "legacy open claim + evaluation → Potential 0, claim linked, no second claim, recordCheck returns normally" (v1 forced active through the C3 seam) | M12, M16 |
 | DA-A-4 | `recovery.test.ts` · "one 120 receipt under two remedies counts 120 once" (SEC-MF-2), "undeclared intersection → second openCase refused", "R01 + order-level loss on one order → Σ ≤ paid", "two credits for one loss → Recovered = loss, excess on the over-credit line" | M12, M16 |
 | DA-A-5 | `lib/deadlines/engine.test.ts` · "counterparty deadline + 1 day → overdue, outcome unchanged, nextAction escalate", "unknown payment class selects no timer and does not produce needs_facts" | M12 |
 | DA-A-7 | `retention.test.ts` · "forwarded order, no case → text cleared at 30 days, quotes and headers kept", "with a claim → kept", "pinned → kept"; `src/pages/Privacy.test.tsx` · "copy renders every privacyFacts constant" | M14, M15 |
 | DA-A-8 | `evidence.test.ts` · "no doc type → awaiting_doc_type, never extracted", "declared card_statement → store_only" | M13 |
 | DA-A-9 | `lib/claimState.test.ts` · "requiredChannel postal + informal email sent → not submitted; day 61 → expired" | M10 |
 | DA-A-11 | `lib/rules/registry.test.ts` · "production registry returns only activation.ts actives", "testRegistry importable only from *.test.ts" | M12 |
-| DA-A-13 | `r01Parity.test.ts` · "GBP purchase + GBP observation → claim", "GBP + USD observation → rejected" | M12, M16 |
+| DA-A-13 | `r01Parity.test.ts` · "GBP purchase + GBP observation → claim", "GBP + USD observation → rejected" (both modes, C3) | M12, M16 |
 | DA-A-14 | `drafts.test.ts` (new cases only) · "prepareSend after a rule-version change → ok:false, version bumped, note written, no outbound, no charge" | M13 |
-| DA-A-15 | `lib/facts/snapshot.test.ts` · "same value re-confirmed → same hash", "12 checks at one price → 0 version bumps", "anchor changed → bump" | M11, M12 |
+| DA-A-15 | `lib/facts/snapshot.test.ts` · "same value re-confirmed → same hash", "anchor changed → bump"; **`opportunities.test.ts` · "12 checks at 12 different prices on an open R01 case → 0 version bumps, 0 invalidated drafts"; "a corrected unit price → bump"** (rev 5, C2) | M11, M12, M13 |
 | DA-A-16 | `claims.test.ts` (new cases) · "finalize retried → one release + one confirm", "confirmCredit with provisional outstanding → refused", grep "only claims.ts writes confirmed_credit" | M10 |
-| DA-A-17 | `recovery.test.ts` · property "Σ tiles = Σ outstanding" per currency; "unknown send appears in Sending or unknown" | M12 |
-| DA-A-21 | `drafts.test.ts` (new cases) · "windowEndsAt + 1 min → window_may_have_passed; with acknowledgment → sends; linked and unlinked identical" | M13 |
-| D142 | `lib/pan.test.ts` · test PANs masked; IMEI 352099001761481, 13-digit ticket, `112-…-…` order ref, EAN-13 unchanged; `facts.test.ts` · "putFact masks text, never refuses" | M10, M11, M13 |
+| DA-A-17 | `recovery.test.ts` · property "Σ tiles = Σ outstanding" per currency; "unknown send appears in Sending or unknown"; **property "every component with an open member is in exactly one tile" over the C4 generator; "return claim 4,000 + promise 1,500 + confirmed 1,500 → 2,500 in Ready"** (rev 5, C4) | M12, M16 |
+| DA-A-21 | `drafts.test.ts` (new cases) · **"linked claim, windowEndsAt + 1 min → window_may_have_passed; with acknowledgment → sends; no version bump; no new draft required"**, "unlinked claim → the same"; M1C **R01-05c** (auto-open closed past the window) and **R01-05d** through M08's loader (rev 5, C1) | M12, M13 |
+| D142 | `lib/pan.test.ts` · test PANs masked (16-digit Visa, Mastercard, Amex 15, 19-digit Visa); **Luhn-valid keep-samples unchanged: `352099001761481`, `4221234567897`, `112-3456789-1234562`, `4006381333932`**; a test asserting each keep-sample is Luhn-valid (rev 5, C5); `facts.test.ts` · "putFact masks text, never refuses" | M10, M11, M13 |
+| N2 (rev 5) | `drafts.test.ts` · "prepareSend on a foreign draft → identical not-found, nothing written"; "61st call in a minute → rate_limited"; "unlinked late send round-trips with acknowledgment"; "example claim → example_claim before any evaluation" | M13 |
+| N3 (rev 5) | `opportunities.test.ts` · "activate → link → deactivate (test registry) → first prepareSend returns rule_withdrawn, supersedes the opportunity, bumps the version once; re-prepare under the legacy path → sendable" | M12, M13 |
+| N5 (rev 5) | `claims.test.ts` · "provisional 4,000 outstanding + confirmCredit 1,000 without the flag → ProvisionalOutstanding, nothing written"; "with separateFromProvisional → recorded, provisional still 4,000"; "finalize path unchanged" | M10, M16 |
+| N6 (rev 5) | `drafts.test.ts` · "edit a legacy item's unitCents after approval → the binding's evaluation still shows the approved values"; `lib/facts/snapshot.test.ts` · "boundFactValues are canonical and bounded ≤ 32" | M11, M12, M13 |
+| N7 (rev 5) | `r01Parity.test.ts` · "a later confirmed snapshot with a different windowDays → v1 uses it (same as legacy) with assumption A-T2" (both modes) | M12, M16 |
 
 **Core financial fixtures (mission §17, M16, through public mutations):**
 - expected 4,000 / promise 4,000 → unresolved 4,000 → confirm 1,500 → 2,500 → confirm 2,500 → 0;
@@ -993,7 +1044,9 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 - wrong variant, currency, range or confidence → no claim;
 - unconfirmed policy → `likely_eligible` with the assumption, **still opens** (DA-A-2);
 - no policy or no window → `source_unverified`, no claim;
-- window + 1 minute → warning with acknowledgment, not a refusal (D145);
+- window + 1 minute → `window_may_have_passed` (acknowledgeable), identical for linked and unlinked claims, no version bump; auto-open stays closed past the window (rev 5, C1);
+- v1 uses exactly `latestPolicy()`'s snapshot (rev 5, N7);
+- every R01 test runs in both modes; the full suite is re-run at the activation commit (rev 5, C3);
 - a settled 5,000 followed by a deeper drop → only the remainder (new loss key n+1);
 - ShopSavvy data and unconfirmed offers never change the outcome;
 - R01 v1 inactive → the legacy path opens exactly the claims it opens today (fallback test).
@@ -1064,13 +1117,26 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 
 | ID | Owner | Only-writer files | Depends on | Required tests (in addition to §10's table) |
 |---|---|---|---|---|
-| M10 | backend | `convex/schema.ts`, `convex/lib/{money,ledger,balance,claimState,canonical,pan,access}.ts`, `convex/limits.ts`, `convex/claims.ts`, `convex/followUps.ts` (the `isClosedForAsk` call site), `convex/convex.config.ts` (no change expected) (+ tests) | M06 accepted | ledger exhaustive-kind test; `owned*` helpers (`ownedTransaction/Evidence/Fact/Incident/Opportunity/Evaluation/NonCashRemedy`, identical not-found, one read, two-user test each) + `assertSameTransaction`; `parseDecimalToMinor` per-case property tests (DA-A-26); `assertUserAmount` 10^12 refused; `isTwoDecimalCurrency`; provisional/non-cash mutations (idempotency, conflict, foreign claim, currency mismatch); DA-A-9, DA-A-16, D142 rows |
-| M11 | backend-2 | `convex/transactions.ts`, `convex/facts.ts`, `convex/lib/facts/{catalog,subject,values,resolve,write,snapshot_retail,legacyRetail,keys_retail,keys_order,keys_air,keys_card}.ts`, `convex/purchases.ts` (ensure + `confirm.currency` + the `isClosedForAsk` call site), `convex/watches.ts` (`markBought` → ensure), `convex/examples.ts` (ensure + `isExample` copy) (+ tests) | M10 | DA-A-1, DA-A-15, DA-A-33 (legacy assumed-USD currency ≠ confirmed), DA-A-35 (every `insert("purchases"` site calls ensure; `markBought` → transaction exists), DA-A-36 (the 1,001st correction is accepted; an unchanged observation patches), DA-A-29 (a fact citing evidence from another transaction is refused), grep "only lib/facts/write.ts inserts facts", putFact masking (D142); unchanged `purchases.test.ts` |
-| M12 | backend-3 | `convex/lib/rules/{types,outcome,conditions,registry,testRegistry,coverage,applicable,r01_price_adjustment_v1}.ts`, `convex/lib/deadlines/{engine,calendar,usFederalHolidays,usZones}.ts`, `convex/opportunities.ts`, `convex/recovery.ts`, `convex/migrations.ts`, `convex/priceWatch.ts` (retrofit + legacy fallback + **S-M03-3**: the target name moves into the user message as a delimited, JSON-escaped field, `SYSTEM` stays constant) (+ tests) | M10, M11, M09 (R01 spec approved), M1C (R01 fixtures) | DA-A-2, 3, 4, 5, 11, 13, 17 rows; `deriveOutcome` precedence table incl. the assumption-only row; deadline engine (calendar/business days, inclusive/exclusive, DST 2026-03-08 and 2026-11-01, unknown/disputed anchor, beyond_calendar, counterparty overdue, advisory act-by); decisive-missing (DA-A-24: an `any` group already passed lists nothing); DA-A-29 ("a foreign or client-supplied relatedTransactionId is refused; the overlap guard reads only the user's claims"); DA-A-32 (subject-scoped evaluation, bounded rows at 50 items under `transactionLimits`); DA-A-22 test stub prepared for wave 2; DA-A-34 ("recovery.summary sums every claim", A.7 inverted against the summary); SEC-AI-1 static test (every `extract()` call site passes a constant `system`); R01 v1 legacy-fallback test |
-| M13 | ingestion-integrations | `convex/evidence.ts`, `convex/http.ts` (upload/download/OPTIONS), `convex/lib/sniff.ts`, `convex/intake.ts`, `convex/inbound.ts`, `convex/lib/schemas.ts`, `convex/drafts.ts` (binding, `prepareSend`, `approveAndSend` hash/ack check, S-M03-1/4/5, `resendAfterUnknown` with full checks, SEC-AI-4 validator for the R01 draft), `convex/mail.ts`, `convex/notify.ts` (S-M03-1 for alerts), `convex/replies.ts` (S-M03-6 only) (+ tests) | M10, M11, M12 (evaluation helper), M1B (flags) | the rev-3 security tests (SEC-UP-1/2/3/5/6, SEC-SD-2 fixture, A.1/A.2 inverted); DA-A-8, DA-A-14, DA-A-21 rows; DA-A-20 ("upload → content_deleted → re-upload → active row with content"); DA-A-27 ("finalize stores 64-hex"); DA-A-28a ("UTF-8 filename round-trips"), 28c (localhost refused on a non-dev `CONVEX_SITE_URL`), 28e (HEIC → never sent to the model), 28f (quota charged from `_storage.size`); DA-A-31 ("resend after a material change → refused"); SEC-AI-6 ("a spoofed 'refund issued $500' to the inbox → unverified_sender candidate, no ledger promise"); S-M03-4/5/6 repros inverted; SEC-AI-4 ("an unknown email/URL in the generated body blocks approval") |
+| M10 | backend | `convex/schema.ts`, `convex/lib/{money,ledger,balance,claimState,canonical,pan,access}.ts`, `convex/limits.ts`, `convex/claims.ts`, `convex/followUps.ts` (the `isClosedForAsk` call site), `convex/convex.config.ts` (no change expected) (+ tests) | M06 accepted | ledger exhaustive-kind test; `owned*` helpers (`ownedTransaction/Evidence/Fact/Incident/Opportunity/Evaluation/NonCashRemedy`, identical not-found, one read, two-user test each) + `assertSameTransaction`; `parseDecimalToMinor` per-case property tests (DA-A-26); `assertUserAmount` 10^12 refused; `isTwoDecimalCurrency`; provisional/non-cash mutations (idempotency, conflict, foreign claim, currency mismatch); DA-A-9, DA-A-16, D142 rows; **rev 5: C5 (Visa 16/19 only; Luhn-valid keep-samples), N5 (`separateFromProvisional`; the `ProvisionalOutstanding` prompt), N6 schema (`cellStatus`, `boundFactValue`, `evaluations.boundFacts`)**; does **not** touch `lib/rateLimits.ts` (M13 owns the rate-limiter buckets) |
+| M11 | backend-2 | `convex/transactions.ts`, `convex/facts.ts`, `convex/lib/facts/{catalog,subject,values,resolve,write,snapshot_retail,legacyRetail,keys_retail,keys_order,keys_air,keys_card}.ts`, `convex/purchases.ts` (ensure + `confirm.currency` + the `isClosedForAsk` call site), `convex/watches.ts` (`markBought` → ensure), `convex/examples.ts` (ensure + `isExample` copy) (+ tests) | M10 | DA-A-1, DA-A-15, DA-A-33 (legacy assumed-USD currency ≠ confirmed), DA-A-35 (every `insert("purchases"` site calls ensure; `markBought` → transaction exists), DA-A-36 (the 1,001st correction is accepted; an unchanged observation patches), DA-A-29 (a fact citing evidence from another transaction is refused), grep "only lib/facts/write.ts inserts facts", putFact masking (D142); unchanged `purchases.test.ts`; **rev 5 N6: `boundFactValues(snapshot, keys)` in `lib/facts/snapshot_retail.ts` returns canonical (subjectKey, key, status, value) rows, ≤ 32** |
+| M12 | backend-3 | `convex/lib/rules/{types,outcome,conditions,registry,testRegistry,coverage,applicable,r01_price_adjustment_v1}.ts`, `convex/lib/deadlines/{engine,calendar,usFederalHolidays,usZones}.ts`, `convex/opportunities.ts`, `convex/recovery.ts`, `convex/migrations.ts`, `convex/priceWatch.ts` (retrofit + legacy fallback + **S-M03-3**: the target name moves into the user message as a delimited, JSON-escaped field, `SYSTEM` stays constant) (+ tests) | M10, M11, M09 (R01 spec approved), M1C (R01 fixtures) | DA-A-2, 3, 4, 5, 11, 13, 17 rows; `deriveOutcome` precedence table incl. the assumption-only row; deadline engine (calendar/business days, inclusive/exclusive, DST 2026-03-08 and 2026-11-01, unknown/disputed anchor, beyond_calendar, counterparty overdue, advisory act-by); decisive-missing (DA-A-24: an `any` group already passed lists nothing); DA-A-29 ("a foreign or client-supplied relatedTransactionId is refused; the overlap guard reads only the user's claims"); DA-A-32 (subject-scoped evaluation, bounded rows at 50 items under `transactionLimits`); DA-A-22 test stub prepared for wave 2; DA-A-34 ("recovery.summary sums every claim", A.7 inverted against the summary); SEC-AI-1 static test (every `extract()` call site passes a constant `system`); R01 v1 legacy-fallback test; **rev 5:**
+- C1: R01 v1's window spec carries `lateAskAcknowledgeable`; the window closing is not material; auto-open is closed past the window (R01-05c);
+- C2: the R01 v1 bound-fact list; 12 checks at 12 prices → 0 bumps; a corrected unit price → bump;
+- C3: every R01 test in both modes through the `vi.mock` registry seam;
+- C4: `ready` is the catch-all, with the exhaustiveness property;
+- N3: activation withdrawal is material;
+- N6: `evaluations.boundFacts` written; `resultHash` includes `boundFactsHash`;
+- N7: `latestPolicy()` snapshot + A-T2;
+- wave-2 note: the retail paid-total cap uses a confirmed `retail.order_total` when present, else item totals with `paidTotalPartial` |
+| M13 | ingestion-integrations | `convex/evidence.ts`, `convex/http.ts` (upload/download/OPTIONS), `convex/lib/sniff.ts`, `convex/intake.ts`, `convex/inbound.ts`, `convex/lib/schemas.ts`, `convex/drafts.ts` (binding, `prepareSend`, `approveAndSend` hash/ack check, S-M03-1/4/5, `resendAfterUnknown` with full checks, SEC-AI-4 validator for the R01 draft), `convex/mail.ts`, `convex/notify.ts` (S-M03-1 for alerts), `convex/replies.ts` (S-M03-6 only), `convex/lib/rateLimits.ts` (rev 5: the `evidenceUpload`, `evidenceDownload` and `prepareSend` buckets, using M10's constants) (+ tests) | M10, M11, M12 (evaluation helper), M1B (flags) | the rev-3 security tests (SEC-UP-1/2/3/5/6, SEC-SD-2 fixture, A.1/A.2 inverted); DA-A-8, DA-A-14, DA-A-21 rows; DA-A-20 ("upload → content_deleted → re-upload → active row with content"); DA-A-27 ("finalize stores 64-hex"); DA-A-28a ("UTF-8 filename round-trips"), 28c (localhost refused on a non-dev `CONVEX_SITE_URL`), 28e (HEIC → never sent to the model), 28f (quota charged from `_storage.size`); DA-A-31 ("resend after a material change → refused"); SEC-AI-6 ("a spoofed 'refund issued $500' to the inbox → unverified_sender candidate, no ledger promise"); S-M03-4/5/6 repros inverted; SEC-AI-4 ("an unknown email/URL in the generated body blocks approval"); **rev 5:**
+- C1: `window_may_have_passed` for linked claims; with acknowledgment → sends, no bump, no new draft;
+- C2: the binding at `drafts.insert` uses the R01 v1 bound-fact list, never the live price;
+- N2: check order, the `prepareSend` limiter, the unlinked-claim hash;
+- N3: `rule_withdrawn`;
+- N6: the binding's evaluation shows the approved values after a legacy item edit |
 | M14 | backend | `convex/account.ts`, `convex/retention.ts`, `convex/crons.ts`, `convex/lib/blobRefs.ts`, `convex/lib/privacyFacts.ts` (+ tests) | M10 | DA-A-7 retention rows; SEC-DEL-1 reflective test (`EXPORT_EXEMPT`: `usage`); SEC-DEL-2/3 (blob then row in one mutation; no URL in the export); orphan sweep (a referenced blob is never deleted; an unregistered `_storage` field fails the test); DA-A-32 evaluation pruning (bounded; never prunes current, bound or case-linked rows); DA-A-20 retention side |
 | M15 | frontend | `src/components/opportunity/{OpportunityCard,Questions,AuthorityBadge,DeadlineLine,CoverageList}.tsx`, `src/components/purchase/ItemTracker.tsx`, `src/lib/money.ts`, `src/components/dashboard/{StatCards,model}.tsx/.ts`, `src/components/claim/Composer.tsx` (prepareSend + window acknowledgment), `src/pages/Privacy.tsx` (DA-A-7 + D142 disclosure), `src/App.tsx` (no change) | M08 (DOM env), M12/M13/M14 queries | component tests (`*.test.tsx`, counted only once M08 lands): every card outcome, unknown deadline, cap shown as a limit, counterparty "overdue" copy, advisory act-by label, no amount without an estimate; `model.test.ts` "mixed currencies → separate series, never summed" (QA-2); DA-A-34 "StatCards renders money only from recovery.summary, never from tracking.overview totals"; Privacy copy test; axe on Purchase, Board and Privacy; the existing e2e purchases/claims specs |
-| M16 | qa | `convex/ledgerFixtures.test.ts`, `convex/r01Parity.test.ts`, `convex/isolationM1.test.ts`, `convex/concurrencyM1.test.ts`, `convex/testing.ts` (seeders for transactions/evidence/opportunities, incl. a synthetic PAN), `e2e/r01-opportunity.spec.ts`, `docs/reviews/…-wave1-qa.md` | M10–M15, M08 | independent core financial fixtures; R01 parity against `5cc326d`; two-user isolation for every new public function; **§17 concurrency tests, each with its read-set argument written in the file header** (convex-test serializes, so each test proves the conflict set): CT-1 concurrent `openCase` → one claim; CT-2 manual re-evaluate vs cron `recordCheck` on one item → one claim, one row per resultHash; CT-3 concurrent `ensurePurchaseTransaction` → one row; CT-4 credit confirmation vs `followUps.fire` → the reminder is a no-op; CT-5 activation change (test registry) during approval → prepareSend refuses and persists; CT-6 approval invalidation vs `approveAndSend` → the send refuses; a browser run of watch → buy → drop → card → claim → prepare → acknowledge → confirm credit → dashboard |
+| M16 | qa | `convex/ledgerFixtures.test.ts`, `convex/r01Parity.test.ts`, `convex/isolationM1.test.ts`, `convex/concurrencyM1.test.ts`, `convex/testing.ts` (seeders for transactions/evidence/opportunities, incl. a synthetic PAN), `e2e/r01-opportunity.spec.ts`, `docs/reviews/…-wave1-qa.md` | M10–M15, M08 | independent core financial fixtures; R01 parity against `5cc326d`; two-user isolation for every new public function; **§17 concurrency tests, each with its read-set argument written in the file header** (convex-test serializes, so each test proves the conflict set): CT-1 concurrent `openCase` → one claim; CT-2 manual re-evaluate vs cron `recordCheck` on one item → one claim, one row per resultHash; CT-3 concurrent `ensurePurchaseTransaction` → one row; CT-4 credit confirmation vs `followUps.fire` → the reminder is a no-op; CT-5 activation change (test registry) during approval → prepareSend refuses and persists; CT-6 approval invalidation vs `approveAndSend` → the send refuses; **rev 5: C3 (r01Parity, DA-A-2/3/13 and N7 tests parameterized over {legacy fallback, v1 forced active}); C4 (an independent tile-exhaustiveness property test over the full status × delivery × promised × provisional generator); N5 through public mutations**; a browser run of watch → buy → drop → card → claim → prepare → acknowledge → confirm credit → dashboard |
 | M17 | devils-advocate | `docs/reviews/…-da-checkpoint-B.md` | M10–M1C | checkpoint B: each high finding's test fails on rev 3 and passes on the implementation |
 | M18 | opus-rules-reviewer | `docs/reviews/…-pack-review-R01-v1.md` | M09, M12, M1C | the R01 v1 code pack matches the M09-approved spec, every param cites a passage id, all R01 fixtures pass unchanged through M08's loader → the lead records activation (DECISIONS + `activation.ts`) |
 | M19 | qa-2 | `scripts/check-rule-packs.mjs` (new: manifest ↔ activation ↔ DECISIONS consistency; pack-file immutability for status ≥ reviewed; `ENGINE_VERSION` check stubbed until M20), `scripts/verify-rule-sources.mjs` (new: on-demand; fetches pinned `sources[].url`s where permitted, compares sha256 with `manifest.json`, writes `docs/rules/review-items/*.md` on drift or failure, never edits logic, prints the manual-verification list for 403 sites) | M08 landed. The `ci.yml` step (`check-rule-packs` on every run; `verify-rule-sources` never in CI) is added by M08 if it is still open, otherwise by the lead as shared-CI owner (D144) | script unit tests on fixture manifests: drift → a review item; unchanged → no output; an edited reviewed pack file → failure |
@@ -1082,8 +1148,8 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 
 | ID | Owner | Only-writer files | Depends on | Required tests / specified content |
 |---|---|---|---|---|
-| M20 | backend | `convex/schema.ts` (wave-2 addendum), `convex/claims.ts` (`insertScenarioClaim`, `recordDenial`, `recordNonCashResolution` (DA-A-18), `get` for item-less claims), `convex/lib/access.ts` (`ownedPacket`, `ownedSubmission`), `convex/packets.ts`, `convex/submissions.ts` (DA-A-10), `convex/lib/packets/common.ts`, `convex/lib/facts/catalog.ts` (merge only), engine files `convex/lib/rules/{types,outcome,conditions,registry,engineVersion}.ts` (DA-A-23 `ENGINE_VERSION`), `scripts/check-rule-packs.mjs` (enable the ENGINE_VERSION check) | wave 1 closed | packet approve/record rules (§6), incl. "approve → ledger event → record succeeds flagged" and "approve → deadline passes → record succeeds, shown against the deadline"; denied transitions; non-cash resolution (a voucher on 40,000 → Asked 0, Non-cash 1, reminders cancelled); an engine change without an `ENGINE_VERSION` bump fails CI; with a bump, approvals are invalidated |
-| M21 | commerce-payments | `convex/lib/facts/{keys_order,keys_card,snapshot_order,snapshot_card}.ts`, `convex/lib/rules/{r05_late_order_v1,r03_billing_error_v1}.ts`, `convex/lib/packets/{r05_v1,r03_v1}.ts` | M20, M09 (R03/R05 approved), M27 per pack | §10 R05/R03; D143.3 (channel, anchor, advisory act-by, no merchant gate); DA-A-30 per-line key; SEC-AI-4 on templates; DA-A-15 "every interpolated key is bound" |
+| M20 | backend | `convex/schema.ts` (wave-2 addendum), `convex/claims.ts` (`insertScenarioClaim`, `recordDenial`, `recordNonCashResolution` (DA-A-18), `get` for item-less claims), `convex/lib/access.ts` (`ownedPacket`, `ownedSubmission`), `convex/packets.ts`, `convex/submissions.ts` (DA-A-10), `convex/lib/packets/common.ts`, `convex/lib/facts/catalog.ts` (merge only), engine files `convex/lib/rules/{types,outcome,conditions,registry,engineVersion}.ts` (DA-A-23 `ENGINE_VERSION`), `scripts/check-rule-packs.mjs` (enable the ENGINE_VERSION check) | wave 1 closed | packet approve/record rules (§6), incl. "approve → ledger event → record succeeds flagged" and "approve → deadline passes → record succeeds, shown against the deadline"; denied transitions; non-cash resolution (a voucher on 40,000 → Asked 0, Non-cash 1, reminders cancelled); an engine change without an `ENGINE_VERSION` bump fails CI; with a bump, approvals are invalidated; **rev 5 N3: `packets.approve`/`submissions.record` on a claim whose pack was withdrawn → `rule_withdrawn` once, then legacy handling; N6: `packets.binding.evaluationId` → evaluation `boundFacts` displayed on the packet** |
+| M21 | commerce-payments | `convex/lib/facts/{keys_order,keys_card,snapshot_order,snapshot_card}.ts`, `convex/lib/rules/{r05_late_order_v1,r03_billing_error_v1}.ts`, `convex/lib/packets/{r05_v1,r03_v1}.ts` | M20, M09 (R03/R05 approved), M27 per pack | §10 R05/R03; D143.3 (channel, anchor, advisory act-by, no merchant gate); DA-A-30 per-line key; SEC-AI-4 on templates; DA-A-15 "every interpolated key is bound"; **rev 5 wave-2 note: the `retail.order_total` fact (incl. tax + shipping) in `keys_order.ts`; an R05 order-total estimate is capped by it, not by item totals ("R05 estimate 64,950 on an order total 64,950 with items 60,000 → not capped")** |
 | M22 | travel | `convex/lib/facts/{keys_air,snapshot_air}.ts`, `convex/lib/rules/{r02_air_refund_v1,r04_baggage_v1}.ts`, `convex/lib/packets/{r02_v1,r04_v1}.ts` | M20, M09 (R02/R04), M27 | §10 R02/R04; D143.2/D143.4; DA-A-24 (no disability/time-zone question on a confirmed 4-hour cancellation change); DA-A-25 (`track_automatic`; overdue → escalate); DA-A-18 R02 voucher acceptance fact |
 | M23 | ingestion-integrations | `convex/evidence.ts` (extraction action + flag gate + text-layer pre-scan), `convex/intake.ts` (second-stage classifier), `convex/lib/schemas_docs.ts`, `convex/lib/quote.ts` (DA-A-6 verification), `convex/lib/pdfText.ts` ("use node"; one exact-pinned PDF text-layer library, D145), `package.json`/lockfile (that one dependency; wave-2 owner once M08 releases) | M20, M1B | DA-A-6 ("a correct short quote → verified", "a digit-swapped value → unverified", "image-only → unverifiable, never counts toward evidenceSupports"); DA-A-8 ("PDF declared receipt with a test PAN in its text layer → store_only"); SEC-UP-4 (embedded JS/remote URL not executed; decompression bomb capped); SEC-AI-2/3/5; SEC-DEL-4 ("extraction finishing after requestDeletion writes no facts, leaves no blob"); the live-extraction flag blocks real-user documents |
 | M24 | frontend | `src/App.tsx` (routes), `src/pages/{Add,Transaction,Opportunities}.tsx`, `src/pages/Claim.tsx` (`claimCurrency`, packet section, tracking mode), `src/pages/Settings.tsx` (move the paste panel out), `src/lib/evidenceFetch.ts` (DA-A-28b previews), `src/components/shell/nav.tsx`, `src/components/packet/*` | M20–M23 | keyboard-only questions and packet flows; the doc-type picker is required before extraction; previews reject non-image sniffed types; §14 resilience states implemented (§9); axe on the new pages; direct-route refresh; foreign ids |
@@ -1214,7 +1280,9 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 
 ---
 
-## 13. Rev 4 changelog
+## 13. Changelogs
+
+### 13.1 Rev 4
 
 | Id | What changed | Section(s) |
 |---|---|---|
@@ -1265,3 +1333,20 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 | M03 lows | S-M03-3 → M12; S-M03-4/5/6 → M13; SEC-AI-4 → M13/M21/M22; SEC-AI-6 → M13 | §6, §7, §11 |
 | DA omissions 1–12 | Pack review/activation (M18/M27); refresh (M19); later scenarios (§11.3); R01 v2 (M37); C50 (M29); diagnostics (M1B/M29); resilience (M24/M25); concurrency (M16/M25); copy (M2A); native text (M23); M03 lows (§11); C37–C58 map (§11.4) | §11 |
 | M08 / M09 | Referenced, not duplicated | §2.7, §11 |
+
+### 13.2 Rev 5 (M06b; M07 recheck `16b6a5a`, D148)
+
+| Id | What changed | Section(s) / task |
+|---|---|---|
+| C1 (N1, DA-A-21) | `lateAskAcknowledgeable` on R01 v1's legacy window; `prepareSend` returns the acknowledgeable `window_may_have_passed` when that window is the only failing condition, identical for linked and unlinked claims; the window closing is not material; auto-open closed past the window | §2.8, §4, §6, §10 R01 + DA-A-21 row · M12/M13 |
+| C2 (DA-A-15) | R01 v1 bound facts = unit price, quantity, item identity, purchase date, claim amount, opening observation; never the live price; 12 prices → 0 invalidations | §2.7, §10 DA-A-15 row · M12/M13 |
+| C3 (N4) | Every R01 test in both modes via the `vi.mock` registry seam; the lead re-runs the full suite at the activation commit | §2.7, §10 · M12/M16 |
+| C4 (DA-A-17) | `ready` is the catch-all tile; I3 disjoint **and exhaustive**; generator over every status/delivery/promise/provisional combination | §3.4, §10 DA-A-17 row · M12/M16 |
+| C5 (D142) | Visa 16/19 only; Luhn-valid keep-samples `352099001761481`, `4221234567897`, `112-3456789-1234562`, `4006381333932` | §2.6, §10 D142 row · M10 |
+| N2 | `prepareSend` check order = `approveAndSend`'s (owner, tombstone, example, address, limiter) before any evaluation; the unlinked hash is the existing binding {to, subject, body, claimVersion, draftVersion} | §6, §10 · M13 |
+| N3 | A withdrawn activation is material: supersede the opportunity, bump once, `rule_withdrawn`, then the legacy path | §2.8, §6, §10 · M12/M13/M20 |
+| N5 | `confirmCredit` with provisional outstanding asks: finalize vs `separateFromProvisional`; never refuses a separate posting | §3.2, §10 · M10/M16 |
+| N6 | `evaluations.boundFacts` (values, ≤ 32); `resultHash` includes `boundFactsHash`; the approved basis stays displayable for legacy purchases | §2.4, §4, §10 · M10/M11/M12/M13/M20 |
+| N7 | R01 v1 uses exactly `latestPolicy()`'s snapshot; A-T1/A-T2 from its `retrievedAt` | §2.7, §10 · M12/M16 |
+| Wave-2 note 1 | Retail paid-total cap = confirmed `retail.order_total` (tax + shipping) else item totals labelled `paidTotalPartial` | §3.4 · M12/M21 |
+| Wave-2 note 2 | The lead runs `verify-rule-sources.mjs` at every wave close, before release, and weekly while a slice is active | §2.7 |
