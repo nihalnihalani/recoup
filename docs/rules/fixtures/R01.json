@@ -6,7 +6,7 @@
   "spec": "docs/rules/R01-retail-price-adjustment.md",
   "construction": "Constructed by hand by opus-rules-researcher (M02, task M1C) on 2026-09-23 from the R01 spec (§1.4, §4, L1) and the R01 v1 behaviour specified in contract rev 4 (044b20d) §2.7 and §10, D145, and DA-A-2 / DA-A-13 / DA-A-22 / DA-A-33. No new R01 v1 evaluator exists yet (M12), and none was consulted. Legacy parity values (the drop threshold, 24-hour-multiple window arithmetic, observation rejection bars) were cross-checked against TODAY's legacy behaviour in convex/lib/ledger.ts (priceDropCents, windowEndsAt) and convex/priceWatch.ts (recordCheck, rejectionReason, implausiblyCheap) at 044b20d. That code is the parity reference, not the code under test. `legacy_note` values are informative strings from that path; an evaluator is not required to emit them.",
   "conventions": {
-    "fact_encoding": "facts.<key> = {type, value, state}; state in {user_confirmed, extracted_candidate, derived, missing, conflicting, assumption}. Fact keys follow contract §2.7: retail.purchase_date, retail.unit_price, retail.quantity, retail.observed_price, retail.window_days, retail.policy_confirmed, retail.policy_temporal, retail.currency. money = {amount_minor:int, currency:ISO-4217}. datetime = ISO-8601 with offset.",
+    "fact_encoding": "facts.<key> = {type, value, state}; state in {user_confirmed, observed, derived, extracted_candidate, conflicting, missing, assumption} (README 'Fixture format'); an accepted price observation is `observed` (contract §2.5 legacy adapter). Fact keys follow contract §2.7: retail.purchase_date, retail.unit_price, retail.quantity, retail.observed_price, retail.window_days, retail.policy_confirmed, retail.policy_temporal, retail.currency. money = {amount_minor:int, currency:ISO-4217}. datetime = ISO-8601 with offset.",
     "observation": "An observation is accepted only if it is a single price (not a range), > 0, variantMatch 'exact', currency equal to the purchase currency, confidence >= 0.7, and not implausibly cheap (>= round(10% of the unit price paid)). A rejected observation never becomes retail.observed_price.",
     "threshold": "A drop qualifies when (unit_price - observed) >= max(100 minor units, round(2% of unit_price)). The claim amount is (unit_price - observed) x quantity.",
     "after_settled_claim": "If confirmed (paid) price-adjustment claims on the item total S > 0, the new ask is (drop x qty) - S, and it opens only if that remainder >= max(100, round(2% of unit_price x quantity)). Each ask is a new loss key (n+1).",
@@ -26,8 +26,10 @@
       "not_eligible",
       "deadline_passed",
       "source_unverified",
-      "unsupported"
-    ]
+      "unsupported",
+      "not_yet_due"
+    ],
+    "conflicting": "A conflicting fact carries `candidates`. If the candidates give different outcomes → needs_facts and no claim. If every candidate gives the same outcome, the conflict is not material: outcome likely_eligible and the claim's windowEndsAt uses the EARLIEST candidate (README cross-pack rule 3)."
   },
   "cases": [
     {
@@ -73,7 +75,7 @@
             "observedAt": "2026-09-20T10:00:00-04:00",
             "source": "merchant product page"
           },
-          "state": "extracted_candidate"
+          "state": "observed"
         },
         "retail.window_days": {
           "type": "integer",
@@ -211,7 +213,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "drop": "399 (< 400)",
@@ -236,7 +238,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "drop": "400 (= threshold)",
@@ -268,7 +270,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "drop": "401",
@@ -308,7 +310,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "drop": "99 (< $1 floor; 2% would be 60)",
@@ -341,7 +343,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "drop": "100 (= $1 floor)",
@@ -555,7 +557,7 @@
             "confidence": 0.95,
             "isRange": false
           },
-          "state": "extracted_candidate"
+          "state": "observed"
         },
         "retail.window_days": {
           "type": "integer",
@@ -707,7 +709,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -734,7 +736,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -761,7 +763,7 @@
                 "confidence": 0.69,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -788,7 +790,7 @@
                 "confidence": 0.9,
                 "isRange": true
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -815,7 +817,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -909,7 +911,7 @@
                 "confidence": 0.93,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -940,7 +942,7 @@
                 "confidence": 0.93,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -1016,7 +1018,7 @@
             "confidence": 0.9,
             "isRange": false
           },
-          "state": "extracted_candidate"
+          "state": "observed"
         },
         "retail.window_days": {
           "type": "integer",
@@ -1109,7 +1111,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -1148,7 +1150,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -1173,7 +1175,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -1231,7 +1233,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -1258,7 +1260,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -1296,7 +1298,7 @@
                 "confidence": 0.9,
                 "isRange": false
               },
-              "state": "extracted_candidate"
+              "state": "observed"
             }
           },
           "expected": {
@@ -1491,7 +1493,7 @@
             "confidence": 0.9,
             "isRange": false
           },
-          "state": "extracted_candidate"
+          "state": "observed"
         },
         "retail.window_days": {
           "type": "integer",
@@ -1548,6 +1550,168 @@
           "R01 spec §3"
         ],
         "reasoning": "Only an accepted observation of the merchant's own price for the exact variant can support a claim."
+      }
+    },
+    {
+      "id": "R01-14",
+      "title": "Required fact missing: no unit price paid (and, as a variant, no purchase date)",
+      "categories": [
+        "missing_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T10:00:00-04:00",
+      "facts_from": "R01-01",
+      "facts_override": {
+        "retail.unit_price": {
+          "type": "money",
+          "value": null,
+          "state": "missing"
+        }
+      },
+      "context": {
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "needs_facts",
+        "missing_facts": [
+          "retail.unit_price"
+        ],
+        "claim": {
+          "opens": false
+        },
+        "amount": null,
+        "note": "retail.unit_price is a required (not assumption-class) fact (contract §2.7); without it no drop can be computed."
+      },
+      "variants": [
+        {
+          "id": "R01-14b",
+          "change": {
+            "retail.unit_price": {
+              "type": "money",
+              "value": {
+                "amount_minor": 49999,
+                "currency": "USD"
+              },
+              "state": "user_confirmed"
+            },
+            "retail.purchase_date": {
+              "type": "datetime",
+              "value": null,
+              "state": "missing"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [
+              "retail.purchase_date"
+            ],
+            "claim": {
+              "opens": false
+            },
+            "amount": null,
+            "note": "No purchase date → no window end can be computed; legacy parity: a purchase without purchasedAt is not watched."
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "contract §2.7 R01 v1 FactRequirements (required: retail.purchase_date, retail.unit_price, retail.observed_price, retail.window_days)",
+          "R01 spec §3"
+        ],
+        "reasoning": "A missing required fact yields needs_facts, never a claim."
+      }
+    },
+    {
+      "id": "R01-15",
+      "title": "Contradictory purchase dates: candidates on opposite sides of the window end, then on the same side",
+      "categories": [
+        "contradictory_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T10:00:00-04:00",
+      "facts_from": "R01-01",
+      "facts_override": {
+        "retail.purchase_date": {
+          "type": "datetime",
+          "value": null,
+          "state": "conflicting",
+          "candidates": [
+            {
+              "value": "2026-09-08T11:00:00-04:00",
+              "evidence": "order-confirmation email",
+              "windowEndsAt": "2026-10-08T15:00:00Z"
+            },
+            {
+              "value": "2026-08-20T09:00:00-04:00",
+              "evidence": "card statement transaction date",
+              "windowEndsAt": "2026-09-19T13:00:00Z"
+            }
+          ]
+        }
+      },
+      "context": {
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "needs_facts",
+        "missing_facts": [
+          "retail.purchase_date"
+        ],
+        "claim": {
+          "opens": false
+        },
+        "amount": null,
+        "note": "Under one candidate the window is open at the clock; under the other it closed on 2026-09-19. The conflict is material."
+      },
+      "variants": [
+        {
+          "id": "R01-15b",
+          "change": {
+            "retail.purchase_date": {
+              "type": "datetime",
+              "value": null,
+              "state": "conflicting",
+              "candidates": [
+                {
+                  "value": "2026-09-08T11:00:00-04:00",
+                  "evidence": "order-confirmation email",
+                  "windowEndsAt": "2026-10-08T15:00:00Z"
+                },
+                {
+                  "value": "2026-09-10T15:00:00-04:00",
+                  "evidence": "receipt",
+                  "windowEndsAt": "2026-10-10T19:00:00Z"
+                }
+              ]
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "assumptions": [
+              "A-T1"
+            ],
+            "unconfirmed_decisive_facts": [
+              "retail.purchase_date"
+            ],
+            "claim": {
+              "opens": true,
+              "amount": {
+                "amount_minor": 5000,
+                "currency": "USD"
+              },
+              "windowEndsAt": "2026-10-08T15:00:00Z",
+              "note": "window end from the EARLIEST candidate (conservative)"
+            }
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "README cross-pack rule 3",
+          "contract §2.7"
+        ],
+        "reasoning": "A conflict that changes the window outcome must be resolved first; one that does not is carried as an unconfirmed fact with the conservative window end."
       }
     }
   ]
