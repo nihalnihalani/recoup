@@ -16,6 +16,8 @@ import schema, {
   evaluationOutcome,
   factValue,
   money,
+  nextAction,
+  reevaluate,
   requiredChannel,
   scenarioId,
 } from "./schema";
@@ -96,6 +98,38 @@ describe("wave-1 schema block (contract §2.4)", () => {
     );
     expect(Object.keys(boundFactValue.fields).sort()).toEqual(["key", "status", "subjectKey", "value"]);
     expect(boundFactValue.fields.value.isOptional).toBe("optional");
+  });
+
+  it("rev 5.2 (M06d, D147(6)): not_yet_due outcome, the reevaluate validator and the wait next action", async () => {
+    expect(evaluationOutcome.members.map((m) => m.value)).toContain("not_yet_due");
+    expect(Object.keys(reevaluate.fields).sort()).toEqual(["at", "when"]);
+    expect(reevaluate.fields.at.isOptional).toBe("optional");
+    expect(reevaluate.fields.when.isOptional).toBe("optional");
+    expect(nextAction.members.map((m) => m.fields.kind.value)).toContain("wait");
+
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await t.run(async (ctx) => {
+      const transactionId = await ctx.db.insert("transactions", {
+        userId, category: "retail_order", status: "active", counterpartyName: "Acme", currency: "USD", liveFactCount: 0,
+      });
+      const opportunityId = await ctx.db.insert("opportunities", {
+        userId, transactionId, scenarioId: "R05", remedyKey: "cash_refund", subjectKey: "txn", dedupeKey: `${transactionId}|R05|cash_refund|txn|-`,
+        status: "open", ruleId: "r05", ruleVersion: 1, outcome: "not_yet_due", authorityClass: "legal_entitlement",
+        remedyType: "cash_refund", cashClass: "cash", lossKeys: [`txn:${transactionId}:paid`], lastEvaluatedAt: 1,
+      });
+      const evaluationId = await ctx.db.insert("evaluations", {
+        userId, opportunityId, scenarioId: "R05", ruleId: "r05", ruleVersion: 1, factSnapshotHash: "s", resultHash: "r",
+        evaluatedAt: 1, trigger: "fact_change", outcome: "not_yet_due",
+        dimensions: { applies: "pass", factsKnown: "pass", evidenceSupports: "pass", windowOpen: "pass", amountCalculable: "pass", readyForApproval: "fail" },
+        conditions: [], missingFacts: [], assumptions: [], disqualifierIds: [], amount: null, deadlines: [], sourceRefs: [],
+        overlap: [], nextAction: { kind: "wait", reevaluate: { at: "2026-10-11" } }, explanation: ["ship-by date not reached"],
+        reevaluate: { at: "2026-10-11" },
+      });
+      const row = await ctx.db.get(evaluationId);
+      expect(row?.reevaluate).toEqual({ at: "2026-10-11" });
+      expect(row?.nextAction).toEqual({ kind: "wait", reevaluate: { at: "2026-10-11" } });
+    });
   });
 
   it("round-trips one row per new table, all owned by one user and linked by id", async () => {
