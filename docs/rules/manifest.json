@@ -1,0 +1,265 @@
+{
+  "schema": "recoup.rules-manifest/v1",
+  "generatedAt": "2026-09-23",
+  "generatedBy": "opus-rules-researcher (M02)",
+  "note": "Lifecycle values: draft | researched | reviewed | active | superseded | withdrawn. Nothing here is reviewed or active. capturedSha256 hashes the file committed in this repo; rawResponseSha256 hashes the upstream HTTP response the capture was rendered from (when available).",
+  "packs": [
+    {
+      "ruleId": "R01.retail_price_adjustment",
+      "scenarioId": "R01",
+      "version": 1,
+      "lifecycle": "researched",
+      "spec": "docs/rules/R01-retail-price-adjustment.md",
+      "fixtures": null,
+      "sources": [],
+      "merchantPacks": [
+        {
+          "ruleId": "R01.bestbuy.all_channels",
+          "version": 1,
+          "lifecycle": "researched",
+          "url": "https://www.bestbuy.com/site/help-topics/price-match-guarantee/pcmcat290300050002.c?id=pcmcat290300050002",
+          "effectiveDate": "2026-09-02",
+          "retrievedAt": "2026-09-23",
+          "rawResponseSha256": null,
+          "note": "browser capture; companion return policy effective 2026-02-23"
+        },
+        {
+          "ruleId": "R01.target.all_channels",
+          "version": 1,
+          "lifecycle": "researched",
+          "url": "https://help.target.com/help/SubCategoryArticle?childcat=Price+Match+Guarantee&parentcat=Policies+%26+Guidelines",
+          "effectiveDate": "unknown",
+          "retrievedAt": "2026-09-23",
+          "rawResponseSha256": null
+        },
+        {
+          "ruleId": "R01.costco.online",
+          "version": 1,
+          "lifecycle": "researched",
+          "url": "https://customerservice.costco.com/app/answers/detail/a_id/628/~/price-adjustment---costco.com-orders",
+          "effectiveDate": "unknown",
+          "retrievedAt": "2026-09-23",
+          "rawResponseSha256": null
+        },
+        {
+          "ruleId": "R01.apple.retail_us",
+          "version": 1,
+          "lifecycle": "researched",
+          "url": "https://www.apple.com/legal/sales-support/sales-policies/retail_us.html",
+          "effectiveDate": "unknown",
+          "retrievedAt": "2026-09-23",
+          "rawResponseSha256": "99bc751ea16bf7371b985f99ba04b2aff042f1e0004aadc41222c16bc41355d2"
+        },
+        {
+          "ruleId": "R01.homedepot",
+          "version": null,
+          "lifecycle": "draft",
+          "url": "https://www.homedepot.com/c/price-match-and-price-check",
+          "status": "source_blocked"
+        }
+      ]
+    },
+    {
+      "ruleId": "R02.airline_fare_refund.us_dot",
+      "scenarioId": "R02",
+      "version": 1,
+      "lifecycle": "researched",
+      "spec": "docs/rules/R02-airline-refund.md",
+      "fixtures": "docs/rules/fixtures/R02.json",
+      "sources": [
+        "ecfr-14cfr260",
+        "usc-49-42305",
+        "ecfr-14cfr399.80l",
+        "federal-web-excerpts"
+      ],
+      "refreshDays": 30,
+      "mandatoryReviewBy": "2027-07-07"
+    },
+    {
+      "ruleId": "R03.credit_billing_error.us_fcba",
+      "scenarioId": "R03",
+      "version": 1,
+      "lifecycle": "researched",
+      "spec": "docs/rules/R03-credit-card-billing-error.md",
+      "fixtures": "docs/rules/fixtures/R03.json",
+      "sources": [
+        "ecfr-12cfr1026.13",
+        "ecfr-12cfr1026-suppI-13",
+        "usc-15-1666",
+        "ecfr-12cfr1026.12c",
+        "ecfr-12cfr1005.11",
+        "federal-web-excerpts"
+      ],
+      "refreshDays": 90
+    },
+    {
+      "ruleId": "R04.baggage.us_dot",
+      "scenarioId": "R04",
+      "version": 1,
+      "lifecycle": "researched",
+      "spec": "docs/rules/R04-baggage.md",
+      "fixtures": "docs/rules/fixtures/R04.json",
+      "sources": [
+        "ecfr-14cfr260",
+        "ecfr-14cfr254",
+        "federal-web-excerpts"
+      ],
+      "refreshDays": 30,
+      "note": "path b/c liability floor: monthly refresh from 2026-10-01 until the 2026 biennial adjustment is published"
+    },
+    {
+      "ruleId": "R05.mitor_shipment.us_ftc",
+      "scenarioId": "R05",
+      "version": 1,
+      "lifecycle": "researched",
+      "spec": "docs/rules/R05-mail-internet-order.md",
+      "fixtures": "docs/rules/fixtures/R05.json",
+      "sources": [
+        "ecfr-16cfr435",
+        "federal-web-excerpts"
+      ],
+      "refreshDays": 180
+    }
+  ],
+  "sources": [
+    {
+      "sourceId": "ecfr-14cfr260",
+      "url": "https://www.ecfr.gov/current/title-14/chapter-II/subchapter-A/part-260",
+      "kind": "federal_regulation",
+      "capturedPath": "docs/rules/sources/ecfr-14cfr260.txt",
+      "capturedSha256": "d6371ba3d87474a6dd6b8fb7fc0134cf1c380b14bd8049e0beab81c0d75b9d5a",
+      "rawResponseSha256": "d79cfeb99842a1d79b813a21993bf4a6ded2226855cec30523890bf79fe51ee3",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "2024-06-25 (am. 2024-08-12; compliance 2024-10-28)"
+    },
+    {
+      "sourceId": "usc-49-42305",
+      "url": "https://www.govinfo.gov/content/pkg/USCODE-2024-title49/html/USCODE-2024-title49-subtitleVII-partA-subpartii-chap423-sec42305.htm",
+      "kind": "federal_statute",
+      "capturedPath": "docs/rules/sources/usc-49-42305.txt",
+      "capturedSha256": "4295929aa271ae9cb0d2c9d251706b17176f9ca095b1fbf1a04622aa554f8f99",
+      "rawResponseSha256": "c6369a21c835a0b881e8461f08fcffbf44e814a63292a911638d348871ade788",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "2024-05-16"
+    },
+    {
+      "sourceId": "ecfr-14cfr399.80l",
+      "url": "https://www.ecfr.gov/current/title-14/chapter-II/subchapter-F/part-399/subpart-G/section-399.80",
+      "kind": "federal_regulation",
+      "capturedPath": "docs/rules/sources/ecfr-14cfr399.80l-excerpt.txt",
+      "capturedSha256": "64d5ec8b59f6e74dc507a40c6d7a18af56d13a3d6f7de9963b44ccd4ffa55bdf",
+      "rawResponseSha256": "45ba2b8f7ad49063fb8022fe95ec21440bd55ac4b26ffb51f4a240c224c9fb4a",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "unknown (as of 2026-09-18)"
+    },
+    {
+      "sourceId": "ecfr-14cfr254",
+      "url": "https://www.ecfr.gov/current/title-14/chapter-II/subchapter-A/part-254",
+      "kind": "federal_regulation",
+      "capturedPath": "docs/rules/sources/ecfr-14cfr254.txt",
+      "capturedSha256": "2da860308e9bac768a77fa9e3031fcfe1ab1d9588b446e3b2f2f4caa0ed6bd4a",
+      "rawResponseSha256": "51e82d345c5142ec2437515f9eddcc86e6af8a027093930f66023eb1d944c1d0",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "$4,700 figure effective 2025-01-22"
+    },
+    {
+      "sourceId": "ecfr-14cfr250",
+      "url": "https://www.ecfr.gov/current/title-14/chapter-II/subchapter-A/part-250",
+      "kind": "federal_regulation",
+      "capturedPath": "docs/rules/sources/ecfr-14cfr250.txt",
+      "capturedSha256": "4955755f7ad6fb2d8f6895578d25b562aaef369c599738d710bd06a97088c65c",
+      "rawResponseSha256": "5dc3926a06ea7535b39a7d31b2dca7481c399ba6dcc803cf1f4627365f17ae35",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "caps effective 2025-01-22"
+    },
+    {
+      "sourceId": "ecfr-16cfr435",
+      "url": "https://www.ecfr.gov/current/title-16/chapter-I/subchapter-D/part-435",
+      "kind": "federal_regulation",
+      "capturedPath": "docs/rules/sources/ecfr-16cfr435.txt",
+      "capturedSha256": "7faa2022230f60405a5435bf71e39e9f08895b8c23a11df87ad24751836255b1",
+      "rawResponseSha256": "0d6529d35f47448d17e2c080a9c0ed7c7d024e59a5e7b647b3f0891f90a42fc7",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "2014-09-17 (79 FR 55619)"
+    },
+    {
+      "sourceId": "ecfr-12cfr1026.13",
+      "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1026/subpart-B/section-1026.13",
+      "kind": "federal_regulation",
+      "capturedPath": "docs/rules/sources/ecfr-12cfr1026.13.txt",
+      "capturedSha256": "c08ddd0f5b2467132d0f0ee7ed105330aab8bbe8b2fd695976cbebd554582a0f",
+      "rawResponseSha256": "9f1b70e91cc67739e1bc86196ee187d5d77448c1bd9a47b7e589fa66711c3d3b",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "2016-11-22 (last amendment in source notes)"
+    },
+    {
+      "sourceId": "ecfr-12cfr1026-suppI-13",
+      "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1026/appendix-Supplement%20I%20to%20Part%201026",
+      "kind": "official_interpretation",
+      "capturedPath": "docs/rules/sources/ecfr-12cfr1026-suppI-13.txt",
+      "capturedSha256": "a0ed1cace1f3139f10ffb4c5107176db18239dff0a6d92fb3e969dee0775c2d8",
+      "rawResponseSha256": "3419816daeb7abb6439ed4a54c5e0f03093db08a4192f580d3cb93e630f4dd0a",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "unknown (as of 2026-09-18)"
+    },
+    {
+      "sourceId": "ecfr-12cfr1026.12c",
+      "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1026/subpart-B/section-1026.12",
+      "kind": "federal_regulation",
+      "capturedPath": "docs/rules/sources/ecfr-12cfr1026.12c-excerpt.txt",
+      "capturedSha256": "0ee951da47beed4255aa373bd6599343cc68c4a7487a43bc8012b27338d3f439",
+      "rawResponseSha256": "c4b8895e2e492f97884b0ae344be89e437715fc16f521b5ef6f56e5264d38f67",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "unknown (as of 2026-09-18)"
+    },
+    {
+      "sourceId": "ecfr-12cfr1005.11",
+      "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1005/subpart-A/section-1005.11",
+      "kind": "federal_regulation",
+      "capturedPath": "docs/rules/sources/ecfr-12cfr1005.11ab-excerpt.txt",
+      "capturedSha256": "16e13c2a7a4c53743a9e8e4a684c6aaf9229b49ab710207fbad2e054d5541940",
+      "rawResponseSha256": "0669a14f83f836f4086de21514f3bcd40041784e50c444b415f4d8e1909a10d0",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "unknown (as of 2026-09-18)"
+    },
+    {
+      "sourceId": "usc-15-1666",
+      "url": "https://www.govinfo.gov/content/pkg/USCODE-2024-title15/html/USCODE-2024-title15-chap41-subchapI-partD-sec1666.htm",
+      "kind": "federal_statute",
+      "capturedPath": "docs/rules/sources/usc-15-1666.txt",
+      "capturedSha256": "e67549bfe4d865b50775b51c767147669737584bbd88cbc51a95ef7b8db370a2",
+      "rawResponseSha256": "c3c4dca79659ac0ee33758a1aaf842bf81901b5c4f8ce52c156f751ae81e4ea5",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "USC 2024 edition"
+    },
+    {
+      "sourceId": "federal-web-excerpts",
+      "url": null,
+      "kind": "agency_guidance_and_fr_notices",
+      "capturedPath": "docs/rules/sources/federal-web-pages-excerpts.md",
+      "capturedSha256": "570f8186780ecaf20c1b9305af8212a63c05274a10bb42ef9b7c67141bda6e8b",
+      "rawResponseSha256": null,
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "per passage (see file)",
+      "note": "DOT refunds (updated 2025-11-07), DOT baggage (2025-10-29), DOT dashboard (2024-12-10), FTC MITOR guide, FTC credit-card page (May 2022), CFPB late-fee page, FR notices 2024-07177/2024-17602/2025-22140/2026-13675/2025-20042/2024-23588/2025-02814, Pub. L. 119-10"
+    }
+  ],
+  "fixtures": {
+    "docs/rules/fixtures/R02.json": "bc1e8fb5cc9e8eb0f420b3a0735421c845083d03e1f4029ec364731105dfbc4b",
+    "docs/rules/fixtures/R03.json": "c82d3124093ae5325a45543f358a78e92eb05b34a6d06c977f345ef803cabbd4",
+    "docs/rules/fixtures/R04.json": "54074f2022bf8cd5b37e6b5e6335b932a1d1d486217afb74348133e05ff6e998",
+    "docs/rules/fixtures/R05.json": "4a61786033b1342ead6e595792b866f986b66ca7eb86ae18538feb8e8bb86dc3"
+  }
+}

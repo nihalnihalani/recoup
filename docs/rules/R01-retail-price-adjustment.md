@@ -27,7 +27,9 @@ Quotations from merchant pages are limited to ≤ 2 sentences each (copyright); 
    - (a) `V.effective_from` is displayed and `V.effective_from ≤ p`, and no later version with `effective_from ≤ p` exists in the capture history; **or**
    - (b) there is a snapshot of `V` captured at `t1 ≤ p` **and** a snapshot with an identical normalized content hash captured at `t2 ≥ p` (the policy text is bracketed; label as the assumption "unchanged between captures"); **or**
    - (c) the user provides the policy as shown at purchase (receipt text, order-confirmation terms, a dated screenshot), which is recorded as user evidence.
-   - Otherwise the evaluator returns **`source_unverified`** (never `eligible`), and the UI says "we can show the merchant's current policy, but we could not confirm the policy that applied on your purchase date".
+   - If none of (a)–(c) holds, two cases must be kept apart:
+     - **Known mismatch:** the captured version displays `effective_from` **after** `p` (e.g., Best Buy's 2026-09-02 page applied to a 2026-08-25 purchase). The current page is affirmatively **not** the purchase-date policy → **`source_unverified`**, no amount, and the UI says "the merchant changed this policy after your purchase; we don't have the version that applied".
+     - **Unknown applicability:** no effective date is displayed and no bracketing capture exists → the outcome is **capped at `likely_eligible_missing_evidence`** (M01 contract `likely_eligible`). The assumption shown is "the current policy text is assumed to be the one in effect on <purchase date>", and the missing fact is `retail.policy_confirmed`. It is **never** `eligible`. This keeps the existing price-watch flow working while stating the uncertainty (mission §1: preserve price-first functionality; mission §8: unknown historical applicability requires review).
 
 ## 2. What a merchant rule pack must record
 
@@ -85,7 +87,7 @@ Example (mission §17): 2 units at 12,000 with an eligible matching price of 9,5
 
 ## 6. Outcomes
 
-`eligible` (identity match confirmed, the purchase-date policy verified per §1.4, window open, comparison offer eligible and currently observed) · `likely_eligible_missing_evidence` (e.g., receipt missing) · `needs_facts` (e.g., received date for a receipt-anchored window; membership tier) · `source_unverified` (purchase-date policy not established) · `not_eligible` (excluded offer, window closed before the drop, no price difference) · `deadline_passed` · `unsupported` (merchant without a captured pack). A `discretion_clause` pack never yields a guaranteed amount; the UI says "merchant decides".
+`eligible` (identity match confirmed, the purchase-date policy verified per §1.4 (a)–(c), window open, comparison offer eligible and currently observed) · `likely_eligible_missing_evidence` (e.g., receipt missing; or purchase-date applicability unknown per §1.4 "unknown applicability") · `needs_facts` (e.g., received date for a receipt-anchored window; membership tier) · `source_unverified` (no captured pack for the merchant/channel, stale pack, or a known effective-date mismatch per §1.4) · `not_eligible` (excluded offer, window closed before the drop, no price difference) · `deadline_passed` · `unsupported` (merchant without a captured pack). A `discretion_clause` pack never yields a guaranteed amount; the UI says "merchant decides".
 
 ## 7. Sample merchant packs verified 2026-09-23
 
@@ -142,7 +144,7 @@ https://www.homedepot.com/c/price-match-and-price-check returned a bot-protectio
 
 ## 9. Known limitations
 
-- L1: Firecrawl snapshots in the existing flow are not yet versioned packs (no `effective_from`, no bracketing logic) → all legacy R01 results are `source_unverified` for purchase-date purposes until migrated.
+- L1: Firecrawl snapshots in the existing flow are not yet versioned packs (no `effective_from`, no bracketing logic). Until migrated, legacy R01 results are capped at `likely_eligible_missing_evidence` with the purchase-date assumption (§1.4), or `source_unverified` where a displayed effective date postdates the purchase.
 - L2: Membership tiers and product categories change the window (Best Buy) → ask only when the pack depends on them.
 - L3: "Currently available" comparison offers must be observed at claim time. A price seen yesterday may not qualify (Hilton-style "available when we review" conditions appear in other merchants' programs too).
 - L4: Merchants' full exclusion lists are longer than the captured summaries (Target "other exclusions may apply").
@@ -150,5 +152,5 @@ https://www.homedepot.com/c/price-match-and-price-check returned a bot-protectio
 ## 10. Document B corrections
 
 1. B's detection rule, "monitor the merchant price until the policy window closes", assumes one window anchored at purchase. Captured policies anchor on **purchase** (Target, Costco) or **receipt** (Best Buy return period, Apple). Apple adds a second clock from the **price change**. Best Buy's window depends on **membership tier and product category** (14 days for activatable devices such as iPhones).
-2. B asks for the "policy effective on the purchase date" — **agreed**, and more strictly: without a dated or bracketed capture, the correct outcome is `source_unverified`. The Best Buy page changed on 2026-09-02.
+2. B asks for the "policy effective on the purchase date" — **agreed**, and more strictly: without a dated or bracketed capture, the result can never be `eligible`. It is `source_unverified` when the page's effective date postdates the purchase (the Best Buy page changed on 2026-09-02), and it is capped at "likely eligible" with an explicit assumption when no date is shown.
 3. B implies a comparison against the "current price". Most captured programs match **only the merchant's own price** (Target, Costco, Apple). Best Buy matches competitors only **at the time of sale**. Its post-purchase adjustment covers only Best Buy's own lower price.
