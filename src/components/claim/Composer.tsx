@@ -1,6 +1,6 @@
 import { useAction, useMutation, useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Doc } from "../../../convex/_generated/dataModel";
 import { deliveryOf, type SendStatus } from "../../lib/delivery";
@@ -293,6 +293,31 @@ export function Composer({
     if (pending?.kind === "ack_content") setPending(null);
   }
 
+  /**
+   * A refusal replaces whatever was pending. DA-B-11: a content acknowledgment covers only the findings the user
+   * was shown, so any new refusal clears it; the next "send anyway" is for what is on screen now.
+   */
+  function refuse(next: Pending) {
+    setAckContent(false);
+    setPending(next);
+  }
+
+  // DA-B-12: a refusal moves focus to its panel's heading, so keyboard and screen-reader users land on the decision.
+  const pendingHeadingRef = useRef<HTMLHeadingElement>(null);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const sendButtonRef = useRef<HTMLButtonElement>(null);
+  const pendingMessageId = useId();
+  useEffect(() => {
+    if (pending) pendingHeadingRef.current?.focus();
+  }, [pending]);
+
+  /** The safe way out of a refusal: close it and put the user back where they can change what they send. */
+  function backToEditing() {
+    setPending(null);
+    if (!locked) bodyRef.current?.focus();
+    else sendButtonRef.current?.focus();
+  }
+
   async function run(work: () => Promise<unknown>) {
     setError(null);
     setBusy(true);
@@ -323,7 +348,7 @@ export function Composer({
     await ensureInbox({});
     const prepared = await prepareSend(approval(acks));
     if (!prepared.ok) {
-      setPending(pendingFor(prepared.code, prepared.message, prepared.findings, prepared.estimate));
+      refuse(pendingFor(prepared.code, prepared.message, prepared.findings, prepared.estimate));
       return;
     }
     await approveAndSend({
@@ -347,7 +372,7 @@ export function Composer({
       acknowledgedOutboundId: draft.outboundId,
     });
     if (!result.ok) {
-      setPending(
+      refuse(
         pendingFor(result.code, result.message, "findings" in result ? result.findings : undefined, "estimate" in result ? result.estimate : undefined),
       );
     }
@@ -407,6 +432,7 @@ export function Composer({
             Message
           </label>
           <textarea
+            ref={bodyRef}
             id={bodyId}
             rows={11}
             className={`${field} block resize-y leading-relaxed`}
@@ -442,6 +468,10 @@ export function Composer({
         <PendingPanel
           pending={pending}
           busy={busy}
+          headingRef={pendingHeadingRef}
+          messageId={pendingMessageId}
+          canEdit={!locked}
+          onBack={backToEditing}
           onAckWindow={() =>
             void run(async () => {
               setAckWindow(true);
@@ -487,8 +517,10 @@ export function Composer({
             I understand the earlier message may already have arrived
           </label>
           <button
+            ref={sendButtonRef}
             type="button"
             disabled={busy || !resendAcknowledged}
+            aria-describedby={pending ? pendingMessageId : undefined}
             className={primaryButtonClass}
             onClick={() => void run(() => act({ window: ackWindow, content: ackContent, amount: ackAmount }))}
           >
@@ -518,8 +550,10 @@ export function Composer({
               Save draft
             </button>
             <button
+              ref={sendButtonRef}
               type="button"
               disabled={busy || pending?.kind === "blocked"}
+              aria-describedby={pending ? pendingMessageId : undefined}
               className={primaryButtonClass}
               onClick={() => void run(() => send({ window: ackWindow, content: ackContent, amount: ackAmount }))}
             >
@@ -536,10 +570,27 @@ export function Composer({
   );
 }
 
-/** The reason nothing was sent, and, for an acknowledgeable one, the explicit "send anyway". */
+const PANEL_HEADINGS: Record<Pending["kind"], string> = {
+  ack_window: "The store's window may have passed",
+  ack_amount: "This claim asks more than Recoup's estimate",
+  ack_content: "Check these details before sending",
+  blocked: "Not sent",
+  review: "Nothing was sent: review the claim again",
+  retry_later: "Not sent yet",
+};
+
+/**
+ * The reason nothing was sent (DA-B-12): a labelled region whose heading takes focus, the reason as the send
+ * button's description, and, for an acknowledgeable refusal, the SAFE action first in DOM and tab order, then the
+ * explicit "send anyway". Nothing is sent without one of those actions.
+ */
 function PendingPanel({
   pending,
   busy,
+  headingRef,
+  messageId,
+  canEdit,
+  onBack,
   onAckWindow,
   onAckContent,
   claimedMinor,
@@ -548,6 +599,10 @@ function PendingPanel({
 }: {
   pending: Pending;
   busy: boolean;
+  headingRef: RefObject<HTMLHeadingElement | null>;
+  messageId: string;
+  canEdit: boolean;
+  onBack: () => void;
   onAckWindow: () => void;
   onAckContent: () => void;
   /** The claim's asked amount, in the estimate's currency (the server compares only same-currency amounts). */
@@ -555,87 +610,72 @@ function PendingPanel({
   onAckAmount: () => void;
   onAdjustAmount: (estimateMinor: number) => void;
 }) {
-  const box = "space-y-2.5 rounded-xl border px-3.5 py-3 text-sm";
-  switch (pending.kind) {
-    case "ack_amount": {
-      // DA-B-2: the claim asks more than Recoup's exact estimate — adjust it, or send the full amount knowingly.
-      const estimate = pending.estimate;
-      if (estimate === undefined) {
-        return (
-          <div role="alert" className={`${box} border-yellow-500/40 bg-yellow-500/10 text-gray-900`}>
-            <p>{pending.message}</p>
-            <button type="button" disabled={busy} className={secondaryButtonClass} onClick={onAckAmount}>
-              Send the full amount anyway
-            </button>
-          </div>
-        );
-      }
-      const claimed = formatMinor(claimedMinor, estimate.currency);
-      const estimated = formatMinor(estimate.amountMinor, estimate.currency);
-      return (
-        <div role="alert" className={`${box} border-yellow-500/40 bg-yellow-500/10 text-gray-900`}>
-          <p>
-            This claim asks {claimed}; Recoup's current estimate is {estimated}.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <button type="button" disabled={busy} className={secondaryButtonClass} onClick={() => onAdjustAmount(estimate.amountMinor)}>
+  const headingId = useId();
+  const tone =
+    pending.kind === "blocked"
+      ? "border-red-500/30 bg-red-500/5 text-red-700"
+      : pending.kind === "ack_window" || pending.kind === "ack_content" || pending.kind === "ack_amount"
+        ? "border-yellow-500/40 bg-yellow-500/10 text-gray-900"
+        : "border-gray-200 text-gray-900";
+  const safe = (
+    <button type="button" disabled={busy} className={primaryButtonClass} onClick={onBack}>
+      {canEdit ? "Keep editing" : "Don't send"}
+    </button>
+  );
+  // DA-B-2: the claim asks more than Recoup's exact estimate. Adjusting is the safe action; asking for the full
+  // amount is the explicit acknowledgment. Without an estimate to adjust to, the safe action is to go back.
+  const estimate = pending.kind === "ack_amount" ? pending.estimate : undefined;
+  const claimed = estimate ? formatMinor(claimedMinor, estimate.currency) : null;
+  const estimated = estimate ? formatMinor(estimate.amountMinor, estimate.currency) : null;
+  return (
+    <section aria-labelledby={headingId} className={`space-y-2.5 rounded-xl border px-3.5 py-3 text-sm ${tone}`}>
+      <h3 id={headingId} ref={headingRef} tabIndex={-1} className="font-semibold outline-none focus-visible:underline">
+        {PANEL_HEADINGS[pending.kind]}
+      </h3>
+      <p id={messageId}>
+        {pending.kind === "ack_amount" && estimate
+          ? `This claim asks ${claimed}; Recoup's current estimate is ${estimated}. Adjusting changes the claim, so you then write a new draft that asks for ${estimated}.`
+          : pending.message}
+      </p>
+      {pending.kind === "ack_content" && pending.findings.length > 0 && (
+        <ul className="list-disc space-y-0.5 pl-5">
+          {pending.findings.map((finding) => (
+            <li key={finding} className="break-all font-mono text-xs">
+              {finding}
+            </li>
+          ))}
+        </ul>
+      )}
+      {pending.kind === "ack_amount" && (
+        <div className="flex flex-wrap gap-2">
+          {estimate ? (
+            <button type="button" disabled={busy} className={primaryButtonClass} onClick={() => onAdjustAmount(estimate.amountMinor)}>
               Adjust to {estimated}
             </button>
-            <button type="button" disabled={busy} className={secondaryButtonClass} onClick={onAckAmount}>
-              Send {claimed} anyway
-            </button>
-          </div>
+          ) : (
+            safe
+          )}
+          <button type="button" disabled={busy} className={secondaryButtonClass} onClick={onAckAmount}>
+            {claimed ? `Send ${claimed} anyway` : "Send the full amount anyway"}
+          </button>
         </div>
-      );
-    }
-    case "ack_window":
-      return (
-        <div role="alert" className={`${box} border-yellow-500/40 bg-yellow-500/10 text-gray-900`}>
-          <p>{pending.message}</p>
+      )}
+      {pending.kind === "ack_window" && (
+        <div className="flex flex-wrap gap-2">
+          {safe}
           <button type="button" disabled={busy} className={secondaryButtonClass} onClick={onAckWindow}>
             Send anyway — the store's price-adjustment window may have passed
           </button>
         </div>
-      );
-    case "ack_content":
-      return (
-        <div role="alert" className={`${box} border-yellow-500/40 bg-yellow-500/10 text-gray-900`}>
-          <p>{pending.message}</p>
-          {pending.findings.length > 0 && (
-            <ul className="list-disc space-y-0.5 pl-5">
-              {pending.findings.map((finding) => (
-                <li key={finding} className="break-all font-mono text-xs">
-                  {finding}
-                </li>
-              ))}
-            </ul>
-          )}
+      )}
+      {pending.kind === "ack_content" && (
+        <div className="flex flex-wrap gap-2">
+          {safe}
           <button type="button" disabled={busy} className={secondaryButtonClass} onClick={onAckContent}>
             I checked these details — send anyway
           </button>
         </div>
-      );
-    case "blocked":
-      return (
-        <div role="alert" className={`${box} border-red-500/30 bg-red-500/5 text-red-700`}>
-          <p>
-            <span className="font-semibold">Not sent.</span> {pending.message}
-          </p>
-        </div>
-      );
-    case "review":
-      return (
-        <div role="alert" className={`${box} border-gray-200 text-gray-900`}>
-          <p>
-            <span className="font-semibold">Nothing was sent. Review the claim again.</span> {pending.message}
-          </p>
-        </div>
-      );
-    case "retry_later":
-      return (
-        <div role="status" className={`${box} border-gray-200 text-gray-700`}>
-          <p>{pending.message}</p>
-        </div>
-      );
-  }
+      )}
+    </section>
+  );
 }
