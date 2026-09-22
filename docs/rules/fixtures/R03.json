@@ -17,9 +17,15 @@
       "not_eligible",
       "deadline_passed",
       "source_unverified",
-      "unsupported"
+      "unsupported",
+      "not_yet_due"
     ],
-    "loader": "A case has EITHER a top-level `expected` OR an `expected` on every variant. `clock` (and optional `source`) may be set on the case or on a variant; a variant value overrides the case value. `facts_from: <case id>` + `facts_override: {...}` means: copy that case's facts, then replace the named facts. A variant's `change` object replaces the named facts for that variant only. Every `facts` value is an object; no prose placeholders."
+    "loader": "A case has EITHER a top-level `expected` OR an `expected` on every variant. `clock` (and optional `source`) may be set on the case or on a variant; a variant value overrides the case value. `facts_from: <case id>` + `facts_override: {...}` means: copy that case's facts, then replace the named facts. A variant's `change` object replaces the named facts for that variant only. Every `facts` value is an object; no prose placeholders.",
+    "fact_states": "user_confirmed | observed | derived | extracted_candidate | conflicting | missing | assumption. Contract §2.5 mapping: user_confirmed→confirmed, observed→observed, derived→derived, extracted_candidate→candidate, conflicting→conflicting, missing→missing (value null), assumption→assumption-class candidate. D147(2)/X1: `eligible` requires every decisive fact to be user_confirmed, or observed/derived from confirmed facts; an extracted_candidate decisive fact caps the outcome at likely_eligible_missing_evidence (the case lists it in expected.unconfirmed_decisive_facts). Since M2D the baseline cases use user_confirmed for decisive facts (the state after the user's fact review); each file has explicit cap variants.",
+    "conflicting": "A conflicting fact carries `candidates: [{value, evidence, ...}]` (README cross-pack rule 3). If every candidate gives the same outcome the conflict is not material, but the fact is still unconfirmed, so the outcome is capped at likely_eligible_missing_evidence; if candidates diverge the outcome is needs_facts. Advisory dates use the earliest candidate.",
+    "not_yet_due": "D147(6)/X3: a path that is not ripe yet has outcome not_yet_due with expected.reevaluate_at (ISO date) or expected.reevaluate_when (event); never not_eligible.",
+    "missing_source": "X5: a variant with source.record = 'missing' means no current source record exists for the pack → source_unverified.",
+    "calendar_zone": "Day arithmetic uses calendar dates as stated by the creditor (transmittal) and as recorded at the billing-error address (receipt). If only instants are known, the billing-error address's zone is used (spec assumption A4)."
   },
   "cases": [
     {
@@ -55,28 +61,28 @@
               "L15"
             ]
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "first_statement_transmitted_on": {
           "type": "date",
           "value": "2026-09-10",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "evidence": "issuer email 'Your statement is available' dated 2026-09-10"
         },
         "statement_closing_date": {
           "type": "date",
           "value": "2026-09-07",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "billing_error_address": {
           "type": "string",
           "value": "PO Box 0000, Example City, ST 00000 (as printed on the statement)",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "electronic_notice_stipulated": {
           "type": "boolean",
           "value": false,
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "notice_channel_planned": {
           "type": "enum",
@@ -133,7 +139,43 @@
           "P-1026.13(c)"
         ],
         "reasoning": "The duplicate extension of credit is a billing error (USC 1666(b)(1); spec A2). The notice is timely if received at the disclosed address within 60 days of the first statement's transmittal."
-      }
+      },
+      "variants": [
+        {
+          "id": "R03-01b",
+          "change": {
+            "first_statement_transmitted_on": {
+              "type": "date",
+              "value": "2026-09-10",
+              "state": "extracted_candidate"
+            },
+            "error_type": {
+              "type": "enum",
+              "value": "duplicate_charge",
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "unconfirmed_decisive_facts": [
+              "first_statement_transmitted_on",
+              "error_type"
+            ],
+            "deadline": {
+              "kind": "notice_must_be_received_by",
+              "date": "2026-11-09",
+              "status": "computed from an unconfirmed anchor; confirm before relying on it"
+            }
+          },
+          "justification": {
+            "passages": [
+              "D147(2)"
+            ],
+            "reasoning": "Extracted but unconfirmed decisive facts cap the outcome."
+          }
+        }
+      ]
     },
     {
       "id": "R03-02",
@@ -151,7 +193,7 @@
         },
         "error_type": {
           "type": "enum",
-          "value": "credit_not_posted",
+          "value": "credit_issued_not_reflected",
           "state": "user_confirmed"
         },
         "disputed_transaction": {
@@ -163,7 +205,7 @@
               "amount_minor": 8450,
               "currency": "USD"
             },
-            "note": "return accepted 2026-06-25; credit never posted"
+            "note": "return accepted 2026-06-25; merchant issued the credit 2026-06-26; it never appeared on the account"
           },
           "state": "user_confirmed"
         },
@@ -171,12 +213,18 @@
           "type": "date",
           "value": "2026-07-02",
           "state": "user_confirmed",
-          "note": "the statement on which the credit should have appeared (comment 13(b)(1)-2)"
+          "note": "the statement on which the issued credit should have appeared (comment 13(b)(1)-2)"
         },
         "notice_channel_planned": {
           "type": "enum",
           "value": "mail_to_billing_error_address",
           "state": "user_confirmed"
+        },
+        "credit_issue_date": {
+          "type": "date",
+          "value": "2026-06-26",
+          "state": "user_confirmed",
+          "evidence": "merchant refund confirmation email 'your refund of $84.50 was issued'"
         }
       },
       "variants": [
@@ -292,7 +340,7 @@
         "transaction_posting_date": {
           "type": "date",
           "value": "2026-09-03",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "evidence": "card app transaction detail"
         },
         "first_statement_transmitted_on": {
@@ -365,7 +413,7 @@
               "currency": "USD"
             }
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         }
       },
       "expected": {
@@ -373,8 +421,8 @@
         "missing_facts": [],
         "amount": null,
         "deadline": null,
-        "route_to": "R13 (Regulation E, 12 CFR 1005.6 / 1005.11)",
-        "explanation": "Debit-card and other electronic transfers are governed by Regulation E, not the Fair Credit Billing Act. Regulation E accepts oral or written notice and has its own 60-day and 2-business-day clocks.",
+        "route_to": "R13 (Regulation E, 12 CFR 1005.11; liability limits 1005.6)",
+        "explanation": "Debit-card and other electronic transfers are governed by Regulation E, not the Fair Credit Billing Act. Regulation E accepts oral or written notice received within 60 days after the statement is sent (1005.11(b)(1)); separate liability limits depend on reporting a lost or stolen access device within two business days (1005.6(b)(1)).",
         "forbidden_outputs": [
           "not_eligible",
           "an FCBA billing-error letter",
@@ -384,6 +432,7 @@
       "justification": {
         "passages": [
           "P-1005.11(b)(1)",
+          "sources/ecfr-12cfr1005.6.txt (1005.6(b)(1))",
           "P-C13(i)-2"
         ],
         "reasoning": "Reg Z §1026.13 applies to open-end consumer credit. Debit transactions are Regulation E. 'Unsupported' is not 'not eligible' (mission §9)."
@@ -418,7 +467,7 @@
               "currency": "USD"
             }
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "delivery_evidence": {
           "type": "object",
@@ -426,22 +475,22 @@
             "promised_delivery_by": "2026-09-01",
             "tracking": "label created 2026-08-26; no carrier scan since"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "first_statement_transmitted_on": {
           "type": "date",
           "value": "2026-09-10",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "billing_error_address": {
           "type": "string",
           "value": "PO Box 0000, Example City, ST 00000",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "electronic_notice_stipulated": {
           "type": "boolean",
           "value": false,
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "evidence": "billing-rights statement lists only a postal address and says 'write to us'"
         },
         "notice_channel_planned": {
@@ -471,7 +520,7 @@
             "electronic_notice_stipulated": {
               "type": "boolean",
               "value": true,
-              "state": "extracted_candidate",
+              "state": "user_confirmed",
               "evidence": "billing-rights statement: 'you may also contact us ... through the secure message center [stated means]'"
             },
             "notice_channel_planned": {
@@ -521,7 +570,7 @@
         "first_statement_transmitted_on": {
           "type": "date",
           "value": "2026-09-10",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "disputed_transaction": {
           "type": "object",
@@ -531,7 +580,7 @@
               "currency": "USD"
             }
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         }
       },
       "expected": {
@@ -578,7 +627,7 @@
               "currency": "USD"
             }
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "first_statement_transmitted_on": {
           "type": "date",
@@ -618,7 +667,49 @@
           "P-1026.13(b)"
         ],
         "reasoning": "The anchor is the FIRST statement reflecting the error. If the August statement reflected it, the window closes 2026-09-30, one week from the clock."
-      }
+      },
+      "variants": [
+        {
+          "id": "R03-07b",
+          "change": {
+            "first_statement_transmitted_on": {
+              "type": "date",
+              "value": null,
+              "state": "conflicting",
+              "candidates": [
+                {
+                  "value": "2026-09-01",
+                  "evidence": "September statement PDF (creation date)"
+                },
+                {
+                  "value": "2026-09-02",
+                  "evidence": "issuer email 'statement available' dated 2026-09-02"
+                }
+              ]
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "unconfirmed_decisive_facts": [
+              "first_statement_transmitted_on"
+            ],
+            "deadline": {
+              "kind": "notice_must_be_received_by",
+              "date": "2026-10-31",
+              "semantics": "earliest candidate 2026-09-01 + 60 days; the later candidate gives 2026-11-01 — both leave the window open on the clock date",
+              "status": "conservative until the anchor is confirmed"
+            }
+          },
+          "justification": {
+            "passages": [
+              "P-1026.13(b)",
+              "README cross-pack rule 3"
+            ],
+            "reasoning": "Both candidates keep the window open, so the conflict does not change the outcome; the anchor is still unconfirmed."
+          }
+        }
+      ]
     },
     {
       "id": "R03-08",
@@ -649,7 +740,7 @@
               "currency": "USD"
             }
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "delivery_evidence": {
           "type": "object",
@@ -658,17 +749,17 @@
             "status_on_clock": "not delivered",
             "tracking": "no shipment record"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "first_statement_transmitted_on": {
           "type": "date",
           "value": "2026-08-28",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "billing_error_address": {
           "type": "string",
           "value": "PO Box 0000, Example City, ST 00000",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "notice_channel_planned": {
           "type": "enum",
@@ -736,7 +827,7 @@
         "first_statement_transmitted_on": {
           "type": "date",
           "value": "2026-09-10",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         }
       },
       "expected": {
@@ -779,7 +870,22 @@
         "reasoning": "An unverified pack must not produce an eligibility conclusion."
       },
       "facts_from": "R03-01",
-      "facts_override": {}
+      "facts_override": {},
+      "variants": [
+        {
+          "id": "R03-10b",
+          "source": {
+            "record": "missing"
+          },
+          "expected": {
+            "outcome": "source_unverified",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "note": "X5"
+          }
+        }
+      ]
     },
     {
       "id": "R03-11",
@@ -849,12 +955,12 @@
               "currency": "USD"
             }
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "first_statement_transmitted_on": {
           "type": "date",
           "value": "2026-09-10",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "merchant_promise": {
           "type": "object",
@@ -866,7 +972,7 @@
             "promised_on": "2026-09-15",
             "text": "refund within 5-7 business days"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "credits_already_received": {
           "type": "money[]",
@@ -893,7 +999,9 @@
         "totals": {
           "potential_minor_USD": 12999,
           "note": "never 25,998"
-        }
+        },
+        "packet_readiness": "blocked_address",
+        "readiness_note": "billing_error_address not yet provided"
       },
       "justification": {
         "passages": [
