@@ -8,7 +8,7 @@
     "fact_encoding": "facts.<name> = {type, value, state}; state in {user_confirmed, extracted_candidate, derived, missing, conflicting}. money = {amount_minor:int, currency}. datetime = ISO-8601 with offset.",
     "T": "End of the applicable shipping time: seller-stated time, else 30 calendar days (50 with a seller credit application) after receipt of a properly completed order. Day 30 is the last compliant day (spec A1).",
     "vesting": "Vesting date = the calendar day after the last day of the applicable period (spec A3).",
-    "working_days": "Mon-Fri excluding 5 U.S.C. 6103 federal holidays (spec A2: 'working days' is undefined in part 435). 2026-09-07 (Labor Day) and 2026-10-12 (Columbus Day) are holidays.",
+    "working_days": "Mon-Fri excluding 5 U.S.C. 6103 federal holidays (spec A2: 'working days' is undefined in part 435). 2026-09-07 (Labor Day) and 2026-10-12 (Columbus Day) are holidays. Counting starts the day after the vesting date (spec A6); the deadline is for the refund being SENT (435.1(b)).",
     "shipment": "Shipment = first carrier-possession event. 'Label created' is not shipment.",
     "deadline_meaning": "Computed deadlines are the SELLER's prompt-refund deadline (tracking/escalation). If paid by consumer credit card, R03's own 60-day notice clock runs independently.",
     "outcome_vocabulary": [
@@ -20,9 +20,15 @@
       "not_eligible",
       "deadline_passed",
       "source_unverified",
-      "unsupported"
+      "unsupported",
+      "not_yet_due"
     ],
-    "loader": "A case has EITHER a top-level `expected` OR an `expected` on every variant. `clock` (and optional `source`) may be set on the case or on a variant; a variant value overrides the case value. `facts_from: <case id>` + `facts_override: {...}` means: copy that case's facts, then replace the named facts. A variant's `change` object replaces the named facts for that variant only. Every `facts` value is an object; no prose placeholders."
+    "loader": "A case has EITHER a top-level `expected` OR an `expected` on every variant. `clock` (and optional `source`) may be set on the case or on a variant; a variant value overrides the case value. `facts_from: <case id>` + `facts_override: {...}` means: copy that case's facts, then replace the named facts. A variant's `change` object replaces the named facts for that variant only. Every `facts` value is an object; no prose placeholders.",
+    "fact_states": "user_confirmed | observed | derived | extracted_candidate | conflicting | missing | assumption. Contract §2.5 mapping: user_confirmed→confirmed, observed→observed, derived→derived, extracted_candidate→candidate, conflicting→conflicting, missing→missing (value null), assumption→assumption-class candidate. D147(2)/X1: `eligible` requires every decisive fact to be user_confirmed, or observed/derived from confirmed facts; an extracted_candidate decisive fact caps the outcome at likely_eligible_missing_evidence (the case lists it in expected.unconfirmed_decisive_facts). Since M2D the baseline cases use user_confirmed for decisive facts (the state after the user's fact review); each file has explicit cap variants.",
+    "conflicting": "A conflicting fact carries `candidates: [{value, evidence, ...}]` (README cross-pack rule 3). If every candidate gives the same outcome the conflict is not material, but the fact is still unconfirmed, so the outcome is capped at likely_eligible_missing_evidence; if candidates diverge the outcome is needs_facts. Advisory dates use the earliest candidate.",
+    "not_yet_due": "D147(6)/X3: a path that is not ripe yet has outcome not_yet_due with expected.reevaluate_at (ISO date) or expected.reevaluate_when (event); never not_eligible.",
+    "missing_source": "X5: a variant with source.record = 'missing' means no current source record exists for the pack → source_unverified.",
+    "calendar_zone": "Calendar days are the buyer's local dates at the ship-to address (spec A5); fixtures use America/New_York (-04:00) unless stated."
   },
   "cases": [
     {
@@ -37,12 +43,12 @@
         "order_channel": {
           "type": "enum",
           "value": "internet",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "seller_identity": {
           "type": "string",
           "value": "Example Outfitters LLC",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "buyer_country": {
           "type": "string",
@@ -52,7 +58,7 @@
         "ship_to_country": {
           "type": "string",
           "value": "US",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "merchandise_category": {
           "type": "enum",
@@ -61,7 +67,7 @@
         },
         "payment_terms": {
           "type": "enum",
-          "value": "prepaid_card_or_cash",
+          "value": "paid_at_order",
           "state": "derived"
         },
         "payment_instrument_class": {
@@ -72,7 +78,7 @@
         "properly_completed_order_at": {
           "type": "datetime",
           "value": "2026-09-01T10:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "shipping_representation": {
           "type": "object",
@@ -82,7 +88,7 @@
             "value": 3,
             "location": "checkout"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "shipped_at": {
           "type": "datetime",
@@ -101,7 +107,7 @@
             "amount_minor": 15000,
             "currency": "USD"
           },
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "note": "includes 999 shipping"
         }
       },
@@ -140,7 +146,88 @@
           "FTC-MITOR-G6"
         ],
         "reasoning": "The stated time governs; a missed time without an option notice obliges the seller to deem the order cancelled and make a prompt refund; 'label created' is not placement in the carrier's possession."
-      }
+      },
+      "variants": [
+        {
+          "id": "R05-01b",
+          "change": {
+            "properly_completed_order_at": {
+              "type": "datetime",
+              "value": "2026-09-01T10:00:00-04:00",
+              "state": "extracted_candidate"
+            },
+            "shipping_representation": {
+              "type": "object",
+              "value": {
+                "text": "Ships within 3 days",
+                "unit": "calendar_days",
+                "value": 3,
+                "location": "checkout"
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "unconfirmed_decisive_facts": [
+              "properly_completed_order_at",
+              "shipping_representation"
+            ],
+            "amount": {
+              "refund_due": {
+                "amount_minor": 15000,
+                "currency": "USD"
+              }
+            },
+            "deadline": {
+              "kind": "seller_prompt_refund",
+              "date": "2026-09-16"
+            }
+          },
+          "justification": {
+            "passages": [
+              "D147(2)"
+            ],
+            "reasoning": "Unconfirmed decisive facts cap the outcome."
+          }
+        },
+        {
+          "id": "R05-01c",
+          "change": {
+            "shipment_status": {
+              "type": "object",
+              "value": {
+                "items_ordered": 3,
+                "items_shipped": 2,
+                "shipped_items_at": "2026-09-03T15:00:00-04:00",
+                "unshipped": "1 x item C"
+              },
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "eligible",
+            "missing_facts": [],
+            "amount": {
+              "refund_due": null,
+              "amount_status": "manual_review",
+              "reason": "refund for the unshipped item; the FTC guide's partial-shipment method is guidance-only (FTC-MITOR-G7)"
+            },
+            "deadline": {
+              "kind": "seller_prompt_refund",
+              "date": "2026-09-16"
+            }
+          },
+          "justification": {
+            "passages": [
+              "P-435.2(c)",
+              "FTC-MITOR-G7"
+            ],
+            "reasoning": "The unshipped item is covered; the amount method is guidance-only."
+          }
+        }
+      ]
     },
     {
       "id": "R05-02",
@@ -154,12 +241,12 @@
         "order_channel": {
           "type": "enum",
           "value": "internet",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "seller_identity": {
           "type": "string",
           "value": "Example Home Store",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "merchandise_category": {
           "type": "enum",
@@ -169,7 +256,7 @@
         "properly_completed_order_at": {
           "type": "datetime",
           "value": "2026-09-01T09:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "shipping_representation": {
           "type": "object",
@@ -179,7 +266,7 @@
             "value": "2026-09-03",
             "location": "order_confirmation"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "delivery_representation": {
           "type": "object",
@@ -187,18 +274,18 @@
             "text": "Arrives by Sep 8",
             "date": "2026-09-08"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "shipped_at": {
           "type": "datetime",
           "value": "2026-09-03T16:20:00-04:00",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "evidence": "carrier acceptance scan"
         },
         "delivered_at": {
           "type": "datetime",
           "value": "2026-09-12T14:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "payment_instrument_class": {
           "type": "enum",
@@ -239,12 +326,12 @@
         "order_channel": {
           "type": "enum",
           "value": "internet",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "seller_identity": {
           "type": "string",
           "value": "Example Garden Tools",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "merchandise_category": {
           "type": "enum",
@@ -254,7 +341,7 @@
         "properly_completed_order_at": {
           "type": "datetime",
           "value": "2026-07-20T11:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "shipping_representation": {
           "type": "object",
@@ -264,13 +351,14 @@
         },
         "delay_notices": {
           "type": "array",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "value": [
             {
               "received_at": "2026-08-10T08:00:00-04:00",
               "revised_ship_date": "2026-09-05",
               "cancel_means_offered": "link + toll-free number",
-              "text": "We will be unable to ship until September 5. If we do not hear from you before we ship, we will assume you agree."
+              "text": "We will be unable to ship until September 5. If you don't want to wait, you may cancel your order and receive a prompt refund using the link below or by calling our toll-free number. If we do not hear from you before we ship, we will assume you agree.",
+              "offers_cancel_and_refund": true
             }
           ]
         },
@@ -282,7 +370,12 @@
         "shipped_at": {
           "type": "datetime",
           "value": "2026-09-04T13:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
+        },
+        "delay_notice_offers_cancel_and_refund": {
+          "type": "boolean",
+          "value": true,
+          "state": "user_confirmed"
         }
       },
       "expected": {
@@ -300,14 +393,53 @@
           "P-435.2(b)(1)(ii)"
         ],
         "reasoning": "For a definite revised date of 30 days or less after T, the buyer 'will be deemed to have consented' unless they cancel before shipment."
-      }
+      },
+      "variants": [
+        {
+          "id": "R05-03b",
+          "change": {
+            "delay_notice_offers_cancel_and_refund": {
+              "type": "boolean",
+              "value": false,
+              "state": "user_confirmed"
+            },
+            "delay_notices": {
+              "type": "array",
+              "value": [
+                {
+                  "received_at": "2026-08-10T08:00:00-04:00",
+                  "revised_ship_date": "2026-09-05",
+                  "text": "Your order is delayed. New ship date: September 5.",
+                  "offers_cancel_and_refund": false
+                }
+              ],
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "manual_review",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "reason": "The notice did not offer cancellation and a prompt refund, so it was not the prescribed option (435.2(b)(1), (b)(1)(i)); the seller then shipped after T (2026-08-19) on 2026-09-04. The Rule required the order to be treated as cancelled (435.2(c)(5)), but its text does not say what happens after the buyer accepts a late delivery."
+          },
+          "justification": {
+            "passages": [
+              "P-435.2(b)(1)",
+              "P-435.2(c)"
+            ],
+            "reasoning": "Inadequate notice → case 1; post-delivery consequences are outside the captured text."
+          }
+        }
+      ]
     },
     {
       "id": "R05-04",
       "title": "Indefinite delay notice; no confirmed consent",
       "categories": [
         "positive",
-        "missing_consent"
+        "missing_consent",
+        "not_yet_due"
       ],
       "mission_domain_fixture": "no confirmed consent to delay",
       "clock": "2026-10-12T12:00:00-04:00",
@@ -315,12 +447,12 @@
         "order_channel": {
           "type": "enum",
           "value": "internet",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "seller_identity": {
           "type": "string",
           "value": "Example Electronics Direct",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "merchandise_category": {
           "type": "enum",
@@ -335,7 +467,7 @@
         "properly_completed_order_at": {
           "type": "datetime",
           "value": "2026-09-01T15:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "shipping_representation": {
           "type": "object",
@@ -345,11 +477,11 @@
             "value": "2026-09-10",
             "location": "order_confirmation"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "delay_notices": {
           "type": "array",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "value": [
             {
               "received_at": "2026-09-08T09:00:00-04:00",
@@ -375,7 +507,7 @@
             "amount_minor": 89900,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         }
       },
       "expected": {
@@ -408,18 +540,20 @@
             }
           },
           "expected": {
-            "outcome": "not_eligible",
+            "outcome": "not_yet_due",
             "missing_facts": [],
-            "note": "Express consent to an indefinite delay; the buyer keeps a continuing right to cancel before shipment (a cancellation would make the case eligible)."
+            "note": "Express consent to an indefinite delay; the buyer keeps a continuing right to cancel before shipment (a cancellation would make the case eligible).",
+            "reevaluate_when": "buyer cancels before shipment (continuing right to cancel, 435.2(b)(1)(iii)(B))"
           }
         },
         {
           "id": "R05-04c",
           "change": {},
           "expected": {
-            "outcome": "not_eligible",
+            "outcome": "not_yet_due",
             "missing_facts": [],
-            "note": "Not yet: the order is deemed cancelled only if not shipped within 30 days of T (by end of 2026-10-10). Re-evaluate on 2026-10-11."
+            "note": "Not yet: the order is deemed cancelled only if not shipped within 30 days of T (by end of 2026-10-10). Re-evaluate on 2026-10-11.",
+            "reevaluate_at": "2026-10-11"
           },
           "clock": "2026-10-05T12:00:00-04:00"
         }
@@ -437,7 +571,8 @@
       "id": "R05-05",
       "title": "Default 30-day rule boundary (no stated time, no notice, not shipped)",
       "categories": [
-        "boundary_time"
+        "boundary_time",
+        "not_yet_due"
       ],
       "mission_domain_fixture": null,
       "facts": {
@@ -449,7 +584,7 @@
         "seller_identity": {
           "type": "string",
           "value": "Example Catalog Co",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "merchandise_category": {
           "type": "enum",
@@ -464,7 +599,7 @@
         "properly_completed_order_at": {
           "type": "datetime",
           "value": "2026-08-01T10:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "shipping_representation": {
           "type": "object",
@@ -487,7 +622,12 @@
             "amount_minor": 4599,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
+        },
+        "ship_to_timezone": {
+          "type": "string",
+          "value": "America/New_York",
+          "state": "user_confirmed"
         }
       },
       "variants": [
@@ -496,9 +636,10 @@
           "clock": "2026-08-30T12:00:00-04:00",
           "day": 29,
           "expected": {
-            "outcome": "not_eligible",
+            "outcome": "not_yet_due",
             "missing_facts": [],
-            "note": "not yet due (T = 2026-08-31)"
+            "note": "not yet due (T = 2026-08-31)",
+            "reevaluate_at": "2026-09-01"
           }
         },
         {
@@ -506,9 +647,10 @@
           "clock": "2026-08-31T23:00:00-04:00",
           "day": 30,
           "expected": {
-            "outcome": "not_eligible",
+            "outcome": "not_yet_due",
             "missing_facts": [],
-            "note": "still within T (day 30 inclusive, spec A1)"
+            "note": "still within T (day 30 inclusive, A1) on the buyer's local date 2026-08-31 (A5); in UTC the clock is already 2026-09-01T03:00Z — the local date governs",
+            "reevaluate_at": "2026-09-01"
           }
         },
         {
@@ -553,12 +695,12 @@
         "order_channel": {
           "type": "enum",
           "value": "internet",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "seller_identity": {
           "type": "string",
           "value": "Example Apparel",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "merchandise_category": {
           "type": "enum",
@@ -568,7 +710,7 @@
         "properly_completed_order_at": {
           "type": "datetime",
           "value": "2026-09-02T12:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "shipping_representation": {
           "type": "object",
@@ -578,7 +720,7 @@
             "value": 5,
             "location": "checkout"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "shipped_at": {
           "type": "datetime",
@@ -615,7 +757,7 @@
       "title": "Buyer applied to the seller for credit: 50-day default",
       "categories": [
         "boundary_time",
-        "negative"
+        "not_yet_due"
       ],
       "mission_domain_fixture": null,
       "clock": "2026-09-10T12:00:00-04:00",
@@ -623,12 +765,12 @@
         "order_channel": {
           "type": "enum",
           "value": "internet",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "seller_identity": {
           "type": "string",
           "value": "Example Furniture Outlet",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "merchandise_category": {
           "type": "enum",
@@ -638,13 +780,13 @@
         "payment_terms": {
           "type": "enum",
           "value": "seller_credit_application",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "evidence": "order submitted with the seller's store-credit application"
         },
         "properly_completed_order_at": {
           "type": "datetime",
           "value": "2026-08-01T10:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "shipping_representation": {
           "type": "object",
@@ -663,10 +805,11 @@
         }
       },
       "expected": {
-        "outcome": "not_eligible",
+        "outcome": "not_yet_due",
         "missing_facts": [],
         "applicable_time_end": "2026-09-20",
-        "note": "Day 40 of 50; re-evaluate after 2026-09-20."
+        "note": "Day 40 of 50; T = 2026-09-20.",
+        "reevaluate_at": "2026-09-21"
       },
       "variants": [
         {
@@ -674,8 +817,8 @@
           "change": {
             "payment_terms": {
               "type": "enum",
-              "value": "prepaid_card_or_cash",
-              "state": "extracted_candidate"
+              "value": "paid_at_order",
+              "state": "user_confirmed"
             },
             "amount_tendered": {
               "type": "money",
@@ -683,7 +826,7 @@
                 "amount_minor": 120000,
                 "currency": "USD"
               },
-              "state": "extracted_candidate"
+              "state": "user_confirmed"
             }
           },
           "expected": {
@@ -717,18 +860,18 @@
         "order_channel": {
           "type": "enum",
           "value": "internet",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "merchandise_category": {
           "type": "enum",
           "value": "seeds_or_growing_plants",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "evidence": "order: 3 bare-root rose plants"
         },
         "properly_completed_order_at": {
           "type": "datetime",
           "value": "2026-07-01T10:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "shipped_at": {
           "type": "datetime",
@@ -750,12 +893,12 @@
             "merchandise_category": {
               "type": "enum",
               "value": "general_merchandise",
-              "state": "extracted_candidate"
+              "state": "user_confirmed"
             },
             "payment_terms": {
               "type": "enum",
               "value": "cod",
-              "state": "extracted_candidate"
+              "state": "user_confirmed"
             }
           },
           "expected": {
@@ -783,7 +926,7 @@
         "order_channel": {
           "type": "enum",
           "value": "internet",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "buyer_country": {
           "type": "string",
@@ -793,12 +936,12 @@
         "seller_country": {
           "type": "string",
           "value": "CA",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "ship_to_country": {
           "type": "string",
           "value": "CA",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "amount_tendered": {
           "type": "money",
@@ -806,7 +949,7 @@
             "amount_minor": 12900,
             "currency": "CAD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         }
       },
       "expected": {
@@ -835,12 +978,12 @@
         "order_channel": {
           "type": "enum",
           "value": "internet",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "seller_identity": {
           "type": "string",
           "value": "Example Sports",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "merchandise_category": {
           "type": "enum",
@@ -850,7 +993,7 @@
         "properly_completed_order_at": {
           "type": "datetime",
           "value": "2026-09-01T10:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "shipping_representation": {
           "type": "object",
@@ -902,7 +1045,71 @@
           "FTC-MITOR-G3"
         ],
         "reasoning": "The clearly and conspicuously stated time governs; two conflicting statements in one confirmation cannot be resolved deterministically."
-      }
+      },
+      "variants": [
+        {
+          "id": "R05-10b",
+          "change": {
+            "shipping_representation": {
+              "type": "object",
+              "value": null,
+              "state": "conflicting",
+              "candidates": [
+                {
+                  "value": {
+                    "text": "Ships in 2 days",
+                    "unit": "calendar_days",
+                    "value": 2
+                  },
+                  "evidence": "order-confirmation header",
+                  "T": "2026-09-03"
+                },
+                {
+                  "value": {
+                    "text": "Ships by Sep 5",
+                    "unit": "date",
+                    "value": "2026-09-05"
+                  },
+                  "evidence": "order-confirmation line item",
+                  "T": "2026-09-05"
+                }
+              ]
+            },
+            "amount_tendered": {
+              "type": "money",
+              "value": {
+                "amount_minor": 6400,
+                "currency": "USD"
+              },
+              "state": "user_confirmed"
+            },
+            "payment_instrument_class": {
+              "type": "enum",
+              "value": "consumer_credit_card",
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "unconfirmed_decisive_facts": [
+              "shipping_representation"
+            ],
+            "amount": {
+              "refund_due": {
+                "amount_minor": 6400,
+                "currency": "USD"
+              }
+            },
+            "deadline": {
+              "kind": "seller_prompt_refund",
+              "date": "2026-09-16",
+              "semantics": "vesting 2026-09-04 (earliest candidate) or 2026-09-06; both give 2026-09-16 (2026-09-07 holiday)"
+            },
+            "note": "Both candidate times have passed without shipment or notice on 2026-09-08, so the conflict is not material."
+          }
+        }
+      ]
     },
     {
       "id": "R05-11",
@@ -930,7 +1137,22 @@
         "reasoning": "Stale sources block conclusions."
       },
       "facts_from": "R05-01",
-      "facts_override": {}
+      "facts_override": {},
+      "variants": [
+        {
+          "id": "R05-11b",
+          "source": {
+            "record": "missing"
+          },
+          "expected": {
+            "outcome": "source_unverified",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "note": "X5"
+          }
+        }
+      ]
     },
     {
       "id": "R05-12",

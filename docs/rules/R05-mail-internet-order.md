@@ -8,7 +8,9 @@
 | Authority class | Legal entitlement — the seller has a duty (enforced by the FTC) to offer a delay option or cancel and promptly refund. See §15 L1 on private enforcement. |
 | Authority subtype | Federal trade regulation rule, 16 CFR part 435 (authority 15 U.S.C. 57a), with FTC business guidance |
 | Jurisdiction | United States — mail, Internet, or telephone order sales "in or affecting commerce" (435.2) |
-| Effective date | Current text: 79 FR 55619 (2014-09-17); no later amendment in the eCFR source notes as of 2026-09-18 |
+| Published | 79 FR 55615, 2014-09-17 (FR 2014-22092; the eCFR source note's "79 FR 55619" is a page within it); no later amendment in the eCFR source notes as of 2026-09-18 |
+| Effective | **2014-12-08** (FR-2014-22092 DATES: "The provisions of the final Rule will become effective on December 8, 2014." — `sources/federal-register-notices.txt`) |
+| Compliance | no separate compliance date captured |
 | Retrieval date | 2026-09-23 |
 | Last verification date | 2026-09-23 |
 | Refresh policy | 180 days, and on any Federal Register document tagged 16 CFR part 435 |
@@ -50,7 +52,7 @@ The applicable shipping time passes without shipment; or a delay notice arrives;
 | No statement **and** the buyer applied **to the seller** for credit to pay for the order | **50 days** |
 
 - **Clock start:** receipt of a **properly completed order** — when the seller receives both payment (or authorization to charge an existing account, or other payment method) and all information needed to process and ship (435.1(c)). Dishonored payment / credit refused resets the clock (435.1(c)(1)-(3)).
-- **Day semantics:** "within thirty (30) days after receipt" → calendar days; the 30th day after receipt is the last compliant day (assumption A1: an order received at any time on day 0 has until the end of day 30). A seller-stated time such as "ships in 2 business days" is evaluated in the seller's stated unit (assumption A2: business = Mon–Fri excluding federal holidays).
+- **Day semantics:** "within thirty (30) days after receipt" → calendar days; the 30th day after receipt is the last compliant day (assumption A1: an order received at any time on day 0 has until the end of day 30). **Calendar-day zone (D147(4)):** the buyer's local date at the ship-to address (assumption A5); the Rule does not name a zone. A seller-stated time such as "ships in 2 business days" is evaluated in the seller's stated unit (assumption A2: business = Mon–Fri excluding federal holidays).
 
 ## 5. Required facts (typed)
 
@@ -60,7 +62,8 @@ The applicable shipping time passes without shipment; or a delay notice arrives;
 | `seller_identity` | string \| unknown | legal seller (not marketplace operator unless it is the seller) | order confirmation / invoice | applicability |
 | `buyer_country`, `ship_to_country`, `seller_country` | string | ISO-3166 | order | jurisdiction |
 | `merchandise_category` | enum | `general_merchandise` \| `serial_subscription_after_first` \| `seeds_or_growing_plants` \| `service` \| `negative_option_plan` | order | exclusions |
-| `payment_terms` | enum | `prepaid_card_or_cash` \| `cod` \| `seller_credit_application` \| `bill_later` | order | exclusions / 50-day rule |
+| `payment_terms` | enum | `paid_at_order` \| `cod` \| `seller_credit_application` \| `bill_later` | order | exclusions / 50-day rule (the refund **form** comes from `payment_instrument_class`, 435.1(d)) |
+| `delay_notice_offers_cancel_and_refund` | boolean \| unknown, per notice | the notice clearly and conspicuously offers the option to cancel and receive a prompt refund and "fully inform[s] the buyer" of that right (435.2(b)(1), (b)(1)(i)) | notice text | option analysis |
 | `properly_completed_order_at` | datetime | ISO-8601 | order confirmation (payment authorization + complete information) | clock start |
 | `shipping_representation` | object \| none | {text (verbatim), unit (`calendar_days` \| `business_days` \| `date`), value, location (`checkout` \| `order_confirmation` \| `ad`)} | captured page/email | applicable time |
 | `delivery_representation` | object \| none | {text, date} | order confirmation | **kept separate** (not used for R05) |
@@ -83,14 +86,16 @@ The applicable shipping time passes without shipment; or a delay notice arrives;
 
 ## 7. Remedy
 
-Cancellation of the unshipped order and a **prompt refund** of the amount tendered — including shipping, handling, insurance and other costs if nothing shipped (FTC-MITOR-G6). Partial shipment: refund of the difference for unshipped items per the seller's ordering instructions. No store credit, vouchers, or scrip (FTC-MITOR-G2). Cash remedy (to the original payment method).
+Cancellation of the unshipped order and a **prompt refund** of the amount tendered — including shipping, handling, insurance and other costs if nothing shipped (FTC-MITOR-G6). Partial shipment: the Rule's refund is for the unshipped merchandise (435.1(d) "unshipped merchandise"); the FTC guide's method — the difference between the total paid and what the buyer would have paid for the shipped items under the seller's ordering instructions — is **guidance-only** (FTC-MITOR-G7), so a partial-shipment **amount** is `manual_review`. No store credit, vouchers, or scrip (FTC-MITOR-G2). Cash remedy (to the original payment method).
 
 ## 8. Option / cancellation logic (435.2(b)–(c)) — deterministic
 
 Let `T` = end of the applicable shipping time (§4).
 
+**Notice adequacy (435.2(b)(1), (b)(1)(i)).** A delay notice counts as the prescribed option only if it offers, clearly and conspicuously, the choice to consent to the delay **or cancel and receive a prompt refund**, and fully informs the buyer of that right. `delay_notice_offers_cancel_and_refund = false` → the notice is not the option → treat as case 1 (435.2(c)(5)). Unknown → `needs_facts`.
+
 1. **No delay notice, not shipped by `T`** → the seller must deem the order cancelled and make a prompt refund (435.2(c)(5)). Right to refund vests when `T` ends without shipment (assumption A3: vesting **date** = the calendar day after the last day of `T`).
-2. **Delay-option notice received ≤ `T`, definite revised date `R` with `R ≤ T + 30 days`:** buyer silence = consent to ship by `R` (435.2(b)(1)(ii)). Buyer may cancel any time before shipment → refund vests on the seller's receipt of the cancellation (435.2(c)(1)). Not shipped by `R` → the seller must offer a **renewed** option before `R`; silence to a renewed option = **rejection** → cancellation if not shipped by `R` (435.2(b)(2)(ii), (c)(3)).
+2. **Delay-option notice received ≤ `T`, definite revised date `R` with `R ≤ T + 30 days`:** buyer silence = consent to ship by `R` (435.2(b)(1)(ii)). Buyer may cancel **before shipment and before `R` expires** → refund vests on the seller's receipt of the cancellation (435.2(b)(1)(ii), (c)(1)). Not shipped by `R` → the seller must offer a **renewed** option before `R`; silence to a renewed option = **rejection** → cancellation if not shipped by `R` (435.2(b)(2)(ii), (c)(3)).
 3. **Delay-option notice with `R > T + 30 days` or "indefinite":** the order is **automatically cancelled** unless shipped within 30 days of `T` or the buyer **expressly consented** within those 30 days (435.2(b)(1)(iii), (c)(2)). Refund vests when `T + 30 days` ends without shipment or express consent (vesting date = the next calendar day, A3).
 4. **Notice sent after `T`** is not a valid first delay-option notice ("in no event later than said applicable time", 435.2(b)(1)) → treat as case 1.
 5. **Buyer consented to an indefinite delay** → continuing right to cancel before shipment (435.2(b)(1)(iii)(B)).
@@ -100,15 +105,15 @@ Let `T` = end of the applicable shipping time (§4).
 
 | Payment | Refund form | Deadline | Anchor | Semantics |
 |---|---|---|---|---|
-| cash, check, money order | return of amount tendered | 7 **working** days | date the right to refund vests | "working days" is **not defined** in part 435 → assumption A2 (Mon–Fri excl. federal holidays) |
-| third-party credit (ordinary credit card) | credit memo to the card issuer + copy to buyer | 7 working days | vesting date | same |
+| cash, check, money order | return of amount tendered | 7 **working** days | date the right to refund vests | refund **sent** (not posted: "a refund sent by any means at least as fast and reliable as first class mail", 435.1(b)); counting starts the day **after** the vesting date (assumption A6); "working days" is **not defined** in part 435 → assumption A2 (Mon–Fri excl. federal holidays) |
+| third-party credit (ordinary credit card) | credit memo to the card issuer + copy to buyer, **or** a statement to the buyer acknowledging the cancellation and that no action was taken that will charge the account (435.1(d)(2)(ii)) | 7 working days | vesting date | same (sent) |
 | seller is the creditor | credit memo / account statement | **one billing cycle** | vesting date | billing cycle of the seller-creditor account |
 | other methods (wallets, debit, etc.) | instructions to the payment entity / return / statement | 7 working days | vesting date | same |
 | seller cannot refund by the same method | cash, check, or money order | 7 working days | date the seller discovers it cannot | same |
 
 ## 10. Notice requirements
 
-- The seller's delay-option notice may be sent by email (FTC-MITOR-G4). Posting only on an order-status page may be insufficient (FTC guide Q&A).
+- The seller's delay-option notice may be sent by email (FTC-MITOR-G4, guidance-only). Posting only on an order-status page may not meet the timing requirement (FTC-MITOR-G8, guidance-only).
 - **Buyer cancellation:** the Rule requires the seller to provide "adequate means, at the seller's expense" (435.2(b)(3)). No specific buyer notice form is required. An email or portal cancellation is valid **only if received before shipment**. Keep timestamped proof.
 
 ## 11. Deadlines — summary
@@ -201,17 +206,18 @@ FTC business-guide passages FTC-MITOR-G1…G6 are in `sources/federal-web-pages-
 - **L4 — Marketplaces.** The seller may be a third party on a marketplace. Seller unknown → `needs_facts`.
 - **L5 — Stated-time interpretation.** "Ships in 3–5 days" ranges → use the **upper** bound (the seller's representation covers the range; assumption A4). Contradictory statements in the same order → `needs_facts`.
 - **L6 — State law** may add rights (435.3(b)); not evaluated.
-- **L7 — Civil-penalty figure in the FTC guide** ("$53,088 per violation") is an inflation-adjusted amount that changes yearly; not used by the evaluator.
+- **L7 — Civil penalties.** The FTC guide states a civil-penalty figure that changes yearly; it is informational, not captured, and not used by the evaluator.
+- **L8 — Non-US scope.** "In or affecting commerce" can include foreign commerce; returning `unsupported` for non-US buyers, sellers or ship-to addresses is a conservative scope choice.
 
 ## 16. Evaluation outline
 
-1. Source not current → `source_unverified`.
+1. No current source record, or source not current → `source_unverified`.
 2. Non-US buyer/seller/ship-to → `unsupported`. `order_channel = in_store` → `not_eligible`. Excluded category or COD → `not_eligible` (the Rule does not apply). Seller unknown → `needs_facts`.
 3. Determine `T` (§4). Missing `properly_completed_order_at` or contradictory representations → `needs_facts`.
 4. `shipped_at ≤ T` (or ≤ consented revised date) → `not_eligible` (shipment promise met; attach an R03 / merchant pointer if a **delivery** promise was missed).
-5. Now ≤ `T` and not shipped → `not_eligible` **yet** (re-evaluate at `T`).
+5. Now ≤ `T` (or ≤ `R`, or ≤ `T + 30 days` under case 3) and not shipped → **`not_yet_due`** with `reevaluate_at` = the day after the period ends (D147(6)); never `not_eligible`. Buyer consented to an indefinite delay → **`not_yet_due`** with `reevaluate_when: "buyer cancels before shipment"`.
 6. Apply §8 cases. Delay-notice state unknown → `needs_facts`. Refund right vested → `eligible`; compute the refund deadline (§9).
-7. Evidence gaps (e.g., no tracking history proving non-shipment) → `likely_eligible_missing_evidence`.
+7. `eligible` requires every **decisive fact** to be confirmed (D147(2)): `order_channel`, `seller_identity`, countries, `merchandise_category`, `payment_terms`, `properly_completed_order_at`, `shipping_representation`, `shipped_at`, `delay_notices` (+ adequacy), `buyer_response`, `amount_tendered`. A user-confirmed "not shipped" plus no carrier-possession event is sufficient for `shipped_at`. Any decisive fact only extracted → `likely_eligible_missing_evidence`. Partial shipment → amount `manual_review`.
 8. Overlap: R03 is an alternative for the same money (never additive); a merchant refund already received reduces the outstanding amount to zero → the opportunity closes as recovered, not as `not_eligible`.
 9. Idempotency key = (owner, rule id, version, seller, order number).
 
@@ -224,6 +230,8 @@ FTC business-guide passages FTC-MITOR-G1…G6 are in `sources/federal-web-pages-
 ## 18. Assumptions
 
 - A1: Day counts in §4 are calendar days; day 30 inclusive.
+- A5: Calendar days are the buyer's local dates at the ship-to address.
+- A6: The 7-working-day count starts the day after the vesting date.
 - A2: "Working days" / seller "business days" = Mon–Fri excluding 5 U.S.C. 6103 federal holidays.
 - A3: Vesting date = the calendar day after the last day of the applicable period (`T`, `R`, or `T + 30 days`); for a buyer cancellation, the date the seller receives it; for a seller decision not to ship, the date of that notice.
 - A4: For a range representation, the upper bound governs.
