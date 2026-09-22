@@ -1,5 +1,10 @@
 import { defineConfig } from "vitest/config";
 
+// `npm run test:clockshift` sets this (400) to run the whole suite with the
+// process clock moved N days ahead (convex/testing/clockShift.setup.ts), so
+// a test that only passes on today's date fails now instead of later (D138).
+const clockShiftDays = process.env.RECOUP_CLOCK_SHIFT_DAYS;
+
 export default defineConfig({
   test: {
     // Default for every file: the Convex runtime (convex-test needs it).
@@ -13,5 +18,6 @@ export default defineConfig({
     environment: "edge-runtime",
     server: { deps: { inline: ["convex-test"] } },
     include: ["convex/**/*.test.ts", "src/**/*.test.ts", "src/**/*.test.tsx"],
+    setupFiles: clockShiftDays ? ["./convex/testing/clockShift.setup.ts"] : [],
   },
 });

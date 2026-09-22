@@ -173,14 +173,23 @@ export const authorityClass = v.union(
   v.literal("settlement_or_program"), v.literal("goodwill"),
 );
 /**
- * Mission §9 outcomes. M02 fixtures' `likely_eligible_missing_evidence` ≡ `likely_eligible`
- * (docs/rules/README.md alias table; M08's fixture loader maps it).
+ * Mission §9 outcomes. docs/rules/README.md alias table, applied by M08's fixture loader:
+ * `likely_eligible_missing_evidence` → `likely_eligible`; `not_yet_due` (D147(6), README rule 4) maps 1:1
+ * (rev 5.2). `not_yet_due` = the path is not ripe yet; it carries a `reevaluate` date or event and is NEVER
+ * `not_eligible`, never approvable and never in a money tile.
  */
 export const evaluationOutcome = v.union(
   v.literal("eligible"), v.literal("likely_eligible"), v.literal("possible_contract_benefit"), v.literal("needs_facts"),
   v.literal("manual_review"), v.literal("not_eligible"), v.literal("deadline_passed"), v.literal("source_unverified"),
   v.literal("unsupported"),
+  v.literal("not_yet_due"),
 );
+/**
+ * rev 5.2 (D147(6)): when a `not_yet_due` path should be re-evaluated. At least one of the two is set (asserted by
+ * the writer). `at` is an ISO local date "YYYY-MM-DD" (fixture `reevaluate_at`); `when` names an event (fixture
+ * `reevaluate_when`, e.g. "MBR filed") that arrives as a fact change.
+ */
+export const reevaluate = v.object({ at: v.optional(v.string()), when: v.optional(v.string()) });
 export const tri = v.union(v.literal("pass"), v.literal("fail"), v.literal("unknown"));
 export const remedyType = v.union(
   v.literal("price_difference"), v.literal("cash_refund"), v.literal("statement_credit"), v.literal("reimbursement"),
@@ -273,6 +282,8 @@ export const nextAction = v.union(
   v.object({ kind: v.literal("ask_anyway"), reason: v.string() }),
   v.object({ kind: v.literal("manual_review"), reason: v.string() }),
   v.object({ kind: v.literal("none"), reason: v.string() }),
+  /** rev 5.2: `not_yet_due` → "check again on <date>" / "after <event>". */
+  v.object({ kind: v.literal("wait"), reevaluate }),
 );
 export const nonCashKind = v.union(
   v.literal("voucher"), v.literal("points"), v.literal("repair"), v.literal("replacement"),
@@ -745,6 +756,8 @@ export default defineSchema({
     overlap: v.array(v.object({ withScenario: scenarioId, withRemedyKey: v.string(), relation: overlapRelation })),
     nextAction, explanation: v.array(v.string()),
     boundFacts: v.optional(v.array(boundFactValue)),
+    /** rev 5.2 (D147(6)): set iff `outcome === "not_yet_due"`. */
+    reevaluate: v.optional(reevaluate),
   }).index("by_opportunity", ["opportunityId"]).index("by_user", ["userId"]),
 
   /**

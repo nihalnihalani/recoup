@@ -12,20 +12,32 @@
 // file so console output from tests can never corrupt the report) and then
 // fails unless:
 //   1. vitest's own run succeeded (no failing tests), AND
-//   2. at least `minCount` (default 600) tests ran in total, AND
+//   2. at least `minCount` (default DEFAULT_MIN_COUNT below) tests ran in
+//      total, AND
 //   3. every collected test file has at least one test (a file that
 //      collects zero tests -- e.g. an empty describe, or a collection
 //      error -- is exactly the "silently misconfigured suite" failure mode
 //      --passWithNoTests was hiding).
 //
 // Usage: node scripts/check-test-count.mjs [minCount]
+//
+// `npm run test:clockshift` runs this same gate with RECOUP_CLOCK_SHIFT_DAYS
+// set (vitest.config.mts then loads convex/testing/clockShift.setup.ts).
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-const minCount = Number(process.argv[2] ?? 600);
+// The floor is a ratchet: the collected count when it was last raised, minus
+// a small margin so a legitimate test consolidation does not break CI, while
+// a silently dropped file or glob still does. History:
+//   600  - T17 (2026-09-21).
+//   1500 - M08 (2026-09-23): 1,550 collected at eb65be6 (72 files), margin 50 (~3%).
+// Raise it when the suite grows. Never lower it to make a red run green.
+const DEFAULT_MIN_COUNT = 1500;
+
+const minCount = Number(process.argv[2] ?? DEFAULT_MIN_COUNT);
 if (!Number.isFinite(minCount) || minCount <= 0) {
   console.error(`[test:ci] FAILED - invalid minCount argument: ${process.argv[2]}`);
   process.exit(1);
@@ -95,6 +107,8 @@ if (!ok) {
   process.exit(1);
 }
 
+const shift = process.env.RECOUP_CLOCK_SHIFT_DAYS;
 console.log(
-  `[test:ci] OK - ${total} tests passed across ${testFiles.length} file(s) (minimum ${minCount}).`,
+  `[test:ci] OK - ${total} tests passed across ${testFiles.length} file(s) (minimum ${minCount})` +
+    (shift ? `, clock shifted +${shift} days.` : "."),
 );
