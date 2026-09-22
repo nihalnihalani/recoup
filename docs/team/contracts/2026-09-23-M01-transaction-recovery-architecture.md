@@ -767,7 +767,11 @@ export interface EvaluationResult {
   amount: AmountCalc | null; deadlines: DeadlineResult[]; sourceRefs: SourceRef[];
   lossKeys: string[]; overlap: OverlapDecl[]; nextAction: NextAction; explanation: string[];
   flags: { unsupportedReason?: string; sourceStale?: boolean; effectiveDateMismatch?: boolean;
-           conflictingKeys: string[]; contractCoverageInexact?: boolean; manualReviewReason?: string;
+           conflictingKeys: string[];                       // every decisive key whose cell is `conflicting`
+           conflicts: { key: string; kind: "candidates" | "confirmed_vs_observed" | "confirmed_vs_confirmed";
+                        values: { value: string; source: string }[]; sameAnswer: boolean }[];   // rev 5.3 (D152); kind is tagged
+                        // by lib/facts/resolve.ts (M11); sameAnswer = every conflicting value yields the same outcome (candidate testing)
+           contractCoverageInexact?: boolean; manualReviewReason?: string;
            notYetDue?: { at?: string; when?: string } };   // rev 5.2: set by the pack only from KNOWN facts (e.g. ship-by date
                                                             // confirmed and still in the future; MBR confirmed "not filed")
 }
@@ -789,7 +793,16 @@ export function deriveOutcome(d: Dimensions, f: Flags, assumptions: Assumption[]
 //        early). An UNKNOWN ripeness fact is not notYetDue — it is a missing fact → needs_facts. NEVER maps to not_eligible.
 //        result.reevaluate = f.notYetDue; nextAction = { kind: "wait", reevaluate }; amount may be computed but is never shown
 //        as owed (§5, §9).
-//  5 f.conflictingKeys.length > 0 || f.manualReviewReason -> "manual_review"
+//  5 conflicts, split by WHO can resolve them (rev 5.3, D152):
+//    5a f.manualReviewReason, or a conflict of kind confirmed_vs_observed | confirmed_vs_confirmed
+//       -> "manual_review". The user cannot settle it by answering: a user_confirmed value contradicts an observed/system
+//       value (e.g. the user confirmed delivery on the 3rd, the carrier's tracking says the 9th), or two confirmed values
+//       contradict. The explanation names both sources and what would resolve it (upload proof / correct the confirmation).
+//    5b a conflict of kind "candidates" (only extracted candidates disagree, or candidates disagree with nothing confirmed)
+//       -> "needs_facts". missingFacts gets reason "conflicting" and the question shows both values and their sources.
+//    5c every conflict has sameAnswer = true -> skip 5a/5b; the outcome stands but is capped at likely_eligible
+//       (PENDING M09b — until the reviewer signs off and the lead records it, M12 keeps 5c behind a single constant and the
+//       fixture variants for it are marked pending).
 //  6 d.applies === "unknown" || d.factsKnown === "unknown" -> "needs_facts"       (required-class facts only)
 //  7 f.contractCoverageInexact                            -> "possible_contract_benefit"
 //  8 d.evidenceSupports !== "pass" || assumptions.length > 0 -> "likely_eligible"  (DA-A-2 row: "only assumption-class unknowns → likely_eligible")
@@ -1055,6 +1068,7 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 | N5 (rev 5) | `claims.test.ts` · "provisional 4,000 outstanding + confirmCredit 1,000 without the flag → ProvisionalOutstanding, nothing written"; "with separateFromProvisional → recorded, provisional still 4,000"; "finalize path unchanged" | M10, M16 |
 | N6 (rev 5) | `drafts.test.ts` · "edit a legacy item's unitCents after approval → the binding's evaluation still shows the approved values"; `lib/facts/snapshot.test.ts` · "boundFactValues are canonical and bounded ≤ 32" | M11, M12, M13 |
 | N7 (rev 5) | `r01Parity.test.ts` · "a later confirmed snapshot with a different windowDays → v1 uses it (same as legacy) with assumption A-T2" (both modes) | M12, M16 |
+| D152 conflicts (rev 5.3) | `lib/rules/outcome.test.ts` · "two extracted candidates disagree, nothing confirmed → needs_facts; the missing fact has reason conflicting and the question lists both values with their evidence sources"; "user_confirmed delivery 3rd vs observed carrier tracking 9th → manual_review; the explanation names both sources and 'upload proof or correct your confirmation'"; "two confirmed values contradict → manual_review"; "same-answer candidates → outcome stands, capped at likely_eligible" (**marked pending M09b**); `lib/facts/resolve.test.ts` · "conflict kind tagged: candidates / confirmed_vs_observed / confirmed_vs_confirmed" | M11, M12 |
 | D147(6) engine (rev 5.2) | `lib/rules/outcome.test.ts` · "flags.notYetDue → not_yet_due; never not_eligible"; "applies fail + notYetDue → not_eligible (rule 3 wins)"; "user deadline passed + notYetDue → deadline_passed (rule 4 wins)"; "notYetDue + conflicting/missing facts → not_yet_due, missingFacts still listed"; "an unknown ripeness fact → needs_facts, not not_yet_due"; `opportunities.test.ts` · "not_yet_due → openCase refused with nextAction wait; no auto-open"; `recovery.test.ts` · "not_yet_due never appears in any money tile" | M12 |
 | D147(6) packs (rev 5.2) | M08 loader over `docs/rules/fixtures/R04.json` · **R04-03b** (MBR confirmed not filed → `not_yet_due`, `reevaluate.when` "MBR filed"); `R05.json` · **R05-04b** (`reevaluate.when`: buyer cancels before shipment), **R05-04c** (`reevaluate.at` 2026-10-11), **R05-05a/b** (`reevaluate.at` 2026-09-01), **R05-07** (`reevaluate.at` 2026-09-21) — all pass unmapped | M21 (R05), M22 (R04) |
 
@@ -1288,7 +1302,7 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 | O15 | 24 h multiples in R01 v1 | **Agreed** for parity; R01 v2 is M37 |
 | O16 | httpAction upload | **Agreed**, with DA-A-8/20/27/28 |
 
-**Pending M09b (recorded, not decided; rev 5.2).** A `conflicting` decisive fact whose candidates **all yield the same answer**: does the outcome stand, as README rule 3 (X2) states, or is it capped at `likely_eligible`? M12 implements candidate-testing (evaluate once per candidate, compare outcomes) so either ruling is a one-line change in `deriveOutcome`. The fixture variants built for this case ("both candidates on the same side") are marked `pending M09b` in M12's run until the reviewer rules and the lead records it.
+**Pending M09b (rev 5.2, narrowed by D152 in rev 5.3).** D152 decides the divergent cases: rule 5a gives `manual_review` for a confirmed value against an observed or confirmed value, and rule 5b gives `needs_facts` for candidates only. **Still pending:** a `conflicting` decisive fact whose candidates **all yield the same answer**. Per D152 the outcome stands, capped at `likely_eligible` (rule 5c), but that awaits M09b's sign-off. README X2 currently says the outcome stands **uncapped**, and M09b checks the README and fixture alignment. M12 implements candidate-testing (evaluate once per candidate, compare outcomes) so the ruling is a one-line change in `deriveOutcome`. The fixture variants built for this case ("both candidates on the same side") are marked `pending M09b` in M12's run until the reviewer rules and the lead records it.
 
 **Remaining items for the lead:**
 - **(R4-1)** Record the D83(5) wording amendment (§2.6).
@@ -1397,3 +1411,9 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 |---|---|---|
 | D147(6) | New outcome `not_yet_due` with a `reevaluate` {at: ISO date \| when: named event}; precedence 4b (below not_eligible/deadline_passed, above manual_review/needs_facts; an unknown ripeness fact stays needs_facts); never `not_eligible`; not approvable; never a card with an amount as owed and excluded from every money tile; "check again on <date>/after <event>" (`nextAction: wait`); event re-evaluates on fact change, date via the wave-2 M29 sweep (`opportunities.reevaluateAt` + index in the M20 addendum); loader passes it through 1:1 | §2.4, §2.8, §4, §5, §10 (engine + R04/R05 rows) · M10 (schema delta), M12, M20, M21, M22, M29 |
 | Pending M09b | A conflicting decisive fact whose candidates all give the same answer: outcome stands (README X2) or capped at `likely_eligible` — recorded, not decided; candidate-testing seam in M12 | §12 · M12 |
+
+### 13.5 Rev 5.3 (M06e)
+
+| Id | What changed | Section(s) / task |
+|---|---|---|
+| D152 | `deriveOutcome` rule 5 split by who can resolve the conflict: 5a `manual_review` (user_confirmed vs observed/system, or confirmed vs confirmed; explanation names both sources and the fix); 5b `needs_facts` (candidates only; question shows both values and sources); 5c same-answer candidates → outcome stands capped at `likely_eligible` — still **pending M09b**; conflict kind tagged in `resolve.ts` | §4, §10, §12 · M11, M12 |
