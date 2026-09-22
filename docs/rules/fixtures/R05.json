@@ -60,6 +60,11 @@
           "value": "US",
           "state": "user_confirmed"
         },
+        "seller_country": {
+          "type": "string",
+          "value": "US",
+          "state": "user_confirmed"
+        },
         "merchandise_category": {
           "type": "enum",
           "value": "general_merchandise",

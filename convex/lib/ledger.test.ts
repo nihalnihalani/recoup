@@ -228,8 +228,8 @@ describe("HC-3: an exhaustive ledger (every kind handled explicitly)", () => {
     expect(() => statusAfterEvent("sent", "bogus_kind" as unknown as EventKind, balance(4000, []))).toThrow(ConvexError);
   });
 
-  it("every kind the schema can store is one the ledger handles", () => {
-    for (const m of schemaEventKind.members) expect(EVENT_KINDS).toContain(m.value);
+  it("the schema's eventKind and the ledger's EVENT_KINDS are the same set", () => {
+    expect(schemaEventKind.members.map((m) => m.value).sort()).toEqual([...EVENT_KINDS].sort());
   });
 
   it("each kind's exact effect on balance and status (every kind × every status)", () => {

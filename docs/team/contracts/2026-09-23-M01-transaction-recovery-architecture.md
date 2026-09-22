@@ -264,7 +264,8 @@ export const conditionResult = v.object({
 /** DA-A-2 / DA-A-24: only DECISIVE unknowns are listed; `class: "assumption"` never sets factsKnown. */
 export const missingFact = v.object({
   subjectKey: v.string(), key: v.string(),
-  reason: v.union(v.literal("missing"), v.literal("candidate_unconfirmed"), v.literal("conflicting"), v.literal("user_unknown")),
+  reason: v.union(v.literal("missing"), v.literal("candidate_unconfirmed"), v.literal("conflicting"), v.literal("user_unknown"),
+    v.literal("conflict_capped")),   // rev 5.5 (D158): a 5c same-answer candidate conflict — the key is asked; the outcome is capped
   class: v.union(v.literal("required"), v.literal("assumption")),
   neededFor: v.array(v.string()),
 });
@@ -770,7 +771,8 @@ export interface EvaluationResult {
            conflictingKeys: string[];                       // every decisive key whose cell is `conflicting`
            conflicts: { key: string; kind: "candidates" | "confirmed_vs_observed" | "confirmed_vs_confirmed";
                         values: { value: string; source: string }[]; sameAnswer: boolean }[];   // rev 5.3 (D152); kind is tagged
-                        // by lib/facts/resolve.ts (M11); sameAnswer = every conflicting value yields the same outcome (candidate testing)
+                        // by lib/facts/resolve.ts (M11); sameAnswer = every conflicting value yields the same outcome AND the same
+                        // amount (candidate testing; D154/D158)
            contractCoverageInexact?: boolean; manualReviewReason?: string;
            notYetDue?: { at?: string; when?: string; userAction?: NextAction } };   // rev 5.4 (D154): userAction set when the awaited
                                                             // event is something the USER controls (e.g. filing a baggage report)   // rev 5.2: set by the pack only from KNOWN facts (e.g. ship-by date
@@ -806,7 +808,7 @@ export function deriveOutcome(d: Dimensions, f: Flags, assumptions: Assumption[]
 //    5c DECIDED (rev 5.4, D154): if there is no 5a conflict and EVERY conflict is kind "candidates" with sameAnswer = true
 //       -> skip 5b; the outcome the rules give stands, CAPPED at likely_eligible. "Same answer" = same outcome AND same amount
 //       (identical estimate amountMinor + currency, or both null) across every conflicting value (candidate testing).
-//       The conflicting keys stay in missingFacts (reason "conflicting") so the user is still asked; only a confirmation lifts
+//       The conflicting keys stay in missingFacts (reason "conflict_capped", rev 5.5/D158) so the user is still asked; only a confirmation lifts
 //       the cap. 5c applies only to candidate-vs-candidate conflicts: confirmed_vs_observed / confirmed_vs_confirmed are 5a.
 //       This is a fixed rule, not a configurable constant.
 //  6 d.applies === "unknown" || d.factsKnown === "unknown" -> "needs_facts"       (required-class facts only)
@@ -1048,6 +1050,10 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 ## 10. Acceptance criteria ("fixture" = expected values written by hand, never produced by the code under test)
 
 **Common (every active evaluator):**
+- **Assertion mapping (rev 5.5, D158)**, implemented in M12's fixture harness and mirrored in M08's loader documentation. Assertions compare **sets of (key, reason-class)**:
+  - fixture `missing_facts` ↔ contract `missingFacts` entries whose reason is in the **missing class**: `missing` or `conflicting` (unresolved → `needs_facts`);
+  - fixture `unconfirmed_decisive_facts` ↔ entries whose reason is in the **unconfirmed class**: `candidate_unconfirmed` (D158's "unconfirmed") or `conflict_capped` (the `likely_eligible` cap);
+  - `user_unknown` is placed in the missing class because the fact stays unresolved (§2.5). This placement is **the architect's reading, flagged to the lead**; D158 does not name it.
 - M02's fixture categories pass unchanged through M08's loader, with `likely_eligible_missing_evidence` mapped to `likely_eligible` and **`not_yet_due` passed through 1:1 with `reevaluate_at` → `reevaluate.at` and `reevaluate_when` → `reevaluate.when`** (rev 5.2).
 - Evaluating twice gives one evaluation row.
 - 30 alternating price observations give a bounded number of evaluation rows (DA-A-32).
@@ -1220,7 +1226,7 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 | M27 | opus-rules-reviewer | `docs/reviews/…-pack-review-R02-R05.md` | M09, M21, M22 | each code pack matches its M09-approved spec and passes the M02 fixtures unchanged → the lead records each activation **before that slice's wave-2 close** |
 | M28 | ingestion-integrations | `convex/drafts.ts` (item-less context, `claimCurrency`, `purpose`), `convex/replies.ts` (DA-A-19 currency; scenario-aware prompt; `expectedDomain`), `convex/followUps.ts` (item-less claims; `responseExpectation`), `convex/lib/schemas.ts` (ReplyClass), `convex/inbound.ts` (unchanged unless needed) | M20 | DA-A-12 HC-1 sites compile and are tested; DA-A-19 ("a '€40' reply on a USD claim → no ledger event, needs review") |
 | M2C | backend-2 | `convex/tracking.ts` (`isClosedForAsk`; item-less claims; DA-A-34 A.7 inverted on overview), `convex/purchases.ts` (board skips `scenario` claims, per-currency fields added alongside the untouched legacy totals), `convex/insights.ts` (optional ids, `claimCurrency`), `convex/priceWatch.ts` (DA-A-22 denied re-open rule) | M20 | repro A.1 inverted; DA-A-22 ("a denied claim at the same price → no claim; a lower price → a claim for (deniedObserved − new) × qty only"); `purchases.test.ts:387–407` unmodified |
-| M29 | backend | `convex/crons.ts` (deadline attention sweep + the evidence-retry sweep entry M23 provides), `convex/deadlines.ts` (new), `convex/ops.ts` (backlog additions) | M20, M21 | **rev 5.2:** the same sweep re-evaluates `not_yet_due` opportunities whose `reevaluateAt` ≤ now (bounded page on `by_status_and_reevaluate_at`, tombstone-gated; test "R05-04c re-evaluated on 2026-10-11 → new outcome recorded"). **C50 user-obligor deadline attention for R03** (in-app only): a bounded sweep on `by_status_and_next_deadline_at`; re-reads state; skips closed, dismissed, superseded and tombstoned work (SEC-CH-6); "a reminder for a case closed after scheduling is a no-op" |
+| M29 | backend | `convex/crons.ts` (deadline attention sweep + the evidence-retry sweep entry M23 provides), `convex/deadlines.ts` (new), `convex/ops.ts` (backlog additions) | M20, M21 | **rev 5.2:** the same sweep re-evaluates `not_yet_due` opportunities whose `reevaluateAt` ≤ now (bounded page on `by_status_and_reevaluate_at`, tombstone-gated; test "R05-04c re-evaluated on 2026-10-11 → new outcome recorded"). **C50 user-obligor deadline attention for R03** (in-app only): a bounded sweep on `by_status_and_next_deadline_at`; re-reads state; skips closed, dismissed, superseded and tombstoned work (SEC-CH-6); "a reminder for a case closed after scheduling is a no-op"; **rev 5.5 (D158):** the user-deadline attention sweep also covers `manual_review` opportunities whose user deadline is still running, so a review never silently uses up a notice window — test "R03 opportunity in manual_review with 10 days left on the received-by deadline → attention set; after the deadline passes → no attention" |
 | M2A | frontend | `src/lib/coverageCopy.ts` (new), `src/pages/SignIn.tsx` (landing copy), `README.md`, `hackathon.md` | M24 | **§20 copy consistency**: every coverage claim in the product copy is derived from `coverage.ts` + RULES-COVERAGE; a copy test fails when any page claims a scenario the production registry does not evaluate ("checks supported recovery paths", never "every right"); no billing copy |
 
 ### 11.3 Waves 3–4 — expansion (each with its recorded blocker or scope; nothing becomes a card without an active pack)
@@ -1447,3 +1453,9 @@ README X2 and the fixtures are aligned by M2E and re-checked by M09c. The same-s
 | D154 (5c) | Rule 5c decided and fixed (no configurable constant): candidate-only conflicts with the same outcome AND same amount → outcome stands, capped at `likely_eligible`; the key is still asked; only confirmation lifts the cap; 5a unchanged | §4, §10, §12 · M12 |
 | D154 (anchors) | A disputed or unconfirmed anchor never yields `dueAt`: user deadlines show a labelled `advisoryActBy` (earliest candidate); counterparty deadlines show no `overdueSince` until the anchor is resolved | §4, §10 · M12 |
 | D154 (not_yet_due) | When re-evaluation waits on a user-controlled action, `nextAction` is that action (pack-declared `notYetDue.userAction`), not `wait` | §4, §5, §10 · M12, M22 |
+
+### 13.7 Rev 5.5 (M06g, D158)
+
+| Id | What changed | Section(s) / task |
+|---|---|---|
+| D158 | `sameAnswer` = same outcome AND same amount (comment); assertion mapping recorded: fixture `missing_facts` ↔ `missingFacts` reason missing/conflicting, `unconfirmed_decisive_facts` ↔ reason candidate_unconfirmed/conflict_capped, compared as sets of (key, reason-class); new reason value `conflict_capped` for 5c (schema delta to M10); M29's attention sweep also covers `manual_review` opportunities with a running user deadline | §2.4, §4, §10, §11 M29 · M10, M12, M29 |
