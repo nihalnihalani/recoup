@@ -65,6 +65,7 @@ import type * as lib_pan from "../lib/pan.js";
 import type * as lib_passage from "../lib/passage.js";
 import type * as lib_policyText from "../lib/policyText.js";
 import type * as lib_privacyFacts from "../lib/privacyFacts.js";
+import type * as lib_quote from "../lib/quote.js";
 import type * as lib_rateLimits from "../lib/rateLimits.js";
 import type * as lib_rules_activation from "../lib/rules/activation.js";
 import type * as lib_rules_applicable from "../lib/rules/applicable.js";
@@ -169,6 +170,7 @@ declare const fullApi: ApiFromModules<{
   "lib/passage": typeof lib_passage;
   "lib/policyText": typeof lib_policyText;
   "lib/privacyFacts": typeof lib_privacyFacts;
+  "lib/quote": typeof lib_quote;
   "lib/rateLimits": typeof lib_rateLimits;
   "lib/rules/activation": typeof lib_rules_activation;
   "lib/rules/applicable": typeof lib_rules_applicable;
