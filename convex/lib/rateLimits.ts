@@ -8,6 +8,7 @@
  */
 import { RateLimiter, MINUTE, HOUR } from "@convex-dev/rate-limiter";
 import { components } from "../_generated/api";
+import { EVALUATIONS_PER_MINUTE, EVIDENCE_DOWNLOADS_PER_MINUTE, EVIDENCE_UPLOADS_PER_HOUR } from "../limits";
 
 export const rateLimiter = new RateLimiter(components.rateLimiter, {
   /** Sign-in/verify/reset attempts, keyed by the normalized email (T05). Token bucket so a burst of legitimate retries (typo, resend) is not immediately refused. */
@@ -61,4 +62,25 @@ export const rateLimiter = new RateLimiter(components.rateLimiter, {
    * Token bucket, so a legitimate burst is never cut at a window edge.
    */
   factsAnswer: { kind: "token bucket", rate: 120, period: HOUR, capacity: 30 },
+  /**
+   * `POST /evidence/upload` per user (M13, SEC-UP-8; `EVIDENCE_UPLOADS_PER_HOUR`), keyed on the server-resolved
+   * userId and consumed before the body is read, so a refused upload stores nothing. Token bucket: a person
+   * photographing a stack of receipts uploads in a burst, and a burst up to the hourly number is fine.
+   */
+  evidenceUpload: { kind: "token bucket", rate: EVIDENCE_UPLOADS_PER_HOUR, period: HOUR, capacity: EVIDENCE_UPLOADS_PER_HOUR },
+  /**
+   * `GET /evidence/file` per user (M13, SEC-UP-5; `EVIDENCE_DOWNLOADS_PER_MINUTE`), keyed on the server-resolved
+   * userId and consumed before the id is looked up, so the route cannot be used to probe ids quickly. A page of
+   * previews fits in one burst.
+   */
+  evidenceDownload: { kind: "token bucket", rate: EVIDENCE_DOWNLOADS_PER_MINUTE, period: MINUTE, capacity: EVIDENCE_DOWNLOADS_PER_MINUTE },
+  /**
+   * Public deterministic re-evaluation per user (M03 §3.7 `evaluate`; `EVALUATIONS_PER_MINUTE`), consumed by M12's
+   * `opportunities.openCase` / `opportunities.reevaluate` with `{ key: userId }` (the server-resolved id, never an
+   * argument) before any evaluation. An evaluation reads a transaction's facts, observations and opportunities, so
+   * an unthrottled caller amplifies reads; 60 a minute is far above any person clicking and bounds a script. Fixed
+   * window, so the 61st call in a minute is refused exactly. Separate from `prepareSend` (drafts) so the two surfaces
+   * never starve each other.
+   */
+  evaluate: { kind: "fixed window", rate: EVALUATIONS_PER_MINUTE, period: MINUTE },
 });
