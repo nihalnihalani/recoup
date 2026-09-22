@@ -156,3 +156,63 @@ it("B2 SEC-AI-4 misses", () => {
     expect(unverifiedContent(body, { emails: new Set(["help@acme.example"]), urls: new Set(), hosts: new Set(["acme.example"]), amountsMinor: new Set([2_500]) })).toEqual([]);
 });
 ```
+
+---
+
+# Addendum — UI portion (M15), plus the M12c tile changes
+
+Model (self-reported from my system prompt): Opus 5.5 / claude-opus-5-5
+
+- **Target:** `origin/main` `01db658`.
+  - M15: `edae0d3` (opportunity card, questions, deadlines, paths-not-checked) and `ca6ced3` (Composer → `prepareSend`, acknowledgeable refusals, resend after unknown), merged in `886f918`.
+  - M12c: `9acc16b` (paid-total cap on confirmed money; excess on the over-credit line; the `paidTotalPartial` label).
+- **Method:**
+  - Worked in a clean detached worktree (`/private/tmp/recoup-m17ui`), removed afterwards.
+  - Gates: **131 files, 2,763 pass + 1 expected fail + 2 todo**; app typecheck exit 0.
+  - Throwaway repros, no deployment:
+    - component tests on the existing Composer harness (happy-dom), U1–U3;
+    - `recovery.summary` tests through convex-test, S1–S2.
+  - All of them reproduce, except U3, which holds.
+- **Lead rulings noted:** D190 routes DA-B-1/2/3/5 to M13b and DA-B-4/6/7 plus the DA-B-2 projection half to M12d. D191 overrides DA-B-6: the gated script is `deploy:dev` (`convex dev --once`), and any production deploy needs explicit user authorization.
+
+## Verdict (UI): **accept with conditions**
+
+- **Severity counts:** 0 critical, 0 high, **3 medium**, 4 low.
+- **Conditions:** fix DA-B-8, DA-B-9 and DA-B-10 before wave 1 closes. They are money semantics and copy.
+- **DA-B-1 on the client side is mitigated:** the Composer runs `prepareSend` and `approveAndSend` back to back in one click and never keeps a `preparedHash` between clicks. Exploiting the stale-evaluation gap therefore needs a hand-crafted client, but the M13b server fix is still required.
+
+## Findings
+
+| ID | Sev | Requirement | Reproduction | Expected vs observed | Impact | Smallest fix | Regression test | Owner |
+|---|---|---|---|---|---|---|---|---|
+| **DA-B-8** | medium | Mission §6 "preserve over-credit" and user-confirmed posted credit; §16 "uncertainty explained without misleading urgency"; D145/D188 | `recovery.ts` puts **every** confirmed amount above `lossAll` on `excess` (`recovered = min(Σnet, lossAll)`). M12c also caps Recovered at the paid total P, and for retail P is **items only** (pre-tax) unless the order total was confirmed. StatCards shows that excess in red: "Over-credit / possible double credit … check whether a credit was posted twice". **S1:** a price adjustment refunded with its sales tax (asked 25.00, received 27.00) → Recovered **25.00** and a red **2.00** "possible double credit". **S2:** a return refunded with tax (120.00 + 9.60) → Recovered **120.00** and a red **9.60**. | **Expected:** a single refund that includes tax or shipping is recovered money, not a suspected double credit. **Observed:** routine refunds understate the headline and trigger a double-credit alarm. | Most US retail refunds include tax, so the alarm fires on normal refunds; the headline understates what the user actually received. | (1) Split `excess` into `aboveAskMinor` (one credited claim in the component, within a *confirmed* order total or where P is partial), with neutral copy "More came back than you asked — often tax or shipping refunded too", and `possibleDoubleCreditMinor` (≥ 2 claims in the component with net > 0, or Σnet above a **confirmed** order total), which keeps the current warning. (2) Skip cap step 1 (moving confirmed money to excess) when `P.partial`, since P is known to be low. (3) Optional, for the lead: D145's `min(Σ, loss)` for a single-claim component. That is conservative, not unsafe. | S1/S2 inverted: "25 + 2 tax on one claim → no double-credit warning"; "two confirmed credits on one loss → warning". | M12 (`recovery.ts`), M15 (StatCards copy) |
+| **DA-B-9** | medium | Mission §14 authority and source presentation; §20 "never promise guaranteed recovery"; contract §9 authority copy | The claim page headline for any open claim is **"Owed to you"** (`src/pages/Claim.tsx:35`). For an R01 claim, the same amount's card says "An estimate, not a guarantee: the business decides", and its authority badge says the policy is "a promise the business made, not a law" (`model.ts`). This copy predates Mission 2 but now contradicts the authority model on the main money screen. | **Expected:** wording that matches the authority class and the outcome. **Observed:** "owed" asserts an entitlement that R01 (`likely_eligible`, merchant decides) does not claim. | Users are led to believe the merchant owes them; this is what §20 forbids. | Choose the headline label by authority and outcome: "You asked for" / "Still outstanding" for merchant promises and goodwill; keep "Owed to you" for an `eligible` `legal_entitlement` only (and legacy return claims if the lead wants). | "R01 claim headline never says 'owed'" (copy test) | M15 now; M24 owns Claim.tsx in wave 2 |
+| **DA-B-10** | medium | Mission §6 "vouchers, points, repairs, replacements, and cash are not interchangeable"; D184 R01 limitation "credit rather than cash" | The only way to record money is the "Credit landed / Confirm credit" form (`Claim.tsx:262–276`), which calls `confirmCredit`. The ledger timeline shows it as **"Back on your card"** (`Timelines.tsx:30`, `Claim.tsx:30`), and it counts in cash Recovered ("back on your card, as you confirmed it", StatCards). Many R01 merchants pay the difference as store credit or a gift card (D184), and `claims.recordNonCashRemedy` exists (M10), but the form never asks. | **Expected:** the user states how it came back; non-cash goes to `nonCashRemedies`. **Observed:** a gift card is counted as cash on the card. | Cash totals inflated by non-cash value; untrue "Back on your card" copy. | Add a required "How did it come back?" choice to the form: to my card or account → `confirmCredit`; store credit, gift card or points → `recordNonCashRemedy` (received, face value). Change the neutral copy to "Confirmed received". | "a store-credit answer writes a nonCashRemedies row, Recovered unchanged, Non-cash count 1" | M15 (form/copy), M10 (unchanged API) |
+| **DA-B-11** | low | SEC-AI-4: an acknowledgment covers the findings the user saw | **U2:** findings A are acknowledged; the next attempt is `rate_limited`; the user clicks "Approve & send" again. The Composer re-sends `acknowledgeUnverifiedContent: true`, and when the server now returns a **different** finding B it sends with B never displayed. `ackContent` resets only when the text is edited (`Composer.tsx:279–283`), and `preparedHash` binds the flag, not the findings. | **Expected:** an acknowledgment is tied to a specific set of findings. **Observed:** it is a boolean that carries over. | A content warning goes unseen (rare: it needs the server allowances to change between attempts). | Client: clear `ackContent` whenever a new refusal or `pending` is set. Server: `preparedHash` includes a hash of the findings, and `approveAndSend` compares it. | U2 inverted | M15, M13 |
+| **DA-B-12** | low | Mission §14 keyboard completion, labels and focus | **U1:** after a refusal, focus stays on "Approve & send". The refusal panel with "Send anyway" is rendered **before** that button in DOM order, so a keyboard user must Shift+Tab back to reach it; `role="alert"` announces the text but not the action. | **Expected:** focus moves to the panel's action (or the panel follows the button and is focused). **Observed:** focus does not move. | Friction for keyboard and screen-reader users at the decision point. | Focus the panel's primary button when `pending` is set; add `aria-describedby` from the send button to the panel message. | U1 inverted: "after window_may_have_passed, `document.activeElement` is 'Send anyway'" | M15 |
+| **DA-B-13** | low | Mission §14 "has anything actually been sent / arrived" | The Asked tile hint says "sent or submitted, **no answer yet**". In wave 1 a merchant's refusal reply is classified (`replies`), but the claim stays `sent` because `denied` arrives in wave 2, so a refused claim sits under "no answer yet". | **Expected:** "no money yet". **Observed:** "no answer yet". | Mildly misleading state. | Change the hint to "sent or submitted; no money yet". | Copy test | M15 |
+| **DA-B-14** | low | Mission §11 status vocabulary (`implemented_verified` vs `implemented_live_unverified`); §20 copy matches coverage | `coverage.ts` sets `status: "implemented_verified"` for any activated pack. Activation is local and dev-only (D186; live providers are externally blocked; production is not deployed). The UI does not show this row, since CoverageList lists only `not_checked`, but it is the source M2A's §20 copy test and RULES-COVERAGE read. | **Expected:** `implemented_live_unverified` (or `active`) until live evidence is recorded. **Observed:** `implemented_verified`. | Coverage and copy could overclaim. | Rename the status for activation-only rows; switch to `implemented_verified` only with a recorded live-verification reference. | "an active pack without a live-verification record is not implemented_verified" | M12, lead |
+
+## UI attacks that hold (one line each)
+
+- **Acknowledgment flow.** An acknowledgeable refusal (window, content) needs its explicit "send anyway" button. Clicking "Approve & send" again re-prepares without the acknowledgment and is refused again. `outcome_not_approvable` and `example_claim` disable sending. The server enforces all of this regardless (`prepareSend`/`approveAndSend`).
+- **Resend after unknown.**
+  - The acknowledgment checkbox is required.
+  - The server re-reads the earlier attempt, returning `outcome_known` without sending when it resolved.
+  - It creates a new draft version and refuses a second concurrent resend (the enqueue clears `sendUnknown`; the second transaction fails the `queued && sendUnknown` check under OCC).
+  - A double-click on "Approve & send" fires once (**U3 holds**).
+- **Stale page and new drafts.** Composer is keyed by `draft._id` (`Claim.tsx:241`), so a new or resent draft resets its text and acknowledgments. A claim-version bump returns `binding_changed` → "Nothing was sent. Review the claim again".
+- **Money copy against the summary invariants.**
+  - Every money figure comes only from `recovery.summary`; `tracking.overview` is not a prop.
+  - "Each amount counts once, in the furthest step it has reached"; Potential is "estimated, not guaranteed".
+  - "of which provisional" sits inside a tile; unsupported currencies are shown as counts, never amounts.
+  - A "Partial" badge appears when `complete` is false; "Capped at what you paid" carries the item-prices-only note.
+  - DA-B-8 is the one semantic defect here.
+- **Provisional wording:** "Provisional credit (not final)" / "Provisional credit resolved", never "Back on your card" (D156).
+- **Card.**
+  - An amount appears only with an estimate, as "An estimate, not a guarantee: the business decides". A cap shows as "Limit … the most this path can pay, not what to expect".
+  - The authority copy says a promise is not a law; there are no probability scores.
+  - `not_yet_due` never shows an amount.
+  - One known wart: after a dismissal, "Open the claim" can still link to the dismissed claim (DA-B-7, M12d).
+- **Placeholder support.** The server creates no card without an active pack (registry). "Paths not checked" shows reasons only, never amounts, and no digital-content path appears for a physical item.
+- **Isolation through URLs.** `forPurchase`, `forTransaction` and `get` use owned* helpers with an identical not-found; M16's reflective two-user guard covers every new public function. External source links use `rel="noreferrer noopener"`, so no internal ids leak through Referer.
