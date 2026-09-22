@@ -1,5 +1,5 @@
 import { ConvexError, v } from "convex/values";
-import { vOutboundId, vOutboundStatus } from "@agentmail/convex";
+import { vOutboundId, vOutboundStatus, type OutboundId } from "@agentmail/convex";
 import {
   action,
   internalMutation,
@@ -13,6 +13,7 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { ownedClaim, requireUserId } from "./lib/access";
+import { isClosedForAsk } from "./lib/claimState";
 import { balanceValidator, claimBalance } from "./lib/balance";
 import { extract } from "./lib/ai";
 import { DraftOut } from "./lib/schemas";
@@ -22,6 +23,8 @@ import { charge } from "./lib/budget";
 import { stripControl } from "./lib/text";
 import { isTombstoned } from "./lib/accountState";
 import { parseSingleEmail } from "./lib/email";
+import { sanitizeError } from "./lib/errors";
+import { redact } from "./lib/log";
 import { clearPendingMailEvent, getPendingMailEvent } from "./mailEvents";
 import { MAIL_RECONCILE_STALL_MS, MAX_SENDS_PER_CLAIM } from "./limits";
 
@@ -45,12 +48,71 @@ const POLICY_SCAN = 20;
  */
 export const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000] as const;
 
-/** Component statuses that mean the message will never be delivered (D13). Exported for `notify.ts` (F3), same reason as `BACKOFF_MS`. */
+/**
+ * Component statuses that can mean the message will never be delivered (D13). Exported for `notify.ts` (F3), same
+ * reason as `BACKOFF_MS`. `bounced` and `rejected` are always terminal; `failed` is terminal ONLY when the provider
+ * answered with a 4xx (`isPermanentSendFailure`) — S-M03-1: every other component failure (a lost response, a
+ * timeout, a 5xx, a 2xx without a body) may have been accepted by the provider, so it is `unknown`, never `failed`.
+ * Use `isTerminalSendFailure` rather than testing membership here.
+ */
 export const TERMINAL_FAILURES = ["failed", "bounced", "rejected"] as const;
 
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+/**
+ * S-M03-1: a component `failed` is a definite "not sent" only when the provider itself answered with an HTTP 4xx
+ * (the component records `AgentMail API error <status>` for both its permanent-error path and a thrown transient
+ * error). A 4xx is a refusal of the request, so nothing was accepted. Everything else is ambiguous.
+ */
+export function isPermanentSendFailure(errorMessage: string | null | undefined): boolean {
+  return /^AgentMail API error 4\d\d\b/.test(errorMessage ?? "");
+}
+
+/** True when this component observation means the message was definitely not delivered (bounce, rejection, 4xx). */
+export function isTerminalSendFailure(status: { status: string; errorMessage: string | null }): boolean {
+  if (status.status === "bounced" || status.status === "rejected") return true;
+  return status.status === "failed" && isPermanentSendFailure(status.errorMessage);
+}
+
+/** A component `failed` that is NOT a provider refusal: the send's outcome is unknown, and the component row is final. */
+export function isAmbiguousSendFailure(status: { status: string; errorMessage: string | null }): boolean {
+  return status.status === "failed" && !isPermanentSendFailure(status.errorMessage);
+}
+
+/**
+ * S-M03-4: the only failure text an owner ever sees. The component stores `AgentMail API error <n>: <body>` for a
+ * permanent failure, and a provider body may echo request data (headers, keys). Never pass it through: a provider
+ * 4xx becomes a fixed sentence naming only the status code; any other component failure text becomes a
+ * `sanitizeError` category. A bounce/rejection reason is shown redacted (keys, bearer tokens and mailbox local parts
+ * removed by `lib/log.redact`).
+ */
+export function ownerSafeSendError(status: string, errorMessage: string | null): string {
+  const code = /^AgentMail API error (\d{3})\b/.exec(errorMessage ?? "")?.[1];
+  if (code !== undefined) {
+    return code.startsWith("4")
+      ? `The mail provider refused this message (${code}). Check the recipient address, then approve it again.`
+      : `The mail provider had an error (${code}).`;
+  }
+  if (status === "failed") return errorMessage ? sanitizeError(errorMessage) : "Delivery failed";
+  return (errorMessage ? redact(errorMessage) : `Delivery ${status}`).slice(0, MAX_ERROR_CHARS);
+}
+
 /** D116: `drafts.update`'s `to` bound -- generous past any real address, but a fixed cap on an otherwise-unbounded string field. */
 const MAX_TO_CHARS = 320;
+/** Only ever run on a string already capped at `MAX_TO_CHARS` (S-M03-5: its backtracking is quadratic in length). */
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+/**
+ * S-M03-5: one recipient, length-capped BEFORE any regex runs (`parseSingleEmail` checks the length first), control
+ * characters stripped first so nothing can break out of a header. Lowercased, as the send path always has been.
+ */
+function parseRecipient(raw: string): string {
+  const cleaned = stripControl(raw).trim();
+  if (cleaned.length === 0) throw new ConvexError("Enter a recipient email address");
+  try {
+    return parseSingleEmail(cleaned, MAX_TO_CHARS).toLowerCase();
+  } catch {
+    throw new ConvexError("Enter a valid recipient email address");
+  }
+}
 /** Draft versions one claim may hold; `insert` refuses past it, so a read of this many is always the whole set. */
 const MAX_DRAFTS_PER_CLAIM = 200;
 /** B1: example claims carry invented stores and contacts; nothing about them may ever leave as mail. */
@@ -117,7 +179,7 @@ export async function confirmedContactFor(
       .take(POLICY_SCAN);
     for (const row of rows) {
       const contact = row.contactEmail?.trim();
-      if (row.confirmedByUser && contact && EMAIL_RE.test(contact)) return contact.toLowerCase();
+      if (row.confirmedByUser && contact && contact.length <= MAX_TO_CHARS && EMAIL_RE.test(contact)) return contact.toLowerCase();
     }
   }
   return null;
@@ -235,7 +297,7 @@ export const generate = action({
     // B1/B5: refusals first, then the budget, then the model, so a refused call spends nothing.
     // Writing a draft for an example claim is allowed (it is how a new account sees what Recoup writes, and it
     // is budgeted like any other draft); SENDING one is what `approveAndSend` refuses.
-    if (claim.status === "confirmed" || claim.status === "dismissed") {
+    if (isClosedForAsk(claim)) {
       throw new ConvexError("This claim is closed");
     }
     await ctx.runMutation(internal.budget.consume, { userId, kind: "draft_generate" });
@@ -393,163 +455,255 @@ async function ownedDraft(
   return draft;
 }
 
+/** What the user saw and approved: the text, the recipient tick, and the claim/draft versions it was shown at (D11). */
+const sendApprovalArgs = {
+  draftId: v.id("drafts"),
+  to: v.string(),
+  subject: v.string(),
+  body: v.string(),
+  claimVersion: v.number(),
+  draftVersion: v.number(),
+  recipientConfirmed: v.optional(v.boolean()),
+};
+type SendApproval = {
+  to: string;
+  subject: string;
+  body: string;
+  claimVersion: number;
+  draftVersion: number;
+  recipientConfirmed?: boolean;
+};
+
+type CheckedSend = { to: string; subject: string; body: string; inboxId: string };
+
+/**
+ * Every check a claim email runs before its side effect, in this order (D11, D13, D18, D58, B1, review H6,
+ * S-M03-5), shared by `approveAndSend` and `resendAfterUnknown` so a resend can never skip one (DA-A-31):
+ * draft version → newest draft → claim version → one ask in flight → closed → recipient (capped before any regex)
+ * → example → D18 recipient tick → inbox → body → per-claim send cap → `claim_email` charge, LAST, so every refusal
+ * costs nothing. `mode: "first"` refuses a draft that already has an attempt; a resend is gated by its caller.
+ */
+async function checkSend(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  draft: Doc<"drafts">,
+  claim: Doc<"claims">,
+  args: SendApproval,
+  mode: "first" | "resend",
+): Promise<CheckedSend> {
+  // Duplicate click: the enqueue already happened in an earlier transaction.
+  if (mode === "first" && draft.outboundId) throw new ConvexError("This draft was already sent");
+
+  if (draft.version !== args.draftVersion) {
+    throw new ConvexError("This draft changed since you reviewed it. Reload and try again.");
+  }
+  // D58: the draft being approved must be the newest one on the claim -- an older draft can still pass every other
+  // check (its own claimVersion matches, it was never sent) yet be stale because a newer draft was generated after it.
+  const siblingDrafts = await ctx.db
+    .query("drafts")
+    .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+    .take(MAX_DRAFTS_PER_CLAIM);
+  const newestVersion = Math.max(...siblingDrafts.map((d) => d.version));
+  if (draft.version !== newestVersion) {
+    throw new ConvexError("A newer draft exists for this claim. Use that one instead.");
+  }
+  if (claim.version !== args.claimVersion || claim.version !== draft.claimVersion) {
+    throw new ConvexError("The claim changed since this draft was written. Generate a new draft.");
+  }
+
+  // One ask in flight per claim, and never on a closed claim (review H6). A resend is by definition on a `queued`
+  // claim whose outcome is unknown; its caller has already checked exactly that.
+  if (mode === "first" && claim.status === "queued") throw new ConvexError("A message for this claim is already being sent");
+  if (isClosedForAsk(claim)) throw new ConvexError("This claim is closed");
+
+  // B1 + S-M03-5: nothing that could break out of a header survives, and the length is capped before any regex.
+  const to = parseRecipient(args.to);
+
+  const purchase = await ctx.db.get(claim.purchaseId);
+  if (!purchase) throw new ConvexError("Purchase not found");
+  if (claim.isExample || purchase.isExample) throw new ConvexError(EXAMPLE_ERROR);
+
+  // D18: an unticked recipient is only allowed when it is exactly the contact from a policy snapshot this user
+  // confirmed themselves.
+  if (args.recipientConfirmed !== true) {
+    const contact = await confirmedContactFor(ctx, userId, purchase.merchantDomain);
+    if (contact !== to) throw new ConvexError("Confirm this recipient before sending");
+  }
+
+  const profile = await ctx.db
+    .query("profiles")
+    .withIndex("by_user", (q) => q.eq("userId", userId))
+    .unique();
+  // T18.5 addendum (F-AUD-2): a `profiles` row can exist as a provisioning-in-flight placeholder (no `inboxId` yet).
+  if (!profile?.inboxId) throw new ConvexError("Set up your Recoup inbox first");
+
+  // The same cap `update` applies; the client's copy of the text is never trusted to have gone through it.
+  const body = args.body.trim().slice(0, MAX_BODY_CHARS);
+  if (body.length === 0) throw new ConvexError("The message body is empty");
+  const subject = subjectWithToken(stripControl(args.subject), claim.token);
+
+  // B1: `queued` only blocks a second send for the ~30s until reconcile, so sends are counted. A draft whose delivery
+  // definitely failed has its `outboundId` and `approvedAt` cleared by `applySendOutcome` and does not count; an
+  // attempt whose outcome is unknown keeps them, so a resend after it uses one more send (S-M03-1).
+  const sentDrafts = siblingDrafts.filter((d) => d.outboundId !== undefined || d.approvedAt !== undefined);
+  if (sentDrafts.length >= MAX_SENDS_PER_CLAIM) {
+    throw new ConvexError(`A claim can be emailed at most ${MAX_SENDS_PER_CLAIM} times. Reply from your own mailbox to follow up.`);
+  }
+  // Last, so every refusal above costs nothing; throws at 10 sends a day.
+  await charge(ctx, userId, "claim_email");
+  return { to, subject, body, inboxId: profile.inboxId };
+}
+
+/** Enqueues one claim email (at most one provider POST: `mail.ts` `retryAttempts: 1`) and schedules its reconcile. */
+async function enqueueClaimEmail(
+  ctx: MutationCtx,
+  claim: Doc<"claims">,
+  draftId: Id<"drafts">,
+  send: CheckedSend,
+  recipientConfirmed: boolean,
+): Promise<OutboundId> {
+  const outboundId = await agentmail.sendMessage(sendCtx(ctx), send.inboxId, {
+    to: send.to,
+    subject: send.subject,
+    text: send.body,
+    labels: [`claim:${claim._id}`],
+  });
+  await ctx.db.patch(draftId, {
+    to: send.to,
+    subject: send.subject,
+    body: send.body,
+    approvedAt: Date.now(),
+    recipientConfirmed,
+    outboundId,
+    sendError: undefined,
+  });
+  // Status only: the version is the money version, and bumping it here would strand this very draft (and every
+  // reminder) behind a stale check.
+  await ctx.db.patch(claim._id, { status: "queued", attentionAt: undefined, sendUnknown: undefined });
+  await ctx.scheduler.runAfter(BACKOFF_MS[0], internal.drafts.reconcileSend, { draftId, attempt: 1 });
+  return outboundId;
+}
+
 /**
  * Sends an approved draft (D11, D13, D18).
  *
- * The approval binds to `{to, subject, body, claimVersion, draftVersion}`:
- * the client echoes back the claim and draft versions it displayed, and a
- * mismatch throws rather than sending text the user never saw in the state
- * they saw it. `outboundId` is written in the same transaction as the
- * component enqueue, so a second click finds it set and is refused instead
- * of mailing the merchant twice.
+ * The approval binds to `{to, subject, body, claimVersion, draftVersion}`: the client echoes back the claim and
+ * draft versions it displayed, and a mismatch throws rather than sending text the user never saw in the state they
+ * saw it. `outboundId` is written in the same transaction as the component enqueue, so a second click finds it set
+ * and is refused instead of mailing the merchant twice.
  *
- * The claim goes to `queued`, never `sent` — only `reconcileSend`, once
- * AgentMail has an actual message id, may say a message was sent.
+ * The claim goes to `queued`, never `sent` — only `reconcileSend`, once AgentMail has an actual message id, may say
+ * a message was sent. If the outcome turns out to be unknown (S-M03-1), the only way to send again is
+ * `resendAfterUnknown`.
  */
 export const approveAndSend = mutation({
-  args: {
-    draftId: v.id("drafts"),
-    to: v.string(),
-    subject: v.string(),
-    body: v.string(),
-    claimVersion: v.number(),
-    draftVersion: v.number(),
-    recipientConfirmed: v.optional(v.boolean()),
-  },
+  args: sendApprovalArgs,
   returns: vOutboundId,
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const draft = await ownedDraft(ctx, args.draftId, userId);
     const claim = await ownedClaim(ctx, draft.claimId, userId);
+    const send = await checkSend(ctx, userId, draft, claim, args, "first");
+    return await enqueueClaimEmail(ctx, claim, draft._id, send, args.recipientConfirmed === true);
+  },
+});
 
-    // Duplicate click: the enqueue already happened in an earlier transaction.
-    if (draft.outboundId) throw new ConvexError("This draft was already sent");
+const resendResult = v.union(
+  v.object({ ok: v.literal(true), outboundId: vOutboundId, draftId: v.id("drafts") }),
+  v.object({ ok: v.literal(false), code: v.literal("outcome_known"), message: v.string() }),
+);
 
-    if (draft.version !== args.draftVersion) {
-      throw new ConvexError("This draft changed since you reviewed it. Reload and try again.");
+/**
+ * Sends a claim email again after its earlier attempt ended with an UNKNOWN outcome (S-M03-1, DA-A-31, SEC-CH-5).
+ *
+ * Nothing ever resends on its own: the provider may already have delivered the earlier attempt, so the user must
+ * acknowledge it by echoing its `acknowledgedOutboundId` (the UI shows that attempt and its time). Then:
+ *   1. the claim must still be `queued` with `sendUnknown`, and the acknowledged attempt must be this draft's;
+ *   2. the earlier attempt's outcome is re-read immediately before the side effect. If it resolved in the meantime
+ *      (delayed success, a bounce, a provider refusal) that outcome is recorded and `{ ok: false, code:
+ *      "outcome_known" }` is RETURNED — never thrown, so the recorded outcome persists — and nothing is sent;
+ *   3. every `approveAndSend` check runs again (`checkSend`), including the claim version: a material change since
+ *      the first attempt refuses the resend (DA-A-31);
+ *   4. the resend is a NEW draft version carrying the re-approved text, so the earlier attempt stays on record with
+ *      its own outbound id, both count toward `MAX_SENDS_PER_CLAIM`, and `claim_email` is charged once more. A claim
+ *      note names the earlier attempt.
+ */
+export const resendAfterUnknown = mutation({
+  args: { ...sendApprovalArgs, acknowledgedOutboundId: v.string() },
+  returns: resendResult,
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const draft = await ownedDraft(ctx, args.draftId, userId);
+    const claim = await ownedClaim(ctx, draft.claimId, userId);
+    if (!draft.outboundId || args.acknowledgedOutboundId !== draft.outboundId) {
+      throw new ConvexError("Review the earlier attempt before sending again");
+    }
+    if (claim.status !== "queued" || claim.sendUnknown !== true) {
+      throw new ConvexError("This message's delivery is not unknown, so it cannot be sent again from here");
     }
 
-    // D58: the draft being approved must be the newest one on the claim --
-    // an older draft can still pass every other check (its own claimVersion
-    // matches, it was never sent) yet be stale because a newer draft was
-    // generated after it.
-    const siblingDrafts = await ctx.db
-      .query("drafts")
-      .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
-      .collect();
-    const newestVersion = Math.max(...siblingDrafts.map((d) => d.version));
-    if (draft.version !== newestVersion) {
-      throw new ConvexError("A newer draft exists for this claim. Use that one instead.");
-    }
-    if (claim.version !== args.claimVersion || claim.version !== draft.claimVersion) {
-      throw new ConvexError("The claim changed since this draft was written. Generate a new draft.");
+    // 2. Re-read the earlier attempt right before the side effect.
+    const earlier = await agentmail.status(statusCtx(ctx), draft.outboundId);
+    if (earlier !== null && (earlier.agentmailMessageId !== null || isTerminalSendFailure(earlier))) {
+      await applySendOutcome(ctx, draft._id, BACKOFF_MS.length, earlier, false);
+      return {
+        ok: false as const,
+        code: "outcome_known" as const,
+        message: earlier.agentmailMessageId !== null && !isTerminalSendFailure(earlier)
+          ? "The earlier attempt was sent after all, so nothing was sent again."
+          : "The earlier attempt failed. Review the draft and approve it again.",
+      };
     }
 
-    // One ask in flight per claim, and never on a closed claim (review H6).
-    if (claim.status === "queued") throw new ConvexError("A message for this claim is already being sent");
-    if (claim.status === "confirmed" || claim.status === "dismissed") {
-      throw new ConvexError("This claim is closed");
-    }
+    // 3. The full approval checks, against the draft the user is looking at.
+    const send = await checkSend(ctx, userId, draft, claim, args, "resend");
 
-    // B1: nothing that could break out of a header survives, whatever the transport does with it.
-    const to = stripControl(args.to).trim().toLowerCase();
-    if (to.length === 0) throw new ConvexError("Enter a recipient email address");
-    if (!EMAIL_RE.test(to)) throw new ConvexError("Enter a valid recipient email address");
-
-    const purchase = await ctx.db.get(claim.purchaseId);
-    if (!purchase) throw new ConvexError("Purchase not found");
-    if (claim.isExample || purchase.isExample) throw new ConvexError(EXAMPLE_ERROR);
-
-    // D18: an unticked recipient is only allowed when it is exactly the
-    // contact from a policy snapshot this user confirmed themselves.
-    if (args.recipientConfirmed !== true) {
-      const contact = await confirmedContactFor(ctx, userId, purchase.merchantDomain);
-      if (contact !== to) {
-        throw new ConvexError("Confirm this recipient before sending");
-      }
-    }
-
-    const profile = await ctx.db
-      .query("profiles")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .unique();
-    // T18.5 addendum (F-AUD-2): a `profiles` row can now exist as a
-    // provisioning-in-flight placeholder (no `inboxId` yet) -- checked, not
-    // just row presence, or `agentmail.sendMessage` below would be called
-    // with `undefined`.
-    if (!profile?.inboxId) throw new ConvexError("Set up your Recoup inbox first");
-
-    // The same cap `update` applies; the client's copy of the text is never trusted to have gone through it.
-    const body = args.body.trim().slice(0, MAX_BODY_CHARS);
-    if (body.length === 0) throw new ConvexError("The message body is empty");
-    const subject = subjectWithToken(stripControl(args.subject), claim.token);
-
-    // B1: `queued` only blocks a second send for the ~30s until reconcile, so sends are counted. A draft whose
-    // delivery failed has its `outboundId` and `approvedAt` cleared by `applySendOutcome` and does not count.
-    const sentDrafts = (
-      await ctx.db
-        .query("drafts")
-        .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
-        .take(MAX_DRAFTS_PER_CLAIM)
-    ).filter((d) => d.outboundId !== undefined || d.approvedAt !== undefined);
-    if (sentDrafts.length >= MAX_SENDS_PER_CLAIM) {
-      throw new ConvexError(`A claim can be emailed at most ${MAX_SENDS_PER_CLAIM} times. Reply from your own mailbox to follow up.`);
-    }
-    // Last, so every refusal above costs nothing; throws at 10 sends a day.
-    await charge(ctx, userId, "claim_email");
-
-    const outboundId = await agentmail.sendMessage(sendCtx(ctx), profile.inboxId, {
-      to,
-      subject,
-      text: body,
-      labels: [`claim:${claim._id}`],
+    // 4. A new draft version for the new attempt; the earlier one keeps its outbound id.
+    const resendDraftId = await ctx.db.insert("drafts", {
+      claimId: claim._id,
+      userId,
+      version: draft.version + 1,
+      claimVersion: claim.version,
+      to: send.to,
+      subject: send.subject,
+      body: send.body,
     });
-
-    await ctx.db.patch(draft._id, {
-      to,
-      subject,
-      body,
-      approvedAt: Date.now(),
-      recipientConfirmed: args.recipientConfirmed === true,
-      outboundId,
-      sendError: undefined,
+    await ctx.db.insert("claimNotes", {
+      claimId: claim._id,
+      userId,
+      kind: "status",
+      text: `Sent again after an unknown delivery outcome. The earlier attempt (${new Date(draft.approvedAt ?? draft._creationTime).toISOString().slice(0, 16).replace("T", " ")} UTC) may also have reached the merchant.`,
     });
-    // Status only: the version is the money version, and bumping it here
-    // would strand this very draft (and every reminder) behind a stale check.
-    await ctx.db.patch(claim._id, {
-      status: "queued",
-      attentionAt: undefined,
-      sendUnknown: undefined,
-    });
-    await ctx.scheduler.runAfter(BACKOFF_MS[0], internal.drafts.reconcileSend, {
-      draftId: draft._id,
-      attempt: 1,
-    });
-    return outboundId;
+    const outboundId = await enqueueClaimEmail(ctx, claim, resendDraftId, send, args.recipientConfirmed === true);
+    return { ok: true as const, outboundId, draftId: resendDraftId };
   },
 });
 
 export type SendOutcome = "sent" | "failed" | "retrying" | "unknown" | "gone";
 
 /**
- * Applies one AgentMail delivery observation to the draft and its claim
- * (D13). Exported as a plain function, not registered: `reconcileSend` and
- * `recheckSend` are the only production callers, and tests drive the
- * transitions directly without needing the component to have talked to the
- * network.
+ * Applies one AgentMail delivery observation to the draft and its claim (D13). Exported as a plain function, not
+ * registered: `reconcileSend`, `recheckSend` and `resendAfterUnknown` are the only production callers, and tests
+ * drive the transitions directly without needing the component to have talked to the network.
  *
- * - a real `agentmailMessageId` → claim `sent`, thread captured, reminder set
- *   (unless N6's stash below says this id already bounced/complained)
- * - `failed | bounced | rejected` → claim back to `drafted` with `sendError`
+ * - a real `agentmailMessageId` → claim `sent`, thread captured, reminder set (unless N6's stash below says this id
+ *   already bounced/complained)
+ * - `bounced | rejected`, or `failed` from a provider 4xx → claim back to `drafted` with an owner-safe `sendError`
+ *   (S-M03-4), binding cleared so the user can fix the address and approve again
+ * - `failed` for any other reason (lost response, timeout, 5xx; S-M03-1) → `unknown`: the binding is KEPT, the claim
+ *   stays `queued` with `sendUnknown`, and no further poll is scheduled because the component row is final. Only
+ *   `resendAfterUnknown`, with the user's acknowledgment, can send again.
  * - still pending, attempts left → reschedule on the backoff
  * - still pending, attempts spent → claim stays `queued`, `sendUnknown: true`
  *
- * `reschedule` says whether THIS call may arm the next stall-interval check
- * once backoff is exhausted (checkpoint-4 N2/N3, superseding the F9 scan
- * below): `reconcileSend`, the scheduled path, passes `true`; `recheckSend`,
- * a user click that must never independently grow the schedule, passes
- * `false`. See the exhausted branch for why the old scan was wrong, not just
- * unbounded.
+ * After a resend, an EARLIER attempt's observation never overwrites the current attempt's state: its failure or
+ * unknown outcome is recorded on its own draft only. If it turns out delivered, the claim becomes `sent` — that is
+ * the truth, whichever attempt got there.
+ *
+ * `reschedule` says whether THIS call may arm the next stall-interval check once backoff is exhausted
+ * (checkpoint-4 N2/N3, superseding the F9 scan below): `reconcileSend`, the scheduled path, passes `true`;
+ * `recheckSend`, a user click that must never independently grow the schedule, passes `false`. See the exhausted
+ * branch for why the old scan was wrong, not just unbounded.
  */
 export async function applySendOutcome(
   ctx: MutationCtx,
@@ -567,16 +721,24 @@ export async function applySendOutcome(
   if (!draft || !draft.outboundId) return "gone";
   const claim = await ctx.db.get(draft.claimId);
   if (!claim) return "gone";
+  // An attempt is superseded once a newer draft of the claim carries its own outbound attempt (a resend).
+  const superseded = (
+    await ctx.db
+      .query("drafts")
+      .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
+      .take(MAX_DRAFTS_PER_CLAIM)
+  ).some((d) => d.version > draft.version && d.outboundId !== undefined);
 
   // Failures first: a bounced message still carries its message id (review H3).
-  if (status && (TERMINAL_FAILURES as readonly string[]).includes(status.status)) {
-    // Clear the outbound binding so the user can fix the address and retry;
-    // `sendError` keeps the reason visible next to the draft.
-    await ctx.db.patch(draft._id, {
-      sendError: (status.errorMessage ?? `Delivery ${status.status}`).slice(0, MAX_ERROR_CHARS),
-      outboundId: undefined,
-      approvedAt: undefined,
-    });
+  if (status && isTerminalSendFailure(status)) {
+    const sendError = ownerSafeSendError(status.status, status.errorMessage);
+    if (superseded) {
+      // The earlier attempt's own record only; its send still counted, and the current attempt is untouched.
+      await ctx.db.patch(draft._id, { sendError });
+      return "failed";
+    }
+    // Clear the outbound binding so the user can fix the address and retry; `sendError` keeps the reason visible.
+    await ctx.db.patch(draft._id, { sendError, outboundId: undefined, approvedAt: undefined });
     if (claim.status === "queued") {
       await ctx.db.patch(claim._id, { status: "drafted", sendUnknown: undefined });
     }
@@ -584,21 +746,20 @@ export async function applySendOutcome(
   }
 
   if (status && status.agentmailMessageId) {
-    // N6 (checkpoint-4 recheck): `mailEvents.onEvent` can see a bounce or
-    // complaint webhook for this message id before this poll ever learns it
-    // (the id is only recorded here) -- that event was stashed
-    // (`mailEvents.storePendingMailEvent`, F8) rather than lost. Consume it
-    // now, before a fast bounce gets silently recorded as "sent" the way
-    // `notify.applyDropOutcome` already does for price-drop alerts.
+    // N6 (checkpoint-4 recheck): `mailEvents.onEvent` can see a bounce or complaint webhook for this message id
+    // before this poll ever learns it (the id is only recorded here) -- that event was stashed
+    // (`mailEvents.storePendingMailEvent`, F8) rather than lost. Consume it now, before a fast bounce gets silently
+    // recorded as "sent" the way `notify.applyDropOutcome` already does for price-drop alerts.
     const pending = await getPendingMailEvent(ctx, status.agentmailMessageId, Date.now());
     if (pending?.reason === "bounced") {
-      await ctx.db.patch(draft._id, {
-        sendError: `Merchant email ${pending.providerStatus} after it was marked sent.`.slice(0, MAX_ERROR_CHARS),
-        outboundId: undefined,
-        approvedAt: undefined,
-      });
-      if (claim.status === "queued") {
-        await ctx.db.patch(claim._id, { status: "drafted", sendUnknown: undefined });
+      const sendError = `Merchant email ${pending.providerStatus} after it was marked sent.`.slice(0, MAX_ERROR_CHARS);
+      if (superseded) {
+        await ctx.db.patch(draft._id, { sendError });
+      } else {
+        await ctx.db.patch(draft._id, { sendError, outboundId: undefined, approvedAt: undefined });
+        if (claim.status === "queued") {
+          await ctx.db.patch(claim._id, { status: "drafted", sendUnknown: undefined });
+        }
       }
       await clearPendingMailEvent(ctx, status.agentmailMessageId);
       return "failed";
@@ -620,14 +781,22 @@ export async function applySendOutcome(
       await ctx.db.patch(claim._id, { threadId: status.threadId });
     }
     if (pending?.reason === "complained") {
-      // Delivered, so the claim stays `sent` (mirrors mailEvents.onEvent's own late-complaint
-      // treatment for a merchant draft) -- flagged for a human, not auto-resent.
+      // Delivered, so the claim stays `sent` (mirrors mailEvents.onEvent's own late-complaint treatment for a
+      // merchant draft) -- flagged for a human, not auto-resent.
       const note = "The merchant's mail provider marked this email as spam after it was sent.";
       await ctx.db.patch(draft._id, { sendError: note.slice(0, MAX_ERROR_CHARS) });
       await ctx.db.insert("claimNotes", { claimId: claim._id, userId: claim.userId, kind: "status", text: note });
       await clearPendingMailEvent(ctx, status.agentmailMessageId);
     }
     return "sent";
+  }
+
+  // S-M03-1: the component gave up without a provider answer that settles it. The provider may have accepted the
+  // message, so this is unknown -- never failed -- and the approval stays bound. The component row is final, so
+  // polling it again can never resolve it: no reschedule (the owner can still `recheckSend`).
+  if (status && isAmbiguousSendFailure(status)) {
+    if (!superseded && claim.status === "queued") await ctx.db.patch(claim._id, { sendUnknown: true });
+    return "unknown";
   }
 
   if (attempt < BACKOFF_MS.length) {
@@ -638,34 +807,22 @@ export async function applySendOutcome(
     return "retrying";
   }
 
-  if (claim.status === "queued") await ctx.db.patch(claim._id, { sendUnknown: true });
-  // T06 durable-delivery review: backoff exhausted must not mean "never
-  // checked again" -- without this, a draft whose delivery never resolves
-  // (worker outage, a status the component never settles) is stuck
-  // `sendUnknown` forever unless the user happens to click "check again"
-  // (`recheckSend`). `drafts` has no `nextCheckAt`/`by_status_nextCheck`
-  // column to drive a `notify.sweepStalled`-style cron sweep (schema.ts is
-  // out of scope for this task), so the sibling mechanism is this mutation
-  // rescheduling itself on the same stall interval `notify.ts` uses for
-  // `mailLog`, at the same "attempts exhausted" attempt number, until a
-  // definite outcome (the `sent`/`failed` branches above) stops it.
+  if (!superseded && claim.status === "queued") await ctx.db.patch(claim._id, { sendUnknown: true });
+  // T06 durable-delivery review: backoff exhausted must not mean "never checked again" -- without this, a draft
+  // whose delivery never resolves (worker outage, a status the component never settles) is stuck `sendUnknown`
+  // forever unless the user happens to click "check again" (`recheckSend`). `drafts` has no
+  // `nextCheckAt`/`by_status_nextCheck` column to drive a `notify.sweepStalled`-style cron sweep, so the sibling
+  // mechanism is this mutation rescheduling itself on the same stall interval `notify.ts` uses for `mailLog`, at the
+  // same "attempts exhausted" attempt number, until a definite outcome (the `sent`/`failed` branches above) stops it.
   //
-  // N2/N3 (checkpoint-4 recheck): this exhausted branch used to gate the
-  // reschedule on a scan of `ctx.db.system.query("_scheduled_functions")`
-  // (F9) looking for an already-pending `reconcileSend` for this draft, to
-  // stop repeated manual `recheckSend` clicks from piling up reschedules.
-  // That scan was wrong, not just unbounded (N3): when `reconcileSend`
-  // itself reaches this branch, ITS OWN scheduled-function row is still
-  // "inProgress" (it is what is currently running), so the scan always
-  // found a "pending" job -- itself -- and concluded a reconcile was
-  // already armed, so a SCHEDULED exhaustion never re-armed the next
-  // stall-interval check at all: `sendUnknown` stuck forever with nothing
-  // left in the scheduler (N2, HIGH). The fix is structural instead of a
-  // runtime scan: the caller says explicitly whether it may arm the next
-  // hop. `status !== null` still stops it in either case -- `null` means
-  // the component no longer recognizes this outbound id, so polling again
-  // can never resolve it (the owner can still force one more check via
-  // `recheckSend`).
+  // N2/N3 (checkpoint-4 recheck): this exhausted branch used to gate the reschedule on a scan of
+  // `ctx.db.system.query("_scheduled_functions")` (F9) looking for an already-pending `reconcileSend` for this draft.
+  // That scan was wrong, not just unbounded (N3): when `reconcileSend` itself reaches this branch, ITS OWN
+  // scheduled-function row is still "inProgress", so the scan always found a "pending" job -- itself -- and a
+  // SCHEDULED exhaustion never re-armed the next stall-interval check at all (N2, HIGH). The fix is structural: the
+  // caller says explicitly whether it may arm the next hop. `status !== null` still stops it in either case --
+  // `null` means the component no longer recognizes this outbound id, so polling again can never resolve it (the
+  // owner can still force one more check via `recheckSend`).
   if (reschedule && status !== null) {
     await ctx.scheduler.runAfter(MAIL_RECONCILE_STALL_MS, internal.drafts.reconcileSend, {
       draftId: draft._id,
@@ -676,10 +833,9 @@ export async function applySendOutcome(
 }
 
 /**
- * The scheduled delivery check (D13, D29). Reads the component's view of the
- * outbound message and hands it to `applySendOutcome`. Skips a tombstoned
- * account (D87): a scheduled mutation reaching a `deleting`/`deleted`
- * user's own claim/draft rows must not keep touching them.
+ * The scheduled delivery check (D13, D29). Reads the component's view of the outbound message and hands it to
+ * `applySendOutcome`. Skips a tombstoned account (D87): a scheduled mutation reaching a `deleting`/`deleted` user's
+ * own claim/draft rows must not keep touching them.
  */
 export const reconcileSend = internalMutation({
   args: { draftId: v.id("drafts"), attempt: v.number() },
@@ -696,11 +852,9 @@ export const reconcileSend = internalMutation({
 });
 
 /**
- * D56: lets the owner ask for one more delivery check on demand, e.g. after
- * a draft has sat `sendUnknown` for a while. Reuses `applySendOutcome` with
- * the backoff exhausted so a still-pending result doesn't reschedule another
- * automatic check; it only updates `sendUnknown` (cleared on a definite
- * outcome, otherwise left as-is).
+ * D56: lets the owner ask for one more delivery check on demand, e.g. after a draft has sat `sendUnknown` for a
+ * while. Reuses `applySendOutcome` with the backoff exhausted so a still-pending result doesn't reschedule another
+ * automatic check; it only updates `sendUnknown` (cleared on a definite outcome, otherwise left as-is).
  */
 export const recheckSend = mutation({
   args: { draftId: v.id("drafts") },
@@ -717,9 +871,12 @@ export const recheckSend = mutation({
 });
 
 /**
- * Live delivery state for one draft the caller owns (D29). Resolves the
- * outbound id from the draft rather than taking it as an argument, so no
- * caller can poll somebody else's outbound message.
+ * Live delivery state for one draft the caller owns (D29). Resolves the outbound id from the draft rather than
+ * taking it as an argument, so no caller can poll somebody else's outbound message.
+ *
+ * Projected for the owner (S-M03-1, S-M03-4): `errorMessage` is never the provider's text (`ownerSafeSendError`),
+ * and a component `failed` whose outcome is actually unknown is reported as `pending` with `outcome: "unknown"`,
+ * never as a failure. `outcome` is the one field a UI needs: sent | failed | unknown | pending.
  */
 export const sendStatus = query({
   args: { draftId: v.id("drafts") },
@@ -729,6 +886,7 @@ export const sendStatus = query({
       agentmailMessageId: v.union(v.string(), v.null()),
       threadId: v.union(v.string(), v.null()),
       errorMessage: v.union(v.string(), v.null()),
+      outcome: v.union(v.literal("sent"), v.literal("failed"), v.literal("unknown"), v.literal("pending")),
     }),
     v.null(),
   ),
@@ -736,7 +894,19 @@ export const sendStatus = query({
     const userId = await requireUserId(ctx);
     const draft = await ownedDraft(ctx, draftId, userId);
     if (!draft.outboundId) return null;
-    return await agentmail.status(statusCtx(ctx), draft.outboundId);
+    const raw = await agentmail.status(statusCtx(ctx), draft.outboundId);
+    if (raw === null) return null;
+    if (isAmbiguousSendFailure(raw)) {
+      return { status: "pending" as const, agentmailMessageId: null, threadId: raw.threadId, errorMessage: null, outcome: "unknown" as const };
+    }
+    const failed = isTerminalSendFailure(raw);
+    return {
+      status: raw.status,
+      agentmailMessageId: raw.agentmailMessageId,
+      threadId: raw.threadId,
+      errorMessage: failed ? ownerSafeSendError(raw.status, raw.errorMessage) : null,
+      outcome: failed ? ("failed" as const) : raw.agentmailMessageId !== null ? ("sent" as const) : ("pending" as const),
+    };
   },
 });
 
