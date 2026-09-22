@@ -833,3 +833,96 @@ Checked and **consistent** with D152:
 - R04 incident in the 2025-02-20..03-19 non-enforcement window.
 - R05 cancellation received after R.
 - R01v2-15 re-modelled as `manual_review`.
+
+---
+
+# M09c — re-check of the M2E changes (2026-09-23)
+
+| Field | Value |
+|---|---|
+| Scope | **Only** the items changed since M09b:<br>• M2E commits `0ce6c95` (README), `6d26374` (R01), `1325f7f` (R02), `64c857e` (R03), `e78aac3` (R04), `58f2ac9` (R05 + manifest);<br>• D154;<br>• contract §4 at `ab72962` (rules 5a/5b/5c and `computeDeadline`). |
+| Base | `origin/main` = `39ab3fd`. `docs/rules/**` in the working tree is identical to `origin/main`. |
+| Manifest | **All 23 hashes match at `origin/main`**: 18 captures and 5 fixture files, recomputed from `git show origin/main:<path>`. |
+| Method | I decided each new or changed fixture result before reading its `expected` block, as in M09 and M09b. |
+
+> Engineering review is not legal certification (M09 header applies unchanged).
+
+## C.0 Final per-pack verdicts (spec gate for activation once each code pack lands)
+
+| Pack | Verdict | Note |
+|---|---|---|
+| **R01 v1** (legacy snapshot tier) | **approve_for_activation** | Unchanged from M09b. The only changes are `conflict_kind` added to R01-15/15b and the new R01-16; both agree with my decisions. |
+| **R01 v2** (reviewed merchant tier) | **approve_for_activation** | All 3 M09b §B.8 items are resolved. |
+| **R02** | **approve_for_activation** | All 3 items resolved. |
+| **R03** | **approve_for_activation** | All 3 items resolved. |
+| **R04** | **approve_for_activation** | The one item is resolved. |
+| **R05** | **approve_with_changes** | **One mechanical fixture edit** (C.1, R05 row). All 4 §B.8 items are resolved. The remaining gap is one I **missed** in M09b §B.4: `seller_country` is still absent from R05-01, and R05-01c/11/12 inherit it. Once added (or once §16.7 makes it conditional), the lead can verify the edit by diff and hash; no further review pass is needed. |
+
+Activation of each pack still requires, per contract §2.7:
+- the code pack to match the spec;
+- all its fixtures to pass unchanged through M08's loader (M18 for R01 v1; M27 for R02–R05; the R01 v2 wave-3 task);
+- the lead's activation entry.
+
+## C.1 M09b §B.8 items
+
+| Item | Status | Checked in the files |
+|---|---|---|
+| R01 v2-1 hash trim step | **resolved** | §2.1 now trims the cut section. That is the variant that reproduced all three published hashes in M09b B.3. |
+| R01 v2-2 Best Buy day-1 rule | **resolved** | §5 (general rule) and §7.1 (BB-3): last day = `received_at` + length − 1. This matches R01v2-01's 2026-09-24. |
+| R01 v2-3 stale variant sources | **resolved** | R01v2-03b, 04c and 04d have variant sources verified 1 day before their clocks. Expected results (deadline_passed / likely_eligible 10,000 / deadline_passed) now match mine. |
+| R02-1 R02-07 facts | **resolved** | Refundability, response time, amounts, carriers and `offer_type` added. R02-07b now isolates the conflict. |
+| R02-2 R02-09 already refunded | **resolved** | `already_refunded` 0 is confirmed; R02-09b is `eligible` 21,210 by 2026-10-26, which matches mine. |
+| R02-3 decisive list vs fixtures | **resolved** | Every R02 `eligible` result carries the §16.8 facts, including `ancillary_fees_paid: []`. §16.8 adds the D152/D154 conflict clause. The only remaining absence is `consumer_response_at` in R02-09b, which is not the timer anchor on the (iii)(B) path. |
+| R03-1 §11 and §16.6 vs D152 | **resolved** | The §11 "Conflicting anchors" row and §16.6 now implement 5a/5b/5c and never give a firm date from a disputed or unconfirmed anchor. |
+| R03-2 R03-07 capped | **resolved** | R03-07 is `likely_eligible`, `disputed_anchor`, advisory act-by 2026-09-30. R03-07b was rebuilt as a divergent case (candidates 07-20 → closed 09-18; 08-01 → open to 09-30) → `needs_facts`, which matches mine. |
+| R03-3 deadline representation | **resolved** | R03-01b: `unknown_anchor` + advisory 2026-11-09. R03-07b: `disputed_anchor`. R03-03 also moved to `unknown_anchor` + advisory 2026-11-02. |
+| R04-1 path a compliance gate | **resolved** | §15 step 1b cites FR-2024-07177-COMPLIANCE. The new R04-01d (2024 incident) → `source_unverified`, which matches mine. |
+| R05-1 R05-04 adequacy | **resolved** | The notice text now offers cancellation and a prompt refund, and `delay_notice_offers_cancel_and_refund: true` is confirmed. R05-04/04b/04c results (eligible by 2026-10-21 / not_yet_due / not_yet_due 10-11) match mine. |
+| R05-2 countries, payment terms | **partially — reviewer omission** | Added to R05-04, 05c and 07b, as B.8 asked. **R05-01 (and 01c/11/12 through `facts_from`) still lacks `seller_country`**, which §16.7 lists as decisive. My M09b decisive-fact check found it, but B.4 left it out. **Edit:** add `seller_country: "US"` (user_confirmed) to R05-01's facts, or change §16.7 to "countries (seller country only when the buyer or ship-to is non-US, or the seller is shown as foreign)". The other absences (`buyer_response`, notice adequacy) are conditional: there is no delay notice in those cases. |
+| R05-3 no seller dates from unconfirmed anchors | **resolved** | The §9 paragraph says so. R05-01b: `unknown_anchor`. R05-10b: `disputed_anchor`. Both have `date: null`. |
+| R05-4 R05-04b next action | **resolved** | `next_action` "You can cancel before shipment for a prompt refund"; §16.5 says the same. |
+| X-1 README rule 3 cap; stale rule-4 line | **resolved** | See C.3. |
+| X-2 contract 5c (amount; candidates only) | **resolved** | See C.3. |
+| X-3 lead records the sign-off | **resolved** | D154 |
+
+## C.2 The new confirmed-vs-observed fixtures, decided blind
+
+| Fixture | Conflict | My decision | Fixture | Agree |
+|---|---|---|---|---|
+| **R01-16** | Price: user says $420.00 (confirmed); accepted price check reads $449.99 (observed) | `manual_review`, no claim. It is 5a regardless, and the two values would also give different amounts. | same | yes |
+| **R01v2-17** | Receipt date: user 09-12 vs store pickup record 09-10 | `manual_review`. 5a applies even though both dates put the 09-18 drop inside the window. | same | yes |
+| **R02-13** | Response: user "rejected" vs carrier record "rebooking ticketed" | `manual_review`; refund timer `disputed_anchor`, no date | same | yes |
+| **R03-13** | Delivery: user "not delivered" vs carrier tracking "delivered 08-19, front door" | `manual_review`. The notice deadline **stays firm at 2026-10-27**, because the anchor (statement transmitted 08-28) is confirmed and not in dispute. The letter must not assert non-delivery without mentioning the carrier record. | same, including the firm deadline and that `forbidden_output` | yes |
+| **R04-13** | Delivery time: user 10:55 (13h15m) vs courier scan 08:30 (10h50m) | `manual_review` | same | yes |
+| **R05-13** | Shipment: user "never shipped" vs carrier acceptance scan 09-03 (inside T) | `manual_review`; seller refund timer `disputed_anchor`, no date | same | yes |
+
+Every file now has one 5c same-answer variant and one 5a case, as README rule 3 requires. Every `conflicting` fact carries `conflict_kind` (24 occurrences), and each 5a case has exactly one `user_confirmed` and one `observed` candidate.
+
+**Other changed results, re-decided blind:**
+- R01v2-03b, 04c, 04d;
+- R02-07, 07b (capped, 22,500, carrier deadline 2026-10-01 from the confirmed rejection);
+- R02-09b;
+- R03-01b, 03, 07, 07b;
+- R04-01d;
+- R05-01b, 04, 04b, 04c, 10b.
+
+All 18, plus the 6 new cases above, agree with my decisions. Inputs that changed only by adding `conflict_kind` (R01-15/15b, R01v2-15/15b, R04-09/09b, R05-10) keep the outcomes I agreed with in M09b.
+
+## C.3 README rule 3 vs D154 and contract §4 (`ab72962`)
+
+| D154 condition | README rule 3 (`0ce6c95`) | Contract §4 (`ab72962`) |
+|---|---|---|
+| (1) same answer = same outcome **and** same amount | yes: "different outcomes or different amounts → `needs_facts`"; "same outcome and the same amount → capped" | yes: 5c "same outcome AND same amount (identical estimate amountMinor + currency, or both null)" |
+| (2) no firm date from a disputed or unconfirmed anchor; advisory earliest for the user; no overdue date for the counterparty | yes | yes: `computeDeadline` has `unknown_anchor` / `disputed_anchor`, no `dueAt`, and no `overdueSince` for the counterparty "even if every candidate's date has passed" |
+| (3) still asked; only confirmation lifts the cap | yes (`unconfirmed_decisive_facts`) | yes ("conflicting keys stay in missingFacts … only a confirmation lifts the cap") |
+| (4) cap only for candidate-vs-candidate; confirmed-vs-* → `manual_review` even with the same answer | yes | yes: "5c applies only to candidate-vs-candidate conflicts"; 5a wins when mixed |
+
+All four conditions are implemented consistently. README rule 4's stale "no `not_yet_due` value yet" line is gone, and the alias table maps `not_yet_due` 1:1.
+
+**Two non-blocking items to fix before code-pack review (M18/M27), not before the spec gate:**
+1. **Stale contract comment.** The contract's `flags.conflicts` comment (§4, `sameAnswer = every conflicting value yields the same outcome`) still omits "and amount". The 5c text is correct; this is an architect edit.
+2. **Undefined assertion mapping.** Fixtures list a 5c key in `unconfirmed_decisive_facts` with `missing_facts: []`. A 5b key goes in `missing_facts`. The contract instead keeps both in `missingFacts`, with reasons `conflicting` / `candidate_unconfirmed`. The M08/M12 fixture assertion must define the mapping (by reason **and** outcome), so that fixtures pass "unchanged". Suggested rule:
+   - `missing_facts` = reasons `missing`/`user_unknown`, plus `conflicting` when the outcome is `needs_facts`;
+   - `unconfirmed_decisive_facts` = `candidate_unconfirmed`, plus `conflicting` under 5c.
+
+**One product note (non-blocking).** R03-13 shows that 5a `manual_review` can sit on a path whose **user** deadline is running, and `manual_review` is not approvable. The firm deadline stays visible (correct). M12/M13 should make sure the C50 user-obligor attention sweep still covers such cases, so a review never silently consumes the 60-day window (mission §10: do not delay a time-sensitive notice).
