@@ -9,6 +9,15 @@ import { components, internal } from "./_generated/api";
 // ("webhook") at call time, not at construction. See CHECK note in the T02
 // report for the exact source line.
 export const agentmail: AgentMail = new AgentMail(components.agentmail, {
+  // S-M03-1 (M13, contract rev 5 §6): at most one provider POST per send. The
+  // component re-POSTs a send after a transient error, and the AgentMail API
+  // takes no idempotency key, so with the default of 5 attempts a response
+  // lost after the provider accepted the message mailed the merchant twice
+  // (security baseline repro A.1). With one attempt, a lost response ends as
+  // a component `failed` that `drafts.applySendOutcome` / `notify.applyDropOutcome`
+  // report as `unknown`, and only an explicit, acknowledged user action
+  // (`drafts.resendAfterUnknown`) can send again.
+  retryAttempts: 1,
   // Cast: `AgentMailOptions.onMessageReceived` declares `thread: unknown`
   // (required), but `inbound.onMessageReceived`'s own args validator now
   // declares `thread: v.optional(v.any())` (D86/T06 fix -- the component's
