@@ -5,13 +5,15 @@
 | Stable id | `R04.baggage.us_dot` with three **separate** paths: `R04.a` bag-fee refund · `R04.b` delayed-bag incidental expenses · `R04.c` lost/damaged property |
 | Version | `v1` |
 | Review status | **researched** — not `active`; needs an independent reviewer. Not legal advice. |
-| Authority class | Legal entitlement (a: refund duty; b/c: carrier liability that federal rules forbid carriers to limit below a floor) |
+| Authority class | a: legal entitlement (a regulatory refund duty, 260.5). b/c: **carrier liability** — the regulation sets a federal floor on the cap a carrier may impose (254.4); the duty to reimburse rests on carrier liability and DOT enforcement guidance (DOT-BAG-1/2), not on a regulation granting reimbursement. |
 | Authority subtype | Federal regulation (14 CFR 260.2, 260.5, 260.10 for path a; 14 CFR part 254 for b/c) + DOT guidance (consumer page) |
 | Jurisdiction | a: covered flights to/from/within the US (part 260). b/c: **interstate/intrastate (domestic) US air transportation** (254.2). International itineraries are governed by treaty (Montreal/Warsaw) → `unsupported` for b/c in v1. |
-| Effective dates | part 260 bag-fee refund: eff. 2024-06-25, compliance 2024-10-28. §254.4 $4,700: FR 2024-23588 eff. **2025-01-22**, DOT enforcement delayed to 2025-03-20 (FR 2025-02814). |
+| Published | part 260: 89 FR 32760 (2024-04-26); §254.4 $4,700: 89 FR 84815 (2024-10-24, FR 2024-23588) |
+| Effective | part 260: 2024-06-25. $4,700 figure: **2025-01-22** (FR-2024-23588 DATES; its SUMMARY: "…from the current amount of $3,800 to $4,700."). Enforcement of the new figures delayed from 2025-02-20 to 2025-03-20 (FR-2025-02814 DATES). All in `sources/federal-register-notices.txt`. |
+| Compliance | part 260 bag-fee refund: **2024-10-28** (FR-2024-07177-COMPLIANCE) |
 | Retrieval date | 2026-09-23 |
 | Last verification date | 2026-09-23 (eCFR point-in-time 2026-09-18) |
-| Refresh policy | 30 days for path a; for b/c **monthly from 2026-10-01 until DOT publishes the 2026 biennial adjustment** (254.6: reviewed every two years using July CPI-U; 2024 was the last review year, so 2026 is a review year), then 90 days |
+| Refresh policy | **30 days for every path.** In addition, from 2026-10-01 the Federal Register is checked monthly for the 2026 biennial adjustment (254.6: reviewed every two years using July CPI-U; 2024 was the last review year, so 2026 is a review year). |
 | Reviewer | — (unassigned) |
 
 Captured sources: `sources/ecfr-14cfr260.txt`, `sources/ecfr-14cfr254.txt`, `sources/federal-web-pages-excerpts.md` (DOT-BAG-*, DOT-REF-8).
@@ -61,6 +63,8 @@ Bag not received at the final destination at deplaning, or received damaged, or 
 | `bag_tag_number` | string | 10-digit license plate | bag tag stub / receipt | a, b, c |
 | `deplane_opportunity_at` | datetime | ISO-8601 with offset | carrier arrival record; user | a |
 | `bag_delivered_or_picked_up_at` | datetime \| null | ISO-8601 with offset | delivery record / courier receipt; user | a, b |
+| `large_aircraft_segment_on_ticket` | boolean \| unknown | any segment on the ticket uses an aircraft with more than 60 seats (254.3/254.4) | itinerary equipment codes; user | b, c |
+| `exemption_documented_by_carrier` | boolean \| unknown | for 260.5(f)(2): the carrier documented the passenger's fault | carrier record | a |
 | `bag_status` | enum | `delivered` \| `delayed_undelivered` \| `declared_lost` \| `damaged` \| `pilfered` | carrier file / user | all |
 | `mbr_filed` | boolean \| unknown | – | MBR reference number / screenshot | a (precondition), b, c |
 | `mbr_reference`, `mbr_filed_at` | string, datetime | – | carrier | a, b, c |
@@ -73,9 +77,9 @@ Bag not received at the final destination at deplaning, or received damaged, or 
 
 ## 6. Exclusions
 
-- a: delay caused by failure to pick up and recheck at the **first US international entry point** (CBP); failure to pick up an on-time bag (e.g., "hidden city"); **voluntary** agreement to travel without the bag (late check-in / standby) — 260.5(f). The voluntary-separation exemption does not waive refund of the fee if the bag is **lost**, or incidental expenses beyond the agreed delivery date (260.5(g)).
+- a: delay caused by failure to pick up and recheck at the **first US international entry point** (CBP); failure to pick up an on-time bag (e.g., "hidden city") **if documented by the carrier** (260.5(f)(2) — a user statement alone does not trigger this exemption; `exemption_documented_by_carrier` must be true); **voluntary** agreement to travel without the bag (late check-in / standby) — 260.5(f). The voluntary-separation exemption does not waive refund of the fee if the bag is **lost**, or incidental expenses beyond the agreed delivery date (260.5(g)).
 - a: no MBR filed → the obligation does not arise (260.5(b)).
-- b/c: items excluded in the carrier's contract of carriage are not compensable on **domestic** travel (DOT-BAG-7); pre-existing damage / improper packing (DOT consumer page); international itineraries → `unsupported` (treaty).
+- b/c: items excluded in the carrier's contract of carriage are not compensable on **domestic** travel (DOT-BAG-7, guidance-only); pre-existing damage / improper packing (DOT-BAG-9, guidance-only); international itineraries → `unsupported` (treaty; not captured).
 
 ## 7. Remedies and calculation
 
@@ -99,17 +103,18 @@ Bag not received at the final destination at deplaning, or received damaged, or 
 ## 9. Notice / filing / response requirements
 
 - a: MBR with the carrier that operated the flight / last segment (260.5(b)). No federal deadline for filing the MBR is stated; DOT "encourage[s]" filing immediately (DOT-BAG-8). The refund is then automatic.
-- b/c: claim filed with the carrier under its **contract of carriage**; deadlines are carrier-specific and were **not** captured in this run (no federal deadline in part 254). DOT: report damage "before leaving the airport" (DOT consumer page, Baggage Tips) — guidance, not a legal deadline.
+- b/c: claim filed with the carrier under its **contract of carriage**; deadlines are carrier-specific and were **not** captured in this run (no federal deadline in part 254). DOT: "Report any problems to the airline before leaving the airport" (DOT-BAG-10, Baggage Tips) — guidance-only, not a legal deadline.
 - Ordinary email: part 254 sets no notice form; the carrier's contract sets the channel. Recoup must use the carrier's stated channel (captured per carrier) and not assume that email suffices.
 
 ## 10. Deadlines
 
 | Item | Anchor | Semantics | Status |
 |---|---|---|---|
-| a — carrier issues the bag-fee refund | the date all of the following hold: bag significantly delayed (or declared lost), MBR filed, and (multi-carrier) the MBR carrier notified the refunding carrier — 260.5(d) | "prompt refund" (260.10). The 7-business-day / 20-calendar-day definition in 260.2 is written for **§260.6(a)(2)** fare refunds. Applying it to bag fees is an interpretation → display "prompt; DOT does not state a day count for bag-fee refunds" — no computed date | informational |
+| a — carrier issues the bag-fee refund | the date all of the following hold: bag significantly delayed (or declared lost), MBR filed, and (multi-carrier) the MBR carrier notified the refunding carrier — 260.5(d) | 260.5 requires a **prompt refund**; the regulation's 7-business-day / 20-calendar-day definition of "prompt refund" (260.2) is anchored to §260.6(a)(2) fare-refund events, which have no bag-fee analogue, so Recoup computes **no date** for bag fees | informational |
 | a — consumer MBR filing | none in federal text | – | none |
 | b/c — carrier claim deadlines | carrier contract of carriage | carrier-specific | **not captured** → `manual_review` for timeliness until captured per carrier |
-| Liability-limit figure | FR adjustment effective date | the evaluator uses the limit in force on the **incident date** (the $4,700 floor applies to incidents on/after 2025-01-22; $3,800 before) | versioned parameter |
+| Liability-limit figure | FR adjustment effective date | the evaluator uses the limit in force on the **incident date** — $4,700 for incidents on/after 2025-01-22, $3,800 before (FR-2024-23588 SUMMARY/DATES, captured). For incidents 2025-01-22 … 2025-03-19, display that DOT delayed **enforcement** of the new figure to 2025-03-20 (FR-2025-02814); the legal effective date is unchanged | versioned parameter |
+| Calendar-day zone (D147(4)) | path a uses durations between instants (no calendar day). The incident **date** that selects the limit version is the local date at the final-destination airport (assumption A3). b/c carrier deadlines: not captured | – | – |
 
 ## 11. Claim channel and escalation
 
@@ -172,30 +177,34 @@ DOT guidance passages DOT-BAG-1 (incidental expenses "reasonable, verifiable, an
 - **L3 — Large-aircraft condition.** §254.4 applies to segments on aircraft with more than 60 seats, or on the same ticket as such a segment. Small-aircraft-only itineraries → `manual_review`.
 - **L4 — Carrier deadlines and exclusions not captured** (contracts of carriage per carrier). Timeliness for b/c → `manual_review` until captured.
 - **L5 — Pending 2026 biennial adjustment.** 2026 is a review year (254.6). A new floor will apply only from its effective date. The evaluator uses the version in force on the **incident date** (versioned parameter). Refresh monthly until published.
-- **L6 — Bag-fee refund timing** has no stated day count (see §10). Recoup does not invent one.
+- **L6 — Bag-fee refund timing.** 260.5 requires a prompt refund; the defined day counts are anchored to fare-refund events (see §10). Recoup computes no date.
+- **L9 — DOT-REF-8 vs 260.5(d).** DOT's page says a bag fee charged by a ticket agent "must" be requested from the airline; 260.5(d) makes the refund **automatic** once its conditions hold. Both preserved: the regulation governs; DOT-REF-8 names whom to contact if the refund does not arrive.
+- **L10 — Path a outside the 254.4 limit (inference).** The texts are silent on whether a 260.5 fee refund counts against a carrier's 254.4 liability limit; Recoup treats them as separate (assumption A4).
 - **L7 — "Lost" declaration** varies by carrier (5–14 days typical per DOT-BAG-5). The evaluator uses the carrier's declaration, not elapsed time.
 - **L8 — International b/c** (Montreal 1,519 SDR per DOT-BAG-4) → `unsupported` in v1; path a still applies to international covered flights.
 
 ## 15. Evaluation outline
 
-1. Source not current → **`source_unverified`**.
+1. No current source record, or source not current → **`source_unverified`**.
 2. Path a:
    1. `itinerary_scope = non_us` → `unsupported`.
-   2. `mbr_filed = unknown` → `needs_facts`; `false` → `not_eligible` now, with next action "file an MBR" (re-evaluates when filed).
+   2. `mbr_filed = unknown` → `needs_facts`; `false` → **`not_yet_due`** with `reevaluate_when: "MBR filed"` and next action "file an MBR" (D147(6)); never `not_eligible`.
    3. Exemption fact true → `not_eligible` (path a only).
    4. Compute the delay (deplane opportunity → delivery/pickup). Missing either instant and the bag not yet declared lost → `needs_facts`. Conflicting instants straddling the threshold → `needs_facts`. `bag_status = declared_lost` → the delay test is not needed.
-   5. Not significant → `not_eligible`. Significant or lost, fee paid → `eligible` (amount per §7). Fee unknown → `likely_eligible_missing_evidence`.
-3. Path b (domestic only): international → `unsupported`. No delay → `not_eligible`. Documented lines → `eligible` for the documented sum when all lines have receipts; any undocumented line or unknown carrier deadline → `likely_eligible_missing_evidence` (estimate = documented sum only). Carrier deadline known and passed → `deadline_passed` (path b only).
-4. Path c (domestic only): `declared_lost` / `damaged` with evidence → `likely_eligible_missing_evidence` (valuation unknown; estimate `null`). No carrier declaration → `needs_facts`.
+   5. Not significant → `not_eligible`. Significant or lost, fee paid → `eligible` (amount per §7) **when every decisive fact is confirmed** (D147(1), (2)): `itinerary_scope`, `deplane_opportunity_at`, `bag_delivered_or_picked_up_at` (or `bag_status = declared_lost`), `mbr_filed`, exemption facts, `bag_fee_paid`. Any decisive fact only extracted → `likely_eligible_missing_evidence`. Fee unknown → `likely_eligible_missing_evidence`. D143(4)'s `likely_eligible` cap does **not** apply to path a (D147(1)).
+3. Path b (domestic only): international → `unsupported`. `large_aircraft_segment_on_ticket = false` → `manual_review` (254.4 floor does not apply); unknown → assumption shown. No delay → `not_eligible`. **v1 cap:** path b is capped at `likely_eligible_missing_evidence` while no carrier contract of carriage is captured (D143(4), D147(1)); estimate = documented, unallocated lines only. Carrier deadline known (future packs) and passed → `deadline_passed`.
+4. Path c (domestic only): `large_aircraft_segment_on_ticket = false` → `manual_review`. `declared_lost` / `damaged` with evidence → `likely_eligible_missing_evidence` (valuation unknown; estimate `null`; v1 cap as path b). No carrier declaration → `needs_facts`.
 5. Overlap and dedupe: each `expense_line` has at most one `allocated_to`. A line allocated to a card benefit (R12) is excluded from b. The bag fee (a) is never an expense line in b. b+c share the per-passenger liability limit. Opportunity key = (owner, rule id, version, bag tag, path).
 
 ## 16. Document B corrections
 
 1. **"$4,700 ceiling."** B: "The current domestic baggage liability ceiling is $4,700 per passenger." The regulation sets **$4,700 as the lowest limit a carrier may impose**. A carrier may set a higher cap. It is never a payout. It applies to domestic itineraries on large aircraft, and to incidents on/after **2025-01-22**. 2026 is a biennial review year, so the figure may change. International bags are governed by the Montreal Convention (1,519 SDR), not $4,700.
-2. **Bag-fee refund conditions.** B says only that the refund follows an MBR. The regulation adds the delay thresholds: **12 h domestic, 15 h / 30 h international**, measured from the **opportunity to deplane** to delivery/pickup. It also adds three exemptions and the carrier-to-carrier notification condition. The refund must be requested from the **airline** even when a ticket agent charged the fee (DOT-REF-8). No day count for the refund is stated for bag fees.
+2. **Bag-fee refund conditions.** B says only that the refund follows an MBR. The regulation adds the delay thresholds: **12 h domestic, 15 h / 30 h international**, measured from the **opportunity to deplane** to delivery/pickup. It also adds three exemptions and the carrier-to-carrier notification condition. DOT's page says to request it from the **airline** even when a ticket agent charged the fee (DOT-REF-8); the regulation makes the refund automatic (L9). 260.5 requires a prompt refund, but the defined day counts are anchored to fare-refund events, so no date can be computed for bag fees.
 3. **Expense basis and deadlines.** "Reasonable, verifiable, actual" is DOT guidance; the regulation's measure is "provable direct or consequential damages". There is **no federal claim deadline** for b/c — the carrier's contract of carriage controls, and Recoup has not captured those yet.
 
 ## 17. Assumptions
 
 - A1: "within 12 hours" is inclusive of exactly 12:00:00 elapsed (delivered at 12:00 → not significant).
 - A2: Expense lines dated after `deplane_opportunity_at` and on or before `bag_delivered_or_picked_up_at` (plus the day of delivery) are candidates; reasonableness is not decided by Recoup.
+- A3: The incident date that selects the liability-limit version is the local date at the final-destination airport.
+- A4: A 260.5 bag-fee refund does not count against a carrier's 254.4 liability limit.

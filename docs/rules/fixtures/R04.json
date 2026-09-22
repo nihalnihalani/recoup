@@ -8,8 +8,8 @@
     "fact_encoding": "facts.<name> = {type, value, state}; state in {user_confirmed, extracted_candidate, derived, missing, conflicting}. money = {amount_minor:int, currency}. datetime = ISO-8601 with offset.",
     "paths": "R04.a = bag-fee refund (14 CFR 260.5); R04.b = delayed-bag incidental expenses (14 CFR 254.4 + DOT guidance); R04.c = lost/damaged property (14 CFR 254.4). Each case names the path(s) it tests.",
     "delay_measurement": "From deplane opportunity to delivery/pickup (260.5(a)). 'Within 12 hours' is inclusive of exactly 12:00 (spec assumption A1).",
-    "liability_floor": "USD 4,700 per passenger for incidents on/after 2025-01-22 (254.4). It is the lowest cap a carrier may impose, never an expected payout.",
-    "carrier_contract_terms": "No carrier contract of carriage is captured in v1, so path b/c claim deadlines are unknown in every case.",
+    "liability_floor": "USD 4,700 per passenger for incidents on/after 2025-01-22; USD 3,800 before (FR-2024-23588). It is the lowest cap a carrier may impose, never an expected payout.",
+    "carrier_contract_terms": "No carrier contract of carriage is captured in v1, so paths b/c are capped at likely_eligible_missing_evidence and their claim deadlines are unknown.",
     "outcome_vocabulary": [
       "eligible",
       "likely_eligible_missing_evidence",
@@ -19,9 +19,15 @@
       "not_eligible",
       "deadline_passed",
       "source_unverified",
-      "unsupported"
+      "unsupported",
+      "not_yet_due"
     ],
-    "loader": "A case has EITHER a top-level `expected` OR an `expected` on every variant. `clock` (and optional `source`) may be set on the case or on a variant; a variant value overrides the case value. `facts_from: <case id>` + `facts_override: {...}` means: copy that case's facts, then replace the named facts. A variant's `change` object replaces the named facts for that variant only. Every `facts` value is an object; no prose placeholders."
+    "loader": "A case has EITHER a top-level `expected` OR an `expected` on every variant. `clock` (and optional `source`) may be set on the case or on a variant; a variant value overrides the case value. `facts_from: <case id>` + `facts_override: {...}` means: copy that case's facts, then replace the named facts. A variant's `change` object replaces the named facts for that variant only. Every `facts` value is an object; no prose placeholders.",
+    "fact_states": "user_confirmed | observed | derived | extracted_candidate | conflicting | missing | assumption. Contract §2.5 mapping: user_confirmed→confirmed, observed→observed, derived→derived, extracted_candidate→candidate, conflicting→conflicting, missing→missing (value null), assumption→assumption-class candidate. D147(2)/X1: `eligible` requires every decisive fact to be user_confirmed, or observed/derived from confirmed facts; an extracted_candidate decisive fact caps the outcome at likely_eligible_missing_evidence (the case lists it in expected.unconfirmed_decisive_facts). Since M2D the baseline cases use user_confirmed for decisive facts (the state after the user's fact review); each file has explicit cap variants.",
+    "conflicting": "A conflicting fact carries `candidates: [{value, evidence, ...}]` (README cross-pack rule 3). If every candidate gives the same outcome the conflict is not material, but the fact is still unconfirmed, so the outcome is capped at likely_eligible_missing_evidence; if candidates diverge the outcome is needs_facts. Advisory dates use the earliest candidate.",
+    "not_yet_due": "D147(6)/X3: a path that is not ripe yet has outcome not_yet_due with expected.reevaluate_at (ISO date) or expected.reevaluate_when (event); never not_eligible.",
+    "missing_source": "X5: a variant with source.record = 'missing' means no current source record exists for the pack → source_unverified.",
+    "path_a_eligible": "D147(1): path a (bag-fee refund, 260.5) may reach eligible when its decisive facts are confirmed; the likely_eligible cap applies to paths b and c only (no carrier contract of carriage captured)."
   },
   "cases": [
     {
@@ -42,7 +48,7 @@
         "operating_carrier_last_segment": {
           "type": "string",
           "value": "XA",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "bag_fee_merchant_of_record": {
           "type": "enum",
@@ -52,7 +58,7 @@
         "bag_tag_number": {
           "type": "string",
           "value": "0123456789",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "bag_fee_paid": {
           "type": "money",
@@ -60,17 +66,17 @@
             "amount_minor": 4000,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "deplane_opportunity_at": {
           "type": "datetime",
           "value": "2026-09-12T21:40:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "bag_delivered_or_picked_up_at": {
           "type": "datetime",
           "value": "2026-09-13T10:55:00-07:00",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "evidence": "courier delivery confirmation"
         },
         "bag_status": {
@@ -81,17 +87,17 @@
         "mbr_filed": {
           "type": "boolean",
           "value": true,
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "mbr_reference": {
           "type": "string",
           "value": "SEAXA12345",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "mbr_filed_at": {
           "type": "datetime",
           "value": "2026-09-12T22:05:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "exemption_facts": {
           "type": "object",
@@ -116,7 +122,7 @@
         "deadline": {
           "kind": "carrier_refund_issuance",
           "date": null,
-          "semantics": "'prompt' (260.10); the regulation states no day count for bag-fee refunds (the 7/20-day definition is written for 260.6(a)(2) fare refunds) — display 'prompt', compute no date"
+          "semantics": "260.5 requires a prompt refund; the regulation's 7-business/20-calendar-day definition is anchored to §260.6(a)(2) fare-refund events, so Recoup computes no date for bag fees."
         },
         "delay_computed": "13h15m > 12h"
       },
@@ -129,7 +135,78 @@
           "P-260.5-E"
         ],
         "reasoning": "Domestic bag not delivered within 12 hours of the deplane opportunity; MBR filed; the refund is automatic and at least the fee paid."
-      }
+      },
+      "variants": [
+        {
+          "id": "R04-01b",
+          "change": {
+            "mbr_filed": {
+              "type": "boolean",
+              "value": true,
+              "state": "extracted_candidate"
+            },
+            "bag_delivered_or_picked_up_at": {
+              "type": "datetime",
+              "value": "2026-09-13T10:55:00-07:00",
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "unconfirmed_decisive_facts": [
+              "mbr_filed",
+              "bag_delivered_or_picked_up_at"
+            ],
+            "amount": {
+              "refund_at_least": {
+                "amount_minor": 4000,
+                "currency": "USD"
+              }
+            }
+          },
+          "justification": {
+            "passages": [
+              "D147(2)"
+            ],
+            "reasoning": "Extracted but unconfirmed decisive facts cap path a at likely_eligible."
+          }
+        },
+        {
+          "id": "R04-01c",
+          "change": {
+            "bag_status": {
+              "type": "enum",
+              "value": "declared_lost",
+              "state": "user_confirmed",
+              "evidence": "carrier email 2026-09-20 'declared lost'"
+            },
+            "bag_delivered_or_picked_up_at": {
+              "type": "datetime",
+              "value": null,
+              "state": "missing"
+            }
+          },
+          "expected": {
+            "outcome": "eligible",
+            "missing_facts": [],
+            "amount": {
+              "refund_at_least": {
+                "amount_minor": 4000,
+                "currency": "USD"
+              }
+            },
+            "note": "A lost bag needs no delay calculation (260.5 covers 'a lost bag or a significantly delayed checked bag')."
+          },
+          "justification": {
+            "passages": [
+              "P-260.5-D",
+              "P-260.5-B"
+            ],
+            "reasoning": "Declared lost + MBR + fee paid → the bag-fee refund is due."
+          }
+        }
+      ]
     },
     {
       "id": "R04-02",
@@ -148,7 +225,7 @@
             "bag_delivered_or_picked_up_at": {
               "type": "datetime",
               "value": "2026-09-13T09:39:00-07:00",
-              "state": "extracted_candidate"
+              "state": "user_confirmed"
             }
           },
           "delay": "11h59m",
@@ -164,7 +241,7 @@
             "bag_delivered_or_picked_up_at": {
               "type": "datetime",
               "value": "2026-09-13T09:40:00-07:00",
-              "state": "extracted_candidate"
+              "state": "user_confirmed"
             }
           },
           "delay": "12h00m",
@@ -181,7 +258,7 @@
             "bag_delivered_or_picked_up_at": {
               "type": "datetime",
               "value": "2026-09-13T09:41:00-07:00",
-              "state": "extracted_candidate"
+              "state": "user_confirmed"
             }
           },
           "delay": "12h01m",
@@ -228,7 +305,7 @@
             "amount_minor": 3500,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "deplane_opportunity_at": {
           "type": "datetime",
@@ -254,14 +331,40 @@
         "amount": null,
         "deadline": null,
         "question": "Did you file a missing-bag report (Mishandled Baggage Report) with the airline? If so, add its reference number.",
-        "note": "If the answer is 'no', the outcome becomes not_eligible for now, with the next action 'file an MBR'."
+        "note": "If the answer is 'no', the outcome is not_yet_due with reevaluate_when 'MBR filed' (variant R04-03b)."
       },
       "justification": {
         "passages": [
           "P-260.5-B"
         ],
         "reasoning": "The carrier has no refund obligation 'unless a passenger files a Mishandled Baggage Report'. Missing is not false."
-      }
+      },
+      "variants": [
+        {
+          "id": "R04-03b",
+          "change": {
+            "mbr_filed": {
+              "type": "boolean",
+              "value": false,
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "not_yet_due",
+            "missing_facts": [],
+            "reevaluate_when": "MBR filed",
+            "next_action": "file a Mishandled Baggage Report with the operating carrier",
+            "amount": null
+          },
+          "justification": {
+            "passages": [
+              "P-260.5-B",
+              "D147(6)"
+            ],
+            "reasoning": "The refund duty arises only after an MBR; the path is not ripe, not ineligible."
+          }
+        }
+      ]
     },
     {
       "id": "R04-04",
@@ -287,17 +390,17 @@
         "deplane_opportunity_at": {
           "type": "datetime",
           "value": "2026-09-05T15:10:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "bag_delivered_or_picked_up_at": {
           "type": "datetime",
           "value": "2026-09-07T11:00:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "mbr_filed": {
           "type": "boolean",
           "value": true,
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "user_claimed_total": {
           "type": "money",
@@ -309,7 +412,7 @@
         },
         "expense_lines": {
           "type": "array",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "value": [
             {
               "id": "E1",
@@ -366,6 +469,11 @@
           "type": "object",
           "value": null,
           "state": "missing"
+        },
+        "large_aircraft_segment_on_ticket": {
+          "type": "boolean",
+          "value": true,
+          "state": "user_confirmed"
         }
       },
       "expected": {
@@ -384,6 +492,7 @@
             {
               "line": "E4",
               "amount_minor": 18750,
+              "currency": "USD",
               "reason": "no receipt"
             }
           ],
@@ -403,7 +512,32 @@
           "P-254.4"
         ],
         "reasoning": "Reimbursement is for 'reasonable, verifiable, and actual' expenses. Only documented lines are estimated (mission §10: use actual supported expenses). The $4,700 figure is a floor on the carrier's cap, not a payout."
-      }
+      },
+      "variants": [
+        {
+          "id": "R04-04b",
+          "change": {
+            "large_aircraft_segment_on_ticket": {
+              "type": "boolean",
+              "value": false,
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "manual_review",
+            "missing_facts": [],
+            "amount": null,
+            "reason": "254.4's floor applies only to segments on (or ticketed with) aircraft of more than 60 seats (254.3)"
+          },
+          "justification": {
+            "passages": [
+              "P-254.3",
+              "P-254.4"
+            ],
+            "reasoning": "Small-aircraft-only itinerary: the federal floor does not apply."
+          }
+        }
+      ]
     },
     {
       "id": "R04-05",
@@ -430,7 +564,7 @@
         "operating_carrier_last_segment": {
           "type": "string",
           "value": "XA",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "bag_fee_paid": {
           "type": "money",
@@ -438,22 +572,22 @@
             "amount_minor": 3500,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "deplane_opportunity_at": {
           "type": "datetime",
           "value": "2026-09-05T15:10:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "bag_delivered_or_picked_up_at": {
           "type": "datetime",
           "value": "2026-09-06T21:10:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "mbr_filed": {
           "type": "boolean",
           "value": true,
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "exemption_facts": {
           "type": "object",
@@ -466,7 +600,7 @@
         },
         "expense_lines": {
           "type": "array",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "value": [
             {
               "id": "E1",
@@ -555,18 +689,18 @@
         "bag_status": {
           "type": "enum",
           "value": "declared_lost",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "evidence": "carrier email 2026-09-20 'your bag has been declared lost'"
         },
         "mbr_filed": {
           "type": "boolean",
           "value": true,
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "incident_date": {
           "type": "date",
           "value": "2026-09-08",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "property_items": {
           "type": "array",
@@ -608,6 +742,11 @@
           "value": null,
           "state": "missing",
           "note": "many contracts exclude electronics on domestic travel (DOT-BAG-7)"
+        },
+        "large_aircraft_segment_on_ticket": {
+          "type": "boolean",
+          "value": null,
+          "state": "missing"
         }
       },
       "expected": {
@@ -629,6 +768,9 @@
           "estimate 470,000",
           "estimate 620,000",
           "the words 'you will receive $4,700'"
+        ],
+        "assumptions": [
+          "a segment on the ticket uses an aircraft with more than 60 seats (254.4 floor applies)"
         ]
       },
       "justification": {
@@ -639,7 +781,42 @@
           "DOT-BAG-7"
         ],
         "reasoning": "254.4 forbids limiting liability below $4,700. Compensation is 'subject to depreciation and maximum liability limits', and contract exclusions apply domestically. Mission §10: a liability ceiling is not a guaranteed payout."
-      }
+      },
+      "variants": [
+        {
+          "id": "R04-06b",
+          "change": {
+            "incident_date": {
+              "type": "date",
+              "value": "2024-12-10",
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [
+              "carrier_liability_limit",
+              "carrier_exclusions",
+              "carrier_claim_deadlines",
+              "proof for suitcase"
+            ],
+            "amount": {
+              "estimate": null,
+              "cap_display": "Carrier liability limit: at least $3,800 per passenger (federal floor in force before 2025-01-22)"
+            },
+            "forbidden_outputs": [
+              "$4,700 floor for a 2024-12-10 incident",
+              "estimate 380,000"
+            ]
+          },
+          "justification": {
+            "passages": [
+              "FR-2024-23588 SUMMARY/DATES"
+            ],
+            "reasoning": "The limit version is selected by the incident date."
+          }
+        }
+      ]
     },
     {
       "id": "R04-07",
@@ -665,7 +842,7 @@
               "JFK-SFO"
             ]
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "longest_us_foreign_nonstop_segment_minutes": {
           "type": "integer",
@@ -678,22 +855,22 @@
             "amount_minor": 7500,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "deplane_opportunity_at": {
           "type": "datetime",
           "value": "2026-09-10T20:00:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "bag_delivered_or_picked_up_at": {
           "type": "datetime",
           "value": "2026-09-11T16:00:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "mbr_filed": {
           "type": "boolean",
           "value": true,
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "exemption_facts": {
           "type": "object",
@@ -702,7 +879,7 @@
             "failed_pickup_on_time_bag": false,
             "voluntary_separation_agreed": false
           },
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "evidence": "carrier MBR note: bag left at JFK customs hall"
         }
       },
@@ -719,7 +896,59 @@
           "P-260.2-SDB"
         ],
         "reasoning": "260.5(f)(1) exempts delays resulting from 'failure to pick up and recheck a bag at the first international entry point'."
-      }
+      },
+      "variants": [
+        {
+          "id": "R04-07b",
+          "change": {
+            "itinerary_scope": {
+              "type": "enum",
+              "value": "domestic",
+              "state": "user_confirmed"
+            },
+            "itinerary": {
+              "type": "object",
+              "value": {
+                "segments": [
+                  "DEN-SEA"
+                ]
+              },
+              "state": "user_confirmed"
+            },
+            "exemption_facts": {
+              "type": "object",
+              "value": {
+                "failed_recheck_at_first_us_entry": false,
+                "failed_pickup_on_time_bag": true,
+                "voluntary_separation_agreed": false
+              },
+              "state": "user_confirmed"
+            },
+            "exemption_documented_by_carrier": {
+              "type": "boolean",
+              "value": false,
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "eligible",
+            "missing_facts": [],
+            "amount": {
+              "refund_at_least": {
+                "amount_minor": 7500,
+                "currency": "USD"
+              }
+            },
+            "note": "260.5(f)(2) exempts only 'if documented by the carrier'; with no carrier documentation the exemption does not apply and the 20 h domestic delay qualifies."
+          },
+          "justification": {
+            "passages": [
+              "P-260.5-F"
+            ],
+            "reasoning": "The (f)(2) exemption requires carrier documentation."
+          }
+        }
+      ]
     },
     {
       "id": "R04-08",
@@ -744,7 +973,7 @@
               "NRT-LAX (10h45m)"
             ]
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "longest_us_foreign_nonstop_segment_minutes": {
           "type": "integer",
@@ -754,17 +983,17 @@
         "deplane_opportunity_at": {
           "type": "datetime",
           "value": "2026-09-14T10:00:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "bag_delivered_or_picked_up_at": {
           "type": "datetime",
           "value": "2026-09-15T02:00:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "mbr_filed": {
           "type": "boolean",
           "value": true,
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "bag_fee_paid": {
           "type": "money",
@@ -772,7 +1001,7 @@
             "amount_minor": 10000,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "exemption_facts": {
           "type": "object",
@@ -785,7 +1014,7 @@
         },
         "expense_lines": {
           "type": "array",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "value": [
             {
               "id": "E1",
@@ -828,7 +1057,7 @@
             "bag_delivered_or_picked_up_at": {
               "type": "datetime",
               "value": "2026-09-15T01:00:00-07:00",
-              "state": "extracted_candidate"
+              "state": "user_confirmed"
             }
           },
           "delay": "15h00m",
@@ -837,6 +1066,46 @@
               {
                 "path": "R04.a",
                 "outcome": "not_eligible"
+              }
+            ]
+          }
+        },
+        {
+          "id": "R04-08c",
+          "change": {
+            "itinerary": {
+              "type": "object",
+              "value": {
+                "segments": [
+                  "SIN-SFO (15h40m)"
+                ]
+              },
+              "state": "user_confirmed"
+            },
+            "longest_us_foreign_nonstop_segment_minutes": {
+              "type": "integer",
+              "value": 940,
+              "state": "user_confirmed"
+            },
+            "bag_delivered_or_picked_up_at": {
+              "type": "datetime",
+              "value": "2026-09-15T16:01:00-07:00",
+              "state": "user_confirmed"
+            }
+          },
+          "delay": "30h01m",
+          "expected": {
+            "results": [
+              {
+                "path": "R04.a",
+                "outcome": "eligible",
+                "amount": {
+                  "refund_at_least": {
+                    "amount_minor": 10000,
+                    "currency": "USD"
+                  }
+                },
+                "note": "segment > 12 h → 30 h standard; 30h01m exceeds it"
               }
             ]
           }
@@ -872,12 +1141,12 @@
             "amount_minor": 4000,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "deplane_opportunity_at": {
           "type": "datetime",
           "value": "2026-09-12T21:40:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "bag_delivered_or_picked_up_at": {
           "type": "datetime",
@@ -899,7 +1168,7 @@
         "mbr_filed": {
           "type": "boolean",
           "value": true,
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         }
       },
       "expected": {
@@ -919,7 +1188,45 @@
           "P-260.5-A"
         ],
         "reasoning": "The end of the delay is the delivery time; the two candidates fall on opposite sides of 12 hours."
-      }
+      },
+      "variants": [
+        {
+          "id": "R04-09b",
+          "change": {
+            "bag_delivered_or_picked_up_at": {
+              "type": "datetime",
+              "value": null,
+              "state": "conflicting",
+              "candidates": [
+                {
+                  "value": "2026-09-13T10:30:00-07:00",
+                  "evidence": "user statement",
+                  "delay": "12h50m"
+                },
+                {
+                  "value": "2026-09-13T11:10:00-07:00",
+                  "evidence": "courier delivery record",
+                  "delay": "13h30m"
+                }
+              ]
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "unconfirmed_decisive_facts": [
+              "bag_delivered_or_picked_up_at"
+            ],
+            "amount": {
+              "refund_at_least": {
+                "amount_minor": 4000,
+                "currency": "USD"
+              }
+            },
+            "note": "Both candidates exceed 12 h: the conflict is not material, but the fact is unconfirmed."
+          }
+        }
+      ]
     },
     {
       "id": "R04-10",
@@ -932,7 +1239,7 @@
       "clock": "2026-09-23T12:00:00-07:00",
       "source": {
         "last_verified_on": "2026-06-01",
-        "refresh_window_days": 90,
+        "refresh_window_days": 30,
         "note": "2026 is a biennial review year for the 254.4 figure"
       },
       "expected": {
@@ -940,7 +1247,7 @@
         "missing_facts": [],
         "amount": null,
         "deadline": null,
-        "note": "114 days since verification > 90 days."
+        "note": "114 days since verification > 30-day window (manifest and spec now agree on 30)."
       },
       "justification": {
         "passages": [
@@ -949,7 +1256,22 @@
         "reasoning": "The limit is reviewed every two years; a stale pack could display an outdated floor."
       },
       "facts_from": "R04-04",
-      "facts_override": {}
+      "facts_override": {},
+      "variants": [
+        {
+          "id": "R04-10b",
+          "source": {
+            "record": "missing"
+          },
+          "expected": {
+            "outcome": "source_unverified",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "note": "X5"
+          }
+        }
+      ]
     },
     {
       "id": "R04-11",
@@ -1010,21 +1332,21 @@
         "deplane_opportunity_at": {
           "type": "datetime",
           "value": "2026-09-05T15:10:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "bag_delivered_or_picked_up_at": {
           "type": "datetime",
           "value": "2026-09-07T11:00:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "mbr_filed": {
           "type": "boolean",
           "value": true,
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "expense_lines": {
           "type": "array",
-          "state": "extracted_candidate",
+          "state": "user_confirmed",
           "value": [
             {
               "id": "E1",
