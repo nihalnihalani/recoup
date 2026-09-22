@@ -1,0 +1,30 @@
+# Captured source text (US federal government work — public domain)
+# URL: https://www.ecfr.gov/api/versioner/v1/full/2026-09-18/title-12.xml?part=1026&section=1026.12 (excerpt: §1026.12(c))
+# Retrieval: 2026-09-23 via eCFR versioner API, point-in-time 2026-09-18
+# SHA-256 of raw response (t12_1026.12.xml): c4b8895e2e492f97884b0ae344be89e437715fc16f521b5ef6f56e5264d38f67
+# Text below is a tag-stripped rendering of the raw response; the raw response is authoritative.
+
+(c) Right of cardholder to assert claims or defenses against card issuer—(1) General rule. When a person who honors a credit card fails to resolve satisfactorily a dispute as to property or services purchased with the credit card in a consumer credit transaction, the cardholder may assert against the card issuer all claims (other than tort claims) and defenses arising out of the transaction and relating to the failure to resolve the dispute. The cardholder may withhold payment up to the amount of credit outstanding for the property or services that gave rise to the dispute and any finance or other charges imposed on that amount.
+
+(2) Adverse credit reports prohibited. If, in accordance with paragraph (c)(1) of this section, the cardholder withholds payment of the amount of credit outstanding for the disputed transaction, the card issuer shall not report that amount as delinquent until the dispute is settled or judgment is rendered.
+
+(3) Limitations—(i) General. The rights stated in paragraphs (c)(1) and (c)(2) of this section apply only if:
+
+(A) The cardholder has made a good faith attempt to resolve the dispute with the person honoring the credit card; and
+
+(B) The amount of credit extended to obtain the property or services that result in the assertion of the claim or defense by the cardholder exceeds $50, and the disputed transaction occurred in the same state as the cardholder's current designated address or, if not within the same state, within 100 miles from that address.
+
+(ii) Exclusion. The limitations stated in paragraph (c)(3)(i)(B) of this section shall not apply when the person honoring the credit card:
+
+(A) Is the same person as the card issuer;
+
+(B) Is controlled by the card issuer directly or indirectly;
+
+(C) Is under the direct or indirect control of a third person that also directly or indirectly controls the card issuer;
+
+(D) Controls the card issuer directly or indirectly;
+
+(E) Is a franchised dealer in the card issuer's products or services; or
+
+(F) Has obtained the order for the disputed transaction through a mail solicitation made or participated in by the card issuer.
+

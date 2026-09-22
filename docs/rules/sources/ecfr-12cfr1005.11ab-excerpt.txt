@@ -1,0 +1,44 @@
+# Captured source text (US federal government work — public domain)
+# URL: https://www.ecfr.gov/api/versioner/v1/full/2026-09-18/title-12.xml?part=1005 (excerpt: §1005.11(a)-(b))
+# Retrieval: 2026-09-23 via eCFR versioner API, point-in-time 2026-09-18
+# SHA-256 of raw response (t12_p1005.xml): 0669a14f83f836f4086de21514f3bcd40041784e50c444b415f4d8e1909a10d0
+# Text below is a tag-stripped rendering of the raw response; the raw response is authoritative.
+
+§ 1005.11 Procedures for resolving errors.
+
+(a) Definition of error—(1) Types of transfers or inquiries covered. The term “error” means:
+
+(i) An unauthorized electronic fund transfer;
+
+(ii) An incorrect electronic fund transfer to or from the consumer's account;
+
+(iii) The omission of an electronic fund transfer from a periodic statement;
+
+(iv) A computational or bookkeeping error made by the financial institution relating to an electronic fund transfer;
+
+(v) The consumer's receipt of an incorrect amount of money from an electronic terminal;
+
+(vi) An electronic fund transfer not identified in accordance with § 1005.9 or § 1005.10(a); or
+
+(vii) The consumer's request for documentation required by § 1005.9 or § 1005.10(a) or for additional information or clarification concerning an electronic fund transfer, including a request the consumer makes to determine whether an error exists under paragraphs (a)(1)(i) through (vi) of this section.
+
+(2) Types of inquiries not covered. The term “error” does not include:
+
+(i) A routine inquiry about the consumer's account balance;
+
+(ii) A request for information for tax or other recordkeeping purposes; or
+
+(iii) A request for duplicate copies of documentation.
+
+(b) Notice of error from consumer—(1) Timing; contents. A financial institution shall comply with the requirements of this section with respect to any oral or written notice of error from the consumer that:
+
+(i) Is received by the institution no later than 60 days after the institution sends the periodic statement or provides the passbook documentation, required by § 1005.9, on which the alleged error is first reflected;
+
+(ii) Enables the institution to identify the consumer's name and account number; and
+
+(iii) Indicates why the consumer believes an error exists and includes to the extent possible the type, date, and amount of the error, except for requests described in paragraph (a)(1)(vii) of this section.
+
+(2) Written confirmation. A financial institution may require the consumer to give written confirmation of an error within 10 business days of an oral notice. An institution that requires written confirmation shall inform the consumer of the requirement and provide the address where confirmation must be sent when the consumer gives the oral notification.
+
+(3) Request for documentation or clarifications. When a notice of error is based on documentation or clarification that the consumer requested under paragraph (a)(1)(vii) of this section, the consumer's notice of error is timely if received by the financial institution no later than 60 days after the institution sends the information requested.
+
