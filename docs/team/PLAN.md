@@ -29,7 +29,8 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | M04 | 0 | opus-qa-engineer | – | Fix the dated-`now` test time-bomb (tracking.test.ts ×2) and sweep for others; P03–P07/P10–P12 reclassification; test-harness inventory | convex/*.test.ts (fixture-clock fixes only), docs/reviews/2026-09-23-qa-baseline.md | verified (f128bf4 time-bomb fix, lead re-ran tracking 13/13; 19499cf QA baseline) |
 | M05 | 0 | opus-devils-advocate | M01 | Checkpoint A: adversarial review of the M01 contract before implementation | docs/reviews/2026-09-23-da-checkpoint-A.md | verified (c47b023; approve-with-changes; 0C/11H/14M/11L; all accepted, rulings D145) |
 | M06 | 0 | opus-product-architect | M05 | Contract rev 4: all pre-wave-1 changes (DA-A-1..5,7,8,9,11,13..17,21) + D142 + D143 + D145 rulings; pre-wave-2 items written as specified text; new tasks for pack review, source re-verification, R01 v2, R10/R13/R18/R19–R25, deadline attention, diagnostics, copy consistency | docs/team/contracts/2026-09-23-M01-*.md | verified (044b20d, rev 4, 1,266 lines, §13 changelog; R4-1..4 confirmed D146) |
-| M07 | 0 | opus-devils-advocate | M06 | Recheck rev 4 against the pre-wave-1 required changes only | docs/reviews/2026-09-23-da-checkpoint-A.md (addendum) | in_progress |
+| M07 | 0 | opus-devils-advocate | M06 | Recheck rev 4 against the pre-wave-1 required changes only | docs/reviews/2026-09-23-da-checkpoint-A.md (addendum) | verified (16b6a5a; start with C1–C5; rulings D148) |
+| M06b | 1 | opus-product-architect | M07 | Contract rev 5: C1–C4, N2–N7, wave-2 notes (D148) | docs/team/contracts/2026-09-23-M01-*.md | in_progress |
 | M08 | 1 | opus-qa-engineer | – | Test infra + CI: DOM env for *.test.tsx (QA-13), rule-fixture loader (hash + alias), twoUsers/clock helpers + time-bomb lint test, CI lint 0 / floor / e2e typecheck / concurrency / env-driven e2e fixtures | vitest.config.mts, package.json, package-lock.json, convex/test.setup.ts, convex/testing/**, src/test/**, .github/workflows/ci.yml, scripts/check-test-count.mjs, e2e/fixtures.ts, playwright.config.ts, docs/reviews/2026-09-23-M08-test-infra.md | in_progress |
 | M09 | 1 | opus-rules-reviewer | – | Independent spec-level review of R01–R05 against captured primary text + blind fixture check (activation gate, DA-A-11) | docs/reviews/2026-09-23-rules-review-R01-R05.md | verified (8fd1e3f; R01 reject-resubmit, R02–R05 approve-with-changes; rulings D147) |
 | M2D | 1 | opus-rules-researcher | M09, M1C | Apply M09's 27 edits + R01 window-event redesign + fixture construction fixes; capture every uncaptured normative source; D147 rulings | docs/rules/** | pending (after M1C) |
@@ -579,7 +580,7 @@ release-candidate.md: commit SHA, tag `rc-<date>`, node/npm versions, lockfile s
 
 | ID | Owner | Status |
 |---|---|---|
-| M10 | opus-backend-engineer | pending (after M07) |
+| M10 | opus-backend-engineer | in_progress |
 | M11 | opus-backend-engineer-2 | pending (M10) |
 | M12 | opus-backend-engineer-3 | pending (M10, M11, M09, M1C) |
 | M13 | opus-ingestion-integrations-engineer | pending (M10–M12, M1B) |
@@ -589,6 +590,6 @@ release-candidate.md: commit SHA, tag `rc-<date>`, node/npm versions, lockfile s
 | M17 | opus-devils-advocate | pending (checkpoint B) |
 | M18 | opus-rules-reviewer | pending (M09, M12, M1C) |
 | M19 | opus-qa-engineer-2 | pending (M08) |
-| M1A | opus-ingestion-integrations-engineer-2 | in_progress |
+| M1A | opus-ingestion-integrations-engineer-2 | verified (ccdd61f; 99/99; D149) |
 | M1B | opus-backend-engineer-4 | pending (M10) |
-| M1C | opus-rules-researcher | in_progress |
+| M1C | opus-rules-researcher | done (72fe1a2; → M09b re-review with M2D) |
