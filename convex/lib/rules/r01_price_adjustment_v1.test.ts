@@ -6,7 +6,9 @@
  * Fixture → evaluator input (README cross-pack rule 2): each fixture fact becomes resolution rows for M11's
  * `resolveCell` (user_confirmed → a confirmed row, observed → observed, derived → derived, extracted_candidate and the
  * R01-only `assumption` state → a candidate row, missing → no row, conflicting → one row per candidate in its
- * `conflict_kind`). `policy_snapshot` + `retail.window_days` are the parameter source. `context.price_claims_on_item`
+ * `conflict_kind`). An `observed` price is "a machine observation, e.g. an accepted price check" (rule 2), so its row
+ * is price-check-sourced and carries the observation's D16 metadata — the only kind of observed price R01 v1 accepts
+ * (contract §2.7, M18 item 1). `policy_snapshot` + `retail.window_days` are the parameter source. `context.price_claims_on_item`
  * becomes the case context: confirmed → a settled loss key, denied → the denied observation (DA-A-22), anything else →
  * the open claim.
  *
@@ -69,6 +71,10 @@ const ROW_STATE: Record<string, ResolveRow["state"]> = {
   extracted_candidate: "extracted_candidate", assumption: "extracted_candidate",
 };
 
+/** Where a fixture row comes from: an observed price is a price check (README rule 2); anything else the user. */
+const sourceFor = (key: string, state: string) =>
+  key === "retail.observed_price" && state === "observed" ? { kind: "price_check", ref: "fixture" } as const : { kind: "user" } as const;
+
 function cellOf(subjectKey: string, key: string, fact: FixtureFact | undefined): Cell {
   if (!fact || fact.state === "missing") return resolveCell(subjectKey, key, []);
   if (fact.state === "conflicting") {
@@ -77,11 +83,11 @@ function cellOf(subjectKey: string, key: string, fact: FixtureFact | undefined):
       state: kind === "candidates" ? "extracted_candidate" : ROW_STATE[(c.state as string) ?? "extracted_candidate"],
       value: toValue(fact.type, c.value),
       at: i + 1,
-      source: { kind: "evidence", ref: String(c.evidence ?? `candidate ${i + 1}`) },
+      source: kind === "candidates" ? { kind: "evidence", ref: String(c.evidence ?? `candidate ${i + 1}`) } : { ...sourceFor(key, String(c.state)), ref: String(c.evidence ?? `candidate ${i + 1}`) },
     }));
     return resolveCell(subjectKey, key, rows);
   }
-  return resolveCell(subjectKey, key, [{ state: ROW_STATE[fact.state], value: toValue(fact.type, fact.value), at: 1, source: { kind: "user" } }]);
+  return resolveCell(subjectKey, key, [{ state: ROW_STATE[fact.state], value: toValue(fact.type, fact.value), at: 1, source: sourceFor(key, fact.state) }]);
 }
 
 type Claim = { status: string; expectedCents?: number; currency?: string; ["openedFromPriceCheckId.observedCents"]?: number };
@@ -296,6 +302,123 @@ describe("R01 v1 pack invariants beyond the fixtures", () => {
     expect(r.outcome).toBe("likely_eligible");
     expect(r.dimensions.evidenceSupports).toBe("unknown");
     expect(r.missingFacts.map((m) => [m.key, m.reason])).toEqual([["retail.unit_price", "candidate_unconfirmed"]]);
+  });
+
+  describe("M18 item 1: only a vetted price check is an accepted observation (contract §2.7)", () => {
+    // M18's repro: a USD 499.99 purchase with a confirmed policy (R01-01's facts).
+    const r01 = FILE.cases.find((c) => c.id === "R01-01")!;
+    const priced = (rows: Parameters<typeof resolveCell>[2], observation: R01ObservationMeta | null) => {
+      const { snapshot, cc } = build(r01);
+      return { r: run(r01, { ...snapshot, observedPrice: resolveCell(ITEM, "retail.observed_price", rows), observation }, cc), snapshot };
+    };
+    const money = (n: number, currency = "USD"): FactValue => ({ kind: "money", amountMinor: n, currency });
+    const meta: R01ObservationMeta = { variantMatch: "exact", confidence: 0.95, isRange: false };
+    const expectNoAmount = (r: EvaluationResult) => {
+      expect(r.outcome).toBe("needs_facts");
+      expect(r.amount).toBeNull();
+      expect(r.missingFacts.map((m) => [m.key, m.reason])).toEqual([["retail.observed_price", "missing"]]);
+      expect(r01AutoOpen(r, { openClaimExists: false }).opens).toBe(false);
+    };
+
+    it("repro 1: an unconfirmed EUR 300.00 on a USD 499.99 purchase → no estimate (no cross-currency subtraction), no auto-open", () => {
+      const { r } = priced([{ state: "extracted_candidate", value: money(30_000, "EUR"), at: 1, source: { kind: "evidence", ref: "email" } }], null);
+      expectNoAmount(r);
+      expect(JSON.stringify(r)).not.toContain("19999");
+    });
+
+    it("repro 2: an unconfirmed USD 9.99 (implausibly cheap) → no estimate, no auto-open", () => {
+      const { r } = priced([{ state: "extracted_candidate", value: money(999), at: 1, source: { kind: "evidence", ref: "email" } }], meta);
+      expectNoAmount(r);
+      expect(JSON.stringify(r)).not.toContain("49000");
+    });
+
+    it("an evidence-sourced observed value without metadata → not accepted", () => {
+      expectNoAmount(priced([{ state: "observed", value: money(44_999), at: 1, source: { kind: "evidence", ref: "screenshot" } }], null).r);
+    });
+
+    it("a price-check-sourced value WITHOUT its acceptance metadata → not accepted", () => {
+      expectNoAmount(priced([{ state: "observed", value: money(44_999), at: 1, source: { kind: "legacy_price_check" } }], null).r);
+    });
+
+    it("a user-confirmed current price (not a price check) → not accepted", () => {
+      expectNoAmount(priced([{ state: "user_confirmed", value: money(44_999), at: 1, source: { kind: "user" } }], meta).r);
+    });
+
+    it("a candidates-only conflict on the observed price → not accepted (never candidate-tested into an amount)", () => {
+      expectNoAmount(priced([
+        { state: "extracted_candidate", value: money(44_999), at: 1, source: { kind: "evidence", ref: "a" } },
+        { state: "extracted_candidate", value: money(43_000), at: 2, source: { kind: "evidence", ref: "b" } },
+      ], meta).r);
+    });
+
+    it("the same value from a vetted price check with its metadata → accepted (5,000 estimate)", () => {
+      const { r } = priced([{ state: "observed", value: money(44_999), at: 1, source: { kind: "legacy_price_check", ref: "pc1" } }], meta);
+      expect(r.outcome).toBe("likely_eligible");
+      expect(r.amount?.estimate).toEqual({ amountMinor: 5_000, currency: "USD" });
+    });
+
+    it("a vetted check with an undefined variantMatch is rejected like legacy ('Could not tell which variant…')", () => {
+      const { r } = priced([{ state: "observed", value: money(44_999), at: 1, source: { kind: "price_check" } }], { confidence: 0.95 });
+      expectNoAmount(r);
+      expect(r.conditions.find((c) => c.id === "r01.v1.observation_accepted")?.note).toBe("Could not tell which variant the price is for");
+    });
+  });
+
+  it("D160 / M18 N3: a KWD (three-decimal) purchase is unsupported too", () => {
+    const { snapshot, cc } = build(base);
+    const kwd = (n: number): FactValue => ({ kind: "money", amountMinor: n, currency: "KWD" });
+    const r = run(base, {
+      ...snapshot,
+      unitPrice: resolveCell(ITEM, "retail.unit_price", [{ state: "user_confirmed", value: kwd(12000), at: 1, source: { kind: "user" } }]),
+      observedPrice: resolveCell(ITEM, "retail.observed_price", [{ state: "observed", value: kwd(9500), at: 1, source: { kind: "price_check" } }]),
+      currency: resolveCell("txn", "retail.currency", [{ state: "user_confirmed", value: { kind: "code", code: "KWD" }, at: 1, source: { kind: "user" } }]),
+    }, cc);
+    expect(r.outcome).toBe("unsupported");
+    expect(r.amount).toBeNull();
+    expect(r01AutoOpen(r, { openClaimExists: false }).opens).toBe(false);
+  });
+
+  describe("M18 N2: a paid claim AND a denied claim on one item → the smaller ask (conservative; spec silent)", () => {
+    const withObs = (unit: number, qty: number, obs: number) => {
+      const { snapshot } = build(base);
+      return {
+        ...snapshot,
+        unitPrice: resolveCell(ITEM, "retail.unit_price", [{ state: "user_confirmed", value: { kind: "money", amountMinor: unit, currency: "USD" }, at: 1, source: { kind: "user" } }]),
+        quantity: resolveCell(ITEM, "retail.quantity", [{ state: "user_confirmed", value: { kind: "count", n: qty }, at: 1, source: { kind: "user" } }]),
+        observedPrice: resolveCell(ITEM, "retail.observed_price", [{ state: "observed", value: { kind: "money", amountMinor: obs, currency: "USD" }, at: 1, source: { kind: "price_check" } }]),
+      };
+    };
+
+    it("paid 3,000 + denied at 11,000 + a new 8,500 on a 12,000 item → 500 (the paid remainder), never the 2,500 denial difference", () => {
+      const r = run(base, withObs(12_000, 1, 8_500), { settledMinorByLossKey: { [`${ITEM}:price_diff:1`]: 3_000 }, deniedObservedMinor: 11_000 });
+      expect(r.amount?.estimate).toEqual({ amountMinor: 500, currency: "USD" });
+      expect(r.amount?.formula).toBe("(12,000 - 8,500) x 1 - 3,000 settled (less than the denied-claim difference)");
+      expect(r01AutoOpen(r, { openClaimExists: false, deniedObservedMinor: 11_000, observedMinor: 8_500, unitMinor: 12_000 })).toMatchObject({ opens: true, amountMinor: 500 });
+    });
+
+    it("paid 5,000 (qty 2) + denied at 9,000 + a new 8,500 → 1,000 (the denial difference is the smaller)", () => {
+      const r = run(base, withObs(12_000, 2, 8_500), { settledMinorByLossKey: { [`${ITEM}:price_diff:1`]: 5_000 }, deniedObservedMinor: 9_000 });
+      expect(r.amount?.estimate).toEqual({ amountMinor: 1_000, currency: "USD" });
+      expect(r.amount?.formula).toBe("(9,000 denied observation - 8,500) x 2");
+    });
+
+    it("a paid remainder below its threshold stays not_eligible even with a denial on record", () => {
+      const r = run(base, withObs(12_000, 2, 9_400), { settledMinorByLossKey: { [`${ITEM}:price_diff:1`]: 5_000 }, deniedObservedMinor: 11_000 });
+      expect(r.outcome).toBe("not_eligible");
+      expect(r.amount).toBeNull();
+    });
+  });
+
+  it("M18 N4: a returned item is labelled 'No open price window', not 'Drop below threshold'", () => {
+    const { snapshot, cc } = build(base);
+    const r = run(base, { ...snapshot, itemReturned: true }, cc);
+    expect(r01AutoOpen(r, { openClaimExists: false })).toEqual({ opens: false, note: "No open price window" });
+  });
+
+  it("M18 N5/N6: the pack declares itself researched (status is the lead's) and records the credit-vs-cash limitation", () => {
+    expect(r01PriceAdjustmentV1.lifecycle).toBe("researched");
+    expect(r01PriceAdjustmentV1.knownLimitations.join(" ")).toContain("credit rather than cash");
+    expect(r01PriceAdjustmentV1.knownLimitations.join(" ")).not.toContain("(D147)");
   });
 
   it("the window is a lateAskAcknowledgeable user deadline (C1)", () => {
