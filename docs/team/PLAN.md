@@ -36,7 +36,7 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | M2D | 1 | opus-rules-researcher | M09, M1C | Apply M09's 27 edits + R01 window-event redesign + fixture construction fixes; capture every uncaptured normative source; D147 rulings | docs/rules/** | verified (2743862 et al.; 23/23 hashes; D151) |
 | M09b | 1 | opus-rules-reviewer | M2D | Re-review of revised specs/fixtures; activation gate | docs/reviews/2026-09-23-rules-review-R01-R05.md (addendum) | verified (4bcf07b; R01 v1 approve_for_activation; others approve_with_changes; D154) |
 | M2E | 1 | opus-rules-researcher | M09b | Apply M09b §B.8 edits; README rule 3 cap; confirmed-vs-observed fixture per file | docs/rules/** | verified (0ce6c95..58f2ac9) |
-| M09c | 1 | opus-rules-reviewer | M2E | Re-check changed items only | review addendum | in_progress |
+| M09c | 1 | opus-rules-reviewer | M2E | Re-check changed items only | review addendum | verified (337b4b1; spec gate: R01v1/R01v2/R02/R03/R04 approved, R05 one edit; D158) |
 | M06f | 1 | opus-product-architect | M09b | Contract §4 5c decided + disputed-anchor deadline rule + not_yet_due next action (D154) | contract | verified (ab72962, e780129; M12 briefed) |
 
 ---
