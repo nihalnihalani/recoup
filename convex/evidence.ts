@@ -31,10 +31,13 @@ import { isFlagOn } from "./lib/flags";
 import { logEvent } from "./lib/log";
 import { isHeicFamily, type SniffedMime } from "./lib/sniff";
 import { maskPans } from "./lib/pan";
+import { chargeStoredBytes, storedBytes } from "./lib/blobRefs";
+import { sha256Hex } from "./lib/canonical";
 import {
   EVIDENCE_BYTES_PER_USER_PER_DAY,
   EVIDENCE_UPLOADS_PER_DAY,
   GLOBAL_DAILY_BUDGETS,
+  MAX_EVIDENCE_BYTES_PER_USER,
   MAX_EVIDENCE_FILE_NAME_CHARS,
   MAX_EVIDENCE_ROWS_PER_USER,
   MAX_EVIDENCE_TEXT_CHARS,
@@ -182,6 +185,15 @@ export async function reserveEvidenceRow(ctx: MutationCtx, userId: Id<"users">):
   return true;
 }
 
+/** Rows counted against `MAX_EVIDENCE_ROWS_PER_USER` so far (reads only). */
+async function evidenceRowsUsed(ctx: MutationCtx, userId: Id<"users">): Promise<number> {
+  const row = await ctx.db
+    .query("usage")
+    .withIndex("by_user_day_kind", (q) => q.eq("userId", userId).eq("day", LIFETIME_DAY).eq("kind", EVIDENCE_ROWS_KIND))
+    .first();
+  return row?.count ?? 0;
+}
+
 /** The user's live (not content-deleted) evidence rows with this hash, and the newest cleared one (DA-A-20). */
 export async function findByHash(
   ctx: QueryCtx | MutationCtx,
@@ -209,19 +221,12 @@ export const TEXT_EXTRACTOR_VERSION = "intake_email_v1";
 
 export type EvidenceProvenance = Doc<"evidence">["provenance"];
 
-async function sha256HexOf(text: string): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
-  let hex = "";
-  for (const b of digest) hex += b.toString(16).padStart(2, "0");
-  return hex;
-}
-
 /**
  * §2.6: the content hash of text evidence is the hex SHA-256 of the MASKED, whitespace-normalized text, so the same
  * email forwarded twice, or forwarded and pasted, is one row, and a card number never reaches the hash (D142).
  */
 export async function textContentHash(text: string): Promise<string> {
-  return await sha256HexOf(maskPans(text).replace(/\s+/g, " ").trim());
+  return await sha256Hex(maskPans(text).replace(/\s+/g, " ").trim());
 }
 
 /** Provenance a later, identical submission may upgrade to: the user now stands behind content a stranger sent. */
@@ -436,10 +441,27 @@ export const finalizeUpload = internalMutation({
       return { outcome: "stored" as const, evidenceId: active._id, duplicate: true, extractionStatus: active.extractionStatus };
     }
 
-    if (!(await chargeBytes(ctx, args.userId, meta.size, now))) {
+    // Every cap is checked (reads only) BEFORE anything is charged, so a refusal leaves every counter untouched:
+    // the daily byte quotas (DA-A-28f), the per-user stored-bytes cap (D173, `MAX_EVIDENCE_BYTES_PER_USER`,
+    // released by retention/purge through `lib/blobRefs.releaseEvidenceBlob`), and — for a new row — the row cap.
+    const revive = cleared !== null && cleared.kind === "upload" ? cleared : null;
+    if (
+      (await bytesExhausted(ctx, args.userId, meta.size, now)) ||
+      (await storedBytes(ctx, args.userId)) + meta.size > MAX_EVIDENCE_BYTES_PER_USER
+    ) {
       await discard();
       return { outcome: "refused" as const, reason: "quota" as const };
     }
+    if (revive === null && (await evidenceRowsUsed(ctx, args.userId)) >= MAX_EVIDENCE_ROWS_PER_USER) {
+      await discard();
+      return { outcome: "refused" as const, reason: "row_cap" as const };
+    }
+    // The charges, only now that the blob WILL be bound (a new row or a revive; never a duplicate or a refusal). They
+    // cannot fail after the checks above in the same transaction; if one did, the throw rolls everything back and the
+    // route deletes the blob.
+    if (!(await chargeBytes(ctx, args.userId, meta.size, now))) throw new Error("evidence byte quota changed during finalize");
+    if (!(await chargeStoredBytes(ctx, args.userId, meta.size))) throw new Error("stored-bytes cap changed during finalize");
+    if (revive === null && !(await reserveEvidenceRow(ctx, args.userId))) throw new Error("evidence row cap changed during finalize");
 
     const fields = {
       mimeType: args.sniffedMime,
@@ -451,10 +473,10 @@ export const finalizeUpload = internalMutation({
     };
 
     let evidenceId: Id<"evidence">;
-    if (cleared !== null && cleared.kind === "upload") {
+    if (revive !== null) {
       // DA-A-20 + D163: the row whose content retention cleared comes back to life with the new blob, and its
       // retention clock restarts now.
-      await ctx.db.patch(cleared._id, {
+      await ctx.db.patch(revive._id, {
         ...fields,
         storageId: args.storageId,
         retention: "active",
@@ -463,14 +485,8 @@ export const finalizeUpload = internalMutation({
         extractionStartedAt: undefined,
         extractorVersion: undefined,
       });
-      evidenceId = cleared._id;
+      evidenceId = revive._id;
     } else {
-      if (!(await reserveEvidenceRow(ctx, args.userId))) {
-        // Undo the byte charge by refusing through a throw would lose the discard; instead the bytes stay charged for
-        // a refused row, which only makes the daily quota stricter.
-        await discard();
-        return { outcome: "refused" as const, reason: "row_cap" as const };
-      }
       evidenceId = await ctx.db.insert("evidence", {
         userId: args.userId,
         kind: "upload",

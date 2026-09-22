@@ -19,6 +19,7 @@ import {
   EVIDENCE_UPLOADS_PER_DAY,
   EVIDENCE_UPLOADS_PER_HOUR,
   GLOBAL_DAILY_BUDGETS,
+  MAX_EVIDENCE_BYTES_PER_USER,
   MAX_EVIDENCE_ROWS_PER_USER,
   MAX_UPLOAD_BYTES,
 } from "./limits";
@@ -229,6 +230,28 @@ describe("POST /evidence/upload — stored, hashed, deduped, charged (SEC-UP-1/6
     expect(res.status).toBe(429);
     expect(await storedBlobs(t)).toBe(0);
     expect(await evidenceRows(t)).toHaveLength(0);
+  });
+
+  it("D173: the stored-bytes cap refuses an upload over it (blob deleted, nothing charged); after retention clears one, a new upload within the cap succeeds", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const first = png("f".repeat(200));
+    const second = png("s".repeat(200));
+    // Just enough room for one of the two files.
+    await t.run((ctx) =>
+      ctx.db.insert("usage", { userId: a.userId, day: "lifetime", kind: "evidence_stored_bytes", count: MAX_EVIDENCE_BYTES_PER_USER - first.byteLength - 10 }),
+    );
+    const stored = await uploadJson(a.as, first);
+    const over = await upload(a.as, second);
+    expect(over.status).toBe(429);
+    expect(await storedBlobs(t)).toBe(1);
+    const dailyBefore = (await t.run((ctx) => ctx.db.query("usage").collect())).find((u) => u.userId === a.userId && u.kind === "evidence_bytes")?.count;
+    expect(dailyBefore).toBe(first.byteLength); // the refused upload charged nothing
+
+    vi.advanceTimersByTime(31 * 86_400_000);
+    for (let i = 0; i < 60; i++) if ((await t.mutation(internal.retention.sweepRecovery, {})).done) break;
+    expect((await t.run((ctx) => ctx.db.get(stored.evidenceId)))!.retention).toBe("content_deleted");
+    expect((await upload(a.as, second)).status).toBe(200);
   });
 
   it(`the per-user row cap (${MAX_EVIDENCE_ROWS_PER_USER}) refuses a new row and deletes the stored blob`, async () => {

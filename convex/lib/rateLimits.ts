@@ -83,4 +83,12 @@ export const rateLimiter = new RateLimiter(components.rateLimiter, {
    * never starve each other.
    */
   evaluate: { kind: "fixed window", rate: EVALUATIONS_PER_MINUTE, period: MINUTE },
+  /**
+   * `drafts.prepareSend` per user (M13, contract rev 5 N2; M03 §3.7's evaluate number, `EVALUATIONS_PER_MINUTE`),
+   * keyed on the server-resolved userId and consumed after the ownership, example and recipient checks but BEFORE
+   * the claim is re-evaluated: each call runs an `approval_check` evaluation (read amplification). A refusal is
+   * returned as `rate_limited`, never thrown. Fixed window, so the 61st call in a minute is refused exactly; separate
+   * from `evaluate` so reviewing a draft never starves opening a case, or the reverse.
+   */
+  prepareSend: { kind: "fixed window", rate: EVALUATIONS_PER_MINUTE, period: MINUTE },
 });
