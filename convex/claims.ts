@@ -3,7 +3,7 @@ import { components } from "./_generated/api";
 import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { ownedClaim, ownedItem, requireUserId } from "./lib/access";
-import { balance, deriveStatus, newToken, statusAfterEvent, type EventKind } from "./lib/ledger";
+import { balance, deriveStatus, newToken, statusAfterEvent } from "./lib/ledger";
 import { assertCents, assertPositiveCents } from "./lib/money";
 import { assertMaxChars } from "./lib/text";
 import schema, { claimStatus, eventKind } from "./schema";
@@ -233,7 +233,7 @@ async function findLedgerDuplicate(
 export async function applyEvent(
   ctx: MutationCtx,
   claim: Doc<"claims">,
-  kind: EventKind,
+  kind: Doc<"ledgerEvents">["kind"],
   cents: number,
   evidence: string,
   idempotencyKey: string,
