@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { orderedCurrencies, recoveredByCurrency, sumCentsByCurrency } from "./currencyTotals";
+import { pinDefaultLocale } from "../test/locale";
+
+// The labels below are en-US strings ("$50.00"); the formatter uses the machine's default locale, so pin it (M16:
+// this file failed 5/15 under LANG=de_DE.UTF-8 — a locale time-bomb like D138).
+pinDefaultLocale("en-US");
 
 describe("orderedCurrencies", () => {
   it("puts primaryCurrency first, the rest alphabetical after it", () => {

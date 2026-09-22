@@ -507,13 +507,11 @@ describe("H. per-transaction paid-total cap (D145; contract §3.4 I4)", () => {
 
 describe("H2. confirmed money on one item above what was paid (contract §3.4 I4; mission §6)", () => {
   /**
-   * FINDING QA-M16-1 (MEDIUM): I4 says "for each capped transaction, Σ ≤ P(T)" with Σ = recovered + outstanding, but
-   * the cap only ever trims OUTSTANDING. Two confirmed credits on distinct loss keys of the same item (a price
-   * adjustment, then the full return refund) put Recovered above the price paid, with nothing on the over-credit
-   * line. Through public flows: a 2,000 price adjustment confirmed, then the 4,000 item returned and refunded in
-   * full → Recovered 6,000 on a 4,000 purchase. Expected per I4 and mission §6 (confirmed recovery is never
-   * inflated; a possible double credit is shown, never erased): Recovered ≤ 4,000 with the rest on the over-credit
-   * line. Fixed by M12c (D188): the paid-total cap now also caps Recovered; this pinned test is the regression test.
+   * QA-M16-1 (MEDIUM, found by this file at 4f274f1, fixed by M12c in 9acc16b per D188): the paid-total cap used to
+   * trim only OUTSTANDING, so two confirmed credits on distinct loss keys of one item (a price adjustment, then the
+   * full return refund) showed Recovered above the price paid with nothing on the over-credit line. Through public
+   * flows: a 2,000 price adjustment confirmed, then the 4,000 item returned and refunded in full. D188: per
+   * transaction per currency, Recovered = min(Σ confirmed net, paid) and the excess is on the over-credit line.
    */
   it("a confirmed price adjustment + a confirmed full return refund never show more Recovered than the 4,000 paid", async () => {
     const t = setup();
@@ -535,9 +533,10 @@ describe("H2. confirmed money on one item above what was paid (contract §3.4 I4
     const ret = await returnClaim(as, itemIds[0]);
     await as.mutation(api.claims.confirmCredit, { claimId: ret, cents: 4_000, evidence: "Full refund posted", idempotencyKey: "rf" });
     const usd = (await as.query(api.recovery.summary, { now: NOW })).currencies.find((c: { currency: string }) => c.currency === "USD")!;
-    // I2 still holds either way; I4 is the violated one.
+    // I2: Recovered + over-credit = Σ net = 6,000; I4: Recovered ≤ paid 4,000; D188: the 2,000 excess is visible.
     expect(usd.recoveredMinor + usd.overCreditMinor).toBe(6_000);
-    expect(usd.recoveredMinor).toBeLessThanOrEqual(4_000);
+    expect(usd.recoveredMinor).toBe(4_000);
+    expect(usd.overCreditMinor).toBe(2_000);
   });
 });
 
