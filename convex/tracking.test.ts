@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { convexTest } from "convex-test";
 import agentmail from "@agentmail/convex/test";
 import firecrawl from "@firecrawl/firecrawl-convex/test";
@@ -258,13 +258,25 @@ function limitedHarness() {
 }
 
 describe("tracking.overview: read budget at 40 purchases x 50 items x 30 checks (D93)", () => {
+  // D138/M04: both tests pass `now: NOW` to `api.tracking.overview`, which
+  // validates it against the server clock (`watches.assertCoarseNow`, +/-24 h).
+  // With the real clock this fixed NOW was a calendar time-bomb: green on
+  // 2026-09-21, red from 2026-09-22. Pin the clock to NOW. Date only (not
+  // timers), as readBudget.test.ts/dashboard.test.ts do: fully-faked timers
+  // starve the nested `ctx.runQuery` these tests measure inside `t.run`.
+  const NOW = Date.UTC(2026, 8, 21, 12);
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
+
   it(
     "does not overflow the 32,000-document transaction limit and reports truncated",
     async () => {
       const t = limitedHarness();
       const userId: Id<"users"> = await t.run((ctx) => ctx.db.insert("users", { name: "Heavy" }));
       const as = t.withIdentity({ subject: `${userId}|session` });
-      const NOW = Date.UTC(2026, 8, 21, 12);
       const DAY = 86_400_000;
       const HOUR = 3_600_000;
       const PURCHASES = 40;
@@ -351,7 +363,6 @@ describe("tracking.overview: read budget at 40 purchases x 50 items x 30 checks 
       const t = limitedHarness();
       const userId: Id<"users"> = await t.run((ctx) => ctx.db.insert("users", { name: "Heavy" }));
       const as = t.withIdentity({ subject: `${userId}|session` });
-      const NOW = Date.UTC(2026, 8, 21, 12);
       const DAY = 86_400_000;
       const HOUR = 3_600_000;
       const PURCHASES = 60;
