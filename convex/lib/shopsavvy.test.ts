@@ -6,6 +6,7 @@ import {
   MARKET_PARSE_MAX_POINTS_PER_OFFER,
   marketStats,
   MIN_OUTLIER_POINTS,
+  parseEnvelope,
   parseSnapshot,
   toCents,
   withoutOutliers,
@@ -332,6 +333,51 @@ describe("parseSnapshot", () => {
     expect(snap.offers[1].storeDomain).toBeNull();
     expect(snap.offers[2].productUrl).not.toBeNull();
     expect(snap.offers[2].storeDomain).toBe("shop.example");
+  });
+});
+
+/**
+ * QA-1 (P03, M1A): `parseSnapshot` folds three different provider answers into one `null`, and
+ * `market.lookup` used to read that `null` as "the key is unset" (`not_configured`), which the D71
+ * gate lets through, so every accepted price check paid for the same lookup again. `parseEnvelope`
+ * keeps them apart: the provider answering "no such product" is a legitimate empty result, and a
+ * body that is not an envelope at all is malformed (a terminal failure, like invalid JSON).
+ */
+describe("parseEnvelope (QA-1)", () => {
+  it("returns the snapshot for a real product envelope", () => {
+    const envelope = parseEnvelope(LIVE, NOW);
+    expect(envelope.kind).toBe("snapshot");
+    if (envelope.kind !== "snapshot") return;
+    expect(envelope.snapshot).toEqual(parseSnapshot(LIVE, NOW));
+  });
+
+  it("keeps a product with no offers as a snapshot (market.lookup turns zero points into empty_result)", () => {
+    const envelope = parseEnvelope({ success: true, data: [{ title_short: "x", offers: [] }] }, NOW);
+    expect(envelope.kind).toBe("snapshot");
+  });
+
+  it.each([
+    ["success:false", { success: false }],
+    ["success:false with an error message", { success: false, error: "Product not found" }],
+    ["success:false even when it also carries data", { success: false, data: [{ offers: [{ retailer: "Shop", price: 10 }] }] }],
+    ["data:[]", { success: true, data: [] }],
+    ["data:[] without a success flag", { data: [] }],
+    ["data:null", { success: true, data: null }],
+    ["no data field", { success: true }],
+  ])("reads %s as the provider's own empty answer", (_label, body) => {
+    expect(parseEnvelope(body, NOW)).toEqual({ kind: "empty" });
+  });
+
+  it.each([
+    ["null", null],
+    ["a string", "not an envelope"],
+    ["a number", 42],
+    ["a top-level array", [{ offers: [] }]],
+    ["data as a string", { success: true, data: "nope" }],
+    ["data as a number", { success: true, data: 7 }],
+    ["data[0] not an object", { success: true, data: ["nope"] }],
+  ])("reads %s as malformed, never as empty or as not configured", (_label, body) => {
+    expect(parseEnvelope(body, NOW)).toEqual({ kind: "malformed" });
   });
 });
 

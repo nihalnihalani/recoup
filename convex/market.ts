@@ -39,7 +39,7 @@ import { sanitizeError } from "./lib/errors";
 import { tryCharge, tryConsumeGlobalBudget } from "./lib/budget";
 import { cleanStoreUrl, FIND_MARKER, registrableHost, sameStore } from "./lib/offerMatch";
 import { WATCH_ROWS } from "./offers";
-import { parseSnapshot, flattenHistory, hostOf, type MarketSnapshot } from "./lib/shopsavvy";
+import { parseEnvelope, flattenHistory, hostOf, type MarketSnapshot } from "./lib/shopsavvy";
 import { marketState } from "./schema";
 import {
   DAILY_BUDGETS,
@@ -106,17 +106,32 @@ class ShopSavvyHttpError extends Error {
   }
 }
 
-/** The response body could not be trusted enough to parse: too large, or not valid JSON. */
+/** The response body could not be trusted enough to parse: too large, not valid JSON, or not a ShopSavvy envelope. */
 class MalformedResponseError extends Error {}
 
 /**
- * One live call. Returns null when the key is unset (the feature is simply
- * off) and throws on anything else, so the caller classifies the failure.
- * The body is read as text with a bounded length before it is ever parsed.
+ * What one `fetchSnapshot` call produced, short of a thrown failure. The three
+ * are deliberately distinct (QA-1, P03): only `not_configured` means the key is
+ * unset, and `requestLookup` lets that state through once a key exists, so
+ * recording a provider's empty answer as `not_configured` would pay for the
+ * same lookup again on every accepted price check.
  */
-export async function fetchSnapshot(productUrl: string, now: number): Promise<MarketSnapshot | null> {
+export type FetchOutcome =
+  | { kind: "not_configured" }
+  | { kind: "empty" }
+  | { kind: "snapshot"; snapshot: MarketSnapshot };
+
+/**
+ * One live call. Returns `not_configured` when the key is unset (the feature
+ * is simply off, and nothing was asked), `empty` when ShopSavvy answered that
+ * it has nothing for this product (`success: false`, or no `data`), and throws
+ * on anything else — HTTP errors, a body that is too large, not JSON, or not a
+ * ShopSavvy envelope — so the caller classifies the failure. The body is read
+ * as text with a bounded length before it is ever parsed.
+ */
+export async function fetchSnapshot(productUrl: string, now: number): Promise<FetchOutcome> {
   const key = process.env.SHOPSAVVY_API_KEY;
-  if (!key) return null;
+  if (!key) return { kind: "not_configured" };
 
   const { start, end } = historyRange(now);
   const url =
@@ -148,7 +163,9 @@ export async function fetchSnapshot(productUrl: string, now: number): Promise<Ma
   } catch {
     throw new MalformedResponseError("was not valid JSON");
   }
-  return parseSnapshot(body, now);
+  const envelope = parseEnvelope(body, now);
+  if (envelope.kind === "malformed") throw new MalformedResponseError("was not a ShopSavvy envelope");
+  return envelope;
 }
 
 /** 400/401/403/malformed -> give up; 429/5xx/timeout/network -> worth another attempt. */
@@ -519,27 +536,21 @@ export const lookup = internalAction({
     }
 
     const now = Date.now();
-    let snapshot: MarketSnapshot | null = null;
-    let fetchError: "retryable_failure" | "terminal_failure" | null = null;
+    let fetched: FetchOutcome | { kind: "failed"; failure: "retryable_failure" | "terminal_failure" };
     try {
-      snapshot = await fetchSnapshot(watch.productUrl, now);
+      fetched = await fetchSnapshot(watch.productUrl, now);
     } catch (err) {
-      fetchError = classifyFetchError(err);
+      fetched = { kind: "failed", failure: classifyFetchError(err) };
       // T24c (D109): structured, redacted line instead of a bare console.error -- marketNote (what
       // the user sees) is always the fixed copy regardless; this is operator-only.
       logEvent("market_failed", { watchId, error: sanitizeError(err instanceof Error ? err.message : String(err)) });
     }
 
-    if (fetchError !== null) {
+    if (fetched.kind === "failed") {
       const nextAttempts = watch.attempts + 1;
-      const outcome = fetchError === "retryable_failure" && nextAttempts < MARKET_MAX_ATTEMPTS ? "retryable_failure" : "terminal_failure";
-      // F9 (D103): with MARKET_MAX_ATTEMPTS = 3, only MARKET_RETRY_BACKOFF_MS[0] (10m) and [1] (1h) are
-      // ever read here -- the 3rd attempt's `nextAttempts` (3) already fails `< MARKET_MAX_ATTEMPTS`
-      // above and goes straight to terminal_failure, so index [2] (6h) is presently dead. D71's own
-      // description ("3 attempts with 10m/1h/6h backoff") promises all three are reachable; today only
-      // two are. This file does not own limits.ts, so it cannot change either constant -- see the task
-      // report's "known gaps"/limits.ts-edit note for the recommended fix (raise MARKET_MAX_ATTEMPTS to
-      // 4, which the backoff array already has enough entries for).
+      const outcome = fetched.failure === "retryable_failure" && nextAttempts < MARKET_MAX_ATTEMPTS ? "retryable_failure" : "terminal_failure";
+      // F9 (D103) / D105: MARKET_MAX_ATTEMPTS is 4, so the 1st, 2nd and 3rd failures read
+      // MARKET_RETRY_BACKOFF_MS[0..2] (10m/1h/6h, D71) and the 4th goes straight to terminal_failure.
       const nextRetryAt = outcome === "retryable_failure" ? now + MARKET_RETRY_BACKOFF_MS[watch.attempts] : undefined;
       await ctx.runMutation(internal.market.recordSnapshot, {
         watchId,
@@ -555,13 +566,26 @@ export const lookup = internalAction({
       return null;
     }
 
-    if (snapshot === null) {
-      // The key was unset. Reachable in steady state only during the T12 rewiring window (watches.ts
-      // still calling `lookup` directly, see the file header); requestLookup already handles this
-      // branch for every caller that goes through the claim.
+    if (fetched.kind === "not_configured") {
+      // The key is genuinely unset (nothing was asked). `requestLookup` already refuses before any
+      // charge in that case, so this is reachable only if the key was removed between the claim and
+      // this run, or through the T12 rewiring window (a direct `lookup` call, see the file header).
+      // Never stamps `marketFetchedAt` (recordSnapshot), so a key added later runs a lookup (D60/D71).
       await ctx.runMutation(internal.market.recordSnapshot, { watchId, outcome: "not_configured", points: [], stores: [] });
       return null;
     }
+
+    if (fetched.kind === "empty") {
+      // QA-1 (P03): the key is set and ShopSavvy answered that it has nothing for this product
+      // (`success: false`, or no `data`). That is a legitimate empty result -- a retrieval that
+      // happened -- not `not_configured`: recording it as the latter let `requestLookup` pay for the
+      // same lookup again on every accepted price check, and told the user the deployment was not set
+      // up. `empty_result` is terminal for now under D71/D96: the automatic path never re-requests it,
+      // and only a manual refresh (per-user budget) can ask again.
+      await ctx.runMutation(internal.market.recordSnapshot, { watchId, outcome: "empty_result", points: [], stores: [] });
+      return null;
+    }
+    const snapshot = fetched.snapshot;
 
     // Reduced to a registrable host (T13/P04): `hostOf` alone returns the full hostname (e.g.
     // `shop.acme.example`), which would never equal a candidate store's already-registrable

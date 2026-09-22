@@ -298,6 +298,238 @@ describe("empty result", () => {
   });
 });
 
+/**
+ * QA-1 (P03 residual, M1A). With the key set, ShopSavvy answering "no such product" (HTTP 200 with
+ * `success:false`, or `data:[]`) used to be stamped `not_configured` -- a state the D71 gate lets
+ * through -- so every accepted price check paid for the same lookup again until the user's daily cap
+ * ran out, and the note blamed the deployment. It is the provider's own empty answer: `empty_result`,
+ * which D71/D96's refresh policy never re-requests automatically (a manual refresh may retry it at
+ * once, bounded by the per-user budget).
+ */
+describe("provider has no such product (QA-1)", () => {
+  const NO_PRODUCT: Array<[string, unknown]> = [
+    ["success:false", { success: false, error: "Product not found" }],
+    ["data:[]", { success: true, data: [] }],
+  ];
+
+  /** An accepted own-store price check -- the real caller of `requestLookup(trigger: "auto")`. */
+  function acceptedCheck(watchId: Id<"watches">) {
+    return {
+      watchId,
+      sourceUrl: URL,
+      observedCents: 10_000,
+      currency: "USD",
+      confidence: 0.92,
+      isRange: false,
+      variantMatch: "exact" as const,
+    };
+  }
+
+  it.each(NO_PRODUCT)("key set + %s -> empty_result (a retrieval), not not_configured", async (_label, body) => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(body)));
+
+    await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
+    await t.finishAllScheduledFunctions(vi.runAllTimers); // drains the claimed lookup job
+
+    const row = await watchRow(t, watchId);
+    expect(row.marketState).toBe("empty_result");
+    expect(row.marketNote).toBe("ShopSavvy has no price history for this product");
+    expect(row.marketFetchedAt).toBe(T0); // the provider was asked and answered: that is a retrieval
+    expect(row.marketAttempts).toBe(0);
+    expect(row.marketNextRetryAt).toBeUndefined();
+    expect(await marketRows(t, watchId)).toHaveLength(0);
+    expect(await offerRows(t, watchId)).toHaveLength(0);
+    expect(await scheduled(t)).toHaveLength(0); // no retry of any kind
+  });
+
+  it.each(NO_PRODUCT)(
+    "key set + %s: the next accepted checks neither schedule nor charge another lookup",
+    async (_label, body) => {
+      const t = setup();
+      const { userId } = await signedIn(t);
+      const watchId = await seedWatch(t, userId);
+      process.env.SHOPSAVVY_API_KEY = "test-key";
+      const fetchSpy = vi.fn(async () => jsonResponse(body));
+      vi.stubGlobal("fetch", fetchSpy);
+
+      await t.mutation(internal.watches.recordWatchCheck, acceptedCheck(watchId));
+      await t.finishAllScheduledFunctions(vi.runAllTimers);
+      expect((await watchRow(t, watchId)).marketState).toBe("empty_result");
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+      // Two more accepted checks the same day (the sweep's cadence would produce these on its own).
+      for (let i = 0; i < 2; i++) {
+        await t.mutation(internal.watches.recordWatchCheck, acceptedCheck(watchId));
+        await t.finishAllScheduledFunctions(vi.runAllTimers);
+      }
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(await usageCount(t, userId, "market_lookup")).toBe(1);
+      expect(await usageCount(t, undefined, "market_lookup")).toBe(1);
+      expect((await watchRow(t, watchId)).marketState).toBe("empty_result");
+      expect(await scheduled(t)).toHaveLength(0);
+    },
+  );
+
+  it("an explicit auto request after empty_result is refused before any charge (D71 gate)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ success: false })));
+
+    await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
+    await t.action(internal.market.lookup, { watchId });
+    expect(await usageCount(t, userId, "market_lookup")).toBe(1);
+
+    const auto = await t.mutation(internal.market.requestLookup, { watchId, trigger: "auto" });
+    expect(auto).toEqual({ scheduled: false, state: "empty_result", reason: "empty_result" });
+    expect(await usageCount(t, userId, "market_lookup")).toBe(1);
+    expect(await usageCount(t, undefined, "market_lookup")).toBe(1);
+  });
+
+  it("a manual refresh may still retry an empty_result at once, and is charged for it (D96)", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    const fetchSpy = vi.fn(async () => jsonResponse({ success: true, data: [] }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
+    await t.action(internal.market.lookup, { watchId });
+    expect((await watchRow(t, watchId)).marketState).toBe("empty_result");
+
+    // ShopSavvy has since indexed the product.
+    fetchSpy.mockResolvedValue(jsonResponse(bodyWithOnePoint()));
+    expect(await as.mutation(api.market.refresh, { watchId })).toEqual({ scheduled: true, state: "queued" });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    expect((await watchRow(t, watchId)).marketState).toBe("success");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(await usageCount(t, userId, "market_lookup")).toBe(2);
+  });
+
+  it("key unset -> not_configured with no charge; once the key is added, the next accepted check runs a lookup (D60/D71)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    const fetchSpy = vi.fn(async () => jsonResponse({ success: true, data: [] }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await t.mutation(internal.watches.recordWatchCheck, acceptedCheck(watchId));
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const unconfigured = await watchRow(t, watchId);
+    expect(unconfigured.marketState).toBe("not_configured");
+    expect(unconfigured.marketFetchedAt).toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await usageCount(t, userId, "market_lookup")).toBe(0);
+
+    // A second accepted check with the key still unset stays not_configured and still costs nothing.
+    await t.mutation(internal.watches.recordWatchCheck, acceptedCheck(watchId));
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await usageCount(t, userId, "market_lookup")).toBe(0);
+
+    // The operator adds the key: not_configured never blocks, so the next accepted check looks up.
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    await t.mutation(internal.watches.recordWatchCheck, acceptedCheck(watchId));
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(await usageCount(t, userId, "market_lookup")).toBe(1);
+    expect((await watchRow(t, watchId)).marketState).toBe("empty_result");
+
+    // ...and that provider-empty answer is not paid for again by the check after it.
+    await t.mutation(internal.watches.recordWatchCheck, acceptedCheck(watchId));
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(await usageCount(t, userId, "market_lookup")).toBe(1);
+  });
+
+  it("a retryable failure still follows the backoff, and a provider-empty answer on the retry ends the chain as empty_result", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    const fetchSpy = vi.fn();
+    fetchSpy.mockResolvedValueOnce(jsonResponse({}, 503));
+    fetchSpy.mockResolvedValueOnce(jsonResponse({ success: false }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
+    await t.action(internal.market.lookup, { watchId });
+    const failed = await watchRow(t, watchId);
+    expect(failed.marketState).toBe("retryable_failure");
+    expect(failed.marketAttempts).toBe(1);
+    expect(failed.marketNextRetryAt).toBe(T0 + MARKET_RETRY_BACKOFF_MS[0]);
+    // The automatic continuation is scheduled for exactly the backoff, not sooner. (The job the claim
+    // scheduled for `lookup` is also still pending here, because this test ran `lookup` directly; it
+    // no-ops when drained, since `markRunning` only moves a `queued` watch.)
+    const retries = (await scheduled(t)).filter((j) => String(j.name).includes("requestLookup"));
+    expect(retries).toHaveLength(1);
+    expect(retries[0].scheduledTime).toBe(T0 + MARKET_RETRY_BACKOFF_MS[0]);
+
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const row = await watchRow(t, watchId);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(row.marketState).toBe("empty_result");
+    expect(row.marketAttempts).toBe(0); // F9 (D103): an empty_result closes the failure cycle
+    expect(row.marketNextRetryAt).toBeUndefined();
+    expect(await scheduled(t)).toHaveLength(0);
+  });
+});
+
+describe("classification of the remaining transport outcomes (P03 coverage gaps from the QA baseline)", () => {
+  it.each([
+    ["a JSON body that is not an envelope", () => jsonResponse("not an envelope")],
+    ["an envelope whose data is not a product", () => jsonResponse({ success: true, data: "nope" })],
+    ["a small invalid-JSON body", () => new Response("{not json", { status: 200 })],
+    ["HTTP 400", () => jsonResponse({}, 400)],
+    ["HTTP 401", () => jsonResponse({}, 401)],
+    ["HTTP 403", () => jsonResponse({}, 403)],
+  ])("%s -> terminal_failure, never not_configured, with no automatic retry", async (_label, respond) => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    vi.stubGlobal("fetch", vi.fn(async () => respond()));
+
+    await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
+    await t.finishAllScheduledFunctions(vi.runAllTimers); // drains the claimed lookup job
+
+    const row = await watchRow(t, watchId);
+    expect(row.marketState).toBe("terminal_failure");
+    expect(row.marketNote).toBe("Market history is unavailable for this product");
+    expect(await scheduled(t)).toHaveLength(0);
+    const auto = await t.mutation(internal.market.requestLookup, { watchId, trigger: "auto" });
+    expect(auto).toEqual({ scheduled: false, state: "terminal_failure", reason: "terminal_failure" });
+  });
+
+  it.each([
+    ["a network failure", () => Promise.reject(new TypeError("fetch failed"))],
+    ["a timeout", () => Promise.reject(new DOMException("The operation timed out.", "TimeoutError"))],
+  ])("%s -> retryable_failure with the first backoff step", async (_label, fail) => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    vi.stubGlobal("fetch", vi.fn(fail));
+
+    await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
+    await t.action(internal.market.lookup, { watchId });
+
+    const row = await watchRow(t, watchId);
+    expect(row.marketState).toBe("retryable_failure");
+    expect(row.marketAttempts).toBe(1);
+    expect(row.marketNextRetryAt).toBe(T0 + MARKET_RETRY_BACKOFF_MS[0]);
+  });
+});
+
 describe("OUT_OF_STOCK_NOTE (D102)", () => {
   it("is exported, and stays literally equal to src/lib/offerNotes.ts's UI copy", () => {
     // D102: exported so this string can be VERIFIED against the frontend's copy by a test, instead of

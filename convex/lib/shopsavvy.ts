@@ -178,23 +178,59 @@ function parsePoints(raw: unknown, now: number): MarketPoint[] {
 }
 
 /**
+ * What one ShopSavvy response body says, kept apart so the caller never has to
+ * guess (QA-1, P03):
+ *  - `snapshot`: a product envelope (possibly with no usable offers — the
+ *    caller decides what zero points means);
+ *  - `empty`: the provider's own "nothing for that product" answer —
+ *    `success: false`, or a `data` that is absent, `null` or `[]`. A
+ *    legitimate empty result, not a failure and never "not configured";
+ *  - `malformed`: not an envelope at all (a non-object or top-level array
+ *    root, or a `data` that is neither a product object nor a list starting
+ *    with one) — the same class as a body that is not JSON.
+ */
+export type ShopSavvyEnvelope =
+  | { kind: "snapshot"; snapshot: MarketSnapshot }
+  | { kind: "empty" }
+  | { kind: "malformed" };
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
  * Reads the `{ success, data: [...] }` envelope. Anything malformed is dropped
  * rather than guessed at: a missing price is not the same as a free product.
  * An explicit `success: false` is trusted over any `data` the same body might
- * also carry — the provider is telling us the call failed.
+ * also carry — the provider is telling us it has nothing to give for this
+ * request, so none of that data is read.
  *
  * `now` bounds every timestamp found inside (see `epoch`); it defaults to
  * `Date.now()` because only actions call this without passing one explicitly.
  */
-export function parseSnapshot(body: unknown, now: number = Date.now()): MarketSnapshot | null {
-  if (typeof body !== "object" || body === null) return null;
-  const root = body as Record<string, unknown>;
-  if (root.success === false) return null;
-  const data = root.data;
-  const product = Array.isArray(data) ? data[0] : data;
-  if (typeof product !== "object" || product === null) return null;
-  const p = product as Record<string, unknown>;
+export function parseEnvelope(body: unknown, now: number = Date.now()): ShopSavvyEnvelope {
+  if (!isPlainRecord(body)) return { kind: "malformed" };
+  if (body.success === false) return { kind: "empty" };
+  const data = body.data;
+  if (data === undefined || data === null) return { kind: "empty" };
+  if (Array.isArray(data) && data.length === 0) return { kind: "empty" };
+  const product: unknown = Array.isArray(data) ? data[0] : data;
+  if (!isPlainRecord(product)) return { kind: "malformed" };
+  return { kind: "snapshot", snapshot: readProduct(product, now) };
+}
 
+/**
+ * The snapshot inside a product envelope, or null for every other answer
+ * (empty or malformed alike). Callers that must tell those two apart — as
+ * `convex/market.ts` must, to avoid recording a provider's empty answer as
+ * anything else — use `parseEnvelope` instead.
+ */
+export function parseSnapshot(body: unknown, now: number = Date.now()): MarketSnapshot | null {
+  const envelope = parseEnvelope(body, now);
+  return envelope.kind === "snapshot" ? envelope.snapshot : null;
+}
+
+function readProduct(p: Record<string, unknown>, now: number): MarketSnapshot {
   const rawOffers = Array.isArray(p.offers) ? p.offers : [];
   const offers: MarketOffer[] = [];
   for (const entry of rawOffers.slice(0, MARKET_PARSE_MAX_OFFERS)) {
