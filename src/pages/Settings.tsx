@@ -14,6 +14,7 @@ import {
   fetchAllRows,
 } from "../lib/accountExport";
 import { ErrorBox, Loading } from "../components/States";
+import { HeldRefund } from "../components/attention/HeldRefund";
 import {
   errorText,
   inputClass,
@@ -61,6 +62,7 @@ function SettingsContent() {
   const ensureInbox = useAction(api.profiles.ensureInbox);
   const paste = useAction(api.intake.paste);
   const retryEvent = useMutation(api.intake.retryEvent);
+  const confirmRefundEmail = useMutation(api.intake.confirmRefundEmail);
   const requestDeletion = useMutation(api.account.requestDeletion);
   const convex = useConvex();
   const { signOut } = useAuthActions();
@@ -403,12 +405,24 @@ function SettingsContent() {
                             aria-hidden="true"
                             className={`size-2 rounded-full ${event.status === "failed" ? "bg-red-500" : "bg-yellow-500"}`}
                           />
-                          {event.status === "failed" ? "Failed" : "Needs review"}
+                          {event.status === "failed"
+                            ? "Failed"
+                            : event.refundAwaitingConfirmation
+                              ? "Needs your confirmation"
+                              : "Needs review"}
                         </span>
                       </td>
                       <td className="min-w-64 px-3 py-3 text-gray-900">
                         {/* F-T16-3: `lastError` is always undefined on the wire now (T16); `errorSummary` is the real sanitized projection. */}
                         {event.summary ?? event.errorSummary ?? "No detail recorded."}
+                        {/* DA-B-3: a refund email Recoup cannot authenticate waits for the user's one tap. */}
+                        {event.refundAwaitingConfirmation && (
+                          <HeldRefund
+                            eventId={event._id}
+                            refund={event.pendingRefund}
+                            onConfirm={(processedEventId) => confirmRefundEmail({ processedEventId })}
+                          />
+                        )}
                       </td>
                       <td className="whitespace-nowrap px-3 py-3 text-gray-500">
                         {event.kind}
@@ -417,7 +431,8 @@ function SettingsContent() {
                       <td className="px-3 py-3 text-right tabular-nums text-gray-500">{event.attempts}</td>
                       <td className="whitespace-nowrap px-3 py-3 text-gray-500">{when(event._creationTime)}</td>
                       <td className="px-3 py-3 text-right">
-                        {event.status === "failed" && (
+                        {/* Never a retry for a held refund: it would pay for a new extraction and change nothing. */}
+                        {event.status === "failed" && !event.refundAwaitingConfirmation && (
                           <button
                             type="button"
                             onClick={() => void handleRetry(event._id)}

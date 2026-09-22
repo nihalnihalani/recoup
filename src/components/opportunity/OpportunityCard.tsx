@@ -320,7 +320,17 @@ function NextStep({
 
   let primary: ReactNode = null;
   let text: string | null = null;
-  if (claimId !== undefined) {
+  if (action?.kind === "review_amount") {
+    // DA-B-2: the facts changed under an open claim and the claim now asks more than the rule computes.
+    text =
+      `Your open claim asks for ${formatMinor(action.claimedMinor, action.currency)}, more than the current estimate of ` +
+      `${formatMinor(action.estimateMinor, action.currency)}. Review the amount on the claim before you send it.`;
+    primary = (
+      <Link to={`/claims/${action.claimId}`} className={primaryButtonClass}>
+        Review the claim amount
+      </Link>
+    );
+  } else if (claimId !== undefined) {
     primary = (
       <Link to={`/claims/${claimId}`} className={primaryButtonClass}>
         Open the claim

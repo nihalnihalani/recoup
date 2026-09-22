@@ -10,10 +10,11 @@ import { StatusSteps } from "../components/charts/StatusSteps";
 import { WindowMeter } from "../components/charts/WindowMeter";
 import { Card, StatLabel } from "../components/claim/Card";
 import { Composer, PacketRow } from "../components/claim/Composer";
+import { CreditLandedForm } from "../components/claim/CreditLandedForm";
 import { MoneyForm } from "../components/claim/MoneyForm";
 import { ClaimTimeline } from "../components/claim/Timelines";
 import { DeltaBadge } from "../components/DeltaBadge";
-import { fmt } from "../lib/money";
+import { fmt, formatMinor } from "../lib/money";
 import { Empty, ErrorBox, Loading } from "../components/States";
 import { bigNumberClass, day, errorText, pageTitleClass, secondaryButtonClass, when } from "../lib/ui";
 
@@ -21,19 +22,33 @@ type ClaimData = FunctionReturnType<typeof api.claims.get>;
 type Overview = FunctionReturnType<typeof api.tracking.overview>;
 type TrackedItem = Overview["items"][number];
 
-/** The headline figure changes meaning with the claim's state; the label says which. */
+/**
+ * The headline figure changes meaning with the claim's state; the label says which. An open claim is what the user
+ * ASKED for, never "owed" (DA-B-9, mission §20): whether anything is owed is the authority's question (a store's
+ * price-adjustment policy is a promise the business made, not a law), and the recovery-path card carries that.
+ */
 function headline(
   status: ClaimData["claim"]["status"],
   balance: ClaimData["balance"],
 ): { label: string; cents: number; tone: string } {
   if (status === "confirmed") {
-    return { label: "Back on your card", cents: balance.confirmed - balance.debited, tone: "text-green-700!" };
+    return { label: "Back to your card or account", cents: balance.confirmed - balance.debited, tone: "text-green-700!" };
   }
   if (status === "dismissed") {
     return { label: "Dismissed", cents: balance.unresolved, tone: "text-gray-400! line-through" };
   }
-  return { label: "Owed to you", cents: balance.unresolved, tone: "" };
+  return { label: "You asked for", cents: balance.unresolved, tone: "" };
 }
+
+const NON_CASH_WORDS: Record<ClaimData["nonCashRemedies"][number]["kind"], string> = {
+  voucher: "Store credit or gift card",
+  points: "Points",
+  repair: "Repair",
+  replacement: "Replacement",
+  service_credit: "Service credit",
+  fee_waiver: "Fee waiver",
+  other: "Non-cash remedy",
+};
 
 function Figure({ label, cents, currency }: { label: string; cents?: number; currency: string }) {
   return (
@@ -73,6 +88,7 @@ export default function Claim() {
 
   const generate = useAction(api.drafts.generate);
   const confirmCredit = useMutation(api.claims.confirmCredit);
+  const recordNonCashRemedy = useMutation(api.claims.recordNonCashRemedy);
   const recordLaterDebit = useMutation(api.claims.recordLaterDebit);
   const dismiss = useMutation(api.claims.dismiss);
 
@@ -83,7 +99,7 @@ export default function Claim() {
   if (!claimId) return <Empty title="No claim selected" />;
   if (data === undefined) return <Loading rows={4} />;
 
-  const { claim, item, purchase, balance, drafts, replies, followUps, notes, policy, events } = data;
+  const { claim, item, purchase, balance, drafts, replies, followUps, notes, policy, events, nonCashRemedies } = data;
   const currency = purchase?.currency ?? "USD";
   const latestDraft = drafts[0];
   const pendingFollowUp = followUps.find((followUp) => followUp.status === "pending");
@@ -214,6 +230,25 @@ export default function Claim() {
               <Figure label="Confirmed" cents={balance.confirmed} currency={currency} />
               <Figure label="Charged again" cents={balance.debited} currency={currency} />
             </dl>
+            {nonCashRemedies.length > 0 && (
+              <div className="mt-4 border-t border-dashed border-gray-200 pt-4">
+                <p className="text-xs text-gray-600">Non-cash, not counted as money back</p>
+                <ul className="mt-1.5 space-y-1 text-sm text-gray-900">
+                  {nonCashRemedies.map((remedy) => (
+                    <li key={remedy._id} className="flex flex-wrap justify-between gap-x-3">
+                      <span>
+                        {NON_CASH_WORDS[remedy.kind]} · {remedy.state === "received" ? "received" : "promised"}
+                      </span>
+                      {remedy.faceValue && (
+                        <span className="tabular-nums text-gray-700">
+                          {formatMinor(remedy.faceValue.amountMinor, remedy.faceValue.currency)} face value
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </Card>
         </div>
 
@@ -261,16 +296,23 @@ export default function Claim() {
 
           <Card title="Record money" icon="card">
             <div className="space-y-3">
-              <MoneyForm
-                title="Credit landed"
-                submitLabel="Confirm credit"
-                tone="credit"
+              <CreditLandedForm
                 currency={currency}
-                onSubmit={(cents, evidence, idempotencyKey) =>
+                onCash={(cents, evidence, idempotencyKey) =>
                   confirmCredit({
                     claimId: claim._id,
                     cents,
                     evidence: evidence || "Confirmed by the customer",
+                    idempotencyKey,
+                  })
+                }
+                onNonCash={({ kind, description, faceValueMinor, idempotencyKey }) =>
+                  recordNonCashRemedy({
+                    claimId: claim._id,
+                    kind,
+                    description,
+                    ...(faceValueMinor !== undefined ? { faceValue: { amountMinor: faceValueMinor, currency } } : {}),
+                    state: "received",
                     idempotencyKey,
                   })
                 }

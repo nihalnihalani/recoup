@@ -27,8 +27,10 @@ test.describe("claims", () => {
     await expect(leadPage.getByRole("heading", { name: "E2E claim item", level: 1 })).toBeVisible();
   });
 
-  test("the claim page shows what is owed and no draft has been written yet", async ({ leadPage: page }) => {
-    await expect(page.getByText("Owed to you")).toBeVisible();
+  test("the claim page shows what was asked for and no draft has been written yet", async ({ leadPage: page }) => {
+    // DA-B-9: an open claim is what the user asked for, never "owed".
+    await expect(page.getByText("You asked for")).toBeVisible();
+    await expect(page.getByText("Owed to you")).toHaveCount(0);
     await expect(page.getByText("$25.00").first()).toBeVisible();
 
     const messageCard = page.locator("section").filter({ has: page.getByRole("heading", { name: "Message to the store", level: 2 }) });
@@ -84,6 +86,8 @@ test.describe("claims", () => {
     const moneyCard = page.locator("section").filter({ has: page.getByRole("heading", { name: "Record money", level: 2 }) });
     const creditForm = moneyCard.locator("details").filter({ has: page.getByText("Credit landed") });
     await creditForm.locator("summary").click();
+    // DA-B-10: the form asks how it came back; only this answer is a cash credit.
+    await creditForm.getByRole("radio", { name: /To my card or original payment/ }).check();
     await creditForm.getByLabel(/^Amount/).fill("15.00");
     await creditForm.getByLabel("Where you saw it").fill("Card statement, E2E test");
     await creditForm.getByRole("button", { name: "Confirm credit" }).click();
