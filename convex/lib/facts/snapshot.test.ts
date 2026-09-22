@@ -120,9 +120,11 @@ describe("legacyRetailRows (contract §2.5 legacy adapter)", () => {
 describe("snapshotHash (DA-A-15: values, never row ids)", () => {
   it("same value re-confirmed → same hash", async () => {
     const once = [stored("txn", "retail.currency", "user_confirmed", { kind: "code", code: "USD" }, CREATED + 10)];
+    // Re-confirmed on a NEW row (new id, new time, a different cited document): only the value is hashed.
+    const again = stored("txn", "retail.currency", "user_confirmed", { kind: "code", code: "USD" }, CREATED + 99);
     const twice = [
       { ...once[0], row: { ...once[0].row, state: "superseded" as const } },
-      stored("txn", "retail.currency", "user_confirmed", { kind: "code", code: "USD" }, CREATED + 99),
+      { ...again, row: { ...again.row, source: { kind: "evidence" as const, ref: "ev-2" } } },
     ];
     const a = await snapshotHash(buildRetailSnapshot(input(legacy(), once)));
     const b = await snapshotHash(buildRetailSnapshot(input(legacy(), twice)));
