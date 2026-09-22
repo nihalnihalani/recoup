@@ -16,6 +16,7 @@ const calls: string[] = [];
 const prepareSend = vi.fn(async (_args: Call): Promise<unknown> => ({ ok: true, preparedHash: "hash-1", findings: [] }));
 const approveAndSend = vi.fn(async (_args: Call): Promise<unknown> => "outbound-1");
 const resendAfterUnknown = vi.fn(async (_args: Call): Promise<unknown> => ({ ok: true, outboundId: "outbound-2", draftId: "d2" }));
+const adjustExpected = vi.fn(async (_args: Call): Promise<unknown> => null);
 const ensureInbox = vi.fn(async () => null);
 let sendStatus: unknown = null;
 
@@ -33,6 +34,7 @@ vi.mock("convex/react", () => ({
     if (name === "drafts:prepareSend") return tracked("prepareSend", prepareSend);
     if (name === "drafts:approveAndSend") return tracked("approveAndSend", approveAndSend);
     if (name === "drafts:resendAfterUnknown") return tracked("resendAfterUnknown", resendAfterUnknown);
+    if (name === "claims:adjustExpected") return tracked("adjustExpected", adjustExpected);
     return vi.fn(async () => null);
   },
   useAction: () => ensureInbox,
@@ -80,6 +82,8 @@ beforeEach(() => {
   approveAndSend.mockImplementation(async () => "outbound-1");
   resendAfterUnknown.mockReset();
   resendAfterUnknown.mockImplementation(async () => ({ ok: true, outboundId: "outbound-2", draftId: "d2" }));
+  adjustExpected.mockReset();
+  adjustExpected.mockImplementation(async () => null);
 });
 
 const approve = () => fireEvent.click(screen.getByRole("button", { name: "Approve & send" }));
@@ -218,5 +222,55 @@ describe("Composer: after an unknown outcome (S-M03-1, DA-A-31)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Send anyway — the store's price-adjustment window may have passed" }));
     await waitFor(() => expect(resendAfterUnknown).toHaveBeenCalledTimes(2));
     expect(resendAfterUnknown.mock.calls[1][0]).toMatchObject({ acknowledgeWindowRisk: true });
+  });
+});
+
+// M13b (D190/D194, DA-B-2): a claim asking more than Recoup's exact estimate — adjust, or send the full amount
+// knowingly; nothing is sent until the user picks one.
+describe("Composer: amount_exceeds_estimate (DA-B-2)", () => {
+  const exceeds = async () => ({
+    ok: false,
+    code: "amount_exceeds_estimate",
+    message: "This claim asks USD 50.00; Recoup's current estimate is USD 25.00.",
+    estimate: { amountMinor: 2_500, currency: "USD" },
+  });
+  const usd = (minor: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(minor / 100);
+
+  it("shows both amounts and sends nothing until the user chooses", async () => {
+    prepareSend.mockImplementationOnce(exceeds);
+    renderComposer(draft(), claim({ expectedCents: 5_000 }));
+    approve();
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(`This claim asks ${usd(5_000)}; Recoup's current estimate is ${usd(2_500)}.`);
+    expect(screen.getByRole("button", { name: `Adjust to ${usd(2_500)}` })).toBeDefined();
+    expect(screen.getByRole("button", { name: `Send ${usd(5_000)} anyway` })).toBeDefined();
+    expect(approveAndSend).not.toHaveBeenCalled();
+    expect(adjustExpected).not.toHaveBeenCalled();
+  });
+
+  it('"Send … anyway" re-prepares and sends with the amount acknowledgment', async () => {
+    prepareSend.mockImplementationOnce(exceeds);
+    renderComposer(draft(), claim({ expectedCents: 5_000 }));
+    approve();
+    fireEvent.click(await screen.findByRole("button", { name: `Send ${usd(5_000)} anyway` }));
+    await waitFor(() => expect(approveAndSend).toHaveBeenCalledTimes(1));
+    expect(prepareSend.mock.calls[1][0]).toMatchObject({ acknowledgeAmountAboveEstimate: true });
+    expect(approveAndSend.mock.calls[0][0]).toMatchObject({ acknowledgeAmountAboveEstimate: true, preparedHash: "hash-1" });
+    expect(adjustExpected).not.toHaveBeenCalled();
+  });
+
+  it('"Adjust to …" calls adjustExpected with the estimate, then re-prepares without acknowledging the old amount', async () => {
+    prepareSend.mockImplementationOnce(exceeds);
+    // After the adjustment the draft's claim version is stale, so the review asks for a new draft; nothing is sent.
+    prepareSend.mockImplementationOnce(async () => ({ ok: false, code: "binding_changed", message: "The claim changed since this draft was written." }));
+    renderComposer(draft(), claim({ expectedCents: 5_000 }));
+    approve();
+    fireEvent.click(await screen.findByRole("button", { name: `Adjust to ${usd(2_500)}` }));
+    await waitFor(() => expect(prepareSend).toHaveBeenCalledTimes(2));
+    expect(adjustExpected.mock.calls[0][0]).toMatchObject({ claimId: "c1", expectedCents: 2_500 });
+    expect(calls).toEqual(["prepareSend", "adjustExpected", "prepareSend"]);
+    expect(prepareSend.mock.calls[1][0]).not.toHaveProperty("acknowledgeAmountAboveEstimate");
+    expect((await screen.findByRole("alert")).textContent).toContain("Review the claim again");
+    expect(approveAndSend).not.toHaveBeenCalled();
   });
 });

@@ -26,6 +26,7 @@ import type * as intake from "../intake.js";
 import type * as lib_access from "../lib/access.js";
 import type * as lib_accountState from "../lib/accountState.js";
 import type * as lib_ai from "../lib/ai.js";
+import type * as lib_amountReview from "../lib/amountReview.js";
 import type * as lib_authMail from "../lib/authMail.js";
 import type * as lib_authMigrate from "../lib/authMigrate.js";
 import type * as lib_balance from "../lib/balance.js";
@@ -128,6 +129,7 @@ declare const fullApi: ApiFromModules<{
   "lib/access": typeof lib_access;
   "lib/accountState": typeof lib_accountState;
   "lib/ai": typeof lib_ai;
+  "lib/amountReview": typeof lib_amountReview;
   "lib/authMail": typeof lib_authMail;
   "lib/authMigrate": typeof lib_authMigrate;
   "lib/balance": typeof lib_balance;
