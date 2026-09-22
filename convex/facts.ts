@@ -1,12 +1,13 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
 import { cellStatus, factValue } from "./schema";
 import { ownedTransaction, requireUserId } from "./lib/access";
-import { getFactSpec } from "./lib/facts/catalog";
+import { getFactSpec, type FactSpec } from "./lib/facts/catalog";
 import { loadRetailSnapshot } from "./lib/facts/legacyRetail";
 import { resolveCell, type Cell, type CellSource, type ResolveRow } from "./lib/facts/resolve";
 import { putFact, readLiveFacts, toResolveRow } from "./lib/facts/write";
+import { rateLimiter } from "./lib/rateLimits";
 
 const sourceView = v.object({
   kind: v.union(
@@ -36,14 +37,24 @@ export const cellView = v.object({
     }),
   ),
   capsOutcomeAt: v.union(v.literal("likely_eligible"), v.null()),
-  /** Whether the user may answer this key (a question is shown only then). */
+  /** Whether the user may state this key (a question is shown only then). */
   userAssertable: v.boolean(),
+  /**
+   * M11b: where the user states it — `purchases.confirm` for a key the purchase record backs (edit the purchase),
+   * `facts.answer` otherwise. Absent when the user cannot state it.
+   */
+  answerVia: v.optional(v.union(v.literal("facts.answer"), v.literal("purchases.confirm"))),
   question: v.optional(v.object({ prompt: v.string(), why: v.string(), sensitive: v.optional(v.boolean()) })),
 });
 
 const src = (s: CellSource) => (s.ref === undefined ? { kind: s.kind } : { kind: s.kind, ref: s.ref });
 
-function toView(c: Cell) {
+/** M11b: on a purchase-backed transaction, a `purchase_record` key is edited on the purchase, not answered here. */
+function backedByPurchase(txn: Doc<"transactions">, spec: FactSpec): boolean {
+  return txn.purchaseId !== undefined && spec.sourceOfTruth === "purchase_record";
+}
+
+function toView(txn: Doc<"transactions">, c: Cell) {
   const spec = getFactSpec(c.key);
   const common = {
     subjectKey: c.subjectKey,
@@ -51,7 +62,9 @@ function toView(c: Cell) {
     status: c.status,
     capsOutcomeAt: c.capsOutcomeAt,
     userAssertable: spec?.userAssertable ?? false,
-    ...(spec?.userAssertable ? { question: spec.question } : {}),
+    ...(spec?.userAssertable
+      ? { question: spec.question, answerVia: backedByPurchase(txn, spec) ? ("purchases.confirm" as const) : ("facts.answer" as const) }
+      : {}),
   };
   switch (c.status) {
     case "confirmed":
@@ -94,7 +107,7 @@ export const list = query({
   handler: async (ctx, { transactionId }) => {
     const userId = await requireUserId(ctx);
     const txn = await ownedTransaction(ctx, transactionId, userId);
-    return (await transactionCells(ctx, txn)).map(toView);
+    return (await transactionCells(ctx, txn)).map((c) => toView(txn, c));
   },
 });
 
@@ -104,6 +117,10 @@ export const list = query({
  * the live cap. `{ kind: "user_unknown" }` records "I don't know" (never read as a value, DA-A-1).
  * `overridesObserved` deliberately replaces what the system observed; without it a disagreement shows as a conflict.
  * Re-sending an identical answer writes nothing.
+ *
+ * M11b: rate-limited per user (`factsAnswer`) before any write; and a key the purchase record backs
+ * (`sourceOfTruth: "purchase_record"`) is refused on a purchase-backed transaction — the user edits the purchase
+ * (`purchases.confirm`) instead, so their own correction never contradicts their own purchase record.
  */
 export const answer = mutation({
   args: {
@@ -119,6 +136,13 @@ export const answer = mutation({
   }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    const limit = await rateLimiter.limit(ctx, "factsAnswer", { key: userId });
+    if (!limit.ok) throw new ConvexError("You sent too many answers in a short time. Try again in a minute.");
+    const txn = await ownedTransaction(ctx, args.transactionId, userId);
+    const spec = getFactSpec(args.key);
+    if (spec !== null && backedByPurchase(txn, spec)) {
+      throw new ConvexError(`This comes from your purchase record: edit the purchase to change it (${spec.key}).`);
+    }
     return await putFact(ctx, userId, {
       transactionId: args.transactionId,
       subjectKey: args.subjectKey,
