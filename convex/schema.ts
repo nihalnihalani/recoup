@@ -648,6 +648,8 @@ export default defineSchema({
     lastObservedAt: v.optional(v.number()),
     isExample: v.optional(v.boolean()),
   }).index("by_transaction_and_subject_key_and_key", ["transactionId", "subjectKey", "key"])
+    /** M11 (lead-approved): bounded reads of one state's rows on a transaction, e.g. every current candidate. */
+    .index("by_transaction_and_state_and_subject_key_and_key", ["transactionId", "state", "subjectKey", "key"])
     .index("by_user", ["userId"]),
 
   /** What went wrong, kept apart from the transaction's original facts (mission §7). */
