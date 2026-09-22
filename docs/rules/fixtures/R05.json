@@ -25,7 +25,7 @@
     ],
     "loader": "A case has EITHER a top-level `expected` OR an `expected` on every variant. `clock` (and optional `source`) may be set on the case or on a variant; a variant value overrides the case value. `facts_from: <case id>` + `facts_override: {...}` means: copy that case's facts, then replace the named facts. A variant's `change` object replaces the named facts for that variant only. Every `facts` value is an object; no prose placeholders.",
     "fact_states": "user_confirmed | observed | derived | extracted_candidate | conflicting | missing | assumption. Contract §2.5 mapping: user_confirmed→confirmed, observed→observed, derived→derived, extracted_candidate→candidate, conflicting→conflicting, missing→missing (value null), assumption→assumption-class candidate. D147(2)/X1: `eligible` requires every decisive fact to be user_confirmed, or observed/derived from confirmed facts; an extracted_candidate decisive fact caps the outcome at likely_eligible_missing_evidence (the case lists it in expected.unconfirmed_decisive_facts). Since M2D the baseline cases use user_confirmed for decisive facts (the state after the user's fact review); each file has explicit cap variants.",
-    "conflicting": "A conflicting fact carries `candidates: [{value, evidence, ...}]` (README cross-pack rule 3). If every candidate gives the same outcome the conflict is not material, but the fact is still unconfirmed, so the outcome is capped at likely_eligible_missing_evidence; if candidates diverge the outcome is needs_facts. Advisory dates use the earliest candidate.",
+    "conflicting": "D152/D154 (README cross-pack rule 3): conflict_kind 'candidates' → different outcomes or amounts = needs_facts; same outcome and amount = capped at likely_eligible_missing_evidence (fact listed in unconfirmed_decisive_facts). conflict_kind 'confirmed_vs_observed' / 'confirmed_vs_confirmed' → manual_review. A conflicting or extracted-only deadline anchor never gives a firm date: deadline.date = null, status disputed_anchor / unknown_anchor, and (user-obligor paths only) advisory_act_by from the earliest candidate.",
     "not_yet_due": "D147(6)/X3: a path that is not ripe yet has outcome not_yet_due with expected.reevaluate_at (ISO date) or expected.reevaluate_when (event); never not_eligible.",
     "missing_source": "X5: a variant with source.record = 'missing' means no current source record exists for the pack → source_unverified.",
     "calendar_zone": "Calendar days are the buyer's local dates at the ship-to address (spec A5); fixtures use America/New_York (-04:00) unless stated."
@@ -182,7 +182,9 @@
             },
             "deadline": {
               "kind": "seller_prompt_refund",
-              "date": "2026-09-16"
+              "date": null,
+              "status": "unknown_anchor",
+              "note": "counterparty deadline: no refund-by or overdue date from an unconfirmed order time / shipping representation (D154 condition 2)"
             }
           },
           "justification": {
@@ -487,7 +489,8 @@
               "received_at": "2026-09-08T09:00:00-04:00",
               "revised_ship_date": "indefinite",
               "reason_given": "supplier backorder",
-              "text": "We are unable to provide a new ship date."
+              "text": "We are unable to provide a new ship date because of a supplier backorder. If you don't want to wait, you may cancel your order and receive a prompt refund using the link below. If we do not hear from you and have not shipped by October 10, your order will be cancelled automatically and your money refunded.",
+              "offers_cancel_and_refund": true
             }
           ]
         },
@@ -507,6 +510,31 @@
             "amount_minor": 89900,
             "currency": "USD"
           },
+          "state": "user_confirmed"
+        },
+        "buyer_country": {
+          "type": "string",
+          "value": "US",
+          "state": "user_confirmed"
+        },
+        "ship_to_country": {
+          "type": "string",
+          "value": "US",
+          "state": "user_confirmed"
+        },
+        "seller_country": {
+          "type": "string",
+          "value": "US",
+          "state": "user_confirmed"
+        },
+        "payment_terms": {
+          "type": "enum",
+          "value": "paid_at_order",
+          "state": "user_confirmed"
+        },
+        "delay_notice_offers_cancel_and_refund": {
+          "type": "boolean",
+          "value": true,
           "state": "user_confirmed"
         }
       },
@@ -543,7 +571,8 @@
             "outcome": "not_yet_due",
             "missing_facts": [],
             "note": "Express consent to an indefinite delay; the buyer keeps a continuing right to cancel before shipment (a cancellation would make the case eligible).",
-            "reevaluate_when": "buyer cancels before shipment (continuing right to cancel, 435.2(b)(1)(iii)(B))"
+            "reevaluate_when": "buyer cancels before shipment (continuing right to cancel, 435.2(b)(1)(iii)(B))",
+            "next_action": "You can cancel before shipment for a prompt refund (continuing right to cancel)."
           }
         },
         {
@@ -627,6 +656,26 @@
         "ship_to_timezone": {
           "type": "string",
           "value": "America/New_York",
+          "state": "user_confirmed"
+        },
+        "buyer_country": {
+          "type": "string",
+          "value": "US",
+          "state": "user_confirmed"
+        },
+        "ship_to_country": {
+          "type": "string",
+          "value": "US",
+          "state": "user_confirmed"
+        },
+        "seller_country": {
+          "type": "string",
+          "value": "US",
+          "state": "user_confirmed"
+        },
+        "payment_terms": {
+          "type": "enum",
+          "value": "paid_at_order",
           "state": "user_confirmed"
         }
       },
@@ -801,6 +850,21 @@
         "shipped_at": {
           "type": "datetime",
           "value": null,
+          "state": "user_confirmed"
+        },
+        "buyer_country": {
+          "type": "string",
+          "value": "US",
+          "state": "user_confirmed"
+        },
+        "ship_to_country": {
+          "type": "string",
+          "value": "US",
+          "state": "user_confirmed"
+        },
+        "seller_country": {
+          "type": "string",
+          "value": "US",
           "state": "user_confirmed"
         }
       },
@@ -1016,7 +1080,8 @@
               },
               "evidence": "order-confirmation line item"
             }
-          ]
+          ],
+          "conflict_kind": "candidates"
         },
         "shipped_at": {
           "type": "datetime",
@@ -1073,7 +1138,8 @@
                   "evidence": "order-confirmation line item",
                   "T": "2026-09-05"
                 }
-              ]
+              ],
+              "conflict_kind": "candidates"
             },
             "amount_tendered": {
               "type": "money",
@@ -1103,8 +1169,9 @@
             },
             "deadline": {
               "kind": "seller_prompt_refund",
-              "date": "2026-09-16",
-              "semantics": "vesting 2026-09-04 (earliest candidate) or 2026-09-06; both give 2026-09-16 (2026-09-07 holiday)"
+              "date": null,
+              "status": "disputed_anchor",
+              "note": "counterparty deadline: no computed date while the shipping representation is disputed (both candidates would give 2026-09-16)"
             },
             "note": "Both candidate times have passed without shipment or notice on 2026-09-08, so the conflict is not material."
           }
@@ -1209,6 +1276,55 @@
       },
       "facts_from": "R05-01",
       "facts_override": {}
+    },
+    {
+      "id": "R05-13",
+      "title": "User confirms the order never shipped; carrier tracking shows an acceptance scan (confirmed vs observed)",
+      "categories": [
+        "contradictory_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-10T12:00:00-04:00",
+      "facts_from": "R05-01",
+      "facts_override": {
+        "shipped_at": {
+          "type": "datetime",
+          "value": null,
+          "state": "conflicting",
+          "conflict_kind": "confirmed_vs_observed",
+          "candidates": [
+            {
+              "value": null,
+              "state": "user_confirmed",
+              "evidence": "user: 'it never shipped'"
+            },
+            {
+              "value": "2026-09-03T17:40:00-04:00",
+              "state": "observed",
+              "evidence": "carrier tracking API: 'Accepted at origin facility'"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "outcome": "manual_review",
+        "missing_facts": [],
+        "amount": null,
+        "deadline": {
+          "kind": "seller_prompt_refund",
+          "date": null,
+          "status": "disputed_anchor"
+        },
+        "explanation": "You said the order never shipped, but the carrier recorded an acceptance scan on 2026-09-03 (inside the promised 3 days). If the package is lost in transit this is not a shipping-time problem under the FTC rule; check with the seller and carrier."
+      },
+      "justification": {
+        "passages": [
+          "P-435.1(e)",
+          "D152",
+          "D154 condition 4"
+        ],
+        "reasoning": "Shipment is placement with the carrier; a confirmed statement contradicting the carrier's scan needs review."
+      }
     }
   ]
 }

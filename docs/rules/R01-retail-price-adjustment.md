@@ -62,7 +62,7 @@ Quotations from merchant pages are limited to ≤ 2 sentences each (copyright); 
 
 ### 2.1 Reproducible hashes
 
-- **`content_hash`**: fetch each URL (HTTP GET, follow redirects); drop `<script>`, `<style>`, `<noscript>`, `<svg>` elements; replace every other tag with a space; decode HTML entities; Unicode NFC; collapse every whitespace run to one space; cut from the first occurrence of the pack's `section_start` marker (inclusive) to the next `section_end` marker (exclusive); SHA-256 of the UTF-8 bytes.
+- **`content_hash`**: fetch each URL (HTTP GET, follow redirects); drop `<script>`, `<style>`, `<noscript>`, `<svg>` elements; replace every other tag with a space; decode HTML entities; Unicode NFC; collapse every whitespace run to one space; cut from the first occurrence of the pack's `section_start` marker (inclusive) to the next `section_end` marker (exclusive); **trim leading and trailing whitespace** of the cut section; SHA-256 of the UTF-8 bytes. (The trim step is required: without it the three published hashes do not reproduce — M09b B.3.)
 - **`passage_hash`**: SHA-256 of the passage text exactly as quoted, NFC and whitespace-collapsed.
 - Verified 2026-09-23: two independent curl fetches gave identical `content_hash` values for Apple, Costco and Target (below). The Apple **raw** HTML hash in the first submission is kept only as provenance.
 
@@ -97,7 +97,7 @@ Example (mission §17): 2 units at 12,000 with an eligible matching price of 9,5
 
 ## 5. Deadline semantics
 
-- Each window: end = `anchor + length` in the pack's unit, in the pack's `calendar_zone`; inclusive/exclusive recorded per pack. If the merchant does not state it → **assumption:** inclusive of the last day on the buyer's local calendar.
+- Each window: end = `anchor + length` in the pack's unit, in the pack's `calendar_zone`; inclusive/exclusive recorded per pack. **Exception — periods that "begin the day you receive"** (Best Buy BB-3): the receipt day is **day 1**, so the last day = `received_at` + length − 1 (a 15-day period for an item received 2026-09-10 ends 2026-09-24). If the merchant does not state it → **assumption:** inclusive of the last day on the buyer's local calendar.
 - `constrains` decides which event is tested: `price_change` → `price_change_at` must fall inside the window (the request may come later, subject to any other window); `request` → `request_at` must fall inside; `both` → both.
 - Two-clock policies (Apple): **both** windows must hold — (1) `price_change_at` within 14 calendar days of `received_at`; (2) `request_at` within 14 days of `price_change_at`.
 - An expired window closes this path only (`deadline_passed`); a window whose tested event has not happened yet is not a failure.
@@ -124,7 +124,7 @@ Example (mission §17): 2 units at 12,000 with an eligible matching price of 9,5
 - Passage BB-1 (passage_hash `aabf2ce5…586d9a`): "If we lower our in-store, online or app price during the return and exchange period, we will match our lower price, upon request."
 - Passage BB-2 (`045d49b0…a4b40b`): "One price match at the time of purchase, per identical item, per customer, at the current pre-tax price available to all customers is allowed."
 - Passage BB-3 (`970f0ccd…4adb9a`): "If you want to return or exchange your purchase, please know that the time period begins the day you receive your product and applies to new, clearance, open-box, refurbished and pre-owned products."
-- **Window:** return period anchored on `received_at`; **`constrains: price_change`** (BB-1 limits when the price is **lowered**). The request timing is not stated ("upon request"); Recoup asks the user to request promptly (assumption, not a rule). Periods: most products **15 days** (Standard) / **60 days** (My Best Buy Plus™ and Total™ members); **activatable devices 14 days** for all (Verizon activatable devices 30 days).
+- **Window:** return period anchored on `received_at`, **receipt day = day 1** (BB-3 "begins the day you receive"; last day = `received_at` + length − 1); **`constrains: price_change`** (BB-1 limits when the price is **lowered**). The request timing is not stated ("upon request"); Recoup asks the user to request promptly (assumption, not a rule). Periods: most products **15 days** (Standard) / **60 days** (My Best Buy Plus™ and Total™ members); **activatable devices 14 days** for all (Verizon activatable devices 30 days).
 - Identity: matching brand, model number and color; new product. Exclusions (summarized; see page): Marketplace products, clearance, refurbished, open-box; many offer types. Puerto Rico stores have their own policy.
 - Evaluator facts: `received_at`, `price_change_at`, `membership_tier`, `product_category`.
 - Temporal: a purchase before 2026-09-02 → known mismatch → `source_unverified` + "ask anyway".

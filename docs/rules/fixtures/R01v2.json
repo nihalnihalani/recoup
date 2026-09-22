@@ -8,7 +8,7 @@
   "conventions": {
     "fact_encoding": "facts.<key> = {type, value, state} per README 'Fixture format'. Keys: retail.merchant_id, retail.channel, retail.purchase_date, retail.received_at, retail.request_at, retail.price_change_at, retail.item_identity, retail.product_category, retail.membership_tier, retail.quantity, retail.unit_price, retail.comparison_offer (observation), retail.prior_adjustments, retail.buyer_is_reseller, retail.target_plus_partner_item, retail.purchase_store_id, retail.promotional_item, retail.promotion_dates, retail.policy_confirmed.",
     "pack_context": "context.pack describes the merchant pack version in force (effective_from, window with `constrains`, discretion, limits). context.pack = null means the merchant has no pack.",
-    "windows": "Each window tests the event named by `constrains` (price_change | request | both). Day counting: the anchor day is day 0 unless the passage says the period 'begins the day you receive' (Best Buy: receipt day = day 1). Last day inclusive (assumption). Calendar days are the buyer's local dates (R01 spec §2 calendar_zone).",
+    "windows": "Each window tests the event named by `constrains` (price_change | request | both). Day counting: the anchor day is day 0 unless the passage says the period 'begins the day you receive' (Best Buy: receipt day = day 1). Last day inclusive (assumption). Calendar days are the buyer's local dates (R01 spec §2 calendar_zone). Best Buy's return period 'begins the day you receive' (BB-3): the receipt day is day 1, last day = received_at + length − 1 (R01 spec §5, §7.1).",
     "temporal": "R01 spec §1.4: displayed effective date ≤ purchase → applicable (can reach eligible); displayed effective date after purchase → source_unverified + ask_anyway; not displayed → capped at likely_eligible_missing_evidence with assumption and missing fact retail.policy_confirmed.",
     "decisive_facts": "D147(2): eligible requires every decisive fact user_confirmed, observed, or derived from those.",
     "refresh": "Merchant packs refresh every 7 days; case/variant `source` gives last_verified_on with refresh_window_days 7.",
@@ -24,7 +24,8 @@
       "source_unverified",
       "unsupported",
       "not_yet_due"
-    ]
+    ],
+    "conflicting": "D152/D154 (README cross-pack rule 3): conflict_kind 'candidates' → different outcomes or amounts = needs_facts; same outcome and amount = capped at likely_eligible_missing_evidence (fact listed in unconfirmed_decisive_facts). conflict_kind 'confirmed_vs_observed' / 'confirmed_vs_confirmed' → manual_review. A conflicting or extracted-only deadline anchor never gives a firm date: deadline.date = null, status disputed_anchor / unknown_anchor, and (user-obligor paths only) advisory_act_by from the earliest candidate."
   },
   "cases": [
     {
@@ -402,6 +403,11 @@
             "missing_facts": [],
             "amount": null,
             "note": "The request falls on day 15; TG-1 constrains the request."
+          },
+          "source": {
+            "last_verified_on": "2026-09-29",
+            "refresh_window_days": 7,
+            "note": "pack re-verified within 7 days of the variant clock (M09b B.8)"
           }
         }
       ],
@@ -605,6 +611,11 @@
               }
             },
             "note": "request on day 14 after the drop — inside clock 2"
+          },
+          "source": {
+            "last_verified_on": "2026-09-28",
+            "refresh_window_days": 7,
+            "note": "pack re-verified within 7 days of the variant clock (M09b B.8)"
           }
         },
         {
@@ -623,6 +634,11 @@
             "missing_facts": [],
             "amount": null,
             "note": "request on day 15 after the drop — clock 2 closed"
+          },
+          "source": {
+            "last_verified_on": "2026-09-29",
+            "refresh_window_days": 7,
+            "note": "pack re-verified within 7 days of the variant clock (M09b B.8)"
           }
         }
       ],
@@ -1708,7 +1724,8 @@
               "evidence": "user: 'picked it up from the leasing office on the 3rd'",
               "drop_day": 13
             }
-          ]
+          ],
+          "conflict_kind": "candidates"
         }
       },
       "context": {
@@ -1763,7 +1780,8 @@
                   "evidence": "carrier tracking",
                   "drop_day": 12
                 }
-              ]
+              ],
+              "conflict_kind": "candidates"
             }
           },
           "expected": {
@@ -1891,6 +1909,66 @@
           "R01 spec §7.1"
         ],
         "reasoning": "The window cannot be placed without the receipt date or, here, the membership tier."
+      }
+    },
+    {
+      "id": "R01v2-17",
+      "title": "Best Buy: user-confirmed receipt date contradicts the store pickup record (confirmed vs observed)",
+      "categories": [
+        "contradictory_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-18T12:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-18",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-01",
+      "facts_override": {
+        "retail.received_at": {
+          "type": "datetime",
+          "value": null,
+          "state": "conflicting",
+          "conflict_kind": "confirmed_vs_observed",
+          "candidates": [
+            {
+              "value": "2026-09-12T11:00:00-04:00",
+              "state": "user_confirmed",
+              "evidence": "user: 'I picked it up on the 12th'"
+            },
+            {
+              "value": "2026-09-10T14:05:00-04:00",
+              "state": "observed",
+              "evidence": "merchant order-status record: picked up 2026-09-10 14:05"
+            }
+          ]
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.bestbuy.all_channels",
+          "pack_version": 1,
+          "effective_from": "2026-09-02"
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "manual_review",
+        "missing_facts": [],
+        "amount": null,
+        "claim": {
+          "opens": false
+        },
+        "explanation": "The return period starts on the day you received the item. You said the 12th; the store's pickup record says the 10th. Check your pickup receipt; the merchant's record will usually decide.",
+        "note": "D152 5a even though both dates put the 2026-09-18 drop inside the window."
+      },
+      "justification": {
+        "passages": [
+          "BB-3",
+          "D152",
+          "D154 condition 4"
+        ],
+        "reasoning": "Confirmed vs observed conflicts go to manual review."
       }
     }
   ]

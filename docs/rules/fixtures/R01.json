@@ -29,7 +29,7 @@
       "unsupported",
       "not_yet_due"
     ],
-    "conflicting": "A conflicting fact carries `candidates`. If the candidates give different outcomes → needs_facts and no claim. If every candidate gives the same outcome, the conflict is not material: outcome likely_eligible and the claim's windowEndsAt uses the EARLIEST candidate (README cross-pack rule 3)."
+    "conflicting": "D152/D154 (README cross-pack rule 3): conflict_kind 'candidates' → different outcomes or amounts = needs_facts; same outcome and amount = capped at likely_eligible_missing_evidence (fact listed in unconfirmed_decisive_facts). conflict_kind 'confirmed_vs_observed' / 'confirmed_vs_confirmed' → manual_review. A conflicting or extracted-only deadline anchor never gives a firm date: deadline.date = null, status disputed_anchor / unknown_anchor, and (user-obligor paths only) advisory_act_by from the earliest candidate."
   },
   "cases": [
     {
@@ -1646,7 +1646,8 @@
               "evidence": "card statement transaction date",
               "windowEndsAt": "2026-09-19T13:00:00Z"
             }
-          ]
+          ],
+          "conflict_kind": "candidates"
         }
       },
       "context": {
@@ -1682,7 +1683,8 @@
                   "evidence": "receipt",
                   "windowEndsAt": "2026-10-10T19:00:00Z"
                 }
-              ]
+              ],
+              "conflict_kind": "candidates"
             }
           },
           "expected": {
@@ -1712,6 +1714,70 @@
           "contract §2.7"
         ],
         "reasoning": "A conflict that changes the window outcome must be resolved first; one that does not is carried as an unconfirmed fact with the conservative window end."
+      }
+    },
+    {
+      "id": "R01-16",
+      "title": "User-confirmed current price contradicts the accepted price check (confirmed vs observed)",
+      "categories": [
+        "contradictory_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T10:00:00-04:00",
+      "facts_from": "R01-01",
+      "facts_override": {
+        "retail.observed_price": {
+          "type": "observation",
+          "value": null,
+          "state": "conflicting",
+          "conflict_kind": "confirmed_vs_observed",
+          "candidates": [
+            {
+              "value": {
+                "amount_minor": 42000,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 1.0,
+                "isRange": false
+              },
+              "state": "user_confirmed",
+              "evidence": "user: 'the price on the site is $420.00 today'"
+            },
+            {
+              "value": {
+                "amount_minor": 44999,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.92,
+                "isRange": false
+              },
+              "state": "observed",
+              "evidence": "accepted price check 2026-09-20T10:00:00-04:00"
+            }
+          ]
+        }
+      },
+      "context": {
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "manual_review",
+        "missing_facts": [],
+        "amount": null,
+        "claim": {
+          "opens": false
+        },
+        "explanation": "You told us the price is $420.00; our price check at 10:00 read $449.99 for the same variant. Review the product page (or upload a dated screenshot) before a claim is prepared.",
+        "note": "D152 5a: both values would qualify (drops of 7,999 and 5,000), but they give different amounts and a user-confirmed value contradicts the system's observation."
+      },
+      "justification": {
+        "passages": [
+          "D152",
+          "D154 condition 4",
+          "README cross-pack rule 3",
+          "contract §2.5 rule 1 (confirmed vs observed without overridesObserved → conflicting)"
+        ],
+        "reasoning": "A confirmed value that the system's own observation contradicts is never silently used in a claim."
       }
     }
   ]

@@ -443,11 +443,11 @@
     }
   ],
   "fixtures": {
-    "docs/rules/fixtures/R01.json": "df97d0150b1bf5d4bc4243e7237492466513b5836cd670078358d79c699392a1",
-    "docs/rules/fixtures/R01v2.json": "03ef33a265480dc13b6967ddcdffb14a04610fb425ef5eb2228220aa2cc19144",
-    "docs/rules/fixtures/R02.json": "d0a8023bde8199c92bdfbe8ebd2ee9be106fa20ec212b5f8143b6778255f16b3",
-    "docs/rules/fixtures/R03.json": "c90fc5dfaf43103af05477f81a93b779f860a989ef588ba575a7d6edb322a7df",
-    "docs/rules/fixtures/R04.json": "819cb1e0e0e4b8f23bc6bda4e9cff2fe338e9a477c4462695f346407cd147882",
-    "docs/rules/fixtures/R05.json": "2af54f859d1cf49c28642cd007b68793efe540904d0e76e9ed3e904ea3e4d795"
+    "docs/rules/fixtures/R01.json": "d24531e2e7a7fd32146816d96b6edb2060592003bcb4b0be2c9daa6decc1218c",
+    "docs/rules/fixtures/R01v2.json": "b446e0365c60511cfe704bb32bfcec4665c444c7729c914f3b82c282698d11dd",
+    "docs/rules/fixtures/R02.json": "b3bc2e71828d748db70210daf2370c1a5ec6be98b44e5d440d79aed9f7f5455f",
+    "docs/rules/fixtures/R03.json": "313ef7cd4e7880eeab489d668d56b866f37ffaaee4b69637714df14db75cb751",
+    "docs/rules/fixtures/R04.json": "f367a8df4ee2a809ab36f40d8e7dc6543749b608ffaa30b102ee9697d4fa6db6",
+    "docs/rules/fixtures/R05.json": "9fd037ffb2e82190ac1a7334f1d64f398a528a0eef20305223e4f09370019c32"
   }
 }
