@@ -465,3 +465,21 @@ either. Deleting the stray row itself needs a small dedicated internal
 mutation (the same pattern `ops.resetRetentionCursor` used for F-T23-3) —
 not added here, tracked as open (F-T18.6-1, LOW; `docs/reviews/
 release-candidate.md` §15.8).
+
+## 13. Deploy path (gated; D191, DA-B-6)
+
+The only backend deploy path is `npm run deploy:dev`. It runs
+`scripts/check-rule-packs.mjs` (pack file hashes, the active pack's engine
+import-closure pin, manifest lifecycle), then `typecheck` and the full
+`vitest run`, and only if all three pass it pushes functions with
+`convex dev --once` to the deployment configured for this checkout
+(`adorable-lion-138`, the disposable dev target). The static site still goes
+up separately with `npx @convex-dev/static-hosting upload --dist dist`
+(D130: `npm run deploy` targets **production**, do not use it).
+
+There is deliberately **no** script that runs `convex deploy`. A production
+deploy needs explicit user authorization naming the target deployment, and
+then the same three gates run by hand, in the same order, with their output
+read before the push. Never deploy a tree whose `check-rule-packs` or test
+run is red, even to dev: an active rule pack's behaviour depends on the
+engine modules it imports, and only the gates catch a silent change.
