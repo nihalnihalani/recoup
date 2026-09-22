@@ -8,7 +8,9 @@
 | Authority class | Legal entitlement |
 | Authority subtype | Federal statute + federal regulation (49 U.S.C. 42305; 14 CFR part 260; 14 CFR 399.80(l) for ticket agents) |
 | Jurisdiction | United States — "covered flight": scheduled flight operated or marketed by a covered carrier **to, from, or within** the US (14 CFR 260.2) |
-| Effective date | Part 260 effective 2024-06-25 (89 FR 32760), amended 2024-08-12 (89 FR 65534); compliance date for the refund provisions **2024-10-28** (FR-2024-07177-COMPLIANCE). Statute §42305 added 2024-05-16 (Pub. L. 118-63 §503). |
+| Published | 89 FR 32760, 2024-04-26 (FR 2024-07177); amended 89 FR 65534, 2024-08-12 (FR 2024-17602) |
+| Effective | 2024-06-25 (FR-2024-07177 DATES); amendment effective 2024-08-12 (FR-2024-17602 DATES) — both in `sources/federal-register-notices.txt` |
+| Compliance | **2024-10-28** for the refund provisions (FR-2024-07177-COMPLIANCE, excerpts file). Statute §42305 enacted 2024-05-16 (Pub. L. 118-63 §503; `sources/usc-49-42305.txt`). |
 | Retrieval date | 2026-09-23 |
 | Last verification date | 2026-09-23 (eCFR point-in-time 2026-09-18; Federal Register API queried 2026-09-23) |
 | Refresh policy | Every 30 days **and** on any Federal Register document tagged 14 CFR part 260/399 or RIN 2105-AF36 (Refund III). Mandatory re-review on or before **2027-07-07** (expiry of the renumbered-flight enforcement discretion). |
@@ -61,6 +63,8 @@ A carrier notice or observed operation showing cancellation or a significant cha
   6. (individual with a disability) different connecting airport(s);
   7. (individual with a disability) substitute aircraft lacking a needed accessibility feature.
 - Threshold semantics: "three hours **or more**" → a change of exactly 3:00 **is** significant; 2:59 is not. Compare **scheduled** times (original vs changed schedule), in absolute UTC instants, not wall-clock strings across time zones.
+- **Delays count too.** 260.2 says "a covered flight itinerary with a **delay** or change". A same-day operational delay is evaluated like a schedule change, using the carrier's **revised scheduled** arrival (criterion 2). Only a delay whose revised schedule stays below the threshold is `not_eligible`.
+- **Preserved nuance — "arrives" vs "scheduled to arrive".** The statute's floor speaks of when the passenger "arrives" (P-42305-D); the regulation speaks of when the consumer "is scheduled to arrive" (P-260.2-SIG). If the revised schedule and the actual arrival fall on opposite sides of the threshold → `manual_review`.
 - The statute sets the 3 h / 6 h arrival thresholds as a floor ("includes, at a minimum", P-42305-D), so a future Refund III rule cannot lower them below the statutory floor for arrival delays.
 - **Automatic refund** (P-260.2-AUTO) and deemed-request events (P-260.6-A2): (i) cancelled and no alternative / compensation offered; (ii) consumer rejects the changed flight, rebooking, or compensation; (iii) consumer does not respond **and** the changed/alternative flight departs without them, or does not respond to a voucher offer by the scheduled/changed departure date.
 - **Affirmative acceptance** (P-260.7): the carrier "must not deem a consumer to have accepted" a voucher/credit "unless the consumer affirmatively agrees". Silence ≠ acceptance of compensation.
@@ -72,9 +76,10 @@ A carrier notice or observed operation showing cancellation or a significant cha
 |---|---|---|---|---|
 | `itinerary_scope` | enum | `domestic` \| `international` \| `non_us` | derived from origin/destination airport countries on the ticket/itinerary | applicability, thresholds |
 | `operating_carrier`, `marketing_carrier` | string | IATA code | ticket / e-ticket receipt | covered flight |
-| `merchant_of_record` | enum | `carrier` \| `ticket_agent` \| `unknown` | card/bank statement descriptor (definition in 260.2) — not the booking website | path selection |
+| `merchant_of_record` | enum | `carrier` \| `ticket_agent` \| `unknown` | card/bank statement descriptor (definition in 260.2) — not the booking website; for cash/check purchases with no statement, the receipt's issuer (assumption A5) | path selection |
 | `ticket_refundability` | enum | `nonrefundable` \| `refundable` \| `unknown` | fare rules on receipt | applicability |
-| `event_type` | enum | `cancellation` \| `schedule_change` \| `downgrade` \| `airport_change` \| `added_connection` \| `renumbered_only` \| `operational_delay_only` | carrier notice; operations data | trigger |
+| `event_type` | enum | `cancellation` \| `schedule_change` \| `operational_delay` \| `downgrade` \| `airport_change` \| `added_connection` \| `renumbered_only` | carrier notice; operations data | trigger |
+| `actual_arrival_at` | datetime \| null | instant | boarding/ops data; user | arrives-vs-scheduled nuance only |
 | `original_sched_departure_at`, `original_sched_arrival_at` | datetime (ISO-8601 with offset) | instant | original booking confirmation | significance |
 | `changed_sched_departure_at`, `changed_sched_arrival_at` | datetime (ISO-8601 with offset) | instant | schedule-change notice | significance |
 | `original_airports`, `changed_airports` | object | IATA codes | confirmation vs notice | significance (3) |
@@ -108,7 +113,7 @@ Full refund of airfare **including any taxes and ancillary fees** (260.6(a)(1)),
 
 ## 8. Calculation and cap
 
-`refund_due = fare_paid + taxes_paid + Σ ancillary_fees_paid(for the affected flight) − already_refunded` per currency; no cap. Integer minor units; never sum across currencies. Ticket agent path: the agent **may retain** a disclosed, per-passenger, non-refundable service fee if the service went beyond processing payment (399.80(l)) → deduct only when the disclosure is evidenced; otherwise `manual_review` for that line.
+`refund_due = fare_paid + taxes_paid + Σ ancillary_fees_paid − already_refunded` per currency; no cap. **Assumption A4:** `fare_paid` is the fare for the cancelled/changed itinerary as ticketed and every listed ancillary fee relates to it. 260.6(a)(1) says only "full and prompt refund of the airfare, including any taxes and ancillary fees"; it does not address a **partly flown** itinerary (e.g. outbound flown, return cancelled) or fees for segments that operated. In those cases the outcome is unchanged but the amount is `manual_review` (no estimate). Integer minor units; never sum across currencies. Ticket agent path: the agent **may retain** a disclosed, per-passenger, non-refundable service fee if the service went beyond processing payment (399.80(l)) → deduct only when the disclosure is evidenced; otherwise `manual_review` for that line.
 
 ## 9. Evidence checklist
 
@@ -124,7 +129,7 @@ Full refund of airfare **including any taxes and ancillary fees** (260.6(a)(1)),
 - Consumer: **no filing required** for path R02.a — the refund is automatic once a deemed-request event occurs. There is no federal consumer deadline to claim. Carriers may set a deadline to **accept** an offer (DOT-REF-7); missing it does not forfeit the refund — non-response followed by departure is itself a deemed request (P-260.6-A2(iii)).
 - Carrier: must notify affected consumers of the change and of the right to a refund (260.9).
 - Path R02.b (ticket agent MoR): consumer must **request** the refund from the ticket agent (399.80(l), "upon request").
-- Ordinary email: no formal notice requirement exists for R02, so email/app/chat rejection is sufficient evidence of rejection; preserve the timestamped copy.
+- Ordinary email: no formal notice requirement exists for R02, and the regulation is silent on the channel for rejecting an offer. Treating an email/app/chat rejection as sufficient evidence is a **product assumption (A6)**; preserve the timestamped copy.
 
 ## 11. Deadlines — anchor and calendar semantics
 
@@ -132,12 +137,12 @@ These are **carrier payment deadlines** (used for status tracking and escalation
 
 | Path | Payment | Anchor event (legal) | Count | Calendar semantics | Source |
 |---|---|---|---|---|---|
-| R02.a | credit card | earliest deemed-request date under 260.6(a)(2): rejection timestamp; or departure of the changed/alternative flight without the consumer (no response); or scheduled departure of cancelled flight (no response to voucher offer); or cancellation with nothing offered | 7 | **business days** = Mon–Fri excluding US federal holidays (260.2); count starts the day **after** the anchor; the 7th business day is the last compliant day | P-260.2-PROMPT, P-42305-B |
+| R02.a | credit card | earliest deemed-request date under 260.6(a)(2): (ii) rejection timestamp; (iii)(A) departure of the changed/alternative flight without the consumer (no response); (iii)(B) no response to a voucher offer by the cancelled flight's scheduled departure date **or the date the significantly delayed or changed flight departs**; (i) cancellation with nothing offered — the text gives no date, so Recoup uses the carrier's cancellation-notice instant (**assumption A7**) | 7 | **business days** = Mon–Fri excluding US federal holidays (260.2); count starts the day **after** the anchor; the 7th business day is the last compliant day | P-260.2-PROMPT, P-42305-B, P-260.6-A2 |
 | R02.a | cash, check, **debit card**, other | same | 20 | **calendar days** (260.2 "20 calendar days"); last compliant day = anchor + 20 | P-260.2-PROMPT |
 | R02.b | credit card | date the **ticket agent receives** the carrier's eligibility information (260.6(d)) — not observable to the consumer | 7 | business days | P-399.80(l) |
 | R02.b | other | date the refund "becom[es] due" | 20 | calendar days | P-399.80(l) |
 
-- Time zone: anchor instants are UTC; the day boundary uses the **carrier's** notice time converted to the consumer's jurisdiction date is **not** specified by the regulation → store the anchor instant and the time zone used, and display the computed date as "on or about" when the anchor is within ±12 h of midnight in any relevant zone (assumption A1).
+- **Calendar-day zone (D147(4)):** the regulation does not name one. The anchor **date** is the date of the anchor instant in the **consumer's home time zone** (assumption A1). When that instant falls on different calendar dates in the consumer's zone and the carrier's origin-airport zone, the computed date is displayed "on or about" with both dates (A1).
 - Holidays: 5 U.S.C. 6103 federal holidays (incl. observed dates). Injected clock in tests.
 - Anchor unknown (e.g., no evidence of rejection time) → no computed date; outcome `needs_facts`.
 
@@ -146,7 +151,7 @@ These are **carrier payment deadlines** (used for status tracking and escalation
 1. R02.a: none needed; track for refund receipt. If not received by the computed date → user-initiated request through the carrier's refund channel (URL per carrier, captured per carrier; not in this rule).
 2. R02.b: request refund from the ticket agent (agent's channel).
 3. Escalation: DOT Office of Aviation Consumer Protection complaint (DOT-DASH-1 references filing complaints; the complaint form URL was **not** verified in this run — capture before activation).
-4. If paid by **credit card** and the refund is not credited: R03 may apply (services not delivered as agreed — 1026.13(a)(3), or failure to credit a credit — 1026.13(a)(4)); R03 deadlines are anchored to statements, independently of this rule.
+4. If paid by **credit card** and the refund is not credited: R03 may apply — services not delivered as agreed (1026.13(a)(3)) when the refund is owed but was never issued; failure to credit (1026.13(a)(4)) **only if a credit was issued** but not reflected. R03 deadlines are anchored to statements, independently of this rule.
 5. Third-party preparation: no restriction found in part 260; the consumer's own carrier/OTA account is typically required to act. Recoup prepares, user submits.
 
 ## 13. Exact supporting passages (verbatim; public domain)
@@ -243,7 +248,7 @@ DOT consumer-page passages DOT-REF-1…9 and FR notices FR-2026-13675-* are in `
 
 ## 15. Known limitations and source conflicts
 
-- **L1 — Renumbered flights.** Under P-260.2-CANCEL a renumbered flight is a cancellation. DOT is not enforcing 260.6/260.9/399.80(l) for renumbered flights with no significant change, until **2027-07-07** (FR-2026-13675-DATES/SCOPE), pending Refund III (RIN 2105-AF36; no NPRM published as of 2026-09-23). Evaluator: `event_type = renumbered_only` → `manual_review` with this explanation; never `eligible`, never silently `not_eligible`.
+- **L1 — Renumbered flights.** Under P-260.2-CANCEL a renumbered flight is a cancellation. Enforcement history (FR-2025-22140, FR-2026-13675 in `sources/federal-register-notices.txt`): normal enforcement until 2025-12-05; paused from 2025-12-05 "until June 30, 2026"; read literally, no notice covers 2026-07-01 → 2026-07-06; paused again "As of July 7, 2026" until **2027-07-07**. The pause covers a passenger who "is successfully rebooked on the new flight" with no significant change; a passenger who **rejects** the renumbered flight is arguably outside it. Refund III (RIN 2105-AF36) had no NPRM as of 2026-09-23. Evaluator: `event_type = renumbered_only` → `manual_review` with this history, never `eligible`, never silently `not_eligible`.
 - **L2 — Refund timing conflict (preserved, not blended).** The regulation (P-260.2-PROMPT) says **20 calendar days** for cash, check, debit card, or other; the same DOT consumer page says 20 **calendar** days in two places (DOT-REF-1, DOT-REF-2) and **20 business days (for cash purchases)** in another (DOT-REF-3). The three DOT passages describe the **same** event paths (reject; no response + no travel). DOT-REF-3 is therefore an inconsistency within the guidance page, not a separate event path. The statute (P-42305-B) says "20 days" without "calendar"/"business". **Resolution:** evaluator uses the regulation (20 calendar days); UI discloses "DOT's consumer page states 20 business days in one place; the regulation states 20 calendar days". Only the display of the carrier-payment date for non-credit-card payments is affected; eligibility is unaffected. DOT-REF-2 also anchors the no-response path to when the flight "departs from its destination" (sic) — the regulation says "departs without the consumer"; the evaluator uses the regulation.
 - **L3 — Document B's reading.** Document B describes the 20-business-day passage as possibly a separate "automatic-refund" event path. The captured text does not support that; see L2.
 - **L4 — Downgrade fare difference.** DOT-REF-6 says the airline must refund the fare difference if a downgraded passenger still flies. That obligation is not in the part 260 text captured; its regulatory basis was not located in this run → `manual_review`, not `eligible`.
@@ -251,18 +256,22 @@ DOT consumer-page passages DOT-REF-1…9 and FR notices FR-2026-13675-* are in `
 - **L6 — Business-day / time-zone boundary.** Regulation does not say which time zone defines the anchor date (assumption A1).
 - **L7 — Ticket-agent anchor** (R02.b) depends on carrier→agent communication the consumer cannot observe → deadline displayed as "not computable".
 - **L8 — Refundable tickets, charters, non-US itineraries, and 24-hour cancellation (14 CFR 259.5(b)(4))** are out of scope for v1.
+- **L10 — DOT-REF-8 vs 260.4(a)/260.5(d).** DOT's page says ancillary and bag fees charged by a ticket agent "must" be requested from the airline; the regulation makes the operating carrier's refund **automatic**. Both preserved: the regulation governs the duty (automatic); DOT-REF-8 tells the consumer whom to contact if the refund does not arrive.
+- **L11 — Disability path (260.6(b)).** Triggered "upon notification by the individual with a disability" and extends to companions on the same reservation. Not modelled in v1 → `manual_review` when `passenger_disability_relevant = true`.
+- **L12 — ANPRM withdrawal** is captured verbatim (FR-2025-20042 DATES).
 - **L9 — Pending change risk.** Refund III may change "cancelled flight". The statutory arrival thresholds (P-42305-D) are a floor. Early-departure, airport-change, connection and downgrade criteria are regulatory only and could change.
 
 ## 16. Evaluation outline (deterministic; for the backend evaluator)
 
-1. Source state ≠ `verified_current` (last verification older than the refresh window, or a newer FR document on part 260/399 not yet reviewed) → **`source_unverified`**.
+1. No current source record, or source state ≠ `verified_current` (last verification older than the refresh window, or a newer FR document on part 260/399 not yet reviewed) → **`source_unverified`**.
+1b. **Temporal gate:** the deemed-request (or incident) date is before the refund-provision compliance date **2024-10-28** → **`source_unverified`** ("rule compliance date"; v1 does not evaluate earlier events).
 2. `itinerary_scope = non_us` or carrier not covered → **`unsupported`**. `ticket_refundability = refundable` → **`unsupported`** (v1).
-3. `event_type = operational_delay_only` with no qualifying change → **`not_eligible`** (link R15 as a possible carrier commitment; never a cash-compensation card).
+3. `event_type = operational_delay`: evaluate criterion (2) with the carrier's **revised scheduled** arrival. Below the threshold → **`not_eligible`** (link R15 as a possible carrier commitment; never a cash-compensation card). At or above → continue like a schedule change. Revised schedule and `actual_arrival_at` on opposite sides of the threshold → **`manual_review`**.
 4. `event_type = renumbered_only` → **`manual_review`** (L1).
 5. Compute significance from scheduled instants and the other criteria. Any required time missing → **`needs_facts`**. Conflicting candidate values that straddle a threshold → **`needs_facts`** (ask to confirm). No criterion met and not cancelled → **`not_eligible`**.
 6. `flew_changed_or_alternative = true` → **`not_eligible`**. `consumer_response = accepted_compensation` (affirmative) → **`not_eligible`**. `accepted_rebooking` and did not fly → **`manual_review`**.
-7. `consumer_response ∈ {unknown}` and the changed/alternative flight has not departed → **`needs_facts`** (ask: did you accept, reject, or not respond?).
-8. Deemed-request event established → **`eligible`** (path by merchant of record). Missing receipt/payment-method evidence with facts otherwise confirmed → **`likely_eligible_missing_evidence`**.
+7. `consumer_response ∈ {unknown}` and the changed/alternative flight has not departed → **`needs_facts`** (ask: did you accept, reject, or not respond?). Response unknown and the changed flight **has already departed** without the consumer → **`needs_facts`** (ask whether a voucher or credit was affirmatively accepted; if not, (iii)(A) makes the refund due).
+8. Deemed-request event established → **`eligible`** only if every **decisive fact** is `user_confirmed` or derived from confirmed facts (D147(2)); otherwise **`likely_eligible_missing_evidence`**. Decisive facts: `itinerary_scope` (and the airports it derives from), `operating_carrier`/`marketing_carrier`, `merchant_of_record`, `ticket_refundability`, `event_type`, the schedule instants used for significance, `offer_type`, `consumer_response` (+ `consumer_response_at` for the timer), `flew_changed_or_alternative`, `payment_method_class` (timer), and the amount inputs `fare_paid`/`taxes_paid`/`ancillary_fees_paid`/`already_refunded`.
 9. Compute the refund amount (§8) and the carrier payment deadline (§11).
 10. Overlaps: attach relationships to R12 (card trip-cancellation: alternative/secondary — not additive), R15 (carrier commitment: may be complementary for expenses actually incurred before the consumer abandoned the trip, e.g. a stranded-overnight hotel; evaluate per carrier plan, never assume additive or exclusive), R03 (payment dispute: fallback channel for the same money, alternative).
 11. Idempotency: the opportunity key = (owner, rule id, rule version, ticket number, affected flight segment). Re-evaluation with an identical fact snapshot returns the same result and **reuses** the existing opportunity; no second claim.
@@ -271,12 +280,16 @@ DOT consumer-page passages DOT-REF-1…9 and FR notices FR-2026-13675-* are in `
 
 1. **Refund timing:** B presents "20 business days" as a possible separate automatic-refund event path. It is an inconsistency inside the DOT page; the regulation says 20 **calendar** days and explicitly includes **debit card** (L2). The anchor is the deemed-request date under 260.6(a)(2), not "the refund request".
 2. **Scope of "significant change":** B mentions only late arrival (3 h / 6 h). The regulation also counts early departure (3 h / 6 h), airport change, extra connections, downgrade, and two disability-specific changes. A merely **renumbered** flight counts as a cancellation, but DOT is not enforcing that until 2027-07-07 (L1).
-3. **Automatic vs on-request:** B's table says "automatic fare and fee refund". That is true only when the **carrier** is the merchant of record. When a ticket agent is the merchant of record, the fare refund is owed **upon request** by the agent (399.80(l)). Ancillary and bag fees must be requested from the **airline** even if the agent charged them (DOT-REF-8). Voucher acceptance must be **affirmative** (260.7); silence does not count.
+3. **Automatic vs on-request:** B's table says "automatic fare and fee refund". That is true only when the **carrier** is the merchant of record. When a ticket agent is the merchant of record, the fare refund is owed **upon request** by the agent (399.80(l)). DOT's page says ancillary and bag fees must be requested from the **airline** even if the agent charged them (DOT-REF-8); the regulation makes the carrier's refund automatic (L10). Voucher acceptance must be **affirmative** (260.7); silence does not count.
 
 (B's thresholds of 3 h domestic / 6 h international and its statement that a 1-hour delay creates no cash right are **confirmed**. The ANPRM that considered cash compensation was withdrawn on 2025-11-17.)
 
 ## 18. Assumptions (must be reviewed before activation)
 
-- A1: The anchor date is the calendar date of the anchor instant in the consumer's home time zone; flagged "on or about" near midnight.
+- A1: The anchor date is the calendar date of the anchor instant in the consumer's home time zone. When the consumer's zone and the carrier's origin-airport zone put that instant on different dates, the result is shown "on or about" with both dates.
 - A2: "Business days" excludes only 5 U.S.C. 6103 federal holidays (per 260.2), not state holidays.
 - A3: Scheduled-time comparisons use the final changed schedule notified before departure; multiple successive changes are compared against the **original** schedule at ticket sale.
+- A4: Full-ticket fare and listed ancillary fees relate to the affected itinerary; partly flown itineraries → amount `manual_review` (§8).
+- A5: For cash/check purchases with no card statement, the receipt's issuer is the merchant of record.
+- A6: A timestamped email/app/chat rejection is sufficient evidence of rejection (§10).
+- A7: For 260.6(a)(2)(i) (cancelled, nothing offered) the anchor is the carrier's cancellation-notice instant (§11).

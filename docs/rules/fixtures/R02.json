@@ -18,10 +18,15 @@
       "not_eligible",
       "deadline_passed",
       "source_unverified",
-      "unsupported"
+      "unsupported",
+      "not_yet_due"
     ],
     "carrier_names": "Fictional carrier codes (XA, XB) are used so fixtures do not imply real events.",
-    "loader": "A case has EITHER a top-level `expected` OR an `expected` on every variant. `clock` (and optional `source`) may be set on the case or on a variant; a variant value overrides the case value. `facts_from: <case id>` + `facts_override: {...}` means: copy that case's facts, then replace the named facts. A variant's `change` object replaces the named facts for that variant only. Every `facts` value is an object; no prose placeholders."
+    "loader": "A case has EITHER a top-level `expected` OR an `expected` on every variant. `clock` (and optional `source`) may be set on the case or on a variant; a variant value overrides the case value. `facts_from: <case id>` + `facts_override: {...}` means: copy that case's facts, then replace the named facts. A variant's `change` object replaces the named facts for that variant only. Every `facts` value is an object; no prose placeholders.",
+    "fact_states": "user_confirmed | observed | derived | extracted_candidate | conflicting | missing | assumption. Contract §2.5 mapping: user_confirmed→confirmed, observed→observed, derived→derived, extracted_candidate→candidate, conflicting→conflicting, missing→missing (value null), assumption→assumption-class candidate. D147(2)/X1: `eligible` requires every decisive fact to be user_confirmed, or observed/derived from confirmed facts; an extracted_candidate decisive fact caps the outcome at likely_eligible_missing_evidence (the case lists it in expected.unconfirmed_decisive_facts). Since M2D the baseline cases use user_confirmed for decisive facts (the state after the user's fact review); each file has explicit cap variants.",
+    "conflicting": "A conflicting fact carries `candidates: [{value, evidence, ...}]` (README cross-pack rule 3). If every candidate gives the same outcome the conflict is not material, but the fact is still unconfirmed, so the outcome is capped at likely_eligible_missing_evidence; if candidates diverge the outcome is needs_facts. Advisory dates use the earliest candidate.",
+    "not_yet_due": "D147(6)/X3: a path that is not ripe yet has outcome not_yet_due with expected.reevaluate_at (ISO date) or expected.reevaluate_when (event); never not_eligible.",
+    "missing_source": "X5: a variant with source.record = 'missing' means no current source record exists for the pack → source_unverified."
   },
   "cases": [
     {
@@ -41,12 +46,12 @@
         "operating_carrier": {
           "type": "string",
           "value": "XA",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "marketing_carrier": {
           "type": "string",
           "value": "XA",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "merchant_of_record": {
           "type": "enum",
@@ -56,32 +61,32 @@
         "ticket_refundability": {
           "type": "enum",
           "value": "nonrefundable",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "event_type": {
           "type": "enum",
           "value": "cancellation",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "ticket_number": {
           "type": "string",
           "value": "0012345678901",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "original_flight_number": {
           "type": "string",
           "value": "XA100",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "original_sched_departure_at": {
           "type": "datetime",
           "value": "2026-10-05T07:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "offer_type": {
           "type": "enum",
           "value": "rebooking",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "consumer_response": {
           "type": "enum",
@@ -91,7 +96,7 @@
         "consumer_response_at": {
           "type": "datetime",
           "value": "2026-10-01T15:20:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "flew_changed_or_alternative": {
           "type": "boolean",
@@ -109,7 +114,7 @@
             "amount_minor": 38000,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "taxes_paid": {
           "type": "money",
@@ -117,7 +122,7 @@
             "amount_minor": 4380,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "ancillary_fees_paid": {
           "type": "money[]",
@@ -128,7 +133,7 @@
               "currency": "USD"
             }
           ],
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "already_refunded": {
           "type": "money",
@@ -185,6 +190,120 @@
             ],
             "reasoning": "When a ticket agent is the merchant of record, 399.80(l) makes the agent's failure to refund 'upon request' the violation; the timing is keyed to the agent receiving carrier information."
           }
+        },
+        {
+          "id": "R02-01c",
+          "change": {
+            "itinerary_legs": {
+              "type": "object",
+              "value": {
+                "outbound": "flown 2026-09-28",
+                "return": "XA100 2026-10-05 cancelled"
+              },
+              "state": "user_confirmed"
+            },
+            "fare_paid": {
+              "type": "money",
+              "value": {
+                "amount_minor": 38000,
+                "currency": "USD",
+                "note": "round-trip fare; no per-segment split on the receipt"
+              },
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "eligible",
+            "missing_facts": [],
+            "amount": {
+              "refund_due": null,
+              "amount_status": "manual_review",
+              "reason": "260.6(a)(1) does not address a partly flown itinerary (spec §8, assumption A4)"
+            },
+            "deadline": {
+              "kind": "carrier_refund_issuance",
+              "date": "2026-10-13",
+              "semantics": "as R02-01"
+            }
+          },
+          "justification": {
+            "passages": [
+              "P-260.6-A1"
+            ],
+            "reasoning": "Eligibility for the cancelled return segment is established; the amount for a partly used round trip is not determinable from the text."
+          }
+        },
+        {
+          "id": "R02-01d",
+          "change": {
+            "consumer_response": {
+              "type": "enum",
+              "value": "rejected",
+              "state": "extracted_candidate"
+            },
+            "fare_paid": {
+              "type": "money",
+              "value": {
+                "amount_minor": 38000,
+                "currency": "USD"
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "unconfirmed_decisive_facts": [
+              "consumer_response",
+              "fare_paid"
+            ],
+            "amount": {
+              "refund_due": {
+                "amount_minor": 44880,
+                "currency": "USD"
+              },
+              "status": "estimate from unconfirmed extraction"
+            },
+            "deadline": {
+              "kind": "carrier_refund_issuance",
+              "date": "2026-10-13"
+            }
+          },
+          "justification": {
+            "passages": [
+              "D147(2)"
+            ],
+            "reasoning": "Decisive facts extracted but not confirmed cap the outcome at likely_eligible."
+          }
+        },
+        {
+          "id": "R02-01e",
+          "clock": "2024-09-20T12:00:00-04:00",
+          "change": {
+            "original_sched_departure_at": {
+              "type": "datetime",
+              "value": "2024-09-18T07:00:00-04:00",
+              "state": "user_confirmed"
+            },
+            "consumer_response_at": {
+              "type": "datetime",
+              "value": "2024-09-15T15:20:00-04:00",
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "source_unverified",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "reason": "deemed-request date 2024-09-15 is before the refund-provision compliance date 2024-10-28 (spec §16 step 1b)"
+          },
+          "justification": {
+            "passages": [
+              "FR-2024-07177-COMPLIANCE"
+            ],
+            "reasoning": "v1 does not evaluate events before the compliance date."
+          }
         }
       ],
       "justification": {
@@ -222,27 +341,27 @@
         "ticket_refundability": {
           "type": "enum",
           "value": "nonrefundable",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "event_type": {
           "type": "enum",
           "value": "schedule_change",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "original_sched_departure_at": {
           "type": "datetime",
           "value": "2026-11-10T10:00:00-05:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "original_sched_arrival_at": {
           "type": "datetime",
           "value": "2026-11-10T14:00:00-05:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "changed_sched_departure_at": {
           "type": "datetime",
           "value": "2026-11-10T10:00:00-05:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "original_airports": {
           "type": "object",
@@ -250,7 +369,7 @@
             "origin": "BOS",
             "destination": "ATL"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "changed_airports": {
           "type": "object",
@@ -258,27 +377,27 @@
             "origin": "BOS",
             "destination": "ATL"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "original_connections": {
           "type": "integer",
           "value": 0,
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "changed_connections": {
           "type": "integer",
           "value": 0,
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "original_cabin": {
           "type": "enum",
           "value": "economy",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "changed_cabin": {
           "type": "enum",
           "value": "economy",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "consumer_response": {
           "type": "enum",
@@ -288,7 +407,7 @@
         "consumer_response_at": {
           "type": "datetime",
           "value": "2026-11-02T09:00:00-05:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "flew_changed_or_alternative": {
           "type": "boolean",
@@ -306,7 +425,7 @@
             "amount_minor": 21900,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "taxes_paid": {
           "type": "money",
@@ -314,7 +433,7 @@
             "amount_minor": 3120,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "already_refunded": {
           "type": "money",
@@ -332,7 +451,7 @@
             "changed_sched_arrival_at": {
               "type": "datetime",
               "value": "2026-11-10T16:59:00-05:00",
-              "state": "extracted_candidate"
+              "state": "user_confirmed"
             }
           },
           "delta": "2h59m later",
@@ -350,7 +469,7 @@
             "changed_sched_arrival_at": {
               "type": "datetime",
               "value": "2026-11-10T17:00:00-05:00",
-              "state": "extracted_candidate"
+              "state": "user_confirmed"
             }
           },
           "delta": "exactly 3h00m later",
@@ -376,7 +495,7 @@
             "changed_sched_arrival_at": {
               "type": "datetime",
               "value": "2026-11-10T17:01:00-05:00",
-              "state": "extracted_candidate"
+              "state": "user_confirmed"
             }
           },
           "delta": "3h01m later",
@@ -428,27 +547,27 @@
         "ticket_refundability": {
           "type": "enum",
           "value": "nonrefundable",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "event_type": {
           "type": "enum",
           "value": "schedule_change",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "original_sched_arrival_at": {
           "type": "datetime",
           "value": "2026-09-14T12:10:00-05:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "changed_sched_arrival_at": {
           "type": "datetime",
           "value": "2026-09-14T15:11:00-05:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "consumer_response": {
           "type": "enum",
           "value": "accepted_rebooking",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "flew_changed_or_alternative": {
           "type": "boolean",
@@ -498,32 +617,32 @@
         "ticket_refundability": {
           "type": "enum",
           "value": "nonrefundable",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "event_type": {
           "type": "enum",
           "value": "schedule_change",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "original_sched_arrival_at": {
           "type": "datetime",
           "value": "2026-10-28T11:00:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "changed_sched_arrival_at": {
           "type": "datetime",
           "value": "2026-10-28T14:30:00-07:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "changed_or_alternative_departs_at": {
           "type": "datetime",
           "value": "2026-10-28T09:15:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "offer_type": {
           "type": "enum",
           "value": "rebooking",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "consumer_response": {
           "type": "enum",
@@ -561,7 +680,7 @@
     },
     {
       "id": "R02-05",
-      "title": "One-hour operational delay; passenger flew",
+      "title": "One-hour operational delay (revised schedule +1h05m); passenger flew",
       "categories": [
         "negative"
       ],
@@ -580,13 +699,13 @@
         },
         "event_type": {
           "type": "enum",
-          "value": "operational_delay_only",
+          "value": "operational_delay",
           "state": "user_confirmed"
         },
         "original_sched_arrival_at": {
           "type": "datetime",
           "value": "2026-09-20T18:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "actual_arrival_at": {
           "type": "datetime",
@@ -600,8 +719,13 @@
         },
         "delay_cause_controllable": {
           "type": "enum",
-          "value": "unknown",
+          "value": null,
           "state": "missing"
+        },
+        "changed_sched_arrival_at": {
+          "type": "datetime",
+          "value": "2026-09-20T19:05:00-04:00",
+          "state": "user_confirmed"
         }
       },
       "expected": {
@@ -613,7 +737,7 @@
           "any cash-compensation opportunity for delay inconvenience",
           "any amount"
         ],
-        "note": "No federal delay compensation exists (ANPRM withdrawn 2025-11-17). R15 may be shown only as 'check the carrier's customer-service commitments', and it depends on a controllable cause and the carrier's plan thresholds."
+        "note": "Revised scheduled arrival +1h05m meets no significance criterion and the passenger flew. No federal delay compensation exists (ANPRM withdrawn 2025-11-17). R15 may be shown only as 'check the carrier's customer-service commitments'."
       },
       "justification": {
         "passages": [
@@ -622,7 +746,150 @@
           "FR 2025-20042 (withdrawal)"
         ],
         "reasoning": "A 1h05m delay meets no significance criterion and the passenger flew. Amenities for controllable disruptions are carrier commitments (DOT-REF-5), not a refund right."
-      }
+      },
+      "variants": [
+        {
+          "id": "R02-05b",
+          "change": {
+            "changed_sched_arrival_at": {
+              "type": "datetime",
+              "value": "2026-09-20T21:20:00-04:00",
+              "state": "user_confirmed"
+            },
+            "actual_arrival_at": {
+              "type": "datetime",
+              "value": "2026-09-20T21:25:00-04:00",
+              "state": "user_confirmed"
+            },
+            "flew_changed_or_alternative": {
+              "type": "boolean",
+              "value": false,
+              "state": "user_confirmed"
+            },
+            "consumer_response": {
+              "type": "enum",
+              "value": "rejected",
+              "state": "user_confirmed"
+            },
+            "consumer_response_at": {
+              "type": "datetime",
+              "value": "2026-09-20T14:00:00-04:00",
+              "state": "user_confirmed"
+            },
+            "merchant_of_record": {
+              "type": "enum",
+              "value": "carrier",
+              "state": "user_confirmed"
+            },
+            "ticket_refundability": {
+              "type": "enum",
+              "value": "nonrefundable",
+              "state": "user_confirmed"
+            },
+            "payment_method_class": {
+              "type": "enum",
+              "value": "credit_card",
+              "state": "user_confirmed"
+            },
+            "fare_paid": {
+              "type": "money",
+              "value": {
+                "amount_minor": 30000,
+                "currency": "USD"
+              },
+              "state": "user_confirmed"
+            },
+            "taxes_paid": {
+              "type": "money",
+              "value": {
+                "amount_minor": 4000,
+                "currency": "USD"
+              },
+              "state": "user_confirmed"
+            },
+            "already_refunded": {
+              "type": "money",
+              "value": {
+                "amount_minor": 0,
+                "currency": "USD"
+              },
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "eligible",
+            "missing_facts": [],
+            "amount": {
+              "refund_due": {
+                "amount_minor": 34000,
+                "currency": "USD"
+              }
+            },
+            "deadline": {
+              "kind": "carrier_refund_issuance",
+              "date": "2026-09-29",
+              "semantics": "7 business days after 2026-09-20 (a Sunday)"
+            },
+            "note": "A same-day delay whose revised schedule is 3h20m late is a significantly delayed flight; the passenger declined it."
+          },
+          "justification": {
+            "passages": [
+              "P-260.2-SIG",
+              "P-260.6-A2"
+            ],
+            "reasoning": "260.2 covers a 'delay or change'; criterion (2) applies to the revised schedule."
+          }
+        },
+        {
+          "id": "R02-05c",
+          "change": {
+            "changed_sched_arrival_at": {
+              "type": "datetime",
+              "value": "2026-09-20T20:50:00-04:00",
+              "state": "user_confirmed"
+            },
+            "actual_arrival_at": {
+              "type": "datetime",
+              "value": "2026-09-20T21:10:00-04:00",
+              "state": "user_confirmed"
+            },
+            "flew_changed_or_alternative": {
+              "type": "boolean",
+              "value": false,
+              "state": "user_confirmed"
+            },
+            "consumer_response": {
+              "type": "enum",
+              "value": "rejected",
+              "state": "user_confirmed"
+            },
+            "merchant_of_record": {
+              "type": "enum",
+              "value": "carrier",
+              "state": "user_confirmed"
+            },
+            "ticket_refundability": {
+              "type": "enum",
+              "value": "nonrefundable",
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "manual_review",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "reason": "revised schedule +2h50m (below 3 h) but the flight actually arrived +3h10m: statute 'arrives' vs regulation 'scheduled to arrive' (spec §4)"
+          },
+          "justification": {
+            "passages": [
+              "P-42305-D",
+              "P-260.2-SIG"
+            ],
+            "reasoning": "The two first-party texts point to different events; only this conclusion is blocked."
+          }
+        }
+      ]
     },
     {
       "id": "R02-06",
@@ -645,7 +912,7 @@
             "origin": "JFK",
             "destination": "LIS"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "merchant_of_record": {
           "type": "enum",
@@ -655,17 +922,17 @@
         "ticket_refundability": {
           "type": "enum",
           "value": "nonrefundable",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "event_type": {
           "type": "enum",
           "value": "cancellation",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "offer_type": {
           "type": "enum",
           "value": "both",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "consumer_response": {
           "type": "enum",
@@ -675,7 +942,7 @@
         "consumer_response_at": {
           "type": "datetime",
           "value": "2026-10-01T10:05:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "flew_changed_or_alternative": {
           "type": "boolean",
@@ -693,7 +960,7 @@
             "amount_minor": 61200,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "taxes_paid": {
           "type": "money",
@@ -701,7 +968,7 @@
             "amount_minor": 11845,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "already_refunded": {
           "type": "money",
@@ -760,12 +1027,12 @@
         "event_type": {
           "type": "enum",
           "value": "schedule_change",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "original_sched_arrival_at": {
           "type": "datetime",
           "value": "2026-10-09T13:00:00-05:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "changed_sched_arrival_at": {
           "type": "datetime",
@@ -817,7 +1084,47 @@
           "P-260.2-SIG"
         ],
         "reasoning": "One candidate meets criterion (2), the other does not. The conflict is material and must be resolved by the user or a newer carrier record (mission §8 source/fact disagreement)."
-      }
+      },
+      "variants": [
+        {
+          "id": "R02-07b",
+          "change": {
+            "changed_sched_arrival_at": {
+              "type": "datetime",
+              "value": null,
+              "state": "conflicting",
+              "candidates": [
+                {
+                  "value": "2026-10-09T16:10:00-05:00",
+                  "evidence": "schedule-change email body",
+                  "delta": "3h10m"
+                },
+                {
+                  "value": "2026-10-09T16:40:00-05:00",
+                  "evidence": "screenshot of carrier app (OCR)",
+                  "delta": "3h40m"
+                }
+              ]
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "unconfirmed_decisive_facts": [
+              "changed_sched_arrival_at"
+            ],
+            "deadline": null,
+            "note": "Both candidates are >= 3 h, so the conflict is not material; the fact is still unconfirmed (D147(2)). No deadline: consumer_response_at is not in the facts."
+          },
+          "justification": {
+            "passages": [
+              "P-260.2-SIG",
+              "README cross-pack rule 3"
+            ],
+            "reasoning": "Same outcome under every candidate; confirmation still required for eligible."
+          }
+        }
+      ]
     },
     {
       "id": "R02-08",
@@ -839,17 +1146,17 @@
             "origin": "CDG",
             "destination": "FCO"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "operating_carrier": {
           "type": "string",
           "value": "XB",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "event_type": {
           "type": "enum",
           "value": "cancellation",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "consumer_response": {
           "type": "enum",
@@ -862,7 +1169,7 @@
             "amount_minor": 14900,
             "currency": "EUR"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         }
       },
       "expected": {
@@ -902,22 +1209,22 @@
         "ticket_refundability": {
           "type": "enum",
           "value": "nonrefundable",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "event_type": {
           "type": "enum",
           "value": "cancellation",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "original_sched_departure_at": {
           "type": "datetime",
           "value": "2026-10-15T08:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "offer_type": {
           "type": "enum",
           "value": "voucher_or_credit",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "flew_changed_or_alternative": {
           "type": "boolean",
@@ -935,7 +1242,7 @@
             "amount_minor": 18800,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "taxes_paid": {
           "type": "money",
@@ -943,7 +1250,7 @@
             "amount_minor": 2410,
             "currency": "USD"
           },
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         }
       },
       "variants": [
@@ -1029,22 +1336,22 @@
         "original_flight_number": {
           "type": "string",
           "value": "XA123",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "changed_flight_number": {
           "type": "string",
           "value": "XA4567",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "original_sched_arrival_at": {
           "type": "datetime",
           "value": "2026-10-20T10:00:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "changed_sched_arrival_at": {
           "type": "datetime",
           "value": "2026-10-20T10:15:00-04:00",
-          "state": "extracted_candidate"
+          "state": "user_confirmed"
         },
         "consumer_response": {
           "type": "enum",
@@ -1093,14 +1400,14 @@
     },
     {
       "id": "R02-11",
-      "title": "Same facts as R02-01 but the rule pack was last verified 84 days ago",
+      "title": "Same facts as R02-01 but the rule pack was last verified 48 days before the clock",
       "categories": [
         "stale_source"
       ],
       "mission_domain_fixture": null,
-      "clock": "2026-09-23T12:00:00-04:00",
+      "clock": "2026-10-02T12:00:00-04:00",
       "source": {
-        "last_verified_on": "2026-07-01",
+        "last_verified_on": "2026-08-15",
         "refresh_window_days": 30
       },
       "expected": {
@@ -1108,7 +1415,7 @@
         "missing_facts": [],
         "amount": null,
         "deadline": null,
-        "note": "Do not present eligibility from a stale pack. Several part 260 documents appeared in the last year (FR 2025-22140, FR 2026-13675)."
+        "note": "48 days since verification > 30-day window. (M2D: clock moved after the R02-01 facts, per review R02.2.)"
       },
       "justification": {
         "passages": [
@@ -1117,7 +1424,22 @@
         "reasoning": "The mission §8 lifecycle requires verified, current sources before activation. Staleness blocks the conclusion, not the user's data."
       },
       "facts_from": "R02-01",
-      "facts_override": {}
+      "facts_override": {},
+      "variants": [
+        {
+          "id": "R02-11b",
+          "source": {
+            "record": "missing"
+          },
+          "expected": {
+            "outcome": "source_unverified",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "note": "X5: no current source record for the pack."
+          }
+        }
+      ]
     },
     {
       "id": "R02-12",
