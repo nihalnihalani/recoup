@@ -9,7 +9,7 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | Role | Agent name | Wave | Status |
 |---|---|---|---|
 | Lead | this session | – | active |
-| Product architect | opus-product-architect | 0 | idle (M01 delivered) |
+| Product architect | opus-product-architect | 0–1 | idle (M01, M06–M06f delivered) |
 | Rules researcher | opus-rules-researcher | 0 | idle (M02 delivered) |
 | Security & privacy reviewer | opus-security-privacy-reviewer | 0 | idle (M03 delivered) |
 | QA engineer | opus-qa-engineer | 0 | idle (M04 delivered) |
@@ -37,7 +37,7 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | M09b | 1 | opus-rules-reviewer | M2D | Re-review of revised specs/fixtures; activation gate | docs/reviews/2026-09-23-rules-review-R01-R05.md (addendum) | verified (4bcf07b; R01 v1 approve_for_activation; others approve_with_changes; D154) |
 | M2E | 1 | opus-rules-researcher | M09b | Apply M09b §B.8 edits; README rule 3 cap; confirmed-vs-observed fixture per file | docs/rules/** | in_progress |
 | M09c | 1 | opus-rules-reviewer | M2E | Re-check changed items only | review addendum | pending |
-| M06f | 1 | opus-product-architect | M09b | Contract §4 5c decided + disputed-anchor deadline rule + not_yet_due next action (D154) | contract | in_progress |
+| M06f | 1 | opus-product-architect | M09b | Contract §4 5c decided + disputed-anchor deadline rule + not_yet_due next action (D154) | contract | verified (ab72962, e780129; M12 briefed) |
 
 ---
 
