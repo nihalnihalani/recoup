@@ -43,13 +43,11 @@ function expectOnlyKnown(found: readonly string[], known: readonly string[], wha
 }
 
 /**
- * Mission §17 category groups a file does not cover yet. R01 v1 (72fe1a2)
- * tags no case missing_fact or contradictory_fact; contract §9's activation
- * gate needs every group, so this is reported to the lead in the M08 doc.
+ * Mission §17 category groups a file does not cover yet (contract §9's
+ * activation gate needs every group). Empty since M2D added R01-14/R01-15;
+ * a file that loses a group fails here.
  */
-const KNOWN_CATEGORY_GAPS: Readonly<Record<string, readonly string[]>> = {
-  R01: ["missing_fact", "contradictory_fact"],
-};
+const KNOWN_CATEGORY_GAPS: Readonly<Record<string, readonly string[]>> = {};
 
 function byId(file: RuleFixtureFile, id: string): RuleFixtureCase {
   const found = file.cases.find((c) => c.id === id);
@@ -68,7 +66,8 @@ function outcomesOf(c: RuleFixtureCase): string[] {
 describe("rule fixtures: committed files (docs/rules/fixtures)", () => {
   it("loads every manifest-registered file (hash-checked), R01–R05 included", () => {
     const files = loadAllRuleFixtures();
-    expect(files.map((f) => f.scenario)).toEqual([...SCENARIOS]);
+    // Order-insensitive: the loader orders by manifest path, SCENARIOS by stem ("R01-x.json" < "R01.json" but "R01" < "R01-x").
+    expect(files.map((f) => f.scenario).sort()).toEqual([...SCENARIOS].sort());
     expect(SCENARIOS).toEqual(expect.arrayContaining(["R01", "R02", "R03", "R04", "R05"]));
     const manifest = readRulesManifest();
     for (const f of files) expect(f.sha256).toBe(manifest.fixtures[f.relPath]);
@@ -189,21 +188,16 @@ describe("rule fixtures: committed files (docs/rules/fixtures)", () => {
     });
   });
 
-  it("advisory ratchet: only the known fact is state=missing with a non-null value", () => {
-    // Conventions: "Missing facts are state=missing with value null". R02-05's
-    // delay_cause_controllable is {value: "unknown", state: "missing"}; reported
-    // to the rules owner (M08 doc). A NEW occurrence fails here.
-    // README cross-pack rule 2 now states it; M2D fixes R02-05.
+  it("no fact is state=missing with a non-null value (README cross-pack rule 2)", () => {
+    // Found by this loader in R02-05 (value "unknown"); fixed in M2D.
     const found = SCENARIOS.flatMap((s) => missingFactsWithValues(loadRuleFixtureFile(s)));
-    expectOnlyKnown(found, ["R02-05.delay_cause_controllable"], "missing fact with a value");
+    expectOnlyKnown(found, [], "missing fact with a value");
   });
 
-  it("advisory ratchet: only the known amount_minor has no currency beside it", () => {
-    // R04-04's expected.amount.excluded[0] is {line, amount_minor, reason} with
-    // no currency (the conventions define money as amount_minor + ISO-4217);
-    // reported to the rules owner (M08 doc). A NEW occurrence fails here.
+  it("every amount_minor carries a currency (README: money on every money object)", () => {
+    // Found by this loader in R04-04 expected.amount.excluded[0]; fixed in M2D.
     const found = SCENARIOS.flatMap((s) => moneyWithoutCurrency(loadRuleFixtureFile(s)));
-    expectOnlyKnown(found, ["R04-04 expected.amount.excluded[0]"], "amount_minor without currency");
+    expectOnlyKnown(found, [], "amount_minor without currency");
   });
 
   it("the alias table matches docs/rules/README.md 'Outcome vocabulary mapping'; pending rows are known; files use only known names", () => {

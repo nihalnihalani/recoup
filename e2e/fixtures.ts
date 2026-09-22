@@ -10,9 +10,17 @@
  * internal functions because the CLI authenticates as the deployment admin,
  * not as an end user). `runConvex()` below shells out to the locally
  * installed CLI binary directly (`node_modules/.bin/convex`, no `npx`
- * resolution overhead) and reads which deployment to target from
- * `CONVEX_DEPLOYMENT` -- the environment if it is already set (CI), else
- * `.env.local` (local dev, same file `npx convex dev` itself writes).
+ * resolution overhead). Which deployment it targets (M08, QA-9):
+ *  - CI / any run with `E2E_DEPLOY_KEY` set: that deploy key, passed to the
+ *    CLI as `CONVEX_DEPLOY_KEY`. The deployment named in the key must match
+ *    `E2E_CONVEX_URL` and `VITE_CONVEX_URL` when they are set, so seeding
+ *    and the browser can never talk to two different deployments. Under
+ *    `CI` the shared dev deployment is refused too (RELEASE.md §4: CI uses
+ *    a dedicated E2E deployment).
+ *  - Otherwise (local, unchanged): `CONVEX_DEPLOYMENT` from the environment,
+ *    else from `.env.local` (the file `npx convex dev` writes).
+ * The production deployment is refused in every mode, wherever it appears
+ * (deployment, key, `E2E_CONVEX_URL`, `VITE_CONVEX_URL`, `E2E_BASE_URL`).
  *
  * `signInFresh()` never calls `testing:seedUser` -- it drives the REAL
  * sign-up UI end to end (name/email/password -> "Check your email" ->
@@ -48,31 +56,74 @@ export const CODE_LENGTH = 8;
 // Deployment resolution + the `convex run` shell-out
 // ---------------------------------------------------------------------------
 
-let cachedDeployment: string | null = null;
+type Target = {
+  /** What the checks and messages name: `CONVEX_DEPLOYMENT` (e.g. `dev:adorable-lion-138`) or a deploy key's non-secret prefix. Never the key itself. */
+  label: string;
+  /** The bare deployment name (`adorable-lion-138`), used to cross-check URLs. */
+  name: string;
+  /** Environment for the `convex run` child process. */
+  env: NodeJS.ProcessEnv;
+};
+
+let cachedTarget: Target | null = null;
 
 /** `CONVEX_DEPLOYMENT`, from the environment if set, else parsed out of `.env.local` (same source `npx convex dev` writes). */
-function resolveDeployment(): string {
-  if (cachedDeployment) return cachedDeployment;
-  if (process.env.CONVEX_DEPLOYMENT) {
-    cachedDeployment = process.env.CONVEX_DEPLOYMENT;
-    return cachedDeployment;
-  }
+function resolveLocalDeployment(): string {
+  if (process.env.CONVEX_DEPLOYMENT) return process.env.CONVEX_DEPLOYMENT;
   const envLocalPath = path.join(REPO_ROOT, ".env.local");
   let contents: string;
   try {
     contents = readFileSync(envLocalPath, "utf8");
   } catch {
     throw new Error(
-      `e2e/fixtures.ts: CONVEX_DEPLOYMENT is not set and ${envLocalPath} does not exist. ` +
-        `Run "npx convex dev" once to link a deployment, or set CONVEX_DEPLOYMENT / E2E_CONVEX_URL yourself.`,
+      `e2e/fixtures.ts: neither E2E_DEPLOY_KEY nor CONVEX_DEPLOYMENT is set and ${envLocalPath} does not exist. ` +
+        `Run "npx convex dev" once to link a deployment, or set CONVEX_DEPLOYMENT (local) / E2E_DEPLOY_KEY + E2E_CONVEX_URL (CI).`,
     );
   }
   const match = contents.match(/^CONVEX_DEPLOYMENT=(\S+)/m);
   if (!match) {
     throw new Error(`e2e/fixtures.ts: no CONVEX_DEPLOYMENT= line found in ${envLocalPath}.`);
   }
-  cachedDeployment = match[1];
-  return cachedDeployment;
+  return match[1];
+}
+
+/** The seeding target: `E2E_DEPLOY_KEY` when set (CI), else the local `CONVEX_DEPLOYMENT`. */
+function resolveTarget(): Target {
+  if (cachedTarget) return cachedTarget;
+  const deployKey = process.env.E2E_DEPLOY_KEY;
+  if (deployKey) {
+    // A Convex deploy key is `<kind>:<deployment>|<secret>`. Only the part
+    // before `|` is ever used in a check or a message.
+    const label = deployKey.split("|", 1)[0];
+    const m = label.match(/^(dev|prod):([a-z0-9-]+)$/);
+    if (!m || !deployKey.includes("|")) {
+      throw new Error(
+        `e2e/fixtures.ts: E2E_DEPLOY_KEY must be a Convex dev or prod deploy key ("dev:<deployment>|…"); ` +
+          `got a key of kind "${label.split(":", 1)[0]}". Preview keys are not supported by \`convex run\` here.`,
+      );
+    }
+    const env: NodeJS.ProcessEnv = { ...process.env, CONVEX_DEPLOY_KEY: deployKey };
+    delete env.CONVEX_DEPLOYMENT;
+    cachedTarget = { label, name: m[2], env };
+  } else {
+    const deployment = resolveLocalDeployment();
+    cachedTarget = {
+      label: deployment,
+      name: deployment.replace(/^[a-z]+:/, ""),
+      env: { ...process.env, CONVEX_DEPLOYMENT: deployment },
+    };
+  }
+  return cachedTarget;
+}
+
+/** `https://<name>.convex.cloud` → `<name>`; null for any other host (a custom domain cannot be cross-checked). */
+function convexCloudName(url: string): string | null {
+  try {
+    const host = new URL(url).hostname;
+    return host.endsWith(".convex.cloud") ? host.slice(0, -".convex.cloud".length) : null;
+  } catch {
+    throw new Error(`e2e/fixtures.ts: not a valid URL: ${url}`);
+  }
 }
 
 /**
@@ -80,18 +131,38 @@ function resolveDeployment(): string {
  * fail fast, client-side, with a clear message, rather than relying only on
  * the deployment throwing back a ConvexError for every seed/reset call.
  */
-function assertSafeDeployment(deployment: string): void {
-  if (deployment.includes(PRODUCTION_HOST_MARKER)) {
+function assertSafeTarget(target: Target): void {
+  const urls: Array<[string, string | undefined]> = [
+    ["E2E_CONVEX_URL", process.env.E2E_CONVEX_URL],
+    ["VITE_CONVEX_URL", process.env.VITE_CONVEX_URL],
+    ["E2E_BASE_URL", process.env.E2E_BASE_URL],
+  ];
+  for (const [what, value] of [["the target deployment", target.label] as [string, string], ...urls]) {
+    if (value?.includes(PRODUCTION_HOST_MARKER)) {
+      throw new Error(`e2e/fixtures.ts: refusing to run -- ${what} ("${what === "the target deployment" ? target.label : value}") looks like the production deployment.`);
+    }
+  }
+  if (!target.label.includes(EXPECTED_DEPLOYMENT_MARKER) && process.env.E2E_ALLOW_UNKNOWN_DEPLOYMENT !== "true") {
     throw new Error(
-      `e2e/fixtures.ts: refusing to run -- CONVEX_DEPLOYMENT ("${deployment}") looks like the production deployment.`,
+      `e2e/fixtures.ts: the target deployment ("${target.label}") is not the documented disposable deployment ` +
+        `("${EXPECTED_DEPLOYMENT_MARKER}", D83 item 3). Set E2E_ALLOW_UNKNOWN_DEPLOYMENT=true to override ` +
+        `(e.g. a CI-provisioned dedicated E2E deployment).`,
     );
   }
-  if (!deployment.includes(EXPECTED_DEPLOYMENT_MARKER) && process.env.E2E_ALLOW_UNKNOWN_DEPLOYMENT !== "true") {
+  if (process.env.CI && target.label.includes(EXPECTED_DEPLOYMENT_MARKER)) {
     throw new Error(
-      `e2e/fixtures.ts: CONVEX_DEPLOYMENT ("${deployment}") is not the documented disposable deployment ` +
-        `("${EXPECTED_DEPLOYMENT_MARKER}", D83 item 3). Set E2E_ALLOW_UNKNOWN_DEPLOYMENT=true to override ` +
-        `(e.g. a CI-provisioned preview deployment).`,
+      `e2e/fixtures.ts: refusing to run in CI against the shared dev deployment ("${EXPECTED_DEPLOYMENT_MARKER}"); ` +
+        `CI uses a dedicated E2E deployment (docs/ops/RELEASE.md §4).`,
     );
+  }
+  for (const [what, value] of urls.slice(0, 2)) {
+    const name = value ? convexCloudName(value) : null;
+    if (name !== null && name !== target.name) {
+      throw new Error(
+        `e2e/fixtures.ts: ${what} points at "${name}" but seeding targets "${target.name}"; ` +
+          `the browser and the seed calls must use the same deployment.`,
+      );
+    }
   }
 }
 
@@ -101,14 +172,14 @@ function assertSafeDeployment(deployment: string): void {
  * 2)`; a `null`/`undefined` return prints nothing at all.
  */
 function runConvex<T = unknown>(fn: string, args: Record<string, unknown> = {}): T {
-  const deployment = resolveDeployment();
-  assertSafeDeployment(deployment);
+  const target = resolveTarget();
+  assertSafeTarget(target);
   let stdout: string;
   try {
     stdout = execFileSync(CONVEX_BIN, ["run", fn, JSON.stringify(args)], {
       cwd: REPO_ROOT,
       encoding: "utf8",
-      env: { ...process.env, CONVEX_DEPLOYMENT: deployment },
+      env: target.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (err) {

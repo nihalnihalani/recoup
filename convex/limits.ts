@@ -307,3 +307,69 @@ export const MAX_MERCHANT_CHARS = 120;
 export const MAX_ITEM_NAME_CHARS = 200;
 export const MAX_ORDER_REF_CHARS = 100;
 export const MAX_DOMAIN_CHARS = 253;
+
+// --- Transaction recovery (M10, contract rev 5 §2.4 "Caps") -----------------
+//
+// Numeric bounds only. The rate-limiter BUCKETS that enforce the per-minute /
+// per-hour numbers below (`evidenceUpload`, `evidenceDownload`, `prepareSend`)
+// are defined in `convex/lib/rateLimits.ts`, owned by M13 (rev 5 N2).
+
+/** A typed (user-entered) amount above USD 1,000,000 is refused (D145, SEC-MF-4): far above any consumer claim, far below Number.MAX_SAFE_INTEGER, so a typo of a few extra digits is caught rather than stored as money. */
+export const MAX_USER_AMOUNT_MINOR = 100_000_000;
+
+/** Transactions per user, archived included: bounds every `transactions.by_user_and_status` read (same order as MAX_PURCHASES_PER_USER, which is 1:1 with retail transactions, plus flights and card lines). */
+export const MAX_TRANSACTIONS_PER_USER = 500;
+
+/** Evidence rows per user: a heavy year of receipts, tickets and statements; bounds the owner-scoped dedupe and export reads. */
+export const MAX_EVIDENCE_ROWS_PER_USER = 1_000;
+/** Stored evidence bytes per user (500 MB), charged from `_storage.size` after storing (DA-A-28f): 50 maximum-size uploads. */
+export const MAX_EVIDENCE_BYTES_PER_USER = 500 * 1024 * 1024;
+
+/** Non-superseded fact rows per transaction (DA-A-36): the cap counts live rows only, so corrections never lock a user out. */
+export const MAX_LIVE_FACTS_PER_TRANSACTION = 1_000;
+/** Incidents per transaction: a trip or order with more than 20 distinct things going wrong needs a human, not more rows. */
+export const MAX_INCIDENTS_PER_TRANSACTION = 20;
+/** Image uploads linked to one transaction: damage photos and receipts for one case. */
+export const MAX_IMAGES_PER_TRANSACTION = 25;
+
+/** One upload's body cap, streamed (SEC-UP-3): a phone photo or a statement PDF fits; larger is refused with 413 before storing. */
+export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+/** PDF pages processed per document (SEC-UP-4): receipts and statements are short; longer → `over_page_cap`. */
+export const MAX_PDF_PAGES = 20;
+
+/** Uploads per user per rolling hour (`evidenceUpload` bucket, SEC-UP-8): nobody photographs more than 20 receipts an hour by hand. */
+export const EVIDENCE_UPLOADS_PER_HOUR = 20;
+/** Uploads per user per UTC day (per-user daily count quota, SEC-UP-8). */
+export const EVIDENCE_UPLOADS_PER_DAY = 100;
+/** Upload bytes per user per UTC day (per-user daily byte quota, SEC-UP-8): 20 maximum-size uploads. */
+export const EVIDENCE_BYTES_PER_USER_PER_DAY = 200 * 1024 * 1024;
+/** Deployment-wide upload bytes per UTC day (the `evidence_bytes` global kill switch, SEC-UP-8): bounds storage growth whatever the number of accounts. */
+export const EVIDENCE_GLOBAL_DAILY_BYTES = 2 * 1024 * 1024 * 1024;
+/** Evidence downloads per user per minute (`evidenceDownload` bucket): a page of previews, not a scraper. */
+export const EVIDENCE_DOWNLOADS_PER_MINUTE = 30;
+/** Re-evaluations per user per minute (`prepareSend` / evaluate bucket, M03 §3.7, rev 5 N2): the 61st call in a minute is refused. */
+export const EVALUATIONS_PER_MINUTE = 60;
+
+/** Evidence text kept per row after masking (D142): the same bound as inbound email text (`inbound.ts` MAX_TEXT_CHARS). */
+export const MAX_EVIDENCE_TEXT_CHARS = 60_000;
+/** A sanitized upload file name (rev 3). */
+export const MAX_EVIDENCE_FILE_NAME_CHARS = 200;
+/** A locator quote kept after evidence text is cleared (§2.6): enough for a line of a receipt, too little to reconstruct the document. */
+export const MAX_LOCATOR_QUOTE_CHARS = 300;
+/** A free-text fact value (masked, never refused — D142). */
+export const MAX_FACT_TEXT_CHARS = 500;
+
+/** Loss keys per claim or opportunity (§3.3). */
+export const MAX_LOSS_KEYS = 20;
+/** Bound facts stored per evaluation / approval (rev 5 N6). */
+export const MAX_BOUND_FACTS = 32;
+/** Attachments in one approval binding (§2.4; [] in Phase-1 email, HC-18). */
+export const MAX_BINDING_ATTACHMENTS = 10;
+
+/** Claims `recovery.summary` reads per user off `claims.by_user` (§3.4); a real cut reports `complete: false`. */
+export const SUMMARY_MAX_CLAIMS = 200;
+/** Open opportunities the dashboard reads per user (§3.4); a real cut reports `complete: false`. */
+export const SUMMARY_MAX_OPEN_OPPORTUNITIES = 200;
+
+/** Email/paste evidence text is cleared this many days after receipt unless its transaction has a case or the user pinned it (DA-A-7, D146 R4-1). */
+export const RETENTION_EVIDENCE_DAYS = 30;
