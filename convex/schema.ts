@@ -62,6 +62,241 @@ export const marketState = v.union(
 /** Account-deletion tombstone lifecycle (T01/T18, D77). */
 export const accountStateStatus = v.union(v.literal("deleting"), v.literal("deleted"));
 
+// ===================== M10 (wave 1) — shared validators =====================
+// Contract M01 rev 5 §2.4. Additive only: nothing below renames or narrows an
+// existing field. Every NEW index is named `by_<f1>_and_<f2>…` with each
+// field's trailing `Id` dropped (HC-19; schema.test.ts derives and checks it).
+
+/** The 25 mission scenarios (mission §11). A scenario id never implies an active rule pack. */
+export const scenarioId = v.union(
+  v.literal("R01"), v.literal("R02"), v.literal("R03"), v.literal("R04"), v.literal("R05"),
+  v.literal("R06"), v.literal("R07"), v.literal("R08"), v.literal("R09"), v.literal("R10"),
+  v.literal("R11"), v.literal("R12"), v.literal("R13"), v.literal("R14"), v.literal("R15"),
+  v.literal("R16"), v.literal("R17"), v.literal("R18"), v.literal("R19"), v.literal("R20"),
+  v.literal("R21"), v.literal("R22"), v.literal("R23"), v.literal("R24"), v.literal("R25"),
+);
+export const transactionCategory = v.union(v.literal("retail_order"), v.literal("air_travel"), v.literal("card_charge"));
+export const transactionStatus = v.union(v.literal("needs_review"), v.literal("active"), v.literal("archived"));
+/** Integer minor units + ISO 4217. Never signed; direction lives in the field or event kind (`lib/money.assertMoney`). */
+export const money = v.object({ amountMinor: v.number(), currency: v.string() });
+
+/** Where in a piece of evidence a value was read. `quote` ≤ 300 chars (asserted by the writer). */
+export const evidenceLocator = v.union(
+  v.object({ kind: v.literal("text_span"), start: v.number(), end: v.number(), quote: v.string() }),
+  v.object({ kind: v.literal("pdf_page"), page: v.number(), quote: v.optional(v.string()) }),
+  v.object({
+    kind: v.literal("email_header"),
+    header: v.union(v.literal("from"), v.literal("date"), v.literal("subject"), v.literal("message_id")),
+  }),
+  v.object({ kind: v.literal("whole_document") }),
+);
+/** DA-A-6: three-valued from day one (no boolean→union migration later). Semantics implemented in M23 (§2.6). */
+export const quoteStatus = v.union(v.literal("verified"), v.literal("unverified"), v.literal("unverifiable"));
+
+/**
+ * A fact's typed value. `text` ≤ 500 chars and passes through `lib/pan.maskPans` (D142);
+ * `identifier` is validated by its scheme's own format and NEVER goes through the free-text masker;
+ * `user_unknown` is "I don't know" (≠ missing, ≠ false; never a known cell — §2.5).
+ */
+export const factValue = v.union(
+  v.object({ kind: v.literal("money"), amountMinor: v.number(), currency: v.string() }),
+  v.object({ kind: v.literal("instant"), epochMs: v.number() }),
+  v.object({ kind: v.literal("local_date"), date: v.string(), timeZone: v.optional(v.string()) }),
+  v.object({ kind: v.literal("local_datetime"), dateTime: v.string(), timeZone: v.optional(v.string()) }),
+  v.object({ kind: v.literal("code"), code: v.string() }),
+  v.object({ kind: v.literal("text"), text: v.string() }),
+  v.object({ kind: v.literal("identifier"), scheme: v.string(), value: v.string() }),
+  v.object({ kind: v.literal("bool"), value: v.boolean() }),
+  v.object({ kind: v.literal("count"), n: v.number() }),
+  v.object({ kind: v.literal("minutes"), minutes: v.number() }),
+  v.object({ kind: v.literal("user_unknown") }),
+);
+export const factRowState = v.union(
+  v.literal("observed"), v.literal("extracted_candidate"), v.literal("user_confirmed"),
+  v.literal("derived"), v.literal("superseded"), v.literal("rejected"),
+);
+/** Provenance of a fact row. `derived.fromFactIds` ≤ 8 (asserted by the single writer `lib/facts/write.ts`). */
+export const factSource = v.union(
+  v.object({
+    kind: v.literal("evidence"), evidenceId: v.id("evidence"), locator: evidenceLocator,
+    quoteStatus, extractorVersion: v.string(),
+  }),
+  v.object({ kind: v.literal("user") }),
+  v.object({ kind: v.literal("price_check"), priceCheckId: v.id("priceChecks") }),
+  v.object({ kind: v.literal("derived"), ruleId: v.string(), fromFactIds: v.array(v.id("facts")) }),
+);
+
+export const evidenceKind = v.union(
+  v.literal("email"), v.literal("paste"), v.literal("upload"), v.literal("manual_note"), v.literal("system_capture"),
+);
+export const evidenceDocType = v.union(
+  v.literal("order_confirmation"), v.literal("receipt"), v.literal("refund_notice"), v.literal("shipping_notice"),
+  v.literal("delivery_notice"), v.literal("delay_notice"), v.literal("e_ticket"), v.literal("itinerary_change_notice"),
+  v.literal("cancellation_notice"), v.literal("baggage_report"), v.literal("expense_receipt"), v.literal("card_statement"),
+  v.literal("merchant_correspondence"), v.literal("submission_proof"), v.literal("damage_photo"), v.literal("policy_page"),
+  v.literal("other"), v.literal("unknown"),
+);
+export const evidenceChannel = v.union(
+  v.literal("agentmail_forward"), v.literal("paste"), v.literal("upload"), v.literal("manual"), v.literal("system_capture"),
+);
+/** SEC-AI-6: who stands behind the content. `unverified_sender` never creates confirmed facts or case state. */
+export const evidenceProvenance = v.union(
+  v.literal("user_forwarded"), v.literal("user_pasted"), v.literal("user_uploaded"),
+  v.literal("unverified_sender"), v.literal("system_capture"),
+);
+export const extractionStatus = v.union(
+  /** DA-A-8: no user-declared docType yet → never extracted. */
+  v.literal("awaiting_doc_type"),
+  v.literal("not_requested"), v.literal("queued"), v.literal("running"), v.literal("succeeded"),
+  v.literal("needs_review"), v.literal("failed"),
+  /** card_statement, a text layer holding a card number (DA-A-8), or live extraction not approved (D145). */
+  v.literal("store_only"),
+  v.literal("needs_unlocked_copy"), v.literal("unreadable"), v.literal("over_page_cap"),
+);
+export const evidenceRetention = v.union(v.literal("active"), v.literal("content_deleted"));
+
+export const incidentKind = v.union(
+  v.literal("flight_cancelled"), v.literal("flight_schedule_changed"), v.literal("flight_renumbered_only"),
+  v.literal("flight_delayed"), v.literal("denied_boarding"), v.literal("bag_delayed"), v.literal("bag_lost"),
+  v.literal("bag_damaged"), v.literal("ancillary_not_provided"),
+  v.literal("order_not_shipped_on_time"), v.literal("order_in_transit_delay"), v.literal("order_not_delivered"),
+  v.literal("order_delivery_disputed"), v.literal("package_stolen_after_delivery"),
+  v.literal("charge_duplicate"), v.literal("charge_wrong_amount"), v.literal("credit_not_posted"),
+  v.literal("goods_not_delivered_as_agreed"), v.literal("charge_unauthorized"),
+  v.literal("item_damaged"), v.literal("item_stolen"), v.literal("item_defective"), v.literal("return_refused"),
+  v.literal("other"),
+);
+export const incidentStatus = v.union(v.literal("candidate"), v.literal("confirmed"), v.literal("withdrawn"));
+
+export const authorityClass = v.union(
+  v.literal("legal_entitlement"), v.literal("contract_benefit"), v.literal("merchant_promise"),
+  v.literal("settlement_or_program"), v.literal("goodwill"),
+);
+/**
+ * Mission §9 outcomes. M02 fixtures' `likely_eligible_missing_evidence` ≡ `likely_eligible`
+ * (docs/rules/README.md alias table; M08's fixture loader maps it).
+ */
+export const evaluationOutcome = v.union(
+  v.literal("eligible"), v.literal("likely_eligible"), v.literal("possible_contract_benefit"), v.literal("needs_facts"),
+  v.literal("manual_review"), v.literal("not_eligible"), v.literal("deadline_passed"), v.literal("source_unverified"),
+  v.literal("unsupported"),
+);
+export const tri = v.union(v.literal("pass"), v.literal("fail"), v.literal("unknown"));
+export const remedyType = v.union(
+  v.literal("price_difference"), v.literal("cash_refund"), v.literal("statement_credit"), v.literal("reimbursement"),
+  v.literal("fee_refund"), v.literal("billing_correction"), v.literal("voucher"), v.literal("points"), v.literal("repair"),
+  v.literal("replacement"), v.literal("service_credit"),
+);
+export const cashClass = v.union(v.literal("cash"), v.literal("non_cash"), v.literal("provisional"));
+export const overlapRelation = v.union(
+  v.literal("alternative"), v.literal("coordinated"), v.literal("primary_secondary"),
+  v.literal("complementary"), v.literal("distinct_lines"),
+);
+export const opportunityStatus = v.union(
+  v.literal("open"), v.literal("case_open"), v.literal("dismissed"), v.literal("closed"), v.literal("superseded"),
+);
+/** DA-A-5: `overdue` exists only for counterparty obligations. */
+export const deadlineStatus = v.union(
+  v.literal("open"), v.literal("passed"), v.literal("overdue"), v.literal("unknown_anchor"),
+  v.literal("disputed_anchor"), v.literal("beyond_calendar"), v.literal("not_applicable"),
+);
+export const obligor = v.union(v.literal("user"), v.literal("counterparty"));
+export const manualChannel = v.union(
+  v.literal("postal_mail"), v.literal("web_form"), v.literal("portal"), v.literal("phone"),
+  v.literal("chat"), v.literal("in_person"),
+);
+/**
+ * DA-A-9: the channel on which a claim counts as submitted (`lib/claimState` projects delivery from it).
+ * Declared as one FLAT union of `email` + every `manualChannel` member so the validator has a single level.
+ */
+export const requiredChannel = v.union(v.literal("email"), ...manualChannel.members);
+
+/** DA-A-15: a reference to a fact CELL by value coordinates — never a row id, so hashes survive re-confirmation. */
+export const factRef = v.object({ subjectKey: v.string(), key: v.string() });
+/** rev 5 (N6): resolved cell status (§2.5) and a bound fact's value, stored so an approved basis stays displayable. */
+export const cellStatus = v.union(
+  v.literal("confirmed"), v.literal("observed"), v.literal("derived"), v.literal("candidate"),
+  v.literal("conflicting"), v.literal("user_unknown"), v.literal("missing"),
+);
+export const boundFactValue = v.object({
+  subjectKey: v.string(), key: v.string(), status: cellStatus, value: v.optional(factValue),
+});
+export const sourceRef = v.object({ sourceId: v.string(), passageId: v.string(), url: v.string(), effective: v.string() });
+export const conditionResult = v.object({
+  id: v.string(), label: v.string(), result: tri,
+  kind: v.union(
+    v.literal("applicability"), v.literal("requirement"), v.literal("exclusion"), v.literal("timing"), v.literal("evidence"),
+  ),
+  facts: v.array(factRef), sourcePassageId: v.optional(v.string()), note: v.optional(v.string()),
+});
+/** DA-A-2 / DA-A-24: only DECISIVE unknowns are listed; `class: "assumption"` never sets factsKnown. */
+export const missingFact = v.object({
+  subjectKey: v.string(), key: v.string(),
+  reason: v.union(v.literal("missing"), v.literal("candidate_unconfirmed"), v.literal("conflicting"), v.literal("user_unknown")),
+  class: v.union(v.literal("required"), v.literal("assumption")),
+  neededFor: v.array(v.string()),
+});
+export const assumption = v.object({ id: v.string(), text: v.string(), changesOutcomeIf: v.string() });
+/** `inputs` ≤ 12. `cap` is a LIMIT, never the estimate (mission §14). */
+export const amountCalc = v.object({
+  estimate: money,
+  basis: v.union(v.literal("exact_formula"), v.literal("documented_total"), v.literal("user_claimed")),
+  formula: v.string(),
+  inputs: v.array(v.object({ label: v.string(), value: v.string(), fact: v.optional(factRef) })),
+  cap: v.optional(v.object({ amount: money, sourcePassageId: v.string(), note: v.string() })),
+});
+export const deadlineResult = v.object({
+  id: v.string(), label: v.string(), obligor, status: deadlineStatus,
+  dueAt: v.optional(v.number()), dueLocalDate: v.optional(v.string()), timeZone: v.optional(v.string()),
+  mustBe: v.union(v.literal("received"), v.literal("sent"), v.literal("filed"), v.literal("paid"), v.literal("n_a")),
+  /** Counterparty only (DA-A-5). */
+  overdueSince: v.optional(v.number()),
+  /** D143.3: labelled "conservative act-by", NEVER dueAt. */
+  advisoryActBy: v.optional(v.string()),
+  basis: v.string(), anchor: v.optional(factRef), sourcePassageId: v.optional(v.string()),
+});
+export const dimensions = v.object({
+  applies: tri, factsKnown: tri, evidenceSupports: tri, windowOpen: tri, amountCalculable: tri, readyForApproval: tri,
+});
+export const nextAction = v.union(
+  v.object({ kind: v.literal("answer_questions"), keys: v.array(factRef) }),
+  v.object({ kind: v.literal("add_evidence"), docTypes: v.array(evidenceDocType) }),
+  v.object({ kind: v.literal("open_case") }),
+  v.object({ kind: v.literal("continue_case"), claimId: v.id("claims") }),
+  /** DA-A-25: automatic refund; watch the counterparty deadline. */
+  v.object({ kind: v.literal("track") }),
+  /** DA-A-5: counterparty deadline overdue. */
+  v.object({ kind: v.literal("escalate"), reason: v.string() }),
+  /** D143.2: e.g. ticket agent is merchant of record. */
+  v.object({ kind: v.literal("request_refund") }),
+  /** D143.1: user-initiated ask when the source is unverified. */
+  v.object({ kind: v.literal("ask_anyway"), reason: v.string() }),
+  v.object({ kind: v.literal("manual_review"), reason: v.string() }),
+  v.object({ kind: v.literal("none"), reason: v.string() }),
+);
+export const nonCashKind = v.union(
+  v.literal("voucher"), v.literal("points"), v.literal("repair"), v.literal("replacement"),
+  v.literal("service_credit"), v.literal("fee_waiver"), v.literal("other"),
+);
+/**
+ * What an outbound approval is bound to (mission §6 outbound authorization). `contextHash` is the canonical
+ * hash (`lib/canonical.ts`) of every field below — VALUES, not row ids (DA-A-15). `attachments` ≤ 10 ([] in
+ * Phase-1 email). `engineVersion` is populated from wave 2 (DA-A-23) and optional so wave 1 needs no migration.
+ */
+export const approvalBinding = v.object({
+  contextHash: v.string(),
+  claimVersion: v.number(),
+  amount: money,
+  opportunityId: v.optional(v.id("opportunities")),
+  evaluationId: v.optional(v.id("evaluations")),
+  ruleId: v.optional(v.string()),
+  ruleVersion: v.optional(v.number()),
+  engineVersion: v.optional(v.string()),
+  /** Hash over (subjectKey, key, status, value) of every bound fact (§2.5). */
+  boundFactsHash: v.optional(v.string()),
+  attachments: v.array(v.object({ evidenceId: v.id("evidence"), contentHash: v.string() })),
+});
+
 export default defineSchema({
   ...authTables,
 
@@ -249,18 +484,40 @@ export default defineSchema({
     status: claimStatus, windowEndsAt: v.optional(v.number()), policyId: v.optional(v.id("policies")), threadId: v.optional(v.string()),
     token: v.string(), version: v.number(), attentionAt: v.optional(v.number()), openedFromPriceCheckId: v.optional(v.id("priceChecks")),
     sendUnknown: v.optional(v.boolean()), isExample: v.optional(v.boolean()),
+    // M10 (wave 1) links, all optional so every stored claim still validates (contract §2.4).
+    /** The category-neutral parent (M11 `ensurePurchaseTransaction`); set by linking or scenario-case opening. */
+    transactionId: v.optional(v.id("transactions")),
+    /** The opportunity this claim pursues; set by the mandatory lazy link (DA-A-3) or `openCase`. */
+    opportunityId: v.optional(v.id("opportunities")),
+    scenarioId: v.optional(scenarioId),
+    remedyKey: v.optional(v.string()),
+    /** The claim's own ISO 4217 currency (`lib/money.claimCurrency` falls back to the purchase's for legacy rows). */
+    currency: v.optional(v.string()),
+    /** Loss keys (§3.3) this claim pursues, ≤ 20; the overlap guard and loss-component totals key on them. */
+    lossKeys: v.optional(v.array(v.string())),
+    /** DA-A-9: submitted / Asked / expired are projected only from artifacts on this channel (`lib/claimState`). */
+    requiredChannel: v.optional(requiredChannel),
   }).index("by_user", ["userId"]).index("by_item", ["itemId"]).index("by_token", ["token"]).index("by_thread", ["threadId"])
     .index("by_item_type_status", ["itemId", "type", "status"])
     /** F3 (D103): lets `tracking.overview` fetch every price_adjustment claim
      * for a whole purchase's items in one range read, instead of one query
      * per item -- see tracking.ts's docstring for the "too many index
      * ranges read" failure this replaces. */
-    .index("by_purchase_type", ["purchaseId", "type", "status"]),
+    .index("by_purchase_type", ["purchaseId", "type", "status"])
+    /** M10: the claim linked to an opportunity (evaluation retention, DA-A-32; link checks, DA-A-3). */
+    .index("by_opportunity", ["opportunityId"])
+    /** M10: active claims on one transaction (overlap guard, DA-A-4; evidence retention "has a case", DA-A-7). */
+    .index("by_transaction_and_status", ["transactionId", "status"]),
 
-  /** Append-only facts about money. Idempotency keys are scoped per claim (D38). Only user confirmation creates confirmed_credit (Inv 3). */
+  /**
+   * Append-only facts about money. Idempotency keys are scoped per claim (D38). Only user confirmation creates
+   * confirmed_credit (Inv 3; SEC-MF-5 as amended by D145: only `claims.ts` writes it). `currency` (M10) is required
+   * of every NEW writer and must equal the claim's currency; legacy rows carry none.
+   */
   ledgerEvents: defineTable({
     claimId: v.id("claims"), userId: v.id("users"), kind: eventKind, cents: v.number(), evidence: v.string(),
     idempotencyKey: v.optional(v.string()),
+    currency: v.optional(v.string()),
   }).index("by_claim", ["claimId"]).index("by_claim_key", ["claimId", "idempotencyKey"]),
 
   /** Non-monetary audit trail for a claim (D24). */
@@ -273,6 +530,10 @@ export default defineSchema({
     claimId: v.id("claims"), userId: v.id("users"), version: v.number(), claimVersion: v.number(), to: v.string(), subject: v.string(),
     body: v.string(), approvedAt: v.optional(v.number()), recipientConfirmed: v.optional(v.boolean()), outboundId: v.optional(vOutboundId),
     agentmailMessageId: v.optional(v.string()), sendError: v.optional(v.string()),
+    /** M10 (§6): the full approval context — amount, rule/evaluation, bound-fact hash — for opportunity-linked claims. */
+    binding: v.optional(approvalBinding),
+    /** M10 (§6): the hash the user approved; a send re-derives it and refuses on a mismatch. */
+    approvedHash: v.optional(v.string()),
   }).index("by_claim", ["claimId"]).index("by_outbound", ["outboundId"]).index("by_message", ["agentmailMessageId"]),
 
   /** Classified merchant replies. promisedCents only when the reply states an amount (D21). */
@@ -349,4 +610,149 @@ export default defineSchema({
   opsState: defineTable({
     key: v.string(), cursor: v.optional(v.string()), updatedAt: v.number(),
   }).index("by_key", ["key"]),
+
+  // ===================== M10 (wave 1) — new tables (contract §2.4) =====================
+
+  /**
+   * The category-neutral transaction (§2.2): 1:1 with `purchases` for retail (unique through `by_purchase`,
+   * written by M11's `ensurePurchaseTransaction`), standalone for flights and card charges. `naturalKey` is the
+   * owner-scoped dedupe key (card lines include a per-line identity, DA-A-30). `relatedTransactionId` is set only
+   * server-side after `ownedTransaction` (DA-A-29). `liveFactCount` counts non-superseded fact rows (DA-A-36).
+   */
+  transactions: defineTable({
+    userId: v.id("users"), category: transactionCategory, status: transactionStatus,
+    counterpartyName: v.string(), counterpartyDomain: v.optional(v.string()),
+    currency: v.string(), totalMinor: v.optional(v.number()), transactedAt: v.optional(v.number()),
+    naturalKey: v.optional(v.string()),
+    purchaseId: v.optional(v.id("purchases")),
+    relatedTransactionId: v.optional(v.id("transactions")),
+    sourceEvidenceId: v.optional(v.id("evidence")),
+    liveFactCount: v.number(),
+    isExample: v.optional(v.boolean()),
+  }).index("by_user_and_status", ["userId", "status"])
+    .index("by_user_and_natural_key", ["userId", "naturalKey"])
+    .index("by_purchase", ["purchaseId"]),
+
+  /**
+   * Typed facts about a transaction (§2.5). A cell is (transactionId, subjectKey, key); its rows carry a state
+   * and a provenance. Single writer `lib/facts/write.ts putFact` (M11, grep-tested). An unchanged observation
+   * patches `lastObservedAt` instead of inserting (DA-A-36).
+   */
+  facts: defineTable({
+    userId: v.id("users"), transactionId: v.id("transactions"),
+    subjectKey: v.string(), key: v.string(),
+    state: factRowState, value: factValue, source: factSource,
+    supersededBy: v.optional(v.id("facts")),
+    overridesObserved: v.optional(v.boolean()),
+    recordedAt: v.number(),
+    lastObservedAt: v.optional(v.number()),
+    isExample: v.optional(v.boolean()),
+  }).index("by_transaction_and_subject_key_and_key", ["transactionId", "subjectKey", "key"])
+    .index("by_user", ["userId"]),
+
+  /** What went wrong, kept apart from the transaction's original facts (mission §7). */
+  incidents: defineTable({
+    userId: v.id("users"), transactionId: v.id("transactions"),
+    kind: incidentKind, status: incidentStatus,
+    reportedBy: v.union(v.literal("user"), v.literal("extraction")),
+    sourceEvidenceId: v.optional(v.id("evidence")), isExample: v.optional(v.boolean()),
+  }).index("by_transaction", ["transactionId"]).index("by_user", ["userId"]),
+
+  /**
+   * Ingested content with provenance (§2.6). `storageId` is written only by the upload httpAction's finalize
+   * mutation (SEC-UP-1); `contentHash` is lowercase hex SHA-256 (DA-A-27); `text` is masked (D142) and
+   * ≤ 60,000 chars; `fileName` ≤ 200 chars, sanitized. Dedupe on (userId, contentHash) against `active` rows only
+   * (DA-A-20). Only `docTypeDeclaredBy: "user"` unlocks upload extraction (DA-A-8).
+   */
+  evidence: defineTable({
+    userId: v.id("users"), transactionId: v.optional(v.id("transactions")),
+    kind: evidenceKind, docType: evidenceDocType,
+    docTypeDeclaredBy: v.optional(v.union(v.literal("user"), v.literal("classifier"))),
+    sourceChannel: evidenceChannel, provenance: evidenceProvenance,
+    processedEventId: v.optional(v.id("processedEvents")),
+    storageId: v.optional(v.id("_storage")),
+    contentHash: v.string(),
+    mimeType: v.optional(v.string()), sizeBytes: v.optional(v.number()), pageCount: v.optional(v.number()),
+    fileName: v.optional(v.string()),
+    text: v.optional(v.string()),
+    headers: v.optional(v.object({
+      from: v.optional(v.string()), subject: v.optional(v.string()), date: v.optional(v.string()),
+      messageId: v.optional(v.string()),
+    })),
+    receivedAt: v.number(),
+    /** DA-A-7: the user chose to keep it past the retention window. */
+    pinnedAt: v.optional(v.number()),
+    extractionStatus, extractionAttempts: v.number(),
+    extractionStartedAt: v.optional(v.number()), extractorVersion: v.optional(v.string()),
+    extractionSummary: v.optional(v.string()),
+    /** DA-A-6: a deterministic text layer is present (PDF text / email / paste). */
+    hasTextLayer: v.optional(v.boolean()),
+    retention: evidenceRetention, isExample: v.optional(v.boolean()),
+  }).index("by_user_and_content_hash", ["userId", "contentHash"])
+    .index("by_transaction", ["transactionId"])
+    .index("by_storage", ["storageId"])
+    .index("by_extraction_status_and_extraction_started_at", ["extractionStatus", "extractionStartedAt"])
+    /** DA-A-7 retention sweep. */
+    .index("by_retention_and_received_at", ["retention", "receivedAt"]),
+
+  /**
+   * The stable identity of "remedy × loss × transaction" (§2.1, §2.8). `dedupeKey` is
+   * `${transactionId}|${scenarioId}|${remedyKey}|${subjectKey}|${incidentId ?? "-"}` and never includes the rule
+   * version. `nextDeadlineAt` holds USER-obligor deadlines only (DA-A-5). `lossKeys` ≤ 20.
+   */
+  opportunities: defineTable({
+    userId: v.id("users"), transactionId: v.id("transactions"),
+    scenarioId, remedyKey: v.string(), subjectKey: v.string(), incidentId: v.optional(v.id("incidents")),
+    dedupeKey: v.string(),
+    status: opportunityStatus,
+    currentEvaluationId: v.optional(v.id("evaluations")),
+    ruleId: v.string(), ruleVersion: v.number(), outcome: evaluationOutcome,
+    authorityClass, remedyType, cashClass,
+    estimate: v.optional(money),
+    nextDeadlineAt: v.optional(v.number()),
+    nextCounterpartyDueAt: v.optional(v.number()),
+    lossKeys: v.array(v.string()),
+    activeClaimId: v.optional(v.id("claims")),
+    lastEvaluatedAt: v.number(), isExample: v.optional(v.boolean()),
+  }).index("by_user_and_dedupe_key", ["userId", "dedupeKey"])
+    .index("by_transaction", ["transactionId"])
+    .index("by_user_and_status", ["userId", "status"])
+    .index("by_status_and_next_deadline_at", ["status", "nextDeadlineAt"])
+    .index("by_scenario_and_rule_version", ["scenarioId", "ruleVersion"]),
+
+  /**
+   * Append-only evaluation history, one row per changed `resultHash` (§4, DA-A-32). `factSnapshotHash` is stored
+   * alongside but is NOT part of `resultHash`. Array bounds asserted by the single writer: conditions ≤ 64,
+   * missingFacts ≤ 32, assumptions ≤ 16, disqualifiers ≤ 16, deadlines ≤ 8, sourceRefs ≤ 8, overlap ≤ 8,
+   * explanation ≤ 12, boundFacts ≤ 32 (rev 5, N6: the pack's bound-fact values, written on every row).
+   */
+  evaluations: defineTable({
+    userId: v.id("users"), opportunityId: v.id("opportunities"), scenarioId,
+    ruleId: v.string(), ruleVersion: v.number(), engineVersion: v.optional(v.string()),
+    factSnapshotHash: v.string(),
+    resultHash: v.string(),
+    evaluatedAt: v.number(),
+    trigger: v.union(
+      v.literal("fact_change"), v.literal("observation"), v.literal("rule_version"), v.literal("user_request"),
+      v.literal("case_open"), v.literal("approval_check"), v.literal("migration"), v.literal("link"),
+    ),
+    outcome: evaluationOutcome, dimensions,
+    conditions: v.array(conditionResult), missingFacts: v.array(missingFact), assumptions: v.array(assumption),
+    disqualifierIds: v.array(v.string()), amount: v.union(amountCalc, v.null()),
+    deadlines: v.array(deadlineResult), sourceRefs: v.array(sourceRef),
+    overlap: v.array(v.object({ withScenario: scenarioId, withRemedyKey: v.string(), relation: overlapRelation })),
+    nextAction, explanation: v.array(v.string()),
+    boundFacts: v.optional(v.array(boundFactValue)),
+  }).index("by_opportunity", ["opportunityId"]).index("by_user", ["userId"]),
+
+  /**
+   * Non-cash remedies (vouchers, points, repairs, replacements…): append-only, never summed with cash
+   * (mission §6). `faceValue` is shown per item only, never in a total (SEC-MF-1, I5). Idempotency keys are
+   * scoped per claim, like the ledger (D38).
+   */
+  nonCashRemedies: defineTable({
+    userId: v.id("users"), claimId: v.id("claims"), kind: nonCashKind, description: v.string(),
+    faceValue: v.optional(money), state: v.union(v.literal("promised"), v.literal("received")),
+    idempotencyKey: v.string(), recordedAt: v.number(),
+  }).index("by_claim_and_idempotency_key", ["claimId", "idempotencyKey"]).index("by_user", ["userId"]),
 });
