@@ -95,3 +95,9 @@ All 15 rows in the table above: **VERIFIED_LOCAL** via `convex/scenarios.test.ts
 - `npm test`: 66 files — **1,351 passed, 1 expected fail (F-D74-1), 2 failed** (`tracking.test.ts` ×2, dated-`now` fixture; D138).
 - `npm run typecheck`: clean. `npm run lint` (oxlint): clean. `npm run build`: clean. `node scripts/check-patch.mjs`: OK.
 - Logs: session scratchpad `baseline/*.log`.
+
+## 2026-09-23 · wave 1 mid-point · 04e9a17 (lead, clean worktree, regenerated types)
+- `npm test`: 115 files — 2,455 passed, 1 expected fail (F-D74-1), 2 todo (DA-A-22 stubs for M2C).
+- `npm run typecheck` (with regenerated `api.d.ts`), `npm run lint` (0 warnings), `npm run build`: clean. `node scripts/check-rule-packs.mjs`: OK, no active packs.
+- GitHub CI: green at `0bd517b` (run 35785832079); red earlier on a runner-load timeout (fixed `1bae5a7`) and on stale generated types (fixed `0bd517b`, rule D175).
+- Landed and lead-verified in wave 1 so far: M10, M11 (+M11b), M12, M14 (+M14b, M14c), M1A, M1B, M08, M19; M13 deliverables 1–3; M15 deliverable 1.
