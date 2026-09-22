@@ -69,7 +69,7 @@ if (!existsSync(outFile)) {
   process.exit(1);
 }
 
-/** @type {{numTotalTests?: number, numFailedTests?: number, testResults?: Array<{name: string, assertionResults?: Array<unknown>, status?: string}>}} */
+/** @type {{numTotalTests?: number, numFailedTests?: number, testResults?: Array<{name: string, message?: string, assertionResults?: Array<{fullName?: string, status?: string, failureMessages?: string[]}>, status?: string}>}} */
 const report = JSON.parse(readFileSync(outFile, "utf8"));
 rmSync(workDir, { recursive: true, force: true });
 
@@ -85,6 +85,18 @@ if (vitestRunFailed) {
   console.error(
     `[test:ci] FAILED - vitest reported failures (numFailedTests=${report.numFailedTests ?? "unknown"}).`,
   );
+  // The JSON reporter prints nothing to the console, so name what failed
+  // (otherwise a CI log says only "numFailedTests=1").
+  const firstLine = (msg) => String(msg ?? "").split("\n").find((l) => l.trim()) ?? "";
+  const shown = [];
+  for (const file of testFiles) {
+    const rel = path.relative(process.cwd(), file.name);
+    if (file.status === "failed" && (file.assertionResults?.length ?? 0) === 0) shown.push(`  - ${rel}: ${firstLine(file.message) || "file failed to load"}`);
+    for (const a of file.assertionResults ?? []) {
+      if (a.status === "failed") shown.push(`  - ${rel} > ${a.fullName ?? "(unnamed)"}\n      ${firstLine(a.failureMessages?.[0]).slice(0, 300)}`);
+    }
+  }
+  if (shown.length) console.error(shown.slice(0, 20).join("\n") + (shown.length > 20 ? `\n  … and ${shown.length - 20} more` : ""));
   ok = false;
 }
 
