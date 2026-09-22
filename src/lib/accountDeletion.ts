@@ -12,7 +12,8 @@
 export const DELETION_REMOVED_NOW =
   "Deletes your account now, not just hides it: your purchases, items, claims, the ledger, drafts, " +
   "replies, watches, the mail log, alert settings and your profile are removed, including your money " +
-  "history. Every session is signed out immediately, and further sign-in is blocked. Recoup also purges " +
+  "history, along with your transactions, recorded facts, the evidence you forwarded, pasted or uploaded " +
+  "(uploaded files included), recovery opportunities and rule-check history. Every session is signed out immediately, and further sign-in is blocked. Recoup also purges " +
   "the mail system's own stored copies of inbound and outbound email for your Recoup inbox, and requests " +
   "deletion of your Recoup inbox from the mail provider right away, retried automatically.";
 

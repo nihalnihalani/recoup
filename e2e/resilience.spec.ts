@@ -4,7 +4,7 @@
  * `src/components/ErrorBoundary.tsx`), the fallback heading takes focus and
  * "Go to board" works; keyboard-only completion of sign-in and of
  * confirm-credit; an axe scan finds no serious/critical violations on
- * Board, Watching, Settings, a Purchase and a Claim.
+ * Board, Watching, Settings, a Purchase, a Claim and Privacy.
  *
  * Uses the shared `leadPage` fixture (one real sign-in per worker, see
  * `e2e/fixtures.ts`) wherever a test just needs to already be signed in as
@@ -212,6 +212,16 @@ test.describe("resilience", () => {
 
     test("a Claim page has no serious/critical accessibility violations", async ({ leadPage: page }) => {
       const serious = await gotoAndScan(page, `/claims/${seeded.claimId}`);
+      expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
+    });
+
+    // M15: the public Privacy page (signed out, no shell, so no breadcrumb to
+    // wait for) now renders the backend's retention statements (DA-A-7).
+    test("the Privacy page has no serious/critical accessibility violations", async ({ page }) => {
+      await page.goto("/privacy");
+      await expect(page.getByRole("heading", { name: "Privacy & services", level: 1 })).toBeVisible({ timeout: 20_000 });
+      const results = await new AxeBuilder({ page }).analyze();
+      const serious = results.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
       expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
     });
 

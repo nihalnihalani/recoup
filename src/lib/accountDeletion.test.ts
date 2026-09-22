@@ -14,6 +14,13 @@ describe("DELETION_REMOVED_NOW (D119/D121, T24d)", () => {
       "mail log",
       "alert settings",
       "profile",
+      // M15 (D163): the wave-1 tables `account.purge` also removes (M14).
+      "transactions",
+      "recorded facts",
+      "evidence",
+      "uploaded files",
+      "recovery opportunities",
+      "rule-check history",
     ]) {
       expect(DELETION_REMOVED_NOW.toLowerCase()).toContain(word);
     }

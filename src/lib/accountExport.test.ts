@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { EXPORT_EXEMPT, EXPORT_TABLE_NAMES } from "../../convex/account";
 import {
   assembleExport,
   EXPORT_CLOSE,
@@ -12,29 +13,27 @@ import {
 } from "./accountExport";
 
 describe("EXPORT_TABLES", () => {
-  it("mirrors convex/account.ts's EXPORT_TABLES union exactly (19 tables, no duplicates)", () => {
-    expect(EXPORT_TABLES).toEqual([
-      "purchases",
-      "items",
-      "claims",
-      "ledgerEvents",
-      "claimNotes",
-      "drafts",
-      "replies",
-      "followUps",
-      "policies",
-      "priceChecks",
-      "watches",
-      "watchChecks",
-      "offers",
-      "offerChecks",
-      "marketPrices",
-      "mailLog",
-      "processedEvents",
-      "alertSettings",
-      "profiles",
-    ]);
+  // Derived, not pinned (M15, D163): the server's own list is the expectation,
+  // so a table M14 (or anyone) makes exportable fails here until the Settings
+  // export walks it too. Order matters: the download is assembled in it.
+  it("equals convex/account.ts's EXPORT_TABLE_NAMES, in the same order", () => {
+    expect([...EXPORT_TABLES]).toEqual([...EXPORT_TABLE_NAMES]);
+  });
+
+  it("has no duplicates", () => {
     expect(new Set(EXPORT_TABLES).size).toBe(EXPORT_TABLES.length);
+  });
+
+  it("includes the seven wave-1 recovery tables", () => {
+    for (const table of ["transactions", "facts", "incidents", "evidence", "opportunities", "evaluations", "nonCashRemedies"]) {
+      expect(EXPORT_TABLES).toContain(table);
+    }
+  });
+
+  it("never lists a table the server exempts from export", () => {
+    for (const exempt of Object.keys(EXPORT_EXEMPT)) {
+      expect(EXPORT_TABLES).not.toContain(exempt);
+    }
   });
 });
 
