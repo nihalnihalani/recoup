@@ -228,6 +228,49 @@ describe("Composer: refusals are reachable by keyboard (DA-B-12) and acknowledgm
   });
 });
 
+// M13c (D195, DA-B-11): the acknowledgment names the exact findings the user saw (the server's findingsHash).
+describe("Composer: content acknowledgments carry the findings hash (DA-B-11)", () => {
+  const refusal = (findings: string[], findingsHash: string) => async () => ({
+    ok: false, code: "unverified_content", message: "Check these.", findings, findingsHash,
+  });
+
+  it("sends the findingsHash of what was shown to both prepareSend and approveAndSend", async () => {
+    prepareSend.mockImplementationOnce(refusal(["a@x.example"], "fh-A"));
+    renderComposer();
+    approve();
+    fireEvent.click(await screen.findByRole("button", { name: "I checked these details — send anyway" }));
+    await waitFor(() => expect(approveAndSend).toHaveBeenCalledTimes(1));
+    expect(prepareSend.mock.calls[1][0]).toMatchObject({ acknowledgeUnverifiedContent: true, acknowledgedFindingsHash: "fh-A" });
+    expect(approveAndSend.mock.calls[0][0]).toMatchObject({ acknowledgeUnverifiedContent: true, acknowledgedFindingsHash: "fh-A" });
+  });
+
+  it("when the server answers the acknowledged hash with fresh findings, those are shown and nothing is sent", async () => {
+    prepareSend.mockImplementationOnce(refusal(["a@x.example"], "fh-A")).mockImplementationOnce(refusal(["b@y.example"], "fh-B"));
+    renderComposer();
+    approve();
+    fireEvent.click(await screen.findByRole("button", { name: "I checked these details — send anyway" }));
+    expect(await screen.findByText("b@y.example")).toBeDefined();
+    expect(prepareSend.mock.calls[1][0]).toMatchObject({ acknowledgedFindingsHash: "fh-A" });
+    expect(approveAndSend).not.toHaveBeenCalled();
+    // Acknowledging B sends B's hash, never A's.
+    fireEvent.click(screen.getByRole("button", { name: "I checked these details — send anyway" }));
+    await waitFor(() => expect(approveAndSend).toHaveBeenCalledTimes(1));
+    expect(approveAndSend.mock.calls[0][0]).toMatchObject({ acknowledgedFindingsHash: "fh-B" });
+  });
+
+  it("a double click on the acknowledgment sends once", async () => {
+    prepareSend.mockImplementationOnce(refusal(["a@x.example"], "fh-A"));
+    renderComposer();
+    approve();
+    const ack = await screen.findByRole("button", { name: "I checked these details — send anyway" });
+    fireEvent.click(ack);
+    fireEvent.click(ack);
+    await waitFor(() => expect(approveAndSend).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(approveAndSend).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("Composer: after an unknown outcome (S-M03-1, DA-A-31)", () => {
   const unknownDraft = () => draft({ outboundId: "outbound-1" as Doc<"drafts">["outboundId"], approvedAt: Date.UTC(2026, 8, 22, 15) });
   const unknownClaim = () => claim({ status: "queued", sendUnknown: true });
