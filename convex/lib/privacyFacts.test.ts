@@ -15,6 +15,8 @@ import type { Id } from "../_generated/dataModel";
 import { setup, signedIn } from "../test.setup";
 import { evidenceKind } from "../schema";
 import {
+  MAX_LOCATOR_QUOTE_CHARS,
+  RETENTION_EVIDENCE_DAYS,
   RETENTION_KEEP_NEWEST,
   RETENTION_MAILLOG_DAYS,
   RETENTION_OBSERVATION_DAYS,
@@ -82,6 +84,14 @@ describe("lib/privacyFacts — the published copy matches the code", () => {
     expect(imports).toEqual(["../limits"]);
     const limits = readFileSync(path.join(HERE, "..", "limits.ts"), "utf8");
     expect(limits).not.toMatch(/^import /m);
+  });
+
+  it("re-exports M10's limits instead of keeping second copies of the evidence window and quote cap", () => {
+    expect(EVIDENCE_RETENTION_DAYS).toBe(RETENTION_EVIDENCE_DAYS);
+    expect(FACT_QUOTE_MAX_CHARS).toBe(MAX_LOCATOR_QUOTE_CHARS);
+    const own = readFileSync(path.join(HERE, "privacyFacts.ts"), "utf8");
+    expect(own).toMatch(/export const EVIDENCE_RETENTION_DAYS = RETENTION_EVIDENCE_DAYS;/);
+    expect(own).toMatch(/export const FACT_QUOTE_MAX_CHARS = MAX_LOCATOR_QUOTE_CHARS;/);
   });
 
   it("every statement contains the numbers it promises", () => {

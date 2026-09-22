@@ -18,6 +18,8 @@
  * `verbatimModuleSyntax`). The test pins that import list.
  */
 import {
+  MAX_LOCATOR_QUOTE_CHARS,
+  RETENTION_EVIDENCE_DAYS,
   RETENTION_KEEP_NEWEST,
   RETENTION_MAILLOG_DAYS,
   RETENTION_OBSERVATION_DAYS,
@@ -32,9 +34,11 @@ import {
  * Days after `evidence.receivedAt` at which email/paste text, and an upload
  * that nothing keeps, is cleared (`text` removed, blob deleted, row marked
  * `content_deleted`). Measured from receipt, so the text is gone no later
- * than D146's "30 days after Recoup finishes handling it".
+ * than D146's "30 days after Recoup finishes handling it". The number
+ * itself is M10's `limits.RETENTION_EVIDENCE_DAYS`, re-exported under the
+ * name the copy and `retention.ts` use.
  */
-export const EVIDENCE_RETENTION_DAYS = 30;
+export const EVIDENCE_RETENTION_DAYS = RETENTION_EVIDENCE_DAYS;
 
 /** Evidence kinds whose text follows the window (contract §2.6 "email and paste text"). `manual_note` and `system_capture` rows are not touched. */
 export const EVIDENCE_TEXT_KINDS = ["email", "paste"] as const;
@@ -59,8 +63,8 @@ export const UPLOAD_KEEP_REASONS = ["attached_to_open_transaction", "claim_start
  */
 export const EVIDENCE_KEPT_AFTER_CLEARING = ["headers", "content_fingerprint", "fact_quotes"] as const;
 
-/** Upper bound on one fact's locator quote (contract §2.4 `evidenceLocator`, asserted by the fact writer). */
-export const FACT_QUOTE_MAX_CHARS = 300;
+/** Upper bound on one fact's locator quote (contract §2.4 `evidenceLocator`): M10's `limits.MAX_LOCATOR_QUOTE_CHARS`, asserted by the fact writer. */
+export const FACT_QUOTE_MAX_CHARS = MAX_LOCATOR_QUOTE_CHARS;
 
 // --- Rule evaluations (DA-A-32) -------------------------------------------------
 
