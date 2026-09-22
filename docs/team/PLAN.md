@@ -28,8 +28,8 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | M03 | 0 | opus-security-privacy-reviewer | – | P01/P02/P08/P09 reclassification on current revision; public endpoint inventory delta; threat model for upload/documents/new channels/sensitive domains | docs/reviews/2026-09-23-security-baseline.md | verified (793fc29; 367/367 P-suites; 7 throwaway repros; lead confirmed S-M03-1 in component source lib.ts:190-200) |
 | M04 | 0 | opus-qa-engineer | – | Fix the dated-`now` test time-bomb (tracking.test.ts ×2) and sweep for others; P03–P07/P10–P12 reclassification; test-harness inventory | convex/*.test.ts (fixture-clock fixes only), docs/reviews/2026-09-23-qa-baseline.md | verified (f128bf4 time-bomb fix, lead re-ran tracking 13/13; 19499cf QA baseline) |
 | M05 | 0 | opus-devils-advocate | M01 | Checkpoint A: adversarial review of the M01 contract before implementation | docs/reviews/2026-09-23-da-checkpoint-A.md | verified (c47b023; approve-with-changes; 0C/11H/14M/11L; all accepted, rulings D145) |
-| M06 | 0 | opus-product-architect | M05 | Contract rev 4: all pre-wave-1 changes (DA-A-1..5,7,8,9,11,13..17,21) + D142 + D143 + D145 rulings; pre-wave-2 items written as specified text; new tasks for pack review, source re-verification, R01 v2, R10/R13/R18/R19–R25, deadline attention, diagnostics, copy consistency | docs/team/contracts/2026-09-23-M01-*.md | in_progress |
-| M07 | 0 | opus-devils-advocate | M06 | Recheck rev 4 against the pre-wave-1 required changes only | docs/reviews/2026-09-23-da-checkpoint-A.md (addendum) | pending |
+| M06 | 0 | opus-product-architect | M05 | Contract rev 4: all pre-wave-1 changes (DA-A-1..5,7,8,9,11,13..17,21) + D142 + D143 + D145 rulings; pre-wave-2 items written as specified text; new tasks for pack review, source re-verification, R01 v2, R10/R13/R18/R19–R25, deadline attention, diagnostics, copy consistency | docs/team/contracts/2026-09-23-M01-*.md | verified (044b20d, rev 4, 1,266 lines, §13 changelog; R4-1..4 confirmed D146) |
+| M07 | 0 | opus-devils-advocate | M06 | Recheck rev 4 against the pre-wave-1 required changes only | docs/reviews/2026-09-23-da-checkpoint-A.md (addendum) | in_progress |
 | M08 | 1 | opus-qa-engineer | – | Test infra + CI: DOM env for *.test.tsx (QA-13), rule-fixture loader (hash + alias), twoUsers/clock helpers + time-bomb lint test, CI lint 0 / floor / e2e typecheck / concurrency / env-driven e2e fixtures | vitest.config.mts, package.json, package-lock.json, convex/test.setup.ts, convex/testing/**, src/test/**, .github/workflows/ci.yml, scripts/check-test-count.mjs, e2e/fixtures.ts, playwright.config.ts, docs/reviews/2026-09-23-M08-test-infra.md | in_progress |
 | M09 | 1 | opus-rules-reviewer | – | Independent spec-level review of R01–R05 against captured primary text + blind fixture check (activation gate, DA-A-11) | docs/reviews/2026-09-23-rules-review-R01-R05.md | in_progress |
 
@@ -572,3 +572,21 @@ release-candidate.md: commit SHA, tag `rc-<date>`, node/npm versions, lockfile s
 **Invariants:** Local readiness is never equated with a verified production release
 
 **Risks:** Production deployment authority and credentials belong to the user/co-author.
+
+### Wave 1 (contract rev 4 §11.1 is the authoritative task text; statuses tracked here)
+
+| ID | Owner | Status |
+|---|---|---|
+| M10 | opus-backend-engineer | pending (after M07) |
+| M11 | opus-backend-engineer-2 | pending (M10) |
+| M12 | opus-backend-engineer-3 | pending (M10, M11, M09, M1C) |
+| M13 | opus-ingestion-integrations-engineer | pending (M10–M12, M1B) |
+| M14 | opus-backend-engineer (after M10) | pending (M10) |
+| M15 | opus-frontend-ux-engineer | pending (M08, M12–M14) |
+| M16 | opus-qa-engineer | pending (M10–M15) |
+| M17 | opus-devils-advocate | pending (checkpoint B) |
+| M18 | opus-rules-reviewer | pending (M09, M12, M1C) |
+| M19 | opus-qa-engineer-2 | pending (M08) |
+| M1A | opus-ingestion-integrations-engineer-2 | in_progress |
+| M1B | opus-backend-engineer-4 | pending (M10) |
+| M1C | opus-rules-researcher | in_progress |
