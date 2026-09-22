@@ -585,10 +585,10 @@ release-candidate.md: commit SHA, tag `rc-<date>`, node/npm versions, lockfile s
 |---|---|---|
 | M10 | opus-backend-engineer | verified (ad18d14; D165) |
 | M11 | opus-backend-engineer-2 | verified (9d269a9; D164) · M11b verified (3779a1e; D167) · M11d verified (90acfee; D180) |
-| M12 | opus-backend-engineer-3 | verified (04e9a17; D179) · M12c landed (9acc16b/01db658; QA-M16-1 paid cap; lead re-verify at wave close) · M12d part 1 landed (cb9969b/91f69de: DA-B-4, DA-B-7, DA-B-6a+b; D197) · part 2 pending M13b (review_amount + re-pin field) · M12e queued (DA-B-8/13/14; D195) |
-| M13 | opus-ingestion-integrations-engineer | verified (4 deliverables; 1cf3f63; D182) · M13b in_progress (DA-B-1/2/3/5; D190, D194; wave-1 close blocker) · M13c queued (DA-B-11; D195) |
+| M12 | opus-backend-engineer-3 | verified (04e9a17; D179) · M12c landed (9acc16b/01db658; QA-M16-1 paid cap; lead re-verify at wave close) · M12d part 1 landed (cb9969b/91f69de: DA-B-4, DA-B-7, DA-B-6a+b; D197) · part 2 landed (25ff8dd/df39e0c; D199) · M12e landed (d2e8fd2/3f6a92a; D201) · M20 in_progress (push held to wave-1 close; D201) |
+| M13 | opus-ingestion-integrations-engineer | verified (4 deliverables; 1cf3f63; D182) · M13b landed (outbound 0dc874b/9345b65, inbound 8f6b428/1234394; 21 fail-before tests; D198; lead re-verify at close) · M13c landed (85b6e1f/4f70a50; D200) · M23 early start (pure pieces; D200) |
 | M14 | opus-backend-engineer-5 | verified (593de88; D163) · M14b verified (2f72232; D166) · M14c verified (18b4c3b; D176) |
-| M15 | opus-frontend-ux-engineer | verified (886f918; D187) · M15b in_progress (refund one-tap in Settings [wave-1 close blocker], review_amount card, Composer amount ack polish; D194) · M15c queued (DA-B-8/9/10/12/13 UI; D195) |
+| M15 | opus-frontend-ux-engineer | verified (886f918; D187) · M15b landed (d717444 Composer panels; 80ed8e9/6d9d904 held-refund tap, review_amount, "You asked for", how the credit came back) · M15c partial (DA-B-9/10/12 + DA-B-11 client in M15b; DA-B-8/13 display waits on M12e) |
 | M16 | opus-qa-engineer | in_progress (deliverables 1–4 on main, D188; browser spec + upload hash + locale fix next) |
 | M17 | opus-devils-advocate | verified: backend accept-with-conditions (dee6f9f; D190) · UI accept-with-conditions (78f718b; D195) · M17b recheck pending at wave close |
 | M18 | opus-rules-reviewer | verified: M18b approve_for_activation (444f0f5) → R01 v1 ACTIVE (71f1d2a, D186) |

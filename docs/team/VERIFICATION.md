@@ -101,3 +101,8 @@ All 15 rows in the table above: **VERIFIED_LOCAL** via `convex/scenarios.test.ts
 - `npm run typecheck` (with regenerated `api.d.ts`), `npm run lint` (0 warnings), `npm run build`: clean. `node scripts/check-rule-packs.mjs`: OK, no active packs.
 - GitHub CI: green at `0bd517b` (run 35785832079); red earlier on a runner-load timeout (fixed `1bae5a7`) and on stale generated types (fixed `0bd517b`, rule D175).
 - Landed and lead-verified in wave 1 so far: M10, M11 (+M11b), M12, M14 (+M14b, M14c), M1A, M1B, M08, M19; M13 deliverables 1–3; M15 deliverable 1.
+
+## 2026-09-23 · dev deploy of 6d93e8b (lead)
+- `npm run deploy:dev` (D191; first use): check-rule-packs OK (R01 v1 active, D186; engine pin 1/1, D197), typecheck clean, `vitest run` 135 files — 2,813 pass + 1 expected fail + 3 todo; `convex dev --once` → adorable-lion-138 only (log names no other deployment). Static: `npm run build` + `npx @convex-dev/static-hosting upload --dist dist`. `npm run smoke` 7/7 against https://adorable-lion-138.convex.site (bundle references exactly one `.convex.cloud` host, webhook `{}` → 401, OIDC 200).
+- Includes M12c (paid cap), M12d (activation guard, immediate case closure, engine pin, `review_amount`), M13b (late-window/withdrawn re-checks, amount above estimate, content check, refund one-tap hold), M15b Composer panels, M16 seeders (DA-A-35) + e2e harness fix (QA-M16-2).
+- M16(a) evidence upload on the live dev deployment: stored `contentHash` is lowercase hex and equals SHA-256 of the uploaded synthetic PDF bytes (D182(c) closed). Wave-1 Playwright before the harness fix (886f918): 56 tests, 45 pass + 11 flaky (retry-only; cause: stale session after per-spec reseed, fixed in 9c4c5ac; QA's --retries=0 run: 56/56).
