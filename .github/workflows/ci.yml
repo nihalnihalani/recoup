@@ -133,6 +133,34 @@ jobs:
       - name: test:clockshift
         run: npm run test:clockshift
 
+  # M16 (D189): the whole suite in a German locale. Money and dates are formatted in the viewer's locale, so a test
+  # that asserts an en-US literal ("$50.00") passes on an en-US machine and fails everywhere else, a locale
+  # time-bomb like D138's clock one (two such files were found and pinned with src/test/locale.ts). Node's ICU takes
+  # the default locale from LC_ALL even where the OS has no de_DE installed; the first step proves it did.
+  localeshift:
+    name: localeshift (de_DE locale)
+    runs-on: ubuntu-latest
+    env:
+      LC_ALL: de_DE.UTF-8
+      LANG: de_DE.UTF-8
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: npm ci
+        run: npm ci
+
+      - name: assert the German locale is in effect
+        run: |
+          node -e 'const l = new Intl.NumberFormat().resolvedOptions().locale; console.log("default locale", l, new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(1234.5)); if (!l.startsWith("de")) { console.error("LC_ALL was not applied"); process.exit(1); }'
+
+      - name: test:ci under de_DE
+        run: npm run test:ci
+
   # P10 browser acceptance suite (T20). Runs only when the E2E_CONVEX_URL and
   # E2E_DEPLOY_KEY repo secrets exist. They must point at a DEDICATED E2E
   # deployment: never the shared dev deployment adorable-lion-138 and never
