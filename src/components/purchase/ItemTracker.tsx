@@ -22,9 +22,24 @@ import {
   useNow,
 } from "../../lib/ui";
 import { CardHeading, ClaimIcon, DotChip, ExternalIcon } from "./parts";
+import { OpportunityCard } from "../opportunity/OpportunityCard";
+import type { FactAnswer } from "../opportunity/Questions";
+import type { FactCell, OpenCaseResult, OpportunityView } from "../opportunity/model";
 
 type PurchaseData = FunctionReturnType<typeof api.purchases.get>;
 export type TrackedItem = PurchaseData["items"][number];
+
+/** What the page wires into this item's recovery-path cards (`opportunities.forPurchase`, M12). */
+export type OpportunityWiring = {
+  /** Every card on the purchase's transaction, so a card can name its alternatives. */
+  all: readonly OpportunityView[];
+  cells?: readonly FactCell[];
+  purchaseEditHref?: string;
+  counterparty?: string;
+  openCase?: (opportunityId: OpportunityView["opportunity"]["_id"]) => Promise<OpenCaseResult>;
+  checkAgain?: () => Promise<void>;
+  answer?: (answer: FactAnswer) => Promise<void>;
+};
 
 /** `purchases.get` returns at most this many price checks per item. */
 const CHECK_CAP = 30;
@@ -70,12 +85,17 @@ export function ItemTracker({
   purchasedAt,
   windowEndsAt,
   aside,
+  opportunities = [],
+  wiring,
 }: {
   item: TrackedItem;
   currency: string;
   purchasedAt: number | undefined;
   windowEndsAt: number | undefined;
   aside?: ReactNode;
+  /** This item's recovery paths (active packs only; the server filters). */
+  opportunities?: readonly OpportunityView[];
+  wiring?: OpportunityWiring;
 }) {
   const checkNow = useMutation(api.priceWatch.checkNow);
   const [error, setError] = useState<string | null>(null);
@@ -259,6 +279,20 @@ export function ItemTracker({
           <Stat label="Now">{latest ? fmt(latest.cents, currency) : dash}</Stat>
           <Stat label="Lowest">{lowest !== undefined ? fmt(lowest, currency) : dash}</Stat>
         </dl>
+
+        {opportunities.map((view) => (
+          <OpportunityCard
+            key={view.opportunity._id}
+            view={view}
+            related={wiring?.all}
+            cells={wiring?.cells}
+            purchaseEditHref={wiring?.purchaseEditHref}
+            counterparty={wiring?.counterparty}
+            onOpenCase={wiring?.openCase ? () => wiring.openCase!(view.opportunity._id) : undefined}
+            onCheckAgain={wiring?.checkAgain}
+            onAnswer={wiring?.answer}
+          />
+        ))}
 
         {claims.map((claim) => (
           <section key={claim._id} aria-label="Price-drop claim" className={`${cardClass} p-5`}>
