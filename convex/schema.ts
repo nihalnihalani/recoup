@@ -248,7 +248,11 @@ export const conditionResult = v.object({
 /** DA-A-2 / DA-A-24: only DECISIVE unknowns are listed; `class: "assumption"` never sets factsKnown. */
 export const missingFact = v.object({
   subjectKey: v.string(), key: v.string(),
-  reason: v.union(v.literal("missing"), v.literal("candidate_unconfirmed"), v.literal("conflicting"), v.literal("user_unknown")),
+  reason: v.union(
+    v.literal("missing"), v.literal("candidate_unconfirmed"), v.literal("conflicting"), v.literal("user_unknown"),
+    /** rev 5.5 (D158/D161): a same-answer candidate conflict — the key is still asked; the outcome is only capped. */
+    v.literal("conflict_capped"),
+  ),
   class: v.union(v.literal("required"), v.literal("assumption")),
   neededFor: v.array(v.string()),
 });

@@ -15,6 +15,7 @@ import schema, {
   cellStatus,
   evaluationOutcome,
   factValue,
+  missingFact,
   money,
   nextAction,
   reevaluate,
@@ -106,6 +107,10 @@ describe("wave-1 schema block (contract §2.4)", () => {
     expect(reevaluate.fields.at.isOptional).toBe("optional");
     expect(reevaluate.fields.when.isOptional).toBe("optional");
     expect(nextAction.members.map((m) => m.fields.kind.value)).toContain("wait");
+    // M06g (D161): a decisive fact whose candidates conflict caps the outcome instead of blocking it.
+    expect(missingFact.fields.reason.members.map((m) => m.value).sort()).toEqual(
+      ["candidate_unconfirmed", "conflict_capped", "conflicting", "missing", "user_unknown"],
+    );
 
     const t = setup();
     const { userId } = await signedIn(t);
