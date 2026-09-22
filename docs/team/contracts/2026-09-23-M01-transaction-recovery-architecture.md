@@ -1324,7 +1324,7 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 - only confirmation lifts the `likely_eligible` cap;
 - the cap applies only to candidate-vs-candidate conflicts.
 
-README X2 and the fixtures are aligned by M2E and re-checked by M09c. The fixture variants built for this case ("both candidates on the same side") are marked `pending M09b` in M12's run until the reviewer rules and the lead records it.
+README X2 and the fixtures are aligned by M2E and re-checked by M09c. The same-side fixture variants are ordinary expected results, no longer pending.
 
 **Remaining items for the lead:**
 - **(R4-1)** Record the D83(5) wording amendment (§2.6).
