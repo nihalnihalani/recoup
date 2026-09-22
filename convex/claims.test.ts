@@ -481,3 +481,32 @@ describe("claims", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// M10 (contract rev 5 §3.2; D156): the widened ledger kinds are never
+// misread by an existing reader. A provisional credit is not recovery and is
+// never "charged again".
+// ---------------------------------------------------------------------------
+describe("provisional ledger kinds and existing readers (D156)", () => {
+  it("a provisional_credit / provisional_released row produces no charged_again (or credit) item in insights.activity", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { scarf } = await purchaseWithItems(as);
+    const claimId = await openReturnClaim(as, scarf);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("ledgerEvents", {
+        claimId, userId, kind: "provisional_credit", cents: 2000, evidence: "issuer provisional credit", idempotencyKey: "p1", currency: "USD",
+      });
+      await ctx.db.insert("ledgerEvents", {
+        claimId, userId, kind: "provisional_released", cents: 2000, evidence: "reversed", idempotencyKey: "p2", currency: "USD",
+      });
+    });
+    const { events } = await as.query(api.insights.activity, {});
+    const mine = events.filter((e) => e.claimId === claimId);
+    expect(mine.some((e) => e.kind === "claim_opened")).toBe(true);
+    expect(mine.filter((e) => ["charged_again", "credit_confirmed", "credit_promised"].includes(e.kind))).toEqual([]);
+    // And the claim's money is untouched by provisional rows.
+    const c = await as.query(api.claims.get, { claimId });
+    expect(c!.balance).toMatchObject({ confirmed: 0, debited: 0, unresolved: 4000 });
+  });
+});

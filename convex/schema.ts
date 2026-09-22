@@ -9,7 +9,14 @@ export const claimStatus = v.union(
   v.literal("detected"), v.literal("drafted"), v.literal("queued"), v.literal("sent"), v.literal("packet"),
   v.literal("promised"), v.literal("confirmed"), v.literal("reopened"), v.literal("dismissed"),
 );
-export const eventKind = v.union(v.literal("promised_credit"), v.literal("confirmed_credit"), v.literal("later_debit"));
+/**
+ * Ledger event kinds; `lib/ledger.EVENT_KINDS` is the same set and every reader switches on it exhaustively
+ * (HC-3). M10 adds the provisional kinds (contract rev 5 §3.2): never part of `unresolved`, never a status change.
+ */
+export const eventKind = v.union(
+  v.literal("promised_credit"), v.literal("confirmed_credit"), v.literal("later_debit"),
+  v.literal("provisional_credit"), v.literal("provisional_released"),
+);
 export const policyKind = v.union(v.literal("price_adjustment"), v.literal("returns"));
 export const channel = v.union(v.literal("email"), v.literal("form"), v.literal("chat"), v.literal("phone"), v.literal("unknown"));
 export const replyClass = v.union(v.literal("promise"), v.literal("credit_issued"), v.literal("refusal"), v.literal("question"), v.literal("other"));
