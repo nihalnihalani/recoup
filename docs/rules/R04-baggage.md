@@ -186,6 +186,7 @@ DOT guidance passages DOT-BAG-1 (incidental expenses "reasonable, verifiable, an
 ## 15. Evaluation outline
 
 1. No current source record, or source not current → **`source_unverified`**.
+1b. **Temporal gate (path a):** the bag-fee refund conditions (significant delay or loss, MBR) were met — or the incident occurred — before the part 260 bag-fee compliance date **2024-10-28** (FR-2024-07177-COMPLIANCE) → **`source_unverified`** for path a.
 2. Path a:
    1. `itinerary_scope = non_us` → `unsupported`.
    2. `mbr_filed = unknown` → `needs_facts`; `false` → **`not_yet_due`** with `reevaluate_when: "MBR filed"` and next action "file an MBR" (D147(6)); never `not_eligible`.
