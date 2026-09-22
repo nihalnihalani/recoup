@@ -45,6 +45,28 @@
       "spec": "docs/rules/R01-retail-price-adjustment.md",
       "fixtures": "docs/rules/fixtures/R01.json",
       "sources": [],
+      "fixturesTier": "v1 legacy snapshot tier (contract rev 4 \u00a72.7, task M1C)",
+      "dates": {
+        "published": "n/a (merchant pages)",
+        "effective": "per merchant pack (Best Buy 2026-09-02; others not displayed)",
+        "compliance": "n/a"
+      }
+    },
+    {
+      "ruleId": "R01v2.retail_price_adjustment.merchant_packs",
+      "scenarioId": "R01v2",
+      "version": 1,
+      "lifecycle": "researched",
+      "spec": "docs/rules/R01-retail-price-adjustment.md",
+      "fixtures": "docs/rules/fixtures/R01v2.json",
+      "tier": "R01 v2 reviewed merchant-pack tier (wave 3)",
+      "sources": [],
+      "refreshDays": 7,
+      "dates": {
+        "published": "n/a",
+        "effective": "per merchant pack",
+        "compliance": "n/a"
+      },
       "merchantPacks": [
         {
           "ruleId": "R01.bestbuy.all_channels",
@@ -171,29 +193,7 @@
           "url": "https://www.homedepot.com/c/price-match-and-price-check",
           "status": "no pack \u2192 unsupported"
         }
-      ],
-      "fixturesTier": "v1 legacy snapshot tier (contract rev 4 \u00a72.7, task M1C)",
-      "dates": {
-        "published": "n/a (merchant pages)",
-        "effective": "per merchant pack (Best Buy 2026-09-02; others not displayed)",
-        "compliance": "n/a"
-      }
-    },
-    {
-      "ruleId": "R01v2.retail_price_adjustment.merchant_packs",
-      "scenarioId": "R01v2",
-      "version": 1,
-      "lifecycle": "researched",
-      "spec": "docs/rules/R01-retail-price-adjustment.md",
-      "fixtures": "docs/rules/fixtures/R01v2.json",
-      "tier": "R01 v2 reviewed merchant-pack tier (wave 3)",
-      "sources": [],
-      "refreshDays": 7,
-      "dates": {
-        "published": "n/a",
-        "effective": "per merchant pack",
-        "compliance": "n/a"
-      }
+      ]
     },
     {
       "ruleId": "R02.airline_fare_refund.us_dot",
