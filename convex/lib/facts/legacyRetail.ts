@@ -11,8 +11,8 @@
  *   - The newest ACCEPTED price check of an item (`observedCents` set, D16) is its `observed` price row.
  *   - The policy snapshot is a rule-pack parameter source (§2.7), not a fact: it is not read here.
  *
- * Stored fact rows overlay these rows cell by cell (`buildRetailSnapshot`); legacy rows date from the purchase's
- * creation, so a later stored answer is newer.
+ * Stored fact rows overlay these rows cell by cell (`buildRetailSnapshot`): purchase-derived rows sort as the oldest
+ * layer, so any stored answer is newer; an accepted price check competes with stored observations by `observedAt`.
  */
 import type { Doc, Id } from "../../_generated/dataModel";
 import type { QueryCtx } from "../../_generated/server";
@@ -38,7 +38,10 @@ export const LEGACY_CHECK_SCAN = 50;
 export function legacyRetailRows(input: LegacyRetailInput): CellRow[] {
   const { purchase, items, latestAccepted } = input;
   const state: FactRowState = purchase.status === "active" ? "user_confirmed" : "extracted_candidate";
-  const at = purchase._creationTime;
+  // The purchase layer is always the OLDEST layer: every stored fact overlays it, whatever the clocks say (a stored
+  // answer recorded in the purchase's own creation millisecond must not sort before it; `_creationTime` carries a
+  // sub-millisecond fraction, `recordedAt` does not). Observations keep their real `observedAt`.
+  const at = 0;
   const source = { kind: "legacy_purchase" as const };
   const rows: CellRow[] = [];
   const add = (s: string, key: string, value: FactValue, rowState: FactRowState = state) =>
