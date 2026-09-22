@@ -33,6 +33,7 @@ import { boundFactsHash, canonicalHash } from "./lib/canonical";
 import { isClosedForAsk } from "./lib/claimState";
 import { latestPolicy } from "./lib/latestPolicy";
 import { assertUserAmount, claimCurrency } from "./lib/money";
+import { amountExceedsEstimate } from "./lib/amountReview";
 import { loadRetailSnapshot } from "./lib/facts/legacyRetail";
 import { cellLookup } from "./lib/facts/resolve";
 import { snapshotHash } from "./lib/facts/snapshot_retail";
@@ -140,6 +141,8 @@ type Run = {
   caseContext: CaseContext;
   /** The non-closed case on this subject, which the opportunity must link to (DA-A-3). */
   openClaim: Doc<"claims"> | null;
+  /** That case's own currency (`lib/money.claimCurrency`: its own, else its purchase's; null when unknown — no default). */
+  openClaimCurrency: string | null;
   /** What case opening needs for a retail price claim. */
   retail?: { purchaseId: Id<"purchases">; itemId: Id<"items">; policyId?: Id<"policies">; priceCheckId?: Id<"priceChecks">; observedMinor?: number; unitMinor?: number };
 };
@@ -238,6 +241,7 @@ async function r01Runs(ctx: QueryCtx, txn: Doc<"transactions">, subjects: readon
       factSnapshotHash,
       caseContext,
       openClaim: open,
+      openClaimCurrency: open ? claimCurrency(open, purchase) : null,
       retail: {
         purchaseId: purchase._id,
         itemId: item.itemId,
@@ -361,6 +365,31 @@ export async function evaluateTransaction(
   return out;
 }
 
+/**
+ * DA-B-2 (D193): when the linked claim asks more than the re-evaluated `exact_formula` estimate, the pack's
+ * `continue_case` becomes `review_amount` (adjust or acknowledge before sending). The comparison is M13b's one shared
+ * predicate, called exactly as `drafts` calls it on the linked claim's current evaluation, so the card and the send
+ * gate never disagree; it is never true across currencies. Applied before hashing, so the stored evaluation (and its
+ * result hash) is what the card shows; `materialChange` ignores next actions, so adjusting the ask bumps nothing.
+ */
+function withAmountReview(run: Run, result: EvaluationResult): EvaluationResult {
+  const next = result.nextAction;
+  const claim = run.openClaim;
+  if (next.kind !== "continue_case" || claim === null || claim._id !== next.claimId) return result;
+  const review = amountExceedsEstimate({ expectedCents: claim.expectedCents, currency: run.openClaimCurrency }, result.amount);
+  if (!review.exceeds) return result;
+  return {
+    ...result,
+    nextAction: {
+      kind: "review_amount",
+      claimId: next.claimId,
+      claimedMinor: review.claimed.amountMinor,
+      estimateMinor: review.estimate.amountMinor,
+      currency: review.claimed.currency,
+    },
+  };
+}
+
 async function evaluateRun(
   ctx: MutationCtx,
   txn: Doc<"transactions">,
@@ -382,7 +411,7 @@ async function evaluateRun(
   const linking = run.openClaim !== null && run.openClaim._id !== priorActive;
   const activeClaimId: Id<"claims"> | null = run.openClaim?._id ?? null;
 
-  const result: EvaluationResult = pack.evaluate({
+  const result: EvaluationResult = withAmountReview(run, pack.evaluate({
     snapshot: run.snapshot,
     snapshotHash: run.factSnapshotHash,
     pack: { ruleId: pack.ruleId, scenarioId: pack.scenarioId, version: pack.version, params: pack.params, sources: pack.sources },
@@ -392,7 +421,7 @@ async function evaluateRun(
     subjectKey: run.subjectKey,
     caseContext: run.caseContext,
     now,
-  });
+  }));
   assertEvaluationBounds(result);
   const bfh = await boundFactsHash(result.boundFacts);
   const rh = await resultHash(result, bfh);

@@ -54,6 +54,7 @@ function manifest(lifecycle = "reviewed", extra: Record<string, unknown> = {}): 
         // DA-B-6: an active pack pins its engine closure (here: the pack file alone, it imports nothing).
         engineRoots: [PACK_FILE],
         engineClosureSha256: pinOf([[PACK_FILE, PACK_SRC]]),
+        engineClosureDecision: "D170", // D197: the lead's re-pin decision
         ...extra,
       },
       { ruleId: "R08.draft", scenarioId: "R08", version: 1, lifecycle: "researched", fixtures: null, sources: [] },
@@ -264,7 +265,9 @@ describe("check-rule-packs: engine pin (DA-B-6, D190/D193)", () => {
 
   it("editing ANY file in the closure (the engine, lib/money, limits) without a new pin fails", () => {
     for (const [file, src] of [[ENGINE, `${ENGINE_SRC}// tweak\n`], [MONEY, `${MONEY_SRC}// tweak\n`], [LIMITS, "export const cap = 101;\n"]] as const) {
-      expect(activeWith({}, { [file]: src }).errors.join("\n"), file).toMatch(/engine pin: pack R09\.example v1: the engine changed/);
+      expect(activeWith({}, { [file]: src }).errors.join("\n"), file).toMatch(
+        /engine pin: pack R09\.example v1: closure changed: run the pack's fixtures unchanged, then ask the lead for a re-pin decision id/,
+      );
     }
     // A type-only dependency is erased at runtime and not pinned.
     expect(activeWith({}, { [TYPES]: "export type T = 2;\n" }).errors).toEqual([]);
@@ -275,6 +278,13 @@ describe("check-rule-packs: engine pin (DA-B-6, D190/D193)", () => {
     expect(activeWith({ engineRoots: [ENGINE] }).errors.join("\n")).toMatch(/engineRoots must include the pack file/);
     expect(activeWith({ engineClosureSha256: undefined }).errors.join("\n")).toMatch(/records no engineClosureSha256 \(current closure: [0-9a-f]{64}, 4 files\)/);
     expect(activeWith({}, { [MONEY]: null }).errors.join("\n")).toMatch(/cannot read convex\/lib\/money_example/);
+  });
+
+  it("D197: an active pack records its re-pin decision (engineClosureDecision), which must exist in DECISIONS", () => {
+    expect(activeWith({ engineClosureDecision: undefined }).errors.join("\n")).toMatch(/records no engineClosureDecision/);
+    expect(activeWith({ engineClosureDecision: "193" }).errors.join("\n")).toMatch(/records no engineClosureDecision/);
+    expect(activeWith({ engineClosureDecision: "D999" }).errors.join("\n")).toMatch(/engineClosureDecision D999 is not in docs\/team\/DECISIONS\.md/);
+    expect(activeWith({ engineClosureDecision: "D171" }).errors).toEqual([]);
   });
 
   it("a reviewed pack that is not active needs no pin", () => {
