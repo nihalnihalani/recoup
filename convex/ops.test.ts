@@ -5,11 +5,14 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConvexError } from "convex/values";
-import { internal } from "./_generated/api";
-import type { Id } from "./_generated/dataModel";
+import { api, internal } from "./_generated/api";
+import type { Doc, Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { GLOBAL_DAILY_BUDGETS, MARKET_CLAIM_STALE_MS, STUCK_DELETION_AGE_MS } from "./limits";
 import { tryConsumeGlobalBudget } from "./lib/budget";
+import { FLAG_NAMES, isFlagOn } from "./lib/flags";
+import * as opsModule from "./ops";
+import { recordRuleEvaluationFailure, staleSourcePacks } from "./ops";
 
 type T = ReturnType<typeof setup>;
 
@@ -391,5 +394,456 @@ describe("T18.5 addendum (F-T23-3): ops.resetRetentionCursor", () => {
     const t = setup();
     await expect(t.mutation(internal.ops.resetRetentionCursor, { step: 999 })).rejects.toThrow(ConvexError);
     await expect(t.mutation(internal.ops.resetRetentionCursor, { step: -1 })).rejects.toThrow(ConvexError);
+  });
+});
+
+// ===========================================================================
+// M1B (contract rev 5 §2.6, §11.1; mission §15 P12, §18 C58)
+// ===========================================================================
+
+type LoggedLine = Record<string, unknown>;
+
+function loggedLines(spy: ReturnType<typeof vi.spyOn>, kind: string): LoggedLine[] {
+  return (spy.mock.calls as unknown[][])
+    .map((call): LoggedLine | null => {
+      try {
+        return JSON.parse(String(call[0])) as LoggedLine;
+      } catch {
+        return null;
+      }
+    })
+    .filter((line): line is LoggedLine => line !== null && line.kind === kind);
+}
+
+async function flagRows(t: T): Promise<string[]> {
+  return await t.run(async (ctx) => {
+    const rows = await ctx.db.query("opsState").take(500);
+    return rows.map((r) => r.key).filter((k) => k.startsWith("flag")).sort();
+  });
+}
+
+describe("M1B: the public API cannot set flags", () => {
+  it("every registered function in ops.ts is internal -- setFlag, getFlag and flagAudit included", () => {
+    const registered = Object.entries(opsModule).filter(
+      ([, fn]) => typeof fn === "function" && ("isQuery" in fn || "isMutation" in fn || "isAction" in fn),
+    );
+    expect(registered.map(([name]) => name)).toEqual(expect.arrayContaining(["setFlag", "getFlag", "flagAudit", "backlog"]));
+    for (const [name, fn] of registered) {
+      expect((fn as { isInternal?: boolean }).isInternal, name).toBe(true);
+      expect((fn as { isPublic?: boolean }).isPublic, name).toBeUndefined();
+    }
+  });
+
+  it("setFlag is absent from the generated public api type", () => {
+    // Compile-time assertion (checked by `npm run typecheck`): `api.ops.setFlag`
+    // does not exist on the public api, so this line must be a type error.
+    // @ts-expect-error -- ops.setFlag is internal-only.
+    const ref = () => api.ops.setFlag;
+    expect(typeof ref).toBe("function");
+  });
+});
+
+describe("M1B: ops.setFlag", () => {
+  let spy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+  afterEach(() => spy.mockRestore());
+
+  it("every flag is OFF by default (getFlag and isFlagOn agree)", async () => {
+    const t = setup();
+    for (const name of FLAG_NAMES) {
+      expect(await t.query(internal.ops.getFlag, { name })).toEqual({ name, on: false, approvalRef: null, updatedAt: null, invalid: false });
+      expect(await t.run((ctx) => isFlagOn(ctx, name))).toBe(false);
+    }
+  });
+
+  it("refuses to enable live_document_extraction without an approvalRef naming a DECISIONS entry: nothing written, refusal logged", async () => {
+    const t = setup();
+    const attempts: Array<string | undefined> = [undefined, "", "   ", "yes", "approved by the user"];
+    for (const approvalRef of attempts) {
+      await expect(
+        t.mutation(internal.ops.setFlag, { name: "live_document_extraction", on: true, approvalRef }),
+        String(approvalRef),
+      ).rejects.toThrow(/approvalRef/);
+    }
+    expect(await t.run((ctx) => isFlagOn(ctx, "live_document_extraction"))).toBe(false);
+    expect(await flagRows(t)).toEqual([]);
+
+    const refused = loggedLines(spy, "flag_changed");
+    expect(refused).toHaveLength(attempts.length);
+    for (const line of refused) {
+      expect(line).toMatchObject({ flag: "live_document_extraction", from: false, to: true, outcome: "refused", refusal: "approval_ref_required" });
+    }
+  });
+
+  it("with a DECISIONS approvalRef: ON, the ref stored, one audit row, one applied log line", async () => {
+    const t = setup();
+    const result = await t.mutation(internal.ops.setFlag, {
+      name: "live_document_extraction",
+      on: true,
+      approvalRef: "  D9001: user approved document processing  ",
+      reason: "user data-flow approval recorded",
+    });
+    expect(result).toEqual({
+      name: "live_document_extraction",
+      from: false,
+      to: true,
+      approvalRef: "D9001: user approved document processing",
+      auditSeq: 1,
+      changed: true,
+    });
+
+    expect(await t.run((ctx) => isFlagOn(ctx, "live_document_extraction"))).toBe(true);
+    expect(await t.query(internal.ops.getFlag, { name: "live_document_extraction" })).toEqual({
+      name: "live_document_extraction",
+      on: true,
+      approvalRef: "D9001: user approved document processing",
+      updatedAt: NOW,
+      invalid: false,
+    });
+    // Other flags are untouched.
+    expect(await t.run((ctx) => isFlagOn(ctx, "live_statement_extraction"))).toBe(false);
+
+    expect(await t.query(internal.ops.flagAudit, { name: "live_document_extraction" })).toEqual([
+      {
+        seq: 1,
+        from: false,
+        to: true,
+        approvalRef: "D9001: user approved document processing",
+        reason: "user data-flow approval recorded",
+        at: NOW,
+      },
+    ]);
+
+    const applied = loggedLines(spy, "flag_changed");
+    expect(applied).toHaveLength(1);
+    expect(applied[0]).toMatchObject({
+      flag: "live_document_extraction",
+      from: false,
+      to: true,
+      outcome: "applied",
+      approvalRef: "D9001: user approved document processing",
+      auditSeq: 1,
+    });
+  });
+
+  it("disabling never needs an approvalRef, clears it, and is audited as the next row", async () => {
+    const t = setup();
+    await t.mutation(internal.ops.setFlag, { name: "live_document_extraction", on: true, approvalRef: "D9001" });
+    vi.setSystemTime(NOW + HOUR);
+    const off = await t.mutation(internal.ops.setFlag, { name: "live_document_extraction", on: false });
+    expect(off).toEqual({ name: "live_document_extraction", from: true, to: false, approvalRef: null, auditSeq: 2, changed: true });
+    expect(await t.run((ctx) => isFlagOn(ctx, "live_document_extraction"))).toBe(false);
+    expect(await t.query(internal.ops.getFlag, { name: "live_document_extraction" })).toMatchObject({ on: false, approvalRef: null, updatedAt: NOW + HOUR });
+
+    const audit = await t.query(internal.ops.flagAudit, { name: "live_document_extraction" });
+    expect(audit.map((a) => [a.seq, a.from, a.to, a.approvalRef, a.at])).toEqual([
+      [2, true, false, null, NOW + HOUR],
+      [1, false, true, "D9001", NOW],
+    ]);
+  });
+
+  it("every accepted call is audited, a no-op included; flagAudit is newest first and bounded by limit", async () => {
+    const t = setup();
+    await t.mutation(internal.ops.setFlag, { name: "live_document_extraction", on: true, approvalRef: "D9001" });
+    const again = await t.mutation(internal.ops.setFlag, { name: "live_document_extraction", on: true, approvalRef: "D9002" });
+    expect(again).toMatchObject({ from: true, to: true, changed: false, auditSeq: 2, approvalRef: "D9002" });
+    await t.mutation(internal.ops.setFlag, { name: "live_document_extraction", on: false });
+    // A different flag keeps its own sequence.
+    await t.mutation(internal.ops.setFlag, { name: "medical_document_intake", on: false });
+
+    const two = await t.query(internal.ops.flagAudit, { name: "live_document_extraction", limit: 2 });
+    expect(two.map((a) => a.seq)).toEqual([3, 2]);
+    const medical = await t.query(internal.ops.flagAudit, { name: "medical_document_intake" });
+    expect(medical.map((a) => a.seq)).toEqual([1]);
+  });
+
+  it("an approval-gated flag stays OFF when its row is hand-edited ON without setFlag (defence in depth)", async () => {
+    const t = setup();
+    await t.run((ctx) => ctx.db.insert("opsState", { key: "flag:live_document_extraction", cursor: JSON.stringify({ on: true }), updatedAt: NOW }));
+    expect(await t.query(internal.ops.getFlag, { name: "live_document_extraction" })).toMatchObject({ on: false, invalid: true });
+    // setFlag still works on top of the invalid row, and treats it as OFF.
+    const result = await t.mutation(internal.ops.setFlag, { name: "live_document_extraction", on: true, approvalRef: "D9001" });
+    expect(result).toMatchObject({ from: false, to: true, changed: true });
+  });
+
+  it("bounds the reason and strips control characters from it", async () => {
+    const t = setup();
+    await t.mutation(internal.ops.setFlag, { name: "medical_document_intake", on: false, reason: `line one\nline two ${"x".repeat(2_000)}` });
+    const [row] = await t.query(internal.ops.flagAudit, { name: "medical_document_intake" });
+    expect(row.reason).not.toContain("\n");
+    expect(row.reason!.length).toBeLessThanOrEqual(500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rule-evaluation failure counters (the API M12's recordEvaluation catch path calls)
+// ---------------------------------------------------------------------------
+
+describe("M1B: recordRuleEvaluationFailure + backlog.ruleEvaluationFailures", () => {
+  let spy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+  afterEach(() => spy.mockRestore());
+
+  const R02 = { scenarioId: "R02", ruleId: "R02.airline_fare_refund.us_dot", ruleVersion: 1 };
+  const R05 = { scenarioId: "R05", ruleId: "R05.mitor_shipment.us_ftc", ruleVersion: 1 };
+
+  it("reports zero failures on an empty deployment", async () => {
+    const t = setup();
+    const result = await t.query(internal.ops.backlog, { now: NOW });
+    expect(result.ruleEvaluationFailures).toEqual({
+      windowDays: 7,
+      total: 0,
+      days: [
+        { day: "2026-09-21", count: 0 },
+        { day: "2026-09-20", count: 0 },
+        { day: "2026-09-19", count: 0 },
+        { day: "2026-09-18", count: 0 },
+        { day: "2026-09-17", count: 0 },
+        { day: "2026-09-16", count: 0 },
+        { day: "2026-09-15", count: 0 },
+      ],
+      byRule: [],
+      lastAt: null,
+    });
+  });
+
+  it("increments today's UTC counter per rule and writes one redacted rule_evaluation_failed line per failure", async () => {
+    const t = setup();
+    await t.run((ctx) => recordRuleEvaluationFailure(ctx, { ...R02, now: NOW, error: new Error("boom for ops@example.com sk-abcdefghij1234567890") }));
+    await t.run((ctx) => recordRuleEvaluationFailure(ctx, { ...R02, now: NOW + 1, error: "second" }));
+    await t.run((ctx) => recordRuleEvaluationFailure(ctx, { ...R05, now: NOW + 2, error: new Error("third") }));
+
+    const result = await t.query(internal.ops.backlog, { now: NOW + 3 });
+    expect(result.ruleEvaluationFailures.total).toBe(3);
+    expect(result.ruleEvaluationFailures.days[0]).toEqual({ day: "2026-09-21", count: 3 });
+    expect(result.ruleEvaluationFailures.byRule).toEqual([
+      { rule: "R02.airline_fare_refund.us_dot@1", count: 2 },
+      { rule: "R05.mitor_shipment.us_ftc@1", count: 1 },
+    ]);
+    expect(result.ruleEvaluationFailures.lastAt).toBe(NOW + 2);
+
+    const lines = loggedLines(spy, "rule_evaluation_failed");
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatchObject({ scenarioId: "R02", ruleId: "R02.airline_fare_refund.us_dot", ruleVersion: 1, day: "2026-09-21" });
+    expect(lines[0].error).toEqual({ name: "Error", message: "boom for example.com sk-***" });
+  });
+
+  it("keeps one row per UTC day and reports only the 7 days ending at `now` (never the wall clock)", async () => {
+    const t = setup();
+    for (const at of [NOW, NOW - DAY, NOW - 6 * DAY, NOW - 7 * DAY]) {
+      await t.run((ctx) => recordRuleEvaluationFailure(ctx, { ...R02, now: at, error: new Error("x") }));
+    }
+    const rows = await t.run(async (ctx) => (await ctx.db.query("opsState").take(100)).map((r) => r.key).filter((k) => k.startsWith("ruleEvalFailures:")).sort());
+    expect(rows).toEqual(["ruleEvalFailures:2026-09-14", "ruleEvalFailures:2026-09-15", "ruleEvalFailures:2026-09-20", "ruleEvalFailures:2026-09-21"]);
+
+    const result = await t.query(internal.ops.backlog, { now: NOW });
+    expect(result.ruleEvaluationFailures.total).toBe(3); // 09-14 is outside the window
+    expect(result.ruleEvaluationFailures.days.find((d) => d.day === "2026-09-15")).toEqual({ day: "2026-09-15", count: 1 });
+
+    // Asking about a week later: the argument decides, while the wall clock stays at NOW.
+    const later = await t.query(internal.ops.backlog, { now: NOW + 7 * DAY });
+    expect(later.ruleEvaluationFailures.total).toBe(0);
+  });
+
+  it("never throws from a catch path, whatever it is handed, and still counts the failure", async () => {
+    const t = setup();
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const hostile = [
+      { scenarioId: "R02", ruleId: `R02\n${"x".repeat(5_000)}`, ruleVersion: Number.NaN, error: circular },
+      { scenarioId: "", ruleId: "", ruleVersion: -1, error: undefined },
+      { scenarioId: "R02", ruleId: "R02.x", ruleVersion: 1.5, error: 42 },
+    ];
+    for (const input of hostile) {
+      // Resolves (convex-test maps the helper's void return to null) -- it never rejects.
+      await expect(t.run((ctx) => recordRuleEvaluationFailure(ctx, { ...input, now: NOW }))).resolves.toBeNull();
+    }
+    const result = await t.query(internal.ops.backlog, { now: NOW });
+    expect(result.ruleEvaluationFailures.total).toBe(3);
+    for (const { rule } of result.ruleEvaluationFailures.byRule) {
+      expect(rule.length).toBeLessThanOrEqual(130);
+      expect(rule).not.toContain("\n");
+    }
+  });
+
+  it("an invalid `now` falls back to the mutation clock instead of throwing", async () => {
+    const t = setup();
+    await t.run((ctx) => recordRuleEvaluationFailure(ctx, { ...R02, now: Number.NaN, error: "x" }));
+    const result = await t.query(internal.ops.backlog, { now: NOW });
+    expect(result.ruleEvaluationFailures.days[0]).toEqual({ day: "2026-09-21", count: 1 });
+  });
+
+  it("bounds the per-rule breakdown: past 32 distinct rules in one day the rest fold into `other`", async () => {
+    const t = setup();
+    for (let i = 0; i < 40; i++) {
+      await t.run((ctx) => recordRuleEvaluationFailure(ctx, { scenarioId: "R02", ruleId: `R02.rule_${i}`, ruleVersion: 1, now: NOW, error: "x" }));
+    }
+    const result = await t.query(internal.ops.backlog, { now: NOW });
+    expect(result.ruleEvaluationFailures.total).toBe(40);
+    expect(result.ruleEvaluationFailures.byRule.length).toBeLessThanOrEqual(33);
+    expect(result.ruleEvaluationFailures.byRule.find((r) => r.rule === "other")).toEqual({ rule: "other", count: 8 });
+  });
+
+  it("a malformed counter row is treated as zero (read and increment), never a crash", async () => {
+    const t = setup();
+    await t.run((ctx) => ctx.db.insert("opsState", { key: "ruleEvalFailures:2026-09-21", cursor: "not json", updatedAt: NOW }));
+    expect((await t.query(internal.ops.backlog, { now: NOW })).ruleEvaluationFailures.total).toBe(0);
+    await t.run((ctx) => recordRuleEvaluationFailure(ctx, { ...R02, now: NOW, error: "x" }));
+    expect((await t.query(internal.ops.backlog, { now: NOW })).ruleEvaluationFailures.total).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stale-source packs (verification vs refresh windows)
+// ---------------------------------------------------------------------------
+
+describe("M1B: staleSourcePacks (pure)", () => {
+  // The manifest's R02 shape: refreshDays 30, date-only lastVerifiedAt.
+  const R02 = { ruleId: "R02.airline_fare_refund.us_dot", version: 1, refreshDays: 30, sourceIds: ["ecfr-14cfr260", "usc-49-42305"] };
+  const VERIFIED = Date.UTC(2026, 8, 23); // "2026-09-23" as UTC midnight
+  const WINDOW_END = VERIFIED + 30 * DAY;
+  const bothVerified = { "ecfr-14cfr260": { lastVerifiedAt: "2026-09-23" }, "usc-49-42305": { lastVerifiedAt: "2026-09-23" } };
+
+  it("a pack inside its refresh window is not listed", () => {
+    expect(staleSourcePacks([R02], bothVerified, VERIFIED + 10 * DAY)).toEqual([]);
+  });
+
+  it("within the last 7 days of the window: due_soon (re-verify before it lapses)", () => {
+    expect(staleSourcePacks([R02], bothVerified, WINDOW_END - 3 * DAY)).toEqual([
+      { ruleId: R02.ruleId, version: 1, refreshDays: 30, status: "due_soon", windowEndsAt: WINDOW_END, sourceIds: ["ecfr-14cfr260", "usc-49-42305"] },
+    ]);
+  });
+
+  it("exactly at the window end it is still due_soon; one ms later it is stale", () => {
+    expect(staleSourcePacks([R02], bothVerified, WINDOW_END)[0].status).toBe("due_soon");
+    expect(staleSourcePacks([R02], bothVerified, WINDOW_END + 1)[0]).toMatchObject({ status: "stale", windowEndsAt: WINDOW_END });
+  });
+
+  it("the oldest source governs, and only the lapsed sources are named", () => {
+    const mixed = { "ecfr-14cfr260": { lastVerifiedAt: "2026-08-01" }, "usc-49-42305": { lastVerifiedAt: Date.UTC(2026, 8, 20) } };
+    const [pack] = staleSourcePacks([R02], mixed, Date.UTC(2026, 8, 21, 12));
+    expect(pack).toEqual({
+      ruleId: R02.ruleId, version: 1, refreshDays: 30, status: "stale",
+      windowEndsAt: Date.UTC(2026, 7, 1) + 30 * DAY, sourceIds: ["ecfr-14cfr260"],
+    });
+  });
+
+  it("a source with no verification record, or an unparsable date, is never_verified (README rule 8)", () => {
+    const [missing] = staleSourcePacks([R02], { "ecfr-14cfr260": { lastVerifiedAt: "2026-09-23" } }, VERIFIED + DAY);
+    expect(missing).toMatchObject({ status: "never_verified", sourceIds: ["usc-49-42305"] });
+    const [garbled] = staleSourcePacks([R02], { ...bothVerified, "usc-49-42305": { lastVerifiedAt: "last tuesday" } }, VERIFIED + DAY);
+    expect(garbled).toMatchObject({ status: "never_verified", sourceIds: ["usc-49-42305"] });
+  });
+
+  it("a pack with no usable refresh window cannot be shown fresh: stale", () => {
+    for (const refreshDays of [0, -5, Number.NaN]) {
+      expect(staleSourcePacks([{ ...R02, refreshDays }], bothVerified, VERIFIED + DAY)[0]?.status, String(refreshDays)).toBe("stale");
+    }
+  });
+
+  it("orders the most urgent first: never_verified, stale, due_soon", () => {
+    const packs = [
+      { ruleId: "A", version: 1, refreshDays: 30, sourceIds: ["fresh-ish"] },
+      { ruleId: "B", version: 1, refreshDays: 30, sourceIds: ["old"] },
+      { ruleId: "C", version: 1, refreshDays: 30, sourceIds: ["missing"] },
+    ];
+    const verification = { "fresh-ish": { lastVerifiedAt: VERIFIED - 25 * DAY }, old: { lastVerifiedAt: VERIFIED - 60 * DAY } };
+    expect(staleSourcePacks(packs, verification, VERIFIED).map((p) => [p.ruleId, p.status])).toEqual([
+      ["C", "never_verified"],
+      ["B", "stale"],
+      ["A", "due_soon"],
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// backlog: coarse `now`, flags, stale sources, extraction, orphan sweep
+// ---------------------------------------------------------------------------
+
+async function insertEvidence(t: T, userId: Id<"users">, extractionStatus: Doc<"evidence">["extractionStatus"], n = 1) {
+  await t.run(async (ctx) => {
+    for (let i = 0; i < n; i++) {
+      await ctx.db.insert("evidence", {
+        userId, kind: "upload", docType: "unknown", sourceChannel: "upload", provenance: "user_uploaded",
+        contentHash: `${extractionStatus}-${i}`, receivedAt: NOW, extractionStatus, extractionAttempts: 0, retention: "active",
+      });
+    }
+  });
+}
+
+describe("M1B: ops.backlog additions", () => {
+  it("takes `now` as an argument: it wins over the wall clock, and asOf is that instant floored to the hour", async () => {
+    const t = setup();
+    const asked = NOW - 3 * DAY + 17 * 60_000 + 5_000;
+    const result = await t.query(internal.ops.backlog, { now: asked });
+    expect(result.now).toBe(asked);
+    expect(result.asOf).toBe(NOW - 3 * DAY);
+  });
+
+  it("refuses a non-finite `now`", async () => {
+    const t = setup();
+    await expect(t.query(internal.ops.backlog, { now: Number.NaN })).rejects.toThrow(ConvexError);
+    await expect(t.query(internal.ops.backlog, { now: Number.POSITIVE_INFINITY })).rejects.toThrow(ConvexError);
+  });
+
+  it("reports every flag's effective state and approvalRef: all OFF by default, then the enabled one with its reference", async () => {
+    const t = setup();
+    const before = await t.query(internal.ops.backlog, { now: NOW });
+    expect(before.flags).toEqual(FLAG_NAMES.map((name) => ({ name, on: false, approvalRef: null, updatedAt: null, invalid: false })));
+
+    await t.mutation(internal.ops.setFlag, { name: "live_document_extraction", on: true, approvalRef: "D9001" });
+    const after = await t.query(internal.ops.backlog, { now: NOW });
+    expect(after.flags.find((f) => f.name === "live_document_extraction")).toEqual({
+      name: "live_document_extraction", on: true, approvalRef: "D9001", updatedAt: NOW, invalid: false,
+    });
+  });
+
+  it("stale sources: honest about being unwired until the registry and verification.ts exist", async () => {
+    const t = setup();
+    const result = await t.query(internal.ops.backlog, { now: NOW + 42 * 60_000 });
+    expect(result.staleSources).toEqual({ asOf: NOW, inputsWired: false, checkedPacks: 0, packs: [] });
+  });
+
+  it("counts awaiting_doc_type and pending/failed extraction, bounded by scanLimit", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    await insertEvidence(t, userId, "awaiting_doc_type", 3);
+    await insertEvidence(t, userId, "queued", 2);
+    await insertEvidence(t, userId, "running", 1);
+    await insertEvidence(t, userId, "failed", 1);
+    await insertEvidence(t, userId, "succeeded", 4);
+    await insertEvidence(t, userId, "store_only", 2);
+
+    const result = await t.query(internal.ops.backlog, { now: NOW });
+    expect(result.extraction).toEqual({
+      awaitingDocType: { count: 3, truncated: false },
+      queued: { count: 2, truncated: false },
+      running: { count: 1, truncated: false },
+      failed: { count: 1, truncated: false },
+    });
+    const capped = await t.query(internal.ops.backlog, { now: NOW, scanLimit: 2 });
+    expect(capped.extraction.awaitingDocType).toEqual({ count: 2, truncated: true });
+  });
+
+  it("reports the orphan sweep's cursor age: null before its first run, then the age of its opsState row", async () => {
+    const t = setup();
+    expect((await t.query(internal.ops.backlog, { now: NOW })).orphanSweep).toEqual({ ageMs: null });
+    await t.run((ctx) => ctx.db.insert("opsState", { key: "orphanSweep", cursor: "anything", updatedAt: NOW - 5 * HOUR }));
+    expect((await t.query(internal.ops.backlog, { now: NOW })).orphanSweep).toEqual({ ageMs: 5 * HOUR });
+  });
+
+  it("reports the evidence/evaluation retention sweep's cursor age the same way (M14 key `retentionRecovery`)", async () => {
+    const t = setup();
+    expect((await t.query(internal.ops.backlog, { now: NOW })).recoveryRetention).toEqual({ ageMs: null });
+    await t.run((ctx) =>
+      ctx.db.insert("opsState", { key: "retentionRecovery", cursor: JSON.stringify({ step: 1, page: "p", startedAt: NOW - DAY }), updatedAt: NOW - 30 * 60_000 }),
+    );
+    const result = await t.query(internal.ops.backlog, { now: NOW });
+    expect(result.recoveryRetention).toEqual({ ageMs: 30 * 60_000 });
+    expect(result.orphanSweep).toEqual({ ageMs: null }); // independent rows
   });
 });

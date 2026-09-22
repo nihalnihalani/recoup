@@ -21,7 +21,40 @@ describe("LOG_KINDS", () => {
       "scheduler_backlog",
       "market_failed",
       "migration_progress",
+      "rule_evaluation_failed",
+      "source_verification_failed",
+      "flag_changed",
+      "extraction_refused",
     ]);
+  });
+
+  it("M1B (P12/C58): adds the rule-evaluation, source-verification, flag-change and extraction-refused kinds", () => {
+    const kinds: readonly string[] = LOG_KINDS;
+    for (const kind of ["rule_evaluation_failed", "source_verification_failed", "flag_changed", "extraction_refused"]) {
+      expect(kinds).toContain(kind);
+    }
+  });
+});
+
+describe("M1B event kinds keep the unchanged redaction path", () => {
+  let spy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+  afterEach(() => spy.mockRestore());
+
+  it("a rule_evaluation_failed line is redacted exactly like every other kind", () => {
+    logEvent("rule_evaluation_failed", { ruleId: "R02.airline_fare_refund.us_dot", error: new Error("boom for ops@example.com sk-abcdefghij1234567890") });
+    const line = lastLoggedLine(spy);
+    expect(line.kind).toBe("rule_evaluation_failed");
+    expect(line.error).toEqual({ name: "Error", message: "boom for example.com sk-***" });
+  });
+
+  it("a flag_changed line cannot spoof the envelope", () => {
+    logEvent("flag_changed", { kind: "forged", flag: "live_document_extraction", to: true });
+    const line = lastLoggedLine(spy);
+    expect(line.kind).toBe("flag_changed");
+    expect(line.flag).toBe("live_document_extraction");
   });
 });
 
