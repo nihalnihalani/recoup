@@ -6,6 +6,7 @@
  * (cells, condition trees, deadline specs, flags, packs) are declared here.
  */
 import type { Infer } from "convex/values";
+import type { Id } from "../../_generated/dataModel";
 import type {
   amountCalc,
   assumption,
@@ -288,7 +289,7 @@ export interface RuleSourceMeta {
 
 /** What the evaluator knows about existing cases on this opportunity (contract §4 `caseContext`). */
 export interface CaseContext {
-  activeClaimId?: string;
+  activeClaimId?: Id<"claims">;
   /** Confirmed (settled) amounts per loss key on this subject. */
   settledMinorByLossKey: Record<string, number>;
   /** DA-A-22 (wave 2): the opening observation of a denied claim on this subject. */

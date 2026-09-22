@@ -334,7 +334,8 @@ export function computeDeadlineDetailed(
       ...b,
       ...st,
       dueAt: due.dueAt,
-      ...(due.dueLocalDate !== undefined ? { dueLocalDate: due.dueLocalDate } : {}),
+      // A UTC reference zone (exact-instant specs) has no user-facing local date.
+      ...(due.dueLocalDate !== undefined && due.zoneId !== "UTC" ? { dueLocalDate: due.dueLocalDate } : {}),
       ...(due.zoneId !== undefined && due.zoneId !== "UTC" ? { timeZone: due.zoneId } : {}),
       basis: rule,
     },
