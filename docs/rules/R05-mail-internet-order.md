@@ -111,6 +111,8 @@ Let `T` = end of the applicable shipping time (§4).
 | other methods (wallets, debit, etc.) | instructions to the payment entity / return / statement | 7 working days | vesting date | same |
 | seller cannot refund by the same method | cash, check, or money order | 7 working days | date the seller discovers it cannot | same |
 
+**Unconfirmed or disputed anchor (D154 condition 2).** These are counterparty (seller) deadlines. If the vesting date rests on an extracted or conflicting fact (e.g., the order time or the shipping representation), Recoup computes **no** refund-by date and no overdue/escalation date (`deadline.date = null`, status `unknown_anchor` / `disputed_anchor`) until the fact is confirmed.
+
 ## 10. Notice requirements
 
 - The seller's delay-option notice may be sent by email (FTC-MITOR-G4, guidance-only). Posting only on an order-status page may not meet the timing requirement (FTC-MITOR-G8, guidance-only).
@@ -215,7 +217,7 @@ FTC business-guide passages FTC-MITOR-G1…G6 are in `sources/federal-web-pages-
 2. Non-US buyer/seller/ship-to → `unsupported`. `order_channel = in_store` → `not_eligible`. Excluded category or COD → `not_eligible` (the Rule does not apply). Seller unknown → `needs_facts`.
 3. Determine `T` (§4). Missing `properly_completed_order_at` or contradictory representations → `needs_facts`.
 4. `shipped_at ≤ T` (or ≤ consented revised date) → `not_eligible` (shipment promise met; attach an R03 / merchant pointer if a **delivery** promise was missed).
-5. Now ≤ `T` (or ≤ `R`, or ≤ `T + 30 days` under case 3) and not shipped → **`not_yet_due`** with `reevaluate_at` = the day after the period ends (D147(6)); never `not_eligible`. Buyer consented to an indefinite delay → **`not_yet_due`** with `reevaluate_when: "buyer cancels before shipment"`.
+5. Now ≤ `T` (or ≤ `R`, or ≤ `T + 30 days` under case 3) and not shipped → **`not_yet_due`** with `reevaluate_at` = the day after the period ends (D147(6)); never `not_eligible`. Buyer consented to an indefinite delay → **`not_yet_due`** with `reevaluate_when: "buyer cancels before shipment"` and **`next_action`: "you can cancel before shipment for a prompt refund"** (D154: a user-controlled trigger is presented as an action, not a wait).
 6. Apply §8 cases. Delay-notice state unknown → `needs_facts`. Refund right vested → `eligible`; compute the refund deadline (§9).
 7. `eligible` requires every **decisive fact** to be confirmed (D147(2)): `order_channel`, `seller_identity`, countries, `merchandise_category`, `payment_terms`, `properly_completed_order_at`, `shipping_representation`, `shipped_at`, `delay_notices` (+ adequacy), `buyer_response`, `amount_tendered`. A user-confirmed "not shipped" plus no carrier-possession event is sufficient for `shipped_at`. Any decisive fact only extracted → `likely_eligible_missing_evidence`. Partial shipment → amount `manual_review`.
 8. Overlap: R03 is an alternative for the same money (never additive); a merchant refund already received reduces the outstanding amount to zero → the opportunity closes as recovered, not as `not_eligible`.
