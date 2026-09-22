@@ -1,0 +1,23 @@
+# Captured source text (US federal government work — public domain)
+# URL: https://www.ecfr.gov/api/versioner/v1/full/2026-09-18/title-12.xml?part=1026&section=1026.12 (excerpt: §1026.12(b))
+# Retrieval: 2026-09-23 via eCFR versioner API, point-in-time 2026-09-18
+# SHA-256 of raw response (t12_1026.12.xml): c4b8895e2e492f97884b0ae344be89e437715fc16f521b5ef6f56e5264d38f67
+# Text below is a tag-stripped rendering of the raw response; the raw response is authoritative.
+
+(b) Liability of cardholder for unauthorized use—(1)(i) Definition of unauthorized use. For purposes of this section, the term “unauthorized use” means the use of a credit card by a person, other than the cardholder, who does not have actual, implied, or apparent authority for such use, and from which the cardholder receives no benefit.
+
+(ii) Limitation on amount. The liability of a cardholder for unauthorized use of a credit card shall not exceed the lesser of $50 or the amount of money, property, labor, or services obtained by the unauthorized use before notification to the card issuer under paragraph (b)(3) of this section.
+
+(2) Conditions of liability. A cardholder shall be liable for unauthorized use of a credit card only if:
+
+(i) The credit card is an accepted credit card;
+
+(ii) The card issuer has provided adequate notice of the cardholder's maximum potential liability and of means by which the card issuer may be notified of loss or theft of the card. The notice shall state that the cardholder's liability shall not exceed $50 (or any lesser amount) and that the cardholder may give oral or written notification, and shall describe a means of notification (for example, a telephone number, an address, or both); and
+
+(iii) The card issuer has provided a means to identify the cardholder on the account or the authorized user of the card.
+
+(3) Notification to card issuer. Notification to a card issuer is given when steps have been taken as may be reasonably required in the ordinary course of business to provide the card issuer with the pertinent information about the loss, theft, or possible unauthorized use of a credit card, regardless of whether any particular officer, employee, or agent of the card issuer does, in fact, receive the information. Notification may be given, at the option of the person giving it, in person, by telephone, or in writing. Notification in writing is considered given at the time of receipt or, whether or not received, at the expiration of the time ordinarily required for transmission, whichever is earlier.
+
+(4) Effect of other applicable law or agreement. If state law or an agreement between a cardholder and the card issuer imposes lesser liability than that provided in this paragraph, the lesser liability shall govern.
+
+(5) Business use of credit cards. If 10 or more credit cards are issued by one card issuer for use by the employees of an organization, this section does not prohibit the card issuer and the organization from agreeing to liability for unauthorized use without regard to this section. However, liability for unauthorized use may be imposed on an employee of the organization, by either the card issuer or the organization, only in accordance with this section.

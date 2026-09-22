@@ -45,6 +45,19 @@ Rules:
 4. **Text presence ≠ legal force.** eCFR still displays §1026.62 (overdraft rule disapproved by Pub. L. 119-10) and the stayed §1026.52 $8 late-fee safe harbor. A pack records legal status separately (TRIAGE, cross-cutting finding).
 5. **Temporal applicability.** A pack version applies to a transaction only if its effective date is on or before the anchor date and no later version was effective at the anchor. When applicability is unknown, see R01 §1.4 (unknown → capped at likely eligible with an explicit assumption; known mismatch → `source_unverified`).
 
+## Cross-pack rules (D147, 2026-09-23)
+
+These apply to every pack and every fixture file. They answer the M09 review's cross-cutting items X1–X6.
+
+1. **Confirmed facts for `eligible` (D147(2), X1).** `eligible` requires every **decisive** fact to be `user_confirmed`, or `observed` / `derived` from confirmed or observed facts. If any decisive fact is only an `extracted_candidate`, the outcome is capped at `likely_eligible` (fixture alias `likely_eligible_missing_evidence`), and the missing item is the confirmation. Each spec's evaluation outline lists its decisive facts. Amount inputs are decisive for the **estimate**: an unconfirmed amount keeps the outcome at `likely_eligible` too, so no `eligible` packet ever carries an unconfirmed number.
+2. **Fixture fact states → contract cell statuses (contract §2.5).** `user_confirmed` → `confirmed`; `observed` → `observed` (machine observation, e.g. an accepted price check); `derived` → `derived`; `extracted_candidate` → `candidate`; `conflicting` → `conflicting`; `missing` → `missing`; `assumption` → assumption-class `candidate` (R01 v1 only). A `missing` fact always has `value: null`.
+3. **Conflicting facts (X2).** A `conflicting` fact carries `candidates: [{value, evidence}]`. The evaluator tests every candidate. If all candidates give the same outcome, the conflict is not material and the outcome stands. If they diverge, the outcome is `needs_facts`. Advisory dates (e.g. R03's conservative act-by) use the **earliest** candidate. Every file has one variant where both candidates fall on the same side.
+4. **Not yet due (D147(6), X3).** A path that is not ripe yet is outcome **`not_yet_due`** with `reevaluate_at` (an ISO date) or `reevaluate_when` (a named event, e.g. "MBR filed"). It is never `not_eligible`. `not_eligible` means "not under this rule on these facts". Contract note: M01's `evaluationOutcome` has no `not_yet_due` value yet — the architect must add it before a loader can map it (flagged to the lead).
+5. **Dates (D147(3), X4).** Every pack header records **published** (Federal Register date), **effective** and **compliance** dates separately, each from `sources/federal-register-notices.txt` or marked "not captured". eCFR source notes carry publication citations, not effective dates.
+6. **Calendar-day zone (D147(4), X6).** Every deadline row names the time zone that defines a calendar day. Where the source does not say, the choice is a labelled assumption.
+7. **Captured support (D147(5)).** Every normative statement in a spec cites a passage in `sources/`. Anything else is labelled **assumption** or **guidance-only** or is removed. Informational figures not used by any evaluator are removed rather than left uncaptured.
+8. **Missing source (X5).** Each fixture file has a "no current source record" variant → `source_unverified`.
+
 ## From spec to evaluator (for the architect and backend engineers)
 
 Each spec section maps to one field of M01's `RulePack<S, P>` (contract §7):
@@ -82,15 +95,16 @@ Each spec section maps to one field of M01's `RulePack<S, P>` (contract §7):
 | `deadline_passed` | `deadline_passed` |
 | `source_unverified` | `source_unverified` |
 | `unsupported` | `unsupported` |
+| `not_yet_due` (D147(6)) | **none yet** — contract change needed; do not map it to `not_eligible` |
 
 A fixture loader should map `likely_eligible_missing_evidence` → `likely_eligible`. The fixtures keep the mission's longer name so the expected meaning is explicit.
 
 ### Fixture format (`recoup.rule-fixtures/v1`)
 
-- `conventions` in each file define fact encoding (`{type, value, state}` with `state ∈ user_confirmed | extracted_candidate | derived | missing | conflicting`), money (`amount_minor` + ISO-4217), calendars, and deadline meaning.
+- `conventions` in each file define fact encoding (`{type, value, state}` with `state ∈ user_confirmed | observed | derived | extracted_candidate | conflicting | missing | assumption`; mapping in cross-pack rule 2), money (`amount_minor` + ISO-4217, on every money object including exclusions), calendars, and deadline meaning. `conflicting` facts carry `candidates` (cross-pack rule 3).
 - A case has **either** a top-level `expected` **or** an `expected` on every variant. `clock` (ISO-8601 with offset) and optional `source` (`last_verified_on`, `refresh_window_days`) may be set on the case or on a variant; the variant wins.
 - `facts_from: "<case id>"` + `facts_override: {…}` copies another case's facts. A variant's `change` replaces the named facts for that variant.
-- `expected` may also carry `missing_facts`, `amount`, `deadline` (`kind`, `date`, `semantics`, `anchor`), `packet_readiness`, `dedupe`, `overlap`, `totals`, and `forbidden_outputs` (things the UI or evaluator must **not** produce, e.g. displaying a liability cap as the payout).
+- `expected` may also carry `reevaluate_at` / `reevaluate_when` (for `not_yet_due`), `missing_facts`, `amount`, `deadline` (`kind`, `date`, `semantics`, `anchor`), `packet_readiness`, `dedupe`, `overlap`, `totals`, and `forbidden_outputs` (things the UI or evaluator must **not** produce, e.g. displaying a liability cap as the payout).
 - `justification.passages` cite passage ids from the spec or `sources/federal-web-pages-excerpts.md`.
 - `context` holds non-fact state (existing claims on the item, price history, unconfirmed offers); a variant's `context_change` replaces named entries. `action` defaults to `evaluate`; R01-05d uses `send_existing_claim` to test the late-send warning.
 - `fixtures/R01.json` covers the **R01 v1 legacy snapshot tier** (contract rev 4 §2.7, task M1C). Its best outcome is `likely_eligible`; it has no staleness → `source_unverified` case (rule 3 exception).

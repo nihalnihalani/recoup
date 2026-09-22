@@ -2,7 +2,7 @@
 
 All pages below are works of the US federal government (public domain). Passages are copied verbatim from the text rendering obtained on **2026-09-23** by the method stated. `transportation.gov` returns HTTP 403 to non-browser clients (curl, WebFetch, Firecrawl key revoked), so DOT pages were read in a real browser pane (text extraction of `<main>`); no raw-response hash is available for those. Federal Register documents were fetched from `federalregister.gov/documents/full_text/text/...` with the SHA-256 shown.
 
-Passage ids (`DOT-REF-*`, `DOT-BAG-*`, …) are cited by the rule specs.
+Passage ids (`DOT-REF-*`, `DOT-BAG-*`, …) are cited by the rule specs. Federal Register DATES/SUMMARY passages are captured verbatim, with per-document hashes, in `federal-register-notices.txt`; the FR table below is an index.
 
 ---
 
@@ -69,6 +69,14 @@ Passage ids (`DOT-REF-*`, `DOT-BAG-*`, …) are cited by the rule specs.
 
 **DOT-BAG-7** (exclusions in contracts of carriage — domestic)
 > For DOMESTIC travel, airlines are not required to compensate passengers for items they have excluded in their contracts of carriage.
+
+**DOT-BAG-9** (pre-existing damage / improper packing — guidance)
+> Airlines are not responsible for pre-existing damage to the bag or if the damage was caused by improper packing.
+
+**DOT-BAG-10** (report before leaving the airport — guidance, "Baggage Tips")
+> If your bag arrives open, unlocked or visibly damaged, immediately check to see if any of the contents are missing or damaged. Report any problems to the airline before leaving the airport; insist on having a report created.
+
+(DOT-BAG-9 and DOT-BAG-10 were captured in the same 2026-09-23 browser session as DOT-BAG-1…8 and added to this file during M2D.)
 
 **DOT-BAG-8** (bag-fee refund after MBR)
 > In order to receive a refund of the baggage fee for a significantly delayed bag, you must file a mishandled baggage report with the airline. You are encouraged to file the report as soon as you learn that your bag did not arrive with you at the destination. Once the airline has the mishandled baggage report on file and the bag delay becomes “significant” as described above, a refund of the bag fee should be issued to you automatically.
@@ -140,6 +148,14 @@ Passage ids (`DOT-REF-*`, `DOT-BAG-*`, …) are cited by the rule specs.
 
 **FTC-MITOR-G6** (how much to refund)
 > If you cannot ship any of the merchandise ordered by the customer, you must refund the entire amount the customer "tendered," including any shipping, handling, insurance, or other costs.
+
+**FTC-MITOR-G7** (partial shipment — guidance, "How Much You Must Refund")
+> If you ship some, but not all, of the merchandise ordered, you must refund the difference between the total amount paid and the amount the customer would have paid, according to your ordering instructions, for the shipped items only.
+
+**FTC-MITOR-G8** (order-status page — guidance, Q&A)
+> A: If you provide a delay option notice, you must choose a way that is reasonably likely to provide all the required information within the time period required by the Rule. If the consumer doesn’t visit the order-status page until after she misses her order, you haven’t complied with the Rule’s requirements that the delay option notice be provided within the promised shipment time.
+
+(FTC-MITOR-G7 and G8 come from the same 2026-09-23 browser capture as G1…G6 and were added to this file during M2D.)
 
 ---
 

@@ -1,0 +1,11 @@
+# Captured source text (US federal government work — public domain)
+# URL: https://www.ecfr.gov/api/versioner/v1/full/2026-09-18/title-12.xml?part=1026&section=1026.7 (excerpt: (a)(9), (b)(9))
+# Retrieval: 2026-09-23 via eCFR versioner API, point-in-time 2026-09-18
+# SHA-256 of raw response (t12_1026.7.xml): cec7f74c90ce867e73a90981ce0a6f6718d7516fafbe1ec6058dccb68e7bce8d
+# Text below is a tag-stripped rendering of the raw response; the raw response is authoritative.
+
+§ 1026.7(a)(9) [rules affecting home-equity plans]
+(9) Address for notice of billing errors. The address to be used for notice of billing errors. Alternatively, the address may be provided on the billing rights statement permitted by § 1026.9(a)(2).
+
+§ 1026.7(b)(9) [rules affecting open-end (not home-secured) plans]
+(9) Address for notice of billing errors. The address to be used for notice of billing errors. Alternatively, the address may be provided on the billing rights statement permitted by § 1026.9(a)(2).

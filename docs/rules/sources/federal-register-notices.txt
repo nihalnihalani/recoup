@@ -1,0 +1,84 @@
+# Captured Federal Register passages (US federal government works — public domain)
+# Retrieval: 2026-09-23 from https://www.federalregister.gov/documents/full_text/text/<yyyy>/<mm>/<dd>/<doc>.txt
+# Each block: passage id, document, citation, URL, SHA-256 of the full-text response, and the verbatim section text (whitespace collapsed, HTML entities decoded).
+# The full-text response is authoritative; this file is a rendering of the named sections only.
+
+## FR-2011-31715 — CFPB — Truth in Lending (Regulation Z) interim final rule (recodified Regulation Z at 12 CFR part 1026; source of "76 FR 79772" in the §1026.13 source note)
+- Document 2011-31715; citation 76 FR 79768; published 2011-12-22
+- URL: https://www.federalregister.gov/documents/full_text/text/2011/12/22/2011-31715.txt
+- SHA-256 of full-text response: 3bd0529375df754bddafd0e2be4c67113303be1c28139de1ebc9b4d11037faad
+- DATES: "This interim final rule is effective December 30, 2011. Comments must be received on or before February 21, 2012."
+
+## FR-2016-24503 — CFPB — Prepaid Accounts final rule (source of "81 FR 84369" in the §1026.13 source note)
+- Document 2016-24503; citation 81 FR 83934; published 2016-11-22
+- URL: https://www.federalregister.gov/documents/full_text/text/2016/11/22/2016-24503.txt
+- SHA-256 of full-text response: 41f0b5db104437b39d6dd4c2b72662d2d82a624784b7483971ccd2dc6c5d777d
+- DATES: "This rule is effective on October 1, 2017, except for the addition of Sec. 1005.19(b), which is delayed until October 1, 2018."
+
+## FR-2017-08341 — CFPB — Prepaid Accounts: effective-date delay
+- Document 2017-08341; citation 82 FR 18975; published 2017-04-25
+- URL: https://www.federalregister.gov/documents/full_text/text/2017/04/25/2017-08341.txt
+- SHA-256 of full-text response: 9b6a231dc58869363a00f05e943c68f4441d750bc13cc5745c17a093c1f79132
+- DATES: "The amendments in this final rule are effective on April 1, 2018. The effective date of the final rule published on November 22, 2016 (81 FR 83934) is delayed from October 1, 2017, to April 1, 2018. The effective date for the addition of Sec. 1005.19(b) remains October 1, 2018."
+
+## FR-2018-01305 — CFPB — Prepaid Accounts: further delay
+- Document 2018-01305; citation 83 FR 6364; published 2018-02-13
+- URL: https://www.federalregister.gov/documents/full_text/text/2018/02/13/2018-01305.txt
+- SHA-256 of full-text response: 53eb3cefd437d78838c9d4d9d961918f9fb7a5566879cab0b52b83ebbe62d100
+- DATES: "The amendments in this final rule are effective on April 1, 2019. The effective date of the final rule published on November 22, 2016 (81 FR 83934), as delayed on April 25, 2017 (82 FR 18975), is further delayed from April 1, 2018 to April 1, 2019. The effective date of the final rule published on April 25, 2017 (82 FR 18975), is delayed from April 1, 2018 to April 1, 2019. The effective date for the addition of Sec. 1005.19(b), published on November 22, 2016 (81 FR 83934), as confirmed on April 25, 2017 (82 FR 18975), is delayed from October 1, 2018 to April 1, 2019."
+
+## FR-2014-22092 — FTC — Mail or Telephone Order Merchandise Rule final rule (current 16 CFR part 435 text; source note "79 FR 55619")
+- Document 2014-22092; citation 79 FR 55615; published 2014-09-17
+- URL: https://www.federalregister.gov/documents/full_text/text/2014/09/17/2014-22092.txt
+- SHA-256 of full-text response: 8f74b25ac6c48b587072b0502aea8f4f02cf592983582812a97e3897919e2176
+- DATES: "The provisions of the final Rule will become effective on December 8, 2014."
+
+## FR-2024-07177 — DOT — Refunds and Other Consumer Protections (14 CFR part 260)
+- Document 2024-07177; citation 89 FR 32760; published 2024-04-26
+- URL: https://www.federalregister.gov/documents/full_text/text/2024/04/26/2024-07177.txt
+- SHA-256 of full-text response: 1f3a3196e40cc0fa7bf152b90baf8a2ecc7f344d97cc2d0c9f71294839f85bb4
+- DATES: "This rule is effective June 25, 2024. Upon OMB approval of the information collection established in this final rule, the Department will publish a separate notice announcing the effective date of the collection."
+
+## FR-2024-17602 — DOT — Refunds and Other Consumer Protections (2024 FAA Reauthorization)
+- Document 2024-17602; citation 89 FR 65534; published 2024-08-12
+- URL: https://www.federalregister.gov/documents/full_text/text/2024/08/12/2024-17602.txt
+- SHA-256 of full-text response: 4b2b56e413d4249d4f238756bf7a942abcfb78b283e1862b30b05915d75d7cb0
+- DATES: "This rule is effective August 12, 2024."
+
+## FR-2024-23588 — DOT — Periodic Revisions to Denied Boarding Compensation and Domestic Baggage Liability Limits
+- Document 2024-23588; citation 89 FR 84815; published 2024-10-24
+- URL: https://www.federalregister.gov/documents/full_text/text/2024/10/24/2024-23588.txt
+- SHA-256 of full-text response: 6dddf07aa286a45fc9aadc0369b44aaa59097c0d507b855751577f59060d8408
+- SUMMARY: "This final rule, in accordance with existing regulation, raises the liability limits for denied boarding compensation that U.S. and foreign air carriers may impose from the current figures of $775 and $1,550 to $1,075 and $2,150. Also, in accordance with existing regulation, this final rule raises the liability limit U.S. carriers may impose for mishandled baggage in domestic air transportation from the current amount of $3,800 to $4,700."
+- DATES: "This rule is effective on January 22, 2025."
+
+## FR-2025-02814 — DOT — Notification of enforcement discretion (delay of enforcement of 2024-23588)
+- Document 2025-02814; citation 90 FR 9952; published 2025-02-20
+- URL: https://www.federalregister.gov/documents/full_text/text/2025/02/20/2025-02814.txt
+- SHA-256 of full-text response: a01949618e887ca05a12fb00ae611e592f8d44d3c542d6792c66bbf4338060cd
+- DATES: "As of February 20, 2025, enforcement of the amendments enacted in the final rule published October 24, 2024, at 89 FR 84815, is delayed until March 20, 2025."
+
+## FR-2025-22140 — DOT — Notification of enforcement discretion (renumbered flights)
+- Document 2025-22140; citation 90 FR 55999; published 2025-12-05
+- URL: https://www.federalregister.gov/documents/full_text/text/2025/12/05/2025-22140.txt
+- SHA-256 of full-text response: 5b8d3c44af05fe68989e90756096882052b6febe42c22c69584f407a82d4f6c9
+- DATES: "As of December 5, 2025, the Department is pausing until June 30, 2026 the enforcement of airline refunds requirements regarding cancelled flights under 14 CFR parts 260 and 399 for flights that are operated under a different flight number than was held out to consumers at the time of ticket purchases so long as the flights impose no significant change or delay to consumers' itineraries."
+
+## FR-2026-13675 — DOT — Extension of enforcement discretion (renumbered flights)
+- Document 2026-13675; citation 91 FR 41556; published 2026-07-07
+- URL: https://www.federalregister.gov/documents/full_text/text/2026/07/07/2026-13675.txt
+- SHA-256 of full-text response: 86ca72bf61fc5da2f25b5621ec5800299afbfe6510d1ac99f81ffd9c4daa7396
+- DATES: "As of July 7, 2026, the Department is extending the pause on the enforcement of airline refunds requirements regarding cancelled flights under 14 CFR parts 260 and 399 for flights that are merely renumbered. This enforcement discretion is extended for 1-year from the date of this publication, expiring on July 7, 2027."
+
+## FR-2025-20042 — DOT — Airline Passenger Rights ANPRM withdrawal
+- Document 2025-20042; citation —; published 2025-11-17
+- URL: https://www.federalregister.gov/documents/full_text/text/2025/11/17/2025-20042.txt
+- SHA-256 of full-text response: d40c41dedb9d105b8879530345a0b515d1849b489d395841292755d9f0d42bfc
+- DATES: "The Department of Transportation is withdrawing the advance notice proposed rulemaking published December 11, 2024 (89 FR 99760) as of November 17, 2025."
+
+## FR-2025-08286 — CFPB — Withdrawal of guidance documents
+- Document 2025-08286; citation —; published 2025-05-12
+- URL: https://www.federalregister.gov/documents/full_text/text/2025/05/12/2025-08286.txt
+- SHA-256 of full-text response: 004541964d781c19e7a30fb76e71ebd8ac224cc59be527ceb84441bc45a0f8e0
+- DATES: "The withdrawals are applicable as of May 12, 2025."
+- Listed under 'Interpretive Rules' withdrawn: "1. Use of Digital User Accounts to Access Buy Now, Pay Later Loans, 89 FR 47068 (May 31, 2024)."
