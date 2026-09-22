@@ -201,14 +201,26 @@ function PartialNote() {
 
 type TileKey = keyof RecoverySummary["currencies"][number]["tiles"];
 
-/** Furthest state last, the order a case moves through (DA-A-17). Each loss sits in exactly one tile. */
-const TILES: readonly { key: TileKey; label: string; hint: string }[] = [
-  { key: "potential", label: "Potential", hint: "estimated, not guaranteed" },
-  { key: "ready", label: "Ready to ask", hint: "an open claim not sent yet" },
-  { key: "sendingOrUnknown", label: "Sending or unknown", hint: "not confirmed as sent" },
-  { key: "asked", label: "Asked", hint: "sent or submitted; no money yet" },
-  { key: "promised", label: "Promised", hint: "promised to you; not received yet" },
-];
+/**
+ * Furthest state last, the order a case moves through (DA-A-17; M12e precedence promised > refused > asked >
+ * sendingOrUnknown > ready > potential). Each loss sits in exactly one tile, so within one currency they add up.
+ * The `Record` makes a tile the server adds without a row here a compile error, so no amount can silently vanish.
+ */
+const TILE_COPY: Readonly<Record<TileKey, { label: string; hint: string }>> = {
+  potential: { label: "Potential", hint: "estimated, not guaranteed" },
+  ready: { label: "Ready to ask", hint: "an open claim not sent yet" },
+  sendingOrUnknown: { label: "Sending or unknown", hint: "not confirmed as sent" },
+  asked: { label: "Asked", hint: "sent or submitted; no money yet" },
+  refused: { label: "Refused", hint: "The merchant said no — no money yet" },
+  promised: { label: "Promised", hint: "promised to you; not received yet" },
+};
+const TILE_ORDER: readonly TileKey[] = ["potential", "ready", "sendingOrUnknown", "asked", "refused", "promised"];
+const TILES = TILE_ORDER.map((key) => ({ key, ...TILE_COPY[key] }));
+
+/** One currency's outstanding total: the tiles are disjoint (I3), so their sum is Σ outstanding (I1). Never across currencies. */
+function outstandingMinor(row: RecoverySummary["currencies"][number]): number {
+  return TILE_ORDER.reduce((sum, key) => sum + row.tiles[key].amountMinor, 0);
+}
 
 const NON_CASH_LABELS: Record<string, [string, string]> = {
   voucher: ["voucher", "vouchers"],
@@ -251,8 +263,13 @@ function RecoveryPanel({ summary }: { summary: RecoverySummary }) {
         <div className="mt-4 space-y-5">
           {summary.currencies.map((row) => (
             <div key={row.currency} aria-label={`${row.currency} recovery`} role="group">
-              <p className="text-xs font-semibold uppercase tracking-wide text-gray-600">{row.currency}</p>
-              <dl className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+              <p className="flex flex-wrap items-baseline gap-x-2 text-xs font-semibold uppercase tracking-wide text-gray-600">
+                {row.currency}
+                <span className="font-medium normal-case tracking-normal text-gray-600">
+                  {formatMinor(outstandingMinor(row), row.currency)} still outstanding, estimates included
+                </span>
+              </p>
+              <dl className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
                 {TILES.map((tile) => {
                   const t = row.tiles[tile.key];
                   return (
@@ -274,10 +291,16 @@ function RecoveryPanel({ summary }: { summary: RecoverySummary }) {
                   );
                 })}
               </dl>
-              {row.overCreditMinor > 0 && (
+              {/* DA-B-8 / D196: two different stories; `overCreditMinor` (their sum) is not displayed. */}
+              {row.extraCreditedMinor > 0 && (
+                <p className="mt-2 text-sm text-gray-700">
+                  More than you asked — often tax or shipping: {formatMinor(row.extraCreditedMinor, row.currency)}.
+                </p>
+              )}
+              {row.possibleDoubleCreditMinor > 0 && (
                 <p className="mt-2 text-sm text-red-700">
-                  Over-credit / possible double credit: {formatMinor(row.overCreditMinor, row.currency)}. More came back than
-                  this loss; check whether a credit was posted twice.
+                  Possible double credit: {formatMinor(row.possibleDoubleCreditMinor, row.currency)}. Check whether a credit
+                  was posted twice.
                 </p>
               )}
               {row.cappedAtPaidTotal && (

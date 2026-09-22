@@ -3,6 +3,7 @@
  * M15: the dashboard's money comes only from `recovery.summary` (SEC-MF-1, DA-A-34), per currency (QA-2), with
  * disjoint tiles, "of which provisional" and the over-credit line (contract §3.4, §9).
  */
+import axe from "axe-core";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { formatMinor } from "../../lib/money";
 import { render, screen, within } from "../../test/dom";
@@ -87,7 +88,7 @@ describe("StatCards money (DA-A-34, QA-2)", () => {
       }),
     );
     const usd = screen.getByRole("group", { name: "USD recovery" });
-    for (const label of ["Potential", "Ready to ask", "Sending or unknown", "Asked", "Promised"]) {
+    for (const label of ["Potential", "Ready to ask", "Sending or unknown", "Asked", "Refused", "Promised"]) {
       expect(within(usd).getAllByText(label)).toHaveLength(1);
     }
     expect(usd.textContent).toContain(formatMinor(2_500, "USD"));
@@ -100,16 +101,106 @@ describe("StatCards money (DA-A-34, QA-2)", () => {
     expect(usd.textContent).not.toContain(formatMinor(5_500, "USD"));
   });
 
-  it("keeps the over-credit line and the paid-total cap note visible", () => {
+  it("DA-B-8: extra credited money is a neutral line; only a possible double credit is red; the deprecated sum is never shown", () => {
     renderCards(
       summary({
         currencies: [
-          { currency: "USD", recoveredMinor: 6_000, overCreditMinor: 2_000, extraCreditedMinor: 0, possibleDoubleCreditMinor: 2_000, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: true, paidTotalPartial: true },
+          { currency: "USD", recoveredMinor: 2_500, overCreditMinor: 700, extraCreditedMinor: 200, possibleDoubleCreditMinor: 500, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: true, paidTotalPartial: true },
         ],
       }),
     );
-    expect(screen.getByText(/Over-credit \/ possible double credit/).textContent).toContain(formatMinor(2_000, "USD"));
+    const extra = screen.getByText(/More than you asked — often tax or shipping/);
+    expect(extra.textContent).toContain(formatMinor(200, "USD"));
+    expect(extra.className).not.toMatch(/red/);
+    const double = screen.getByText(/Possible double credit/);
+    expect(double.textContent).toContain(formatMinor(500, "USD"));
+    expect(double.className).toContain("text-red-700");
+    expect(document.body.textContent).not.toContain(formatMinor(700, "USD"));
+    expect(document.body.textContent).not.toMatch(/Over-credit/);
     expect(screen.getByText(/cap based on item prices only/)).toBeDefined();
+  });
+
+  it("S1: a refund that included tax (asked 25, received 27) shows no double-credit alarm", () => {
+    renderCards(
+      summary({
+        currencies: [
+          { currency: "USD", recoveredMinor: 2_500, overCreditMinor: 200, extraCreditedMinor: 200, possibleDoubleCreditMinor: 0, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: false, paidTotalPartial: false },
+        ],
+      }),
+    );
+    expect(screen.queryByText(/Possible double credit/)).toBeNull();
+    expect(document.querySelector(".text-red-700")).toBeNull();
+  });
+
+  it("DA-B-13: a refused claim shows as refused, its amount exactly once, never under 'no answer yet'", () => {
+    renderCards(
+      summary({
+        currencies: [
+          {
+            currency: "USD", recoveredMinor: 0, overCreditMinor: 0, extraCreditedMinor: 0, possibleDoubleCreditMinor: 0,
+            tiles: { ...emptyTiles, refused: tile(4_321), asked: tile(1_000) },
+            askedUserReportedMinor: 0, cappedAtPaidTotal: false, paidTotalPartial: false,
+          },
+        ],
+      }),
+    );
+    const usd = screen.getByRole("group", { name: "USD recovery" });
+    const refused = within(usd).getByText("Refused").closest("div")!;
+    expect(refused.textContent).toContain(formatMinor(4_321, "USD"));
+    expect(refused.textContent).toContain("The merchant said no — no money yet");
+    expect(usd.textContent!.split(formatMinor(4_321, "USD")).length - 1).toBe(1);
+    expect(document.body.textContent).not.toContain("no answer yet");
+  });
+
+  it("the tiles add up to the displayed outstanding total, per currency, never across currencies", () => {
+    const tiles = { potential: tile(100), ready: tile(200), sendingOrUnknown: tile(300), asked: tile(400), refused: tile(500), promised: tile(600) };
+    renderCards(
+      summary({
+        currencies: [
+          { currency: "USD", recoveredMinor: 0, overCreditMinor: 0, extraCreditedMinor: 0, possibleDoubleCreditMinor: 0, tiles, askedUserReportedMinor: 0, cappedAtPaidTotal: false, paidTotalPartial: false },
+          { currency: "EUR", recoveredMinor: 0, overCreditMinor: 0, extraCreditedMinor: 0, possibleDoubleCreditMinor: 0, tiles: { ...emptyTiles, asked: tile(7_000) }, askedUserReportedMinor: 0, cappedAtPaidTotal: false, paidTotalPartial: false },
+        ],
+      }),
+    );
+    const usd = screen.getByRole("group", { name: "USD recovery" });
+    const eur = screen.getByRole("group", { name: "EUR recovery" });
+    expect(usd.textContent).toContain(`${formatMinor(2_100, "USD")} still outstanding`);
+    expect(eur.textContent).toContain(`${formatMinor(7_000, "EUR")} still outstanding`);
+    // 2,100 + 7,000 in either currency would be a cross-currency sum.
+    expect(document.body.textContent).not.toContain(formatMinor(9_100, "USD"));
+    expect(document.body.textContent).not.toContain(formatMinor(9_100, "EUR"));
+  });
+
+  it("every tile the summary can return has a place on the dashboard (no amount can silently vanish)", () => {
+    const keys = Object.keys(emptyTiles).sort();
+    renderCards(summary({ currencies: [{ currency: "USD", recoveredMinor: 0, overCreditMinor: 0, extraCreditedMinor: 0, possibleDoubleCreditMinor: 0, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: false, paidTotalPartial: false }] }));
+    const usd = screen.getByRole("group", { name: "USD recovery" });
+    expect(within(usd).getAllByRole("term")).toHaveLength(keys.length);
+  });
+
+  it("passes axe (structure, names, roles; contrast is checked in the browser)", async () => {
+    const { container } = render(
+      <main>
+        <h1>Board</h1>
+        <StatCards
+          watches={[]}
+          activity={[]}
+          activityTruncated={false}
+          activityWindowNote=""
+          summary={summary({
+            nonCash: [{ kind: "voucher", count: 1 }],
+            counts: { notYetDue: 1, needsAnswers: 1, deadlinesThisWeek: 0 },
+            currencies: [
+              { currency: "USD", recoveredMinor: 2_500, overCreditMinor: 700, extraCreditedMinor: 200, possibleDoubleCreditMinor: 500, tiles: { ...emptyTiles, refused: tile(1_000) }, askedUserReportedMinor: 0, cappedAtPaidTotal: true, paidTotalPartial: false },
+            ],
+          })}
+          onlyExamples={false}
+          now={NOW}
+        />
+      </main>,
+    );
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations.map((v) => `${v.id}: ${v.help}`)).toEqual([]);
   });
 
   it("uses each currency's own exponent (JPY has no minor unit)", () => {
