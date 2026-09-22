@@ -38,6 +38,7 @@ import { imageUrlChange } from "./lib/imageUrl";
 import { cleanLine, meaningfulName } from "./lib/text";
 import { charge, consumeGlobalBudget, takeGlobalBudget } from "./lib/budget";
 import { schedulePolicyFetch } from "./policies";
+import { ensurePurchaseTransaction } from "./transactions";
 import { errorNote, observePrice, rejectionReason, truncate, type PageObservation } from "./priceWatch";
 import {
   GLOBAL_DAILY_BUDGETS,
@@ -637,6 +638,8 @@ export const markBought = mutation({
       });
     }
 
+    // DA-A-35: this is a direct purchase insert, so it must create the transaction itself.
+    await ensurePurchaseTransaction(ctx, purchaseId);
     await ctx.db.patch(watch._id, { status: "bought", purchaseId });
     // B4: same shared daily budget as `purchases.create`; over it the purchase is still made, without the research.
     await schedulePolicyFetch(ctx, userId, watch.merchantDomain);
