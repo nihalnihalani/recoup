@@ -18,6 +18,8 @@ export type BoardData = FunctionReturnType<typeof api.purchases.board>;
 export type PriceHistory = NonNullable<FunctionReturnType<typeof api.insights.priceHistory>>;
 export type HistoryStore = PriceHistory["stores"][number];
 export type TrackedRow = FunctionReturnType<typeof api.insights.trackedTable>[number];
+/** `recovery.summary`: the one source of every recovery money figure on the dashboard (SEC-MF-1, DA-A-34). */
+export type RecoverySummary = FunctionReturnType<typeof api.recovery.summary>;
 
 export type SeriesPoint = { at: number; value: number };
 
@@ -77,38 +79,37 @@ function knownAt(points: SeriesPoint[], at: number): number | undefined {
   return known;
 }
 
-/**
- * The sum of every watched price at each observation time. A last known price is
- * carried forward and a first price carried back, so the line moves only when a
- * price moved, never because a product joined the list.
- */
-export function watchedTotalSeries(watches: Watch[]): SeriesPoint[] {
-  const priced = watches
-    .map((watch) => watch.spark.map((p) => ({ at: p.observedAt, value: p.observedCents })))
-    .filter((series) => series.length > 0);
-  const times = [...new Set(priced.flatMap((series) => series.map((p) => p.at)))].sort((a, b) => a - b);
-  return times.map((at) => ({
-    at,
-    value: priced.reduce((sum, series) => sum + (knownAt(series, at) ?? series[0].value), 0),
-  }));
-}
+/** One currency's line over time. A series never mixes currencies (QA-2, mission §6). */
+export type CurrencySeries = { currency: string; members: number; series: SeriesPoint[] };
 
 /**
- * How much sat below the paid price over time, across items whose drop could still
- * be claimed today. An item counts from its first reading on, never before it.
+ * The combined price of the watched products at each observation time, ONE SERIES PER CURRENCY (QA-2): a
+ * dollar price and a euro price are never added into one number. Within a currency a last known price is carried
+ * forward and a first price carried back, so the line moves only when a price moved, never because a product
+ * joined the list. A watch whose currency is not known yet has no series to join and is left out. Ordered by how
+ * many watches share the currency, then by how many readings it has, then by code, so the first entry is the one
+ * most of the list is priced in (the one a single small chart shows).
  */
-export function claimableGapSeries(items: Item[], now: number): SeriesPoint[] {
-  const live = items.filter(
-    (item) => item.points.length > 0 && item.claim?.status !== "confirmed" && (item.windowEndsAt === undefined || item.windowEndsAt > now),
-  );
-  const times = [...new Set(live.flatMap((item) => item.points.map((p) => p.at)))].sort((a, b) => a - b);
-  return times.map((at) => ({
-    at,
-    value: live.reduce((sum, item) => {
-      const known = knownAt(item.points.map((p) => ({ at: p.at, value: p.cents })), at);
-      return known === undefined ? sum : sum + Math.max(item.paidCents - known, 0) * item.qty;
-    }, 0),
-  }));
+export function watchedTotalsByCurrency(watches: Watch[]): CurrencySeries[] {
+  const groups = new Map<string, SeriesPoint[][]>();
+  for (const watch of watches) {
+    if (!watch.currency || watch.spark.length === 0) continue;
+    const series = watch.spark.map((p) => ({ at: p.observedAt, value: p.observedCents }));
+    groups.set(watch.currency, [...(groups.get(watch.currency) ?? []), series]);
+  }
+  return [...groups.entries()]
+    .map(([currency, priced]) => {
+      const times = [...new Set(priced.flatMap((series) => series.map((p) => p.at)))].sort((a, b) => a - b);
+      return {
+        currency,
+        members: priced.length,
+        series: times.map((at) => ({
+          at,
+          value: priced.reduce((sum, series) => sum + (knownAt(series, at) ?? series[0].value), 0),
+        })),
+      };
+    })
+    .sort((a, b) => b.members - a.members || b.series.length - a.series.length || a.currency.localeCompare(b.currency));
 }
 
 /** Local midnight at the start of the day `at` falls in. */
@@ -151,13 +152,6 @@ export function agoLong(at: number, now: number): string {
   const short = ago(at, now);
   if (short === "now") return "just now";
   return /^\d+[mhd]$/.test(short) ? `${short} ago` : `on ${short}`;
-}
-
-/** The currency most rows use; mixed-currency sums are labelled with it. */
-export function mainCurrency(currencies: string[]): string {
-  const counts = new Map<string, number>();
-  for (const c of currencies) counts.set(c, (counts.get(c) ?? 0) + 1);
-  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "USD";
 }
 
 /** A store row's `bests` as a sorted list, one entry per currency (D72: never summed or compared across currencies). */

@@ -57,6 +57,8 @@ export default function Board() {
   const sources = useQuery(api.insights.sources);
   const board = useQuery(api.purchases.board);
   const tracked = useQuery(api.insights.trackedTable, { now: coarseNow });
+  // Every recovery money figure comes from here, never from `tracking.overview` (DA-A-34).
+  const summary = useQuery(api.recovery.summary, { now: coarseNow });
   const loadExamples = useMutation(api.examples.load);
   const now = useNow(60_000);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -75,9 +77,8 @@ export default function Board() {
   }
 
   const items = overview === undefined ? undefined : [...overview.items].sort(byUrgency(now));
-  // Figures describe real purchases; the example only fills in while there is nothing else.
+  // Examples never count toward recovery totals (DA-A-35); the cards say so while the example is all there is.
   const realItems = items?.filter((item) => !item.isExample) ?? [];
-  const scoped = realItems.length > 0 ? realItems : (items ?? []);
   const onlyExamples = realItems.length === 0 && (items?.length ?? 0) > 0;
 
   const liveWatches = watches?.filter((watch) => watch.status === "active" || watch.status === "paused") ?? [];
@@ -131,7 +132,7 @@ export default function Board() {
         </section>
       ) : (
         <>
-          {watches === undefined || activity === undefined || overview === undefined ? (
+          {watches === undefined || activity === undefined || overview === undefined || summary === undefined ? (
             <StatCardsSkeleton />
           ) : (
             <StatCards
@@ -139,8 +140,7 @@ export default function Board() {
               activity={activity.events}
               activityTruncated={activity.truncated}
               activityWindowNote={activity.windowNote}
-              overview={overview}
-              scoped={scoped}
+              summary={summary}
               onlyExamples={onlyExamples}
               now={now}
             />

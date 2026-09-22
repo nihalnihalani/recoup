@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "convex/react";
-import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useId, useState } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -11,26 +11,32 @@ import { UntrackedTable } from "../components/purchase/UntrackedTable";
 import { CardHeading, DotChip, ReviewIcon } from "../components/purchase/parts";
 import { Empty, Loading } from "../components/States";
 import { useCoarseNow } from "../lib/time";
+import { currencyExponent, hundredthsToInput, parseHundredths } from "../lib/money";
 import {
   cardClass,
   cardTitleClass,
-  centsToDollars,
   day,
-  dollarsToCents,
   errorText,
   fromDateInput,
   inputClass,
   labelClass,
   pageTitleClass,
   primaryButtonClass,
+  secondaryButtonClass,
   tableHeadClass,
   toDateInput,
 } from "../lib/ui";
 
 type PurchaseData = FunctionReturnType<typeof api.purchases.get>;
 // ---------------------------------------------------------------------------
-// Review form (D25: every extracted purchase starts needs_review)
+// Review form (D25: every extracted purchase starts needs_review). The same
+// form edits an active purchase (M15, D164/D167): the purchase record is the
+// source of truth for merchant, order, date, currency and item facts, so a
+// question about one of them is answered here, through `purchases.confirm`.
 // ---------------------------------------------------------------------------
+
+/** Codes offered in the currency field's suggestion list; any ISO 4217 code the runtime knows is accepted. */
+const COMMON_CURRENCIES = ["USD", "CAD", "EUR", "GBP", "AUD", "JPY", "MXN"] as const;
 
 type ItemDraft = {
   itemId: Id<"items">;
@@ -40,8 +46,13 @@ type ItemDraft = {
   productUrl: string;
 };
 
-function ReviewForm({ data }: { data: PurchaseData }) {
+function ReviewForm({ data, onDone }: { data: PurchaseData; onDone?: () => void }) {
   const confirm = useMutation(api.purchases.confirm);
+  const editing = data.purchase.status !== "needs_review";
+  const currencyHintId = useId();
+  // Any claim on the purchase was opened (and possibly paid) in its currency; the server refuses a change then.
+  const currencyLocked = data.items.some((item) => item.claims.length > 0);
+  const [currency, setCurrency] = useState(data.purchase.currency);
   const [merchant, setMerchant] = useState(data.purchase.merchant);
   const [merchantDomain, setMerchantDomain] = useState(data.purchase.merchantDomain);
   const [orderRef, setOrderRef] = useState(data.purchase.orderRef ?? "");
@@ -52,7 +63,7 @@ function ReviewForm({ data }: { data: PurchaseData }) {
     data.items.map((item) => ({
       itemId: item._id,
       name: item.name,
-      unitDollars: centsToDollars(item.unitCents),
+      unitDollars: hundredthsToInput(item.unitCents),
       qty: String(item.qty),
       productUrl: item.productUrl ?? "",
     })),
@@ -73,6 +84,11 @@ function ReviewForm({ data }: { data: PurchaseData }) {
       setError("Enter the purchase date.");
       return;
     }
+    const code = currency.trim().toUpperCase();
+    if (currencyExponent(code) === null) {
+      setError("Enter the 3-letter code of the currency you paid in, like USD.");
+      return;
+    }
     const parsed: {
       itemId: Id<"items">;
       name: string;
@@ -81,10 +97,10 @@ function ReviewForm({ data }: { data: PurchaseData }) {
       productUrl?: string;
     }[] = [];
     for (const item of items) {
-      const unitCents = dollarsToCents(item.unitDollars);
+      const unitCents = parseHundredths(item.unitDollars);
       const qty = Number(item.qty);
       if (unitCents === null) {
-        setError(`Enter a valid unit price for "${item.name || "item"}".`);
+        setError(`Enter the unit price for "${item.name || "item"}" as a number like 19.99.`);
         return;
       }
       if (!Number.isSafeInteger(qty) || qty < 1) {
@@ -108,8 +124,11 @@ function ReviewForm({ data }: { data: PurchaseData }) {
         merchantDomain: merchantDomain.trim(),
         orderRef: orderRef.trim() === "" ? undefined : orderRef.trim(),
         purchasedAt: at,
+        // D164: always explicit. Confirming the form is the user's confirmation of the currency (DA-A-33).
+        currency: code,
         items: parsed,
       });
+      onDone?.();
     } catch (caught) {
       setError(errorText(caught));
     } finally {
@@ -120,12 +139,16 @@ function ReviewForm({ data }: { data: PurchaseData }) {
   const cellInput = `${inputClass} min-w-0`;
 
   return (
-    <section aria-label="Review this purchase" className={`${cardClass} col-span-full overflow-hidden`}>
+    <section aria-label={editing ? "Edit this purchase" : "Review this purchase"} className={`${cardClass} col-span-full overflow-hidden`}>
       <div className="px-5 pt-5">
         <CardHeading
           icon={<ReviewIcon />}
-          title="Check the details"
-          hint="Read from the order email. Fix anything wrong, then confirm."
+          title={editing ? "Edit the details" : "Check the details"}
+          hint={
+            editing
+              ? "Recoup's checks use these details. Correct anything that is wrong, then save."
+              : "Read from the order email. Fix anything wrong, then confirm."
+          }
         />
       </div>
 
@@ -174,6 +197,35 @@ function ReviewForm({ data }: { data: PurchaseData }) {
             value={purchasedAt}
             onChange={(event) => setPurchasedAt(event.target.value)}
           />
+        </div>
+        <div>
+          <label className={labelClass} htmlFor="currency">
+            Currency
+          </label>
+          <input
+            id="currency"
+            className={`${inputClass} uppercase disabled:bg-gray-50 disabled:text-gray-500`}
+            value={currency}
+            maxLength={3}
+            autoComplete="off"
+            spellCheck={false}
+            list="currency-codes"
+            disabled={currencyLocked}
+            aria-describedby={currencyHintId}
+            onChange={(event) => setCurrency(event.target.value.toUpperCase())}
+          />
+          <datalist id="currency-codes">
+            {COMMON_CURRENCIES.map((code) => (
+              <option key={code} value={code} />
+            ))}
+          </datalist>
+          <p id={currencyHintId} className="mt-1.5 text-xs text-gray-600">
+            {currencyLocked
+              ? "A claim already uses this currency, so it cannot change."
+              : editing
+                ? "The currency you paid in. Recoup never converts currencies."
+                : `Read from the order email as ${data.purchase.currency}. Confirming the purchase confirms this currency, so change it if you paid in another.`}
+          </p>
         </div>
       </div>
 
@@ -252,8 +304,13 @@ function ReviewForm({ data }: { data: PurchaseData }) {
             {error}
           </p>
         )}
+        {editing && onDone && (
+          <button type="button" onClick={onDone} disabled={busy} className={secondaryButtonClass}>
+            Cancel
+          </button>
+        )}
         <button type="button" onClick={() => void handleSubmit()} disabled={busy} className={primaryButtonClass}>
-          {busy ? "Confirming…" : "Confirm purchase"}
+          {editing ? (busy ? "Saving…" : "Save changes") : busy ? "Confirming…" : "Confirm purchase"}
         </button>
       </footer>
     </section>
@@ -304,6 +361,10 @@ export default function Purchase() {
   // frozen at the query's first subscribe.
   const now = useCoarseNow();
   const data = useQuery(api.purchases.get, purchaseId ? { purchaseId, now } : "skip");
+  // `?edit=details` opens the details form on an active purchase: the edit path a question about a
+  // purchase-record fact links to (`answerVia: "purchases.confirm"`, D167). A plain URL, so it survives a refresh.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const editRequested = searchParams.get("edit") === "details";
 
   if (!purchaseId) return <Empty title="No purchase selected" />;
   if (data === undefined) return <Loading rows={4} />;
@@ -311,6 +372,16 @@ export default function Purchase() {
   const { purchase, items, policies } = data;
   const currency = purchase.currency;
   const needsReview = purchase.status === "needs_review";
+  const editing = !needsReview && editRequested;
+  const stopEditing = () =>
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete("edit");
+        return next;
+      },
+      { replace: true },
+    );
 
   // `get` returns the latest snapshot per kind; this page is price-only.
   const rule = policies.find((candidate) => candidate.kind === "price_adjustment");
@@ -358,6 +429,11 @@ export default function Purchase() {
             <div className="w-full min-w-0 sm:w-56">
               <WindowMeter purchasedAt={purchase.purchasedAt} endsAt={windowEndsAt} />
             </div>
+            {!editing && (
+              <Link to="?edit=details" className={secondaryButtonClass}>
+                Edit details
+              </Link>
+            )}
             {tracked.length > 1 && <CheckAllButton itemIds={tracked.map((item) => item._id)} />}
           </div>
         )}
@@ -366,6 +442,8 @@ export default function Purchase() {
       <div className="grid grid-cols-12 gap-6">
         {needsReview ? (
           <ReviewForm data={data} />
+        ) : editing ? (
+          <ReviewForm data={data} onDone={stopEditing} />
         ) : (
           <>
             {items.length === 0 && <Empty title="No items on this purchase" className="col-span-full" />}
