@@ -1,4 +1,4 @@
-import { ConvexError, v } from "convex/values";
+import { ConvexError, v, type Infer } from "convex/values";
 import { vOutboundId, vOutboundStatus, type OutboundId } from "@agentmail/convex";
 import {
   action,
@@ -11,7 +11,7 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import schema from "./schema";
+import schema, { approvalBinding } from "./schema";
 import { ownedClaim, requireUserId } from "./lib/access";
 import { isClosedForAsk } from "./lib/claimState";
 import { balanceValidator, claimBalance } from "./lib/balance";
@@ -27,6 +27,12 @@ import { sanitizeError } from "./lib/errors";
 import { redact } from "./lib/log";
 import { clearPendingMailEvent, getPendingMailEvent } from "./mailEvents";
 import { MAIL_RECONCILE_STALL_MS, MAX_SENDS_PER_CLAIM } from "./limits";
+import { claimCurrency } from "./lib/money";
+import { boundFactsHash, canonicalHash } from "./lib/canonical";
+import { rateLimiter } from "./lib/rateLimits";
+import { isApprovable } from "./lib/rules/types";
+import { r01LateAskAcknowledgeable } from "./lib/rules/r01_price_adjustment_v1";
+import { evaluatePurchase, evaluateTransaction } from "./opportunities";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -386,6 +392,11 @@ export const insert = internalMutation({
     if (prev.length >= MAX_DRAFTS_PER_CLAIM) {
       throw new ConvexError("This claim has too many drafts; edit an existing one instead");
     }
+    // §6 / C2: a draft of a claim linked to an opportunity is bound at insert to the claim's current evaluation — its
+    // bound facts (R01 v1: never the live price), amount, rule and engine versions. `prepareSend` compares against it.
+    const purchase = await ctx.db.get(claim.purchaseId);
+    const link = await liveLink(ctx, claim);
+    const binding = purchase && link?.evaluation ? await bindingFor(claim, purchase, link.opportunity._id, link.evaluation) : undefined;
     const draftId = await ctx.db.insert("drafts", {
       claimId: args.claimId,
       userId: args.userId,
@@ -394,6 +405,7 @@ export const insert = internalMutation({
       to: args.to.trim(),
       subject: args.subject.slice(0, 200),
       body: args.body.slice(0, MAX_BODY_CHARS),
+      ...(binding !== undefined ? { binding } : {}),
     });
     if (claim.status === "detected") await ctx.db.patch(claim._id, { status: "drafted" });
     return draftId;
@@ -455,6 +467,393 @@ async function ownedDraft(
   return draft;
 }
 
+// ---------------------------------------------------------------------------
+// Approval binding and prepareSend (contract rev 5 §6; DA-A-14, DA-A-21, C1, C2, N2, N3, N6; SEC-AI-4)
+// ---------------------------------------------------------------------------
+
+export type ApprovalBinding = Infer<typeof approvalBinding>;
+
+/**
+ * The approval binding of a claim linked to an opportunity (§2.4 `approvalBinding`, §6). `contextHash` is the
+ * canonical hash of the VALUES the user approves — claim version, amount, rule id/version, engine version, the
+ * bound-fact hash and attachments — never row ids (DA-A-15), so re-evaluating to the same result keeps it, and any
+ * material change (which bumps `claims.version`) breaks it. C2: the bound facts are the pack's list (for R01 v1: unit
+ * price, quantity, item identity, purchase date, claim amount, the opening observation), never the live price.
+ * `evaluationId` names the evaluation the approval was made on; that row stores its bound values (N6).
+ */
+export async function bindingFor(
+  claim: Doc<"claims">,
+  purchase: Doc<"purchases">,
+  opportunityId: Id<"opportunities">,
+  evaluation: Doc<"evaluations">,
+): Promise<ApprovalBinding> {
+  const amount = { amountMinor: claim.expectedCents, currency: claimCurrency(claim, purchase) ?? purchase.currency };
+  const bfh = await boundFactsHash(evaluation.boundFacts ?? []);
+  const contextHash = await canonicalHash({
+    claimVersion: claim.version,
+    amount,
+    ruleId: evaluation.ruleId,
+    ruleVersion: evaluation.ruleVersion,
+    engineVersion: evaluation.engineVersion ?? null,
+    boundFactsHash: bfh,
+    attachments: [],
+  });
+  return {
+    contextHash,
+    claimVersion: claim.version,
+    amount,
+    opportunityId,
+    evaluationId: evaluation._id,
+    ruleId: evaluation.ruleId,
+    ruleVersion: evaluation.ruleVersion,
+    ...(evaluation.engineVersion !== undefined ? { engineVersion: evaluation.engineVersion } : {}),
+    boundFactsHash: bfh,
+    attachments: [],
+  };
+}
+
+/** The claim's live opportunity and its current evaluation, or null (unlinked, or its pack was withdrawn — N3). */
+async function liveLink(
+  ctx: QueryCtx | MutationCtx,
+  claim: Doc<"claims">,
+): Promise<{ opportunity: Doc<"opportunities">; evaluation: Doc<"evaluations"> | null } | null> {
+  if (!claim.opportunityId) return null;
+  const opportunity = await ctx.db.get(claim.opportunityId);
+  if (!opportunity || opportunity.userId !== claim.userId || opportunity.status === "superseded") return null;
+  const evaluation = opportunity.currentEvaluationId ? await ctx.db.get(opportunity.currentEvaluationId) : null;
+  return { opportunity, evaluation };
+}
+
+// --- SEC-AI-4: what the generated body may state -----------------------------------------------------------------
+
+/** Values the server gave the writer (or bound): the only emails, links and amounts a claim email may state. */
+type Allowances = { emails: Set<string>; urls: Set<string>; hosts: Set<string>; amountsMinor: Set<number> };
+
+const MAX_FINDINGS = 10;
+const EMAIL_IN_TEXT = /[^\s@<>()[\]"',;:]+@[^\s@<>()[\]"',;:]+\.[A-Za-z]{2,}/g;
+const URL_IN_TEXT = /\b(?:https?:\/\/|www\.)[^\s<>()"']+/gi;
+const PHONE_IN_TEXT = /(?:\+\d{1,3}[\s.-]?)?\(?\b\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b/g;
+const AMOUNT_IN_TEXT =
+  /(?:[$€£]\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*\.\d{2}\b(?:\s?(?:USD|EUR|GBP|CAD|AUD|dollars?))?|\b\d[\d,]*\s?(?:USD|EUR|GBP|CAD|AUD|dollars?)\b)/gi;
+
+function normalizeUrl(raw: string): string {
+  return raw.replace(/[.,;:!?)\]]+$/, "").replace(/^www\./i, "https://www.").replace(/\/+$/, "").toLowerCase();
+}
+
+function hostOf(raw: string): string | null {
+  try {
+    return new URL(normalizeUrl(raw)).hostname.replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+/** Minor units of an amount token ("$1,234.50", "79.99 USD", "40 dollars"), by string arithmetic; null if unreadable. */
+function amountTokenMinor(token: string): number | null {
+  const m = /(\d[\d,]*)(?:\.(\d{1,2}))?/.exec(token);
+  if (!m) return null;
+  const whole = Number(m[1].replace(/,/g, ""));
+  const frac = m[2] === undefined ? 0 : Number(m[2].padEnd(2, "0"));
+  const minor = whole * 100 + frac;
+  return Number.isSafeInteger(minor) ? minor : null;
+}
+
+/**
+ * SEC-AI-4 (M13): the post-generation check on a claim email. Any email address, link, phone number or money amount
+ * in the body that the server did not supply — the recipient, the store's confirmed contact, the user's own
+ * addresses, the item and policy links (or the store's own site), and the claim's own amounts — is listed. A
+ * non-empty list blocks approval until the user edits the text or acknowledges it (`acknowledgeUnverifiedContent`).
+ * Pure; the body is already capped at 1,200 characters, so the patterns never see unbounded input.
+ */
+export function unverifiedContent(body: string, allowed: Allowances): string[] {
+  const findings: string[] = [];
+  const add = (f: string) => {
+    if (findings.length < MAX_FINDINGS && !findings.includes(f)) findings.push(f);
+  };
+  const withoutUrls = body.replace(URL_IN_TEXT, " ");
+  for (const m of body.matchAll(URL_IN_TEXT)) {
+    const url = normalizeUrl(m[0]);
+    const host = hostOf(m[0]);
+    const known = allowed.urls.has(url) || (host !== null && [...allowed.hosts].some((h) => host === h || host.endsWith(`.${h}`)));
+    if (!known) add(`link ${m[0]}`);
+  }
+  for (const m of withoutUrls.matchAll(EMAIL_IN_TEXT)) {
+    if (!allowed.emails.has(m[0].toLowerCase())) add(`email ${m[0]}`);
+  }
+  for (const m of withoutUrls.matchAll(PHONE_IN_TEXT)) add(`phone ${m[0].trim()}`);
+  for (const m of withoutUrls.matchAll(AMOUNT_IN_TEXT)) {
+    const minor = amountTokenMinor(m[0]);
+    if (minor === null || !allowed.amountsMinor.has(minor)) add(`amount ${m[0].trim()}`);
+  }
+  return findings;
+}
+
+/** Everything `generate` told the writer, plus the claim's bound amounts: what `unverifiedContent` accepts. */
+async function draftAllowances(
+  ctx: QueryCtx | MutationCtx,
+  claim: Doc<"claims">,
+  purchase: Doc<"purchases">,
+  to: string,
+  evaluation: Doc<"evaluations"> | null,
+): Promise<Allowances> {
+  const emails = new Set<string>([to.toLowerCase()]);
+  const urls = new Set<string>();
+  const hosts = new Set<string>([purchase.merchantDomain.toLowerCase().replace(/^www\./, "")]);
+  const amountsMinor = new Set<number>([claim.expectedCents]);
+  const item = await ctx.db.get(claim.itemId);
+  if (item) {
+    amountsMinor.add(item.unitCents);
+    amountsMinor.add(item.unitCents * item.qty);
+    if (item.productUrl) urls.add(normalizeUrl(item.productUrl));
+  }
+  const policy = claim.policyId ? await ctx.db.get(claim.policyId) : null;
+  if (policy) {
+    urls.add(normalizeUrl(policy.sourceUrl));
+    if (policy.contactEmail) emails.add(policy.contactEmail.trim().toLowerCase());
+  }
+  if (claim.openedFromPriceCheckId) {
+    const pc = await ctx.db.get(claim.openedFromPriceCheckId);
+    if (pc?.observedCents !== undefined) amountsMinor.add(pc.observedCents);
+  }
+  const balance = await claimBalance(ctx, claim);
+  amountsMinor.add(Math.max(balance.unresolved, 0));
+  amountsMinor.add(balance.confirmed);
+  for (const f of evaluation?.boundFacts ?? []) {
+    if (f.value?.kind === "money") amountsMinor.add(f.value.amountMinor);
+  }
+  const profile = await ctx.db.query("profiles").withIndex("by_user", (q) => q.eq("userId", claim.userId)).unique();
+  if (profile?.inboxEmail) emails.add(profile.inboxEmail.toLowerCase());
+  const user = await ctx.db.get(claim.userId);
+  if (user?.email) emails.add(user.email.toLowerCase());
+  return { emails, urls, hosts, amountsMinor };
+}
+
+// --- The approval state both prepareSend and approveAndSend compute -------------------------------------------------
+
+/** The text of an approval, normalized exactly as the send will normalize it. */
+type ApprovalText = { to: string; subject: string; body: string };
+
+function approvalText(claim: Doc<"claims">, input: { to: string; subject: string; body: string }): ApprovalText {
+  return {
+    to: parseRecipient(input.to),
+    subject: subjectWithToken(stripControl(input.subject), claim.token),
+    body: input.body.trim().slice(0, MAX_BODY_CHARS),
+  };
+}
+
+export type PrepareCode =
+  | "outcome_not_approvable"
+  | "binding_changed"
+  | "window_may_have_passed"
+  | "rule_withdrawn"
+  | "rate_limited"
+  | "example_claim"
+  | "unverified_content";
+
+type ApprovalState =
+  | { ok: false; code: PrepareCode; message: string; findings?: string[] }
+  | {
+      ok: true;
+      /** The binding to approve under (linked claims), or null (the legacy binding: text + versions). */
+      binding: ApprovalBinding | null;
+      needsWindowAck: boolean;
+      findings: string[];
+    };
+
+const WINDOW_MESSAGE =
+  "The store's price-adjustment window may have passed. You can still send the request; confirm that you understand it may be refused.";
+
+/**
+ * Read-only: may this draft be approved as it stands, and under what binding? Shared by `prepareSend` (after it has
+ * committed a fresh `approval_check` evaluation) and `approveAndSend` (which re-derives it without evaluating).
+ *
+ * - The claim moved on since the draft was written (a material change bumped its version) → `binding_changed`.
+ * - Linked claim: the current evaluation must be in `APPROVABLE_OUTCOMES`; when the ONLY failing condition is the
+ *   acknowledgeable R01 legacy window (C1), the answer is `window_may_have_passed` unless acknowledged — never a hard
+ *   refusal. A draft already bound to a different context → `binding_changed`.
+ * - Unlinked (legacy) claim: past `windowEndsAt` → the same acknowledgeable `window_may_have_passed` (DA-A-21:
+ *   identical for linked and unlinked claims).
+ * - SEC-AI-4: unknown emails/links/phones/amounts in the body → `unverified_content` unless acknowledged.
+ */
+async function approvalState(
+  ctx: QueryCtx | MutationCtx,
+  draft: Doc<"drafts">,
+  claim: Doc<"claims">,
+  purchase: Doc<"purchases">,
+  text: ApprovalText,
+  acks: { windowRisk: boolean; unverifiedContent: boolean },
+  now: number,
+): Promise<ApprovalState> {
+  if (claim.version !== draft.claimVersion) {
+    return { ok: false, code: "binding_changed", message: "The claim changed since this draft was written. Generate a new draft and review it again." };
+  }
+  const link = await liveLink(ctx, claim);
+  let binding: ApprovalBinding | null = null;
+  let needsWindowAck = false;
+  if (link !== null) {
+    const evaluation = link.evaluation;
+    if (evaluation === null) return { ok: false, code: "outcome_not_approvable", message: "Recoup has not checked this claim yet." };
+    if (!isApprovable(evaluation.outcome)) {
+      if (!r01LateAskAcknowledgeable(evaluation)) {
+        return { ok: false, code: "outcome_not_approvable", message: `Recoup's check no longer supports this claim (${evaluation.outcome.replace(/_/g, " ")}).` };
+      }
+      needsWindowAck = true;
+    }
+    binding = await bindingFor(claim, purchase, link.opportunity._id, evaluation);
+    if (draft.binding !== undefined && draft.binding.contextHash !== binding.contextHash) {
+      return { ok: false, code: "binding_changed", message: "What this draft asks for changed since it was written. Generate a new draft and review it again." };
+    }
+  } else if (claim.windowEndsAt !== undefined && now > claim.windowEndsAt) {
+    needsWindowAck = true;
+  }
+  if (needsWindowAck && !acks.windowRisk) return { ok: false, code: "window_may_have_passed", message: WINDOW_MESSAGE };
+  const findings = unverifiedContent(text.body, await draftAllowances(ctx, claim, purchase, text.to, link?.evaluation ?? null));
+  if (findings.length > 0 && !acks.unverifiedContent) {
+    return {
+      ok: false,
+      code: "unverified_content",
+      message: "The message mentions details Recoup did not supply. Edit them out, or confirm that you checked them.",
+      findings,
+    };
+  }
+  return { ok: true, binding, needsWindowAck, findings };
+}
+
+/** The hash the user approves (§6 `preparedHash`); `approveAndSend` recomputes it read-only and compares. */
+async function preparedHashOf(
+  draft: Doc<"drafts">,
+  claim: Doc<"claims">,
+  text: ApprovalText,
+  state: Extract<ApprovalState, { ok: true }>,
+): Promise<string> {
+  return await canonicalHash({
+    v: 1,
+    // Linked: the binding (claim version, amount, rule, bound facts). Unlinked or withdrawn (N2): the legacy binding.
+    ...(state.binding !== null ? { contextHash: state.binding.contextHash } : { claimVersion: claim.version }),
+    draftVersion: draft.version,
+    to: text.to,
+    subject: text.subject,
+    body: text.body,
+    ...(state.needsWindowAck ? { acknowledgeWindowRisk: true } : {}),
+    ...(state.findings.length > 0 ? { acknowledgeUnverifiedContent: true } : {}),
+  });
+}
+
+/** Does this send need a `preparedHash`? Linked claims, and any claim past its legacy window (§6). */
+async function requiresPrepared(ctx: QueryCtx | MutationCtx, claim: Doc<"claims">, now: number): Promise<boolean> {
+  if ((await liveLink(ctx, claim)) !== null) return true;
+  return claim.windowEndsAt !== undefined && now > claim.windowEndsAt;
+}
+
+const prepareArgs = {
+  draftId: v.id("drafts"),
+  to: v.string(),
+  subject: v.string(),
+  body: v.string(),
+  acknowledgeWindowRisk: v.optional(v.boolean()),
+  acknowledgeUnverifiedContent: v.optional(v.boolean()),
+};
+
+const prepareCode = v.union(
+  v.literal("outcome_not_approvable"),
+  v.literal("binding_changed"),
+  v.literal("window_may_have_passed"),
+  v.literal("rule_withdrawn"),
+  v.literal("rate_limited"),
+  v.literal("example_claim"),
+  v.literal("unverified_content"),
+);
+const prepareResult = v.union(
+  v.object({ ok: v.literal(true), preparedHash: v.string(), findings: v.array(v.string()) }),
+  v.object({ ok: v.literal(false), code: prepareCode, message: v.string(), findings: v.optional(v.array(v.string())) }),
+);
+type PrepareResult = { ok: true; preparedHash: string; findings: string[] } | { ok: false; code: PrepareCode; message: string; findings?: string[] };
+
+/**
+ * The evaluation half of a prepare: re-evaluates the claim's R01 subject (`approval_check`) and COMMITS it — the
+ * result, any material version bump and its claimNote (§2.8), the mandatory link of a legacy claim (DA-A-3) and an
+ * N3 supersession. Returns `rule_withdrawn` for the call that finds the claim's pack withdrawn (the version bump and
+ * note are M12's); later calls see a superseded opportunity and take the legacy path.
+ */
+async function reevaluateForApproval(ctx: MutationCtx, claim: Doc<"claims">, now: number): Promise<PrepareResult | null> {
+  if (claim.type !== "price_adjustment" && !claim.opportunityId) return null;
+  const before = claim.opportunityId ? await ctx.db.get(claim.opportunityId) : null;
+  const subjects = [`item:${claim.itemId}`];
+  if (claim.transactionId) await evaluateTransaction(ctx, claim.transactionId, "approval_check", now, { subjects });
+  else await evaluatePurchase(ctx, claim.purchaseId, "approval_check", now, { subjects });
+  if (before && before.status !== "superseded") {
+    const after = await ctx.db.get(before._id);
+    if (after?.status === "superseded") {
+      return {
+        ok: false,
+        code: "rule_withdrawn",
+        message: "Recoup's automatic checks for this kind of claim were withdrawn. Review the claim and approve it again.",
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * The one prepare pass: N2's checks in order (the owner, tombstone and example checks are the caller's), the
+ * committed re-evaluation, then the approval state and its hash. Never throws on a policy refusal: it RETURNS it,
+ * so the committed re-evaluation, version bump and note survive (DA-A-14). Charges nothing.
+ */
+async function prepareCore(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  draft: Doc<"drafts">,
+  claim: Doc<"claims">,
+  purchase: Doc<"purchases">,
+  input: { to: string; subject: string; body: string; acknowledgeWindowRisk?: boolean; acknowledgeUnverifiedContent?: boolean },
+): Promise<PrepareResult> {
+  const text = approvalText(claim, input); // S-M03-5: capped before any regex; throws on a malformed address.
+  const limit = await rateLimiter.limit(ctx, "prepareSend", { key: userId });
+  if (!limit.ok) return { ok: false, code: "rate_limited", message: "Too many checks in a minute. Wait a moment and try again." };
+
+  const now = Date.now();
+  const withdrawn = await reevaluateForApproval(ctx, claim, now);
+  if (withdrawn !== null) return withdrawn;
+  const fresh = (await ctx.db.get(claim._id))!;
+  const state = await approvalState(
+    ctx,
+    draft,
+    fresh,
+    purchase,
+    text,
+    { windowRisk: input.acknowledgeWindowRisk === true, unverifiedContent: input.acknowledgeUnverifiedContent === true },
+    now,
+  );
+  if (!state.ok) return state;
+  // A draft written before its claim was linked is bound now, at the user's review (the text they see is the text
+  // being bound); a draft already bound keeps its original evaluation reference (N6).
+  if (state.binding !== null && draft.binding === undefined) await ctx.db.patch(draft._id, { binding: state.binding });
+  return { ok: true, preparedHash: await preparedHashOf(draft, fresh, text, state), findings: state.findings };
+}
+
+/**
+ * `drafts.prepareSend` (contract rev 5 §6, N2; DA-A-14, DA-A-21 / C1, N3, SEC-AI-4): the review step the UI runs
+ * before every send. Check order, all before any evaluation: sign-in and tombstone (`requireUserId`) → the draft
+ * and its claim are the caller's (identical not-found, nothing written) → an example claim is refused
+ * (`example_claim`) → the recipient parses as one capped address → the per-user `prepareSend` limiter
+ * (`rate_limited`). Then it re-evaluates and commits, and returns `{ ok: true, preparedHash }` or
+ * `{ ok: false, code, message }` — never a throw for a policy refusal, and never a charge.
+ */
+export const prepareSend = mutation({
+  args: prepareArgs,
+  returns: prepareResult,
+  handler: async (ctx, args): Promise<PrepareResult> => {
+    const userId = await requireUserId(ctx);
+    const draft = await ownedDraft(ctx, args.draftId, userId);
+    const claim = await ownedClaim(ctx, draft.claimId, userId);
+    const purchase = await ctx.db.get(claim.purchaseId);
+    if (!purchase) throw new ConvexError("Purchase not found");
+    if (claim.isExample || purchase.isExample) return { ok: false, code: "example_claim", message: EXAMPLE_ERROR };
+    if (draft.outboundId) throw new ConvexError("This draft was already sent");
+    return await prepareCore(ctx, userId, draft, claim, purchase, args);
+  },
+});
+
 /** What the user saw and approved: the text, the recipient tick, and the claim/draft versions it was shown at (D11). */
 const sendApprovalArgs = {
   draftId: v.id("drafts"),
@@ -464,6 +863,15 @@ const sendApprovalArgs = {
   claimVersion: v.number(),
   draftVersion: v.number(),
   recipientConfirmed: v.optional(v.boolean()),
+  /**
+   * §6: required for a claim linked to an opportunity and for any claim past its legacy window — the hash
+   * `prepareSend` returned. Legacy claims inside their window send exactly as before without it.
+   */
+  preparedHash: v.optional(v.string()),
+  /** C1 / DA-A-21: the user acknowledged that the store's window may have passed. */
+  acknowledgeWindowRisk: v.optional(v.boolean()),
+  /** SEC-AI-4: the user checked the details `prepareSend` flagged in the body. */
+  acknowledgeUnverifiedContent: v.optional(v.boolean()),
 };
 type SendApproval = {
   to: string;
@@ -472,9 +880,12 @@ type SendApproval = {
   claimVersion: number;
   draftVersion: number;
   recipientConfirmed?: boolean;
+  preparedHash?: string;
+  acknowledgeWindowRisk?: boolean;
+  acknowledgeUnverifiedContent?: boolean;
 };
 
-type CheckedSend = { to: string; subject: string; body: string; inboxId: string };
+type CheckedSend = { to: string; subject: string; body: string; inboxId: string; approvedHash?: string };
 
 /**
  * Every check a claim email runs before its side effect, in this order (D11, D13, D18, D58, B1, review H6,
@@ -549,9 +960,43 @@ async function checkSend(
   if (sentDrafts.length >= MAX_SENDS_PER_CLAIM) {
     throw new ConvexError(`A claim can be emailed at most ${MAX_SENDS_PER_CLAIM} times. Reply from your own mailbox to follow up.`);
   }
+  // §6: a linked claim, or one past its legacy window, sends only what `prepareSend` approved: the hash is
+  // recomputed read-only from the current state, so a change since the review ("Review the claim again") refuses
+  // before anything is charged or sent. A resend runs the full prepare pass itself in the same transaction.
+  let approvedHash: string | undefined;
+  if (mode === "first") approvedHash = await verifyPrepared(ctx, draft, claim, purchase, args);
   // Last, so every refusal above costs nothing; throws at 10 sends a day.
   await charge(ctx, userId, "claim_email");
-  return { to, subject, body, inboxId: profile.inboxId };
+  return { to, subject, body, inboxId: profile.inboxId, ...(approvedHash !== undefined ? { approvedHash } : {}) };
+}
+
+/** Read-only check of an approval against `prepareSend`'s hash; returns it, or undefined when none is required. */
+async function verifyPrepared(
+  ctx: MutationCtx,
+  draft: Doc<"drafts">,
+  claim: Doc<"claims">,
+  purchase: Doc<"purchases">,
+  args: SendApproval,
+): Promise<string | undefined> {
+  const now = Date.now();
+  if (!(await requiresPrepared(ctx, claim, now))) return undefined;
+  const text = approvalText(claim, args);
+  const state = await approvalState(
+    ctx,
+    draft,
+    claim,
+    purchase,
+    text,
+    { windowRisk: args.acknowledgeWindowRisk === true, unverifiedContent: args.acknowledgeUnverifiedContent === true },
+    now,
+  );
+  if (!state.ok && state.code === "window_may_have_passed") {
+    throw new ConvexError("Acknowledge that the store's window may have passed, then send.");
+  }
+  if (!state.ok || args.preparedHash === undefined || (await preparedHashOf(draft, claim, text, state)) !== args.preparedHash) {
+    throw new ConvexError("Review the claim again before sending.");
+  }
+  return args.preparedHash;
 }
 
 /** Enqueues one claim email (at most one provider POST: `mail.ts` `retryAttempts: 1`) and schedules its reconcile. */
@@ -576,6 +1021,7 @@ async function enqueueClaimEmail(
     recipientConfirmed,
     outboundId,
     sendError: undefined,
+    ...(send.approvedHash !== undefined ? { approvedHash: send.approvedHash } : {}),
   });
   // Status only: the version is the money version, and bumping it here would strand this very draft (and every
   // reminder) behind a stale check.
@@ -610,7 +1056,7 @@ export const approveAndSend = mutation({
 
 const resendResult = v.union(
   v.object({ ok: v.literal(true), outboundId: vOutboundId, draftId: v.id("drafts") }),
-  v.object({ ok: v.literal(false), code: v.literal("outcome_known"), message: v.string() }),
+  v.object({ ok: v.literal(false), code: v.union(v.literal("outcome_known"), prepareCode), message: v.string(), findings: v.optional(v.array(v.string())) }),
 );
 
 /**
@@ -622,8 +1068,10 @@ const resendResult = v.union(
  *   2. the earlier attempt's outcome is re-read immediately before the side effect. If it resolved in the meantime
  *      (delayed success, a bounce, a provider refusal) that outcome is recorded and `{ ok: false, code:
  *      "outcome_known" }` is RETURNED — never thrown, so the recorded outcome persists — and nothing is sent;
- *   3. every `approveAndSend` check runs again (`checkSend`), including the claim version: a material change since
- *      the first attempt refuses the resend (DA-A-31);
+ *   3. the full `prepareSend` pass runs (DA-A-31): the claim is re-evaluated (`approval_check`) and the result,
+ *      version bump and note are committed; any refusal — the claim changed, the outcome left the approvable set,
+ *      the window may have passed without an acknowledgment, the rule was withdrawn, unverified content — is
+ *      RETURNED, and nothing is sent. Then every `approveAndSend` check runs again (`checkSend`);
  *   4. the resend is a NEW draft version carrying the re-approved text, so the earlier attempt stays on record with
  *      its own outbound id, both count toward `MAX_SENDS_PER_CLAIM`, and `claim_email` is charged once more. A claim
  *      note names the earlier attempt.
@@ -635,6 +1083,9 @@ export const resendAfterUnknown = mutation({
     const userId = await requireUserId(ctx);
     const draft = await ownedDraft(ctx, args.draftId, userId);
     const claim = await ownedClaim(ctx, draft.claimId, userId);
+    const purchase = await ctx.db.get(claim.purchaseId);
+    if (!purchase) throw new ConvexError("Purchase not found");
+    if (claim.isExample || purchase.isExample) throw new ConvexError(EXAMPLE_ERROR);
     if (!draft.outboundId || args.acknowledgedOutboundId !== draft.outboundId) {
       throw new ConvexError("Review the earlier attempt before sending again");
     }
@@ -655,18 +1106,24 @@ export const resendAfterUnknown = mutation({
       };
     }
 
-    // 3. The full approval checks, against the draft the user is looking at.
-    const send = await checkSend(ctx, userId, draft, claim, args, "resend");
+    // 3. The full prepare pass (committed re-evaluation; refusals returned), then every approval check.
+    const prepared = await prepareCore(ctx, userId, draft, claim, purchase, args);
+    if (!prepared.ok) return prepared;
+    const current = (await ctx.db.get(claim._id))!;
+    const send = await checkSend(ctx, userId, draft, current, args, "resend");
+    const bound = await liveLink(ctx, current);
 
     // 4. A new draft version for the new attempt; the earlier one keeps its outbound id.
     const resendDraftId = await ctx.db.insert("drafts", {
       claimId: claim._id,
       userId,
       version: draft.version + 1,
-      claimVersion: claim.version,
+      claimVersion: current.version,
       to: send.to,
       subject: send.subject,
       body: send.body,
+      ...(bound?.evaluation ? { binding: await bindingFor(current, purchase, bound.opportunity._id, bound.evaluation) } : {}),
+      approvedHash: prepared.preparedHash,
     });
     await ctx.db.insert("claimNotes", {
       claimId: claim._id,
@@ -674,7 +1131,7 @@ export const resendAfterUnknown = mutation({
       kind: "status",
       text: `Sent again after an unknown delivery outcome. The earlier attempt (${new Date(draft.approvedAt ?? draft._creationTime).toISOString().slice(0, 16).replace("T", " ")} UTC) may also have reached the merchant.`,
     });
-    const outboundId = await enqueueClaimEmail(ctx, claim, resendDraftId, send, args.recipientConfirmed === true);
+    const outboundId = await enqueueClaimEmail(ctx, current, resendDraftId, send, args.recipientConfirmed === true);
     return { ok: true as const, outboundId, draftId: resendDraftId };
   },
 });

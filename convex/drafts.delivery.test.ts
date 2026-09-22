@@ -300,13 +300,13 @@ describe("resendAfterUnknown (S-M03-1, DA-A-31): an explicit, acknowledged, full
     expect(s.posts.length).toBe(1);
   });
 
-  it("DA-A-31: a material change since the first attempt (claim version bumped) → refused", async () => {
+  it("DA-A-31: a material change since the first attempt (claim version bumped) → refused, returned not thrown", async () => {
     const t = setup();
     const s = await unknownSend(t);
     await t.run((ctx) => ctx.db.patch(s.claimId, { version: 2 }));
-    await expect(
-      s.a.as.mutation(api.drafts.resendAfterUnknown, resendArgs(s.draftId, s.outboundId, { claimVersion: 2 })),
-    ).rejects.toThrow(/claim changed/i);
+    const res = await s.a.as.mutation(api.drafts.resendAfterUnknown, resendArgs(s.draftId, s.outboundId, { claimVersion: 2 }));
+    expect(res).toMatchObject({ ok: false, code: "binding_changed" });
+    await drive(t, 20, 5_000);
     expect(s.posts.length).toBe(1);
   });
 
