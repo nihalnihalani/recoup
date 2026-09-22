@@ -15,6 +15,7 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | QA engineer | opus-qa-engineer | 0 | idle (M04 delivered) |
 | Devil's advocate | opus-devils-advocate | 0 (M05) | active |
 | Backend / ingestion / travel / commerce / benefits / frontend engineers | opus-* | 1+ | pending |
+| Rules reviewer (independent of researcher) | opus-rules-reviewer | 1 (M09) | active |
 | Release auditor | opus-release-auditor | 5 | pending |
 
 ## Tasks
@@ -29,6 +30,8 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | M05 | 0 | opus-devils-advocate | M01 | Checkpoint A: adversarial review of the M01 contract before implementation | docs/reviews/2026-09-23-da-checkpoint-A.md | verified (c47b023; approve-with-changes; 0C/11H/14M/11L; all accepted, rulings D145) |
 | M06 | 0 | opus-product-architect | M05 | Contract rev 4: all pre-wave-1 changes (DA-A-1..5,7,8,9,11,13..17,21) + D142 + D143 + D145 rulings; pre-wave-2 items written as specified text; new tasks for pack review, source re-verification, R01 v2, R10/R13/R18/R19–R25, deadline attention, diagnostics, copy consistency | docs/team/contracts/2026-09-23-M01-*.md | in_progress |
 | M07 | 0 | opus-devils-advocate | M06 | Recheck rev 4 against the pre-wave-1 required changes only | docs/reviews/2026-09-23-da-checkpoint-A.md (addendum) | pending |
+| M08 | 1 | opus-qa-engineer | – | Test infra + CI: DOM env for *.test.tsx (QA-13), rule-fixture loader (hash + alias), twoUsers/clock helpers + time-bomb lint test, CI lint 0 / floor / e2e typecheck / concurrency / env-driven e2e fixtures | vitest.config.mts, package.json, package-lock.json, convex/test.setup.ts, convex/testing/**, src/test/**, .github/workflows/ci.yml, scripts/check-test-count.mjs, e2e/fixtures.ts, playwright.config.ts, docs/reviews/2026-09-23-M08-test-infra.md | in_progress |
+| M09 | 1 | opus-rules-reviewer | – | Independent spec-level review of R01–R05 against captured primary text + blind fixture check (activation gate, DA-A-11) | docs/reviews/2026-09-23-rules-review-R01-R05.md | in_progress |
 
 ---
 
