@@ -6,6 +6,7 @@ import { api, internal, components } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { inboxTransport } from "./account";
+import { EXPORT_EXEMPT, EXPORT_TABLE_NAMES, OUTSIDE_PURGE_STEPS, PURGE_STEPS } from "./account";
 import { WRONG_CREDENTIALS_MESSAGE } from "./auth";
 import { rateLimiter } from "./lib/rateLimits";
 import { RETENTION_PAGE, PROCESSED_EVENTS_PAGE, STUCK_DELETION_AGE_MS, STUCK_DELETION_REDRIVE_PAGE } from "./limits";
@@ -1663,5 +1664,312 @@ describe("T18.6 (D129 B-9/B-7): checkpoint 6d remainder -- the component's own d
     const mailLogLeft = await t.run((ctx) => ctx.db.query("mailLog").withIndex("by_user", (q) => q.eq("userId", a.userId)).collect());
     console.log("[T18.6 B-7] mailLog rows left after an outbound with 1001 events:", mailLogLeft.length);
     expect(mailLogLeft).toHaveLength(1);
+  }, 60_000);
+});
+
+// ===========================================================================
+// M14 (contract rev 5 §2.6, §8; SEC-DEL-1/2/3): the transaction-recovery
+// tables in export and purge. Everything below is additive: no test above
+// this line was changed.
+// ===========================================================================
+
+type AnyValidator = {
+  kind: string;
+  tableName?: string;
+  fields?: Record<string, AnyValidator>;
+  element?: AnyValidator;
+  members?: AnyValidator[];
+  key?: AnyValidator;
+  value?: AnyValidator;
+};
+type SchemaTables = Record<string, { validator: AnyValidator; " indexes"(): { indexDescriptor: string; fields: string[] }[] }>;
+const TABLES = schema.tables as unknown as SchemaTables;
+
+/** Every `v.id(<table>)` reachable from `validator`, with a readable path (`binding.attachments[].evidenceId`). */
+function idFields(validator: AnyValidator, path = ""): Array<{ path: string; target: string }> {
+  switch (validator.kind) {
+    case "id":
+      return [{ path, target: validator.tableName! }];
+    case "object":
+      return Object.entries(validator.fields ?? {}).flatMap(([k, f]) => idFields(f, path ? `${path}.${k}` : k));
+    case "array":
+      return idFields(validator.element!, `${path}[]`);
+    case "union":
+      return (validator.members ?? []).flatMap((m) => idFields(m, path));
+    case "record":
+      return [...idFields(validator.key!, `${path}{key}`), ...idFields(validator.value!, `${path}{}`)];
+    default:
+      return [];
+  }
+}
+
+function hasUserIdField(validator: AnyValidator): boolean {
+  if (validator.kind === "union") return (validator.members ?? []).some(hasUserIdField);
+  return validator.kind === "object" && validator.fields?.userId !== undefined;
+}
+
+describe("M14 SEC-DEL-1 — export and purge cover every user-owned table (reflective over schema.tables)", () => {
+  it("every schema table with a userId field is in PURGE_STEPS and in the export list (usage is the one documented export exemption)", () => {
+    const withUserId = Object.keys(TABLES).filter((t) => hasUserIdField(TABLES[t].validator));
+    const purged = new Set<string>(PURGE_STEPS);
+    const exported = new Set<string>(EXPORT_TABLE_NAMES);
+
+    // The exemption lists are pinned HERE, not only in account.ts: widening either one means editing this test.
+    expect(Object.keys(EXPORT_EXEMPT).sort()).toEqual(["usage"]);
+    expect(Object.keys(OUTSIDE_PURGE_STEPS).sort()).toEqual(["accountState", "authAccounts", "authSessions"]);
+
+    const missingFromPurge = withUserId.filter((t) => !purged.has(t) && !(t in OUTSIDE_PURGE_STEPS));
+    const missingFromExport = withUserId.filter((t) => !exported.has(t) && !(t in EXPORT_EXEMPT) && !(t in OUTSIDE_PURGE_STEPS));
+    expect(missingFromPurge).toEqual([]);
+    expect(missingFromExport).toEqual([]);
+
+    // Every exempt name is a real userId table (a stale exemption would hide nothing but reads as coverage).
+    for (const t of [...Object.keys(EXPORT_EXEMPT), ...Object.keys(OUTSIDE_PURGE_STEPS)]) expect(withUserId).toContain(t);
+    // Nothing is listed twice.
+    expect(new Set(PURGE_STEPS).size).toBe(PURGE_STEPS.length);
+    expect(new Set(EXPORT_TABLE_NAMES).size).toBe(EXPORT_TABLE_NAMES.length);
+  });
+
+  it("PURGE_STEPS deletes children before parents: every id edge between two purged tables points forward, except the documented back-edges", () => {
+    const position = new Map<string, number>(PURGE_STEPS.map((t, i) => [t, i]));
+    const backEdges: string[] = [];
+    for (const table of PURGE_STEPS) {
+      for (const { path, target } of idFields(TABLES[table].validator)) {
+        if (target === table || !position.has(target)) continue; // self-links and tables purged elsewhere (users, _storage, _scheduled_functions)
+        if (position.get(target)! < position.get(table)!) backEdges.push(`${table}.${path} -> ${target}`);
+      }
+    }
+    // Each back-edge is a cycle or a Mission-1 ordering choice. Either way the dangling
+    // pointer lives only while the account is tombstoned, when no reader runs (requireUserId
+    // refuses every caller; scheduled readers check isTombstoned).
+    expect(backEdges.sort()).toEqual([
+      "claims.opportunityId -> opportunities", // cycle with opportunities.activeClaimId; contract §8 purges opportunities first
+      "mailLog.watchId -> watches", // Mission-1 order (T18 contract, verbatim)
+      "opportunities.currentEvaluationId -> evaluations", // cycle with evaluations.opportunityId; evaluations are the child
+      "processedEvents.claimId -> claims", // Mission-1 order
+      "transactions.sourceEvidenceId -> evidence", // cycle with evidence.transactionId; evidence (and its blob) first
+      "watches.purchaseId -> purchases", // Mission-1 order
+    ]);
+  });
+});
+
+/** One owned transaction-recovery tree: a retail transaction with an uploaded file (blob) and a forwarded email, a fact, an incident, a claim, an opportunity with its evaluation, and a non-cash remedy. */
+async function seedRecoveryTree(t: T, userId: Id<"users">, tag: string) {
+  return await t.run(async (ctx) => {
+    const storageId = await ctx.storage.store(new Blob([`receipt bytes ${tag}`], { type: "application/pdf" }));
+    const purchaseId = await ctx.db.insert("purchases", { userId, merchant: "Acme", merchantDomain: "acme.example", currency: "USD", status: "active" });
+    const itemId = await ctx.db.insert("items", { purchaseId, userId, name: "Widget", unitCents: 12_000, qty: 1, returned: false });
+    const transactionId = await ctx.db.insert("transactions", {
+      userId, category: "retail_order", status: "active", counterpartyName: "Acme", currency: "USD", purchaseId, liveFactCount: 1,
+    });
+    const uploadId = await ctx.db.insert("evidence", {
+      userId, transactionId, kind: "upload", docType: "receipt", docTypeDeclaredBy: "user", sourceChannel: "upload",
+      provenance: "user_uploaded", storageId, contentHash: tag.padEnd(64, "0"), mimeType: "application/pdf", sizeBytes: 20,
+      fileName: `receipt-${tag}.pdf`, receivedAt: T0, extractionStatus: "store_only", extractionAttempts: 0, retention: "active",
+    });
+    const emailId = await ctx.db.insert("evidence", {
+      userId, transactionId, kind: "email", docType: "order_confirmation", sourceChannel: "agentmail_forward",
+      provenance: "user_forwarded", contentHash: tag.padEnd(64, "1"), text: `Order ${tag}: total USD 120.00`,
+      headers: { from: "orders@acme.example", subject: `Your order ${tag}` }, receivedAt: T0,
+      extractionStatus: "succeeded", extractionAttempts: 1, retention: "active",
+    });
+    await ctx.db.patch(transactionId, { sourceEvidenceId: emailId });
+    const factId = await ctx.db.insert("facts", {
+      userId, transactionId, subjectKey: "txn", key: "retail.total", state: "user_confirmed",
+      value: { kind: "money", amountMinor: 12_000, currency: "USD" },
+      source: { kind: "evidence", evidenceId: emailId, locator: { kind: "text_span", start: 0, end: 10, quote: "USD 120.00" }, quoteStatus: "verified", extractorVersion: "x1" },
+      recordedAt: T0,
+    });
+    const incidentId = await ctx.db.insert("incidents", { userId, transactionId, kind: "item_damaged", status: "confirmed", reportedBy: "user", sourceEvidenceId: uploadId });
+    const claimId = await ctx.db.insert("claims", {
+      purchaseId, itemId, userId, type: "price_adjustment", expectedCents: 500, status: "detected", token: `tok-${tag}`, version: 1, transactionId,
+    });
+    const opportunityId = await ctx.db.insert("opportunities", {
+      userId, transactionId, scenarioId: "R01", remedyKey: "price_difference", subjectKey: `item:${itemId}`,
+      dedupeKey: `${transactionId}|R01|price_difference|item:${itemId}|-`, status: "case_open", ruleId: "r01", ruleVersion: 1,
+      outcome: "likely_eligible", authorityClass: "merchant_promise", remedyType: "price_difference", cashClass: "cash",
+      lossKeys: [], activeClaimId: claimId, lastEvaluatedAt: T0,
+    });
+    const evaluationId = await ctx.db.insert("evaluations", {
+      userId, opportunityId, scenarioId: "R01", ruleId: "r01", ruleVersion: 1, factSnapshotHash: "f".repeat(64), resultHash: "r".repeat(64),
+      evaluatedAt: T0, trigger: "observation", outcome: "likely_eligible",
+      dimensions: { applies: "pass", factsKnown: "pass", evidenceSupports: "unknown", windowOpen: "pass", amountCalculable: "pass", readyForApproval: "pass" },
+      conditions: [], missingFacts: [], assumptions: [], disqualifierIds: [], amount: null, deadlines: [], sourceRefs: [], overlap: [],
+      nextAction: { kind: "continue_case", claimId }, explanation: [],
+    });
+    await ctx.db.patch(opportunityId, { currentEvaluationId: evaluationId });
+    await ctx.db.patch(claimId, { opportunityId });
+    const nonCashId = await ctx.db.insert("nonCashRemedies", {
+      userId, claimId, kind: "voucher", description: "Store voucher", state: "promised", idempotencyKey: `nc-${tag}`, recordedAt: T0,
+    });
+    return { storageId, transactionId, uploadId, emailId, factId, incidentId, claimId, opportunityId, evaluationId, nonCashId };
+  });
+}
+
+const RECOVERY_TABLES = ["transactions", "facts", "incidents", "evidence", "opportunities", "evaluations", "nonCashRemedies"] as const;
+
+async function recoveryRowsOf(t: T, userId: Id<"users">): Promise<Record<string, number>> {
+  return await t.run(async (ctx) => {
+    const counts: Record<string, number> = {};
+    for (const table of RECOVERY_TABLES) {
+      counts[table] = (await ctx.db.query(table).collect()).filter((r) => r.userId === userId).length;
+    }
+    return counts;
+  });
+}
+
+async function exportAll(as: Awaited<ReturnType<typeof signedIn>>["as"], table: (typeof EXPORT_TABLE_NAMES)[number]): Promise<any[]> {
+  const rows: any[] = [];
+  let cursor: string | null | undefined = undefined;
+  for (let pages = 0; pages < 50; pages++) {
+    const page: { rows: any[]; cursor: string | null } = await as.query(api.account.exportPage, { table, cursor: cursor ?? undefined });
+    rows.push(...page.rows);
+    cursor = page.cursor;
+    if (cursor === null) return rows;
+  }
+  throw new Error(`exportPage(${table}) did not finish within 50 pages`);
+}
+
+describe("M14 — exportPage serves the transaction-recovery tables", () => {
+  it("each of the seven new tables exports exactly the caller's own rows, never another user's", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    await seedRecoveryTree(t, a.userId, "aaaa");
+    await seedRecoveryTree(t, b.userId, "bbbb");
+
+    const expected = await recoveryRowsOf(t, a.userId);
+    for (const table of RECOVERY_TABLES) {
+      const rows = await exportAll(a.as, table);
+      expect(rows.length, table).toBe(expected[table]);
+      expect(rows.length, table).toBeGreaterThan(0);
+      expect(rows.every((r) => r.userId === a.userId), table).toBe(true);
+    }
+  });
+
+  it("SEC-DEL-3: an evidence export row lists the file by id, contentHash and fileName, and carries no storage URL or storage id", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const seeded = await seedRecoveryTree(t, a.userId, "cccc");
+
+    const rows = await exportAll(a.as, "evidence");
+    const upload = rows.find((r) => r._id === seeded.uploadId);
+    expect(upload).toMatchObject({ _id: seeded.uploadId, contentHash: "cccc".padEnd(64, "0"), fileName: "receipt-cccc.pdf", hasFile: true });
+    expect(upload).not.toHaveProperty("storageId");
+    const email = rows.find((r) => r._id === seeded.emailId);
+    expect(email).toMatchObject({ hasFile: false, text: "Order cccc: total USD 120.00" });
+
+    const serialized = JSON.stringify(rows);
+    expect(serialized).not.toContain(seeded.storageId);
+    expect(serialized).not.toMatch(/\/api\/storage|https?:\/\/[^"]*convex\.(cloud|site)/);
+  });
+
+  it("evidence export is byte-aware: 100 rows of 60,000 CJK chars export without hitting the 16 MiB read limit", async () => {
+    const t = setupWithLimits();
+    const a = await signedIn(t, "A");
+    await seedCjkEvidence(t, a.userId, 100);
+    const rows = await exportAll(a.as, "evidence");
+    expect(rows).toHaveLength(100);
+  }, 60_000);
+});
+
+/** 3-byte UTF-8 text at the contract's 60,000-char evidence cap (§2.6), the same worst case 6b-6 sized `PROCESSED_EVENTS_PAGE` for. */
+async function seedCjkEvidence(t: ReturnType<typeof setupWithLimits>, userId: Id<"users">, count: number) {
+  const text = "語".repeat(60_000);
+  for (let start = 0; start < count; start += 20) {
+    await t.run(async (ctx) => {
+      for (let i = start; i < Math.min(count, start + 20); i++) {
+        await ctx.db.insert("evidence", {
+          userId, kind: "paste", docType: "order_confirmation", sourceChannel: "paste", provenance: "user_pasted",
+          contentHash: String(i).padStart(64, "0"), text, receivedAt: T0, extractionStatus: "not_requested", extractionAttempts: 0, retention: "active",
+        });
+      }
+    });
+  }
+}
+
+async function blobExists(t: T, storageId: Id<"_storage">): Promise<boolean> {
+  return (await t.run((ctx) => ctx.db.system.get("_storage", storageId))) !== null;
+}
+
+describe("M14 SEC-DEL-2 — purge removes the transaction-recovery tables and their blobs", () => {
+  it("after purge, none of A's rows in the seven new tables and none of A's blobs remain; B's rows and blobs are untouched", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const b = await signedIn(t, "B");
+    const seededA = await seedRecoveryTree(t, a.userId, "dddd");
+    const seededB = await seedRecoveryTree(t, b.userId, "eeee");
+    const bBefore = await recoveryRowsOf(t, b.userId);
+    vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const aAfter = await recoveryRowsOf(t, a.userId);
+    expect(Object.values(aAfter).reduce((x, y) => x + y, 0)).toBe(0);
+    expect(await blobExists(t, seededA.storageId)).toBe(false);
+
+    expect(await recoveryRowsOf(t, b.userId)).toEqual(bBefore);
+    expect(await blobExists(t, seededB.storageId)).toBe(true);
+    const state = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first());
+    expect(state?.status).toBe("deleted");
+  });
+
+  it("deletes each evidence blob in the same purgeStep call as its row: after every call, A's remaining evidence rows and A's remaining blobs are the same set", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const storageIds = await t.run(async (ctx) => {
+      const ids: Id<"_storage">[] = [];
+      for (let i = 0; i < 40; i++) {
+        const storageId = await ctx.storage.store(new Blob([`file ${i}`]));
+        ids.push(storageId);
+        await ctx.db.insert("evidence", {
+          userId: a.userId, kind: "upload", docType: "receipt", sourceChannel: "upload", provenance: "user_uploaded", storageId,
+          contentHash: String(i).padStart(64, "a"), receivedAt: T0, extractionStatus: "store_only", extractionAttempts: 0, retention: "active",
+        });
+      }
+      return ids;
+    });
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+
+    let done = false;
+    let evidenceCalls = 0;
+    for (let calls = 0; !done && calls < 100; calls++) {
+      const before = (await t.run((ctx) => ctx.db.query("evidence").collect())).length;
+      done = (await t.mutation(internal.account.purgeStep, { userId: a.userId })).done;
+      const rows = await t.run((ctx) => ctx.db.query("evidence").collect());
+      if (rows.length !== before) evidenceCalls++;
+      const rowBlobs = new Set(rows.map((r) => r.storageId));
+      for (const id of storageIds) expect(await blobExists(t, id)).toBe(rowBlobs.has(id));
+    }
+    expect(done).toBe(true);
+    expect(evidenceCalls).toBeGreaterThan(1); // 40 rows span more than one byte-aware page
+    for (const id of storageIds) expect(await blobExists(t, id)).toBe(false);
+  });
+
+  it("resumes cleanly when a crash already removed an evidence row's blob: no throw, the row is deleted, the purge finishes", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const seeded = await seedRecoveryTree(t, a.userId, "ffff");
+    await t.run((ctx) => ctx.storage.delete(seeded.storageId)); // the blob is gone, its row is not
+    vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    expect(await t.run((ctx) => ctx.db.get(seeded.uploadId))).toBeNull();
+    const state = await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first());
+    expect(state?.status).toBe("deleted");
+  });
+
+  it("evidence purge is byte-aware: 100 rows of 60,000 CJK chars purge without hitting the 16 MiB read limit", async () => {
+    const t = setupWithLimits();
+    const a = await signedIn(t, "A");
+    await seedCjkEvidence(t, a.userId, 100);
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    let done = false;
+    for (let calls = 0; !done && calls < 80; calls++) done = (await t.mutation(internal.account.purgeStep, { userId: a.userId })).done;
+    expect(done).toBe(true);
+    expect(await t.run((ctx) => ctx.db.query("evidence").collect())).toHaveLength(0);
   }, 60_000);
 });
