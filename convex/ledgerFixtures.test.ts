@@ -81,7 +81,11 @@ async function returnClaim(as: As, itemId: Id<"items">) {
   return await as.mutation(api.claims.open, { itemId });
 }
 
-/** The account holder forwards the merchant's refund email from their own address (SEC-AI-6 verified sender). */
+/**
+ * The account holder forwards the merchant's refund email from their own address, verified by the user's tap (DA-B-3):
+ * a From header is not authentication (D190/D194, D198), so the email alone writes nothing and the promise is recorded
+ * by the holder's one-tap `confirmRefundEmail`, which this helper performs.
+ */
 async function merchantEmail(
   t: T,
   userId: Id<"users">,
@@ -105,6 +109,10 @@ async function merchantEmail(
     processedEventId,
     parsed: { kind: "refund", order: null, refund, confidence: 0.95 },
   });
+  const held = (await t.run(async (ctx) => await ctx.db.get(processedEventId)))!;
+  if ((held.payload as { pendingRefund?: unknown } | undefined)?.pendingRefund !== undefined) {
+    await t.withIdentity({ subject: `${userId}|session` }).mutation(api.intake.confirmRefundEmail, { processedEventId });
+  }
   return (await t.run(async (ctx) => await ctx.db.get(processedEventId)))!;
 }
 

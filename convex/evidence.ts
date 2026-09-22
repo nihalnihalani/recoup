@@ -247,6 +247,8 @@ export async function recordTextEvidence(
     userId: Id<"users">;
     kind: "email" | "paste";
     provenance: EvidenceProvenance;
+    /** DA-B-3 / D194: the inbound email's sender-authentication verdict (always "unavailable" today). */
+    senderAuth?: Doc<"evidence">["senderAuth"];
     text: string;
     headers?: { from?: string; subject?: string; date?: string; messageId?: string };
     processedEventId: Id<"processedEvents">;
@@ -278,6 +280,7 @@ export async function recordTextEvidence(
       retention: "active",
       receivedAt: now,
       processedEventId: input.processedEventId,
+      ...(input.senderAuth !== undefined ? { senderAuth: input.senderAuth } : {}),
       ...(USER_PROVENANCE.has(input.provenance) ? { provenance: input.provenance } : {}),
     });
     return cleared._id;
@@ -290,6 +293,7 @@ export async function recordTextEvidence(
     ...(classified ? { docTypeDeclaredBy: "classifier" as const } : {}),
     sourceChannel: input.kind === "email" ? "agentmail_forward" : "paste",
     provenance: input.provenance,
+    ...(input.senderAuth !== undefined ? { senderAuth: input.senderAuth } : {}),
     processedEventId: input.processedEventId,
     contentHash,
     text,

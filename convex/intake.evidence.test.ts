@@ -7,6 +7,8 @@
  * Recoup sends it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
@@ -136,7 +138,7 @@ describe("§7 order intake: evidence → transaction → candidate facts, never 
 
     const [ev] = await evidenceRows(t);
     expect(ev).toMatchObject({
-      userId, kind: "email", sourceChannel: "agentmail_forward", provenance: "user_forwarded", docType: "order_confirmation",
+      userId, kind: "email", sourceChannel: "agentmail_forward", provenance: "unverified_sender", senderAuth: "unavailable", docType: "order_confirmation",
       docTypeDeclaredBy: "classifier", processedEventId: row._id, extractorVersion: TEXT_EXTRACTOR_VERSION, retention: "active",
     });
     expect(ev.text).not.toContain(PAN);
@@ -251,20 +253,71 @@ describe("SEC-AI-6 / D174: an unverified sender's refund writes nothing until th
     expect(await ledgerRows(t)).toHaveLength(1);
   });
 
-  it("the same email later forwarded by the user themselves upgrades the evidence and records normally", async () => {
+  it("DA-B-3: From = the account email is still only a header — no auth verdict → held, no ledger event; the tap records it", async () => {
     const t = setup();
     const { as } = await account(t);
     await returnedPurchase(t, as);
-    const spoofish = await deliver(t, { from: "store@nordstrom.com", text: "Refund issued for your scarf." }, "e1");
-    const parsed = refundParsed([{ itemName: "wool scarf", amount: 500, currency: "USD", state: "posted" }]);
-    await t.mutation(internal.intake.applyExtraction, { processedEventId: spoofish._id, parsed });
     const mine = await deliver(t, { from: "Ann <ANN@home.example>", text: "Refund issued for your scarf." }, "e2");
+    const parsed = refundParsed([{ itemName: "wool scarf", amount: 500, currency: "USD", state: "posted" }]);
     await t.mutation(internal.intake.applyExtraction, { processedEventId: mine._id, parsed });
-    const evs = await evidenceRows(t);
-    expect(evs).toHaveLength(1); // owner-scoped dedupe on the masked text
-    expect(evs[0].provenance).toBe("user_forwarded");
+    const [ev] = await evidenceRows(t);
+    expect(ev).toMatchObject({ provenance: "unverified_sender", senderAuth: "unavailable" });
+    const held = (await t.run((ctx) => ctx.db.get(mine._id)))!;
+    expect(held.status).toBe("needs_review");
+    expect(held.summary).toMatch(/can't verify that it really came from you/);
+    expect(await ledgerRows(t)).toHaveLength(0);
+    expect(await claimRows(t)).toHaveLength(0);
+    await as.mutation(api.intake.confirmRefundEmail, { processedEventId: mine._id });
     expect((await ledgerRows(t)).map((e) => e.kind)).toEqual(["promised_credit"]);
   });
+
+  it("the same email forwarded twice is one evidence row; a later paste of it by the user upgrades its provenance", async () => {
+    const t = setup();
+    const { as } = await account(t);
+    await returnedPurchase(t, as);
+    const text = "Refund issued for your scarf, order ORD-1, 500.00 USD.";
+    const parsed = refundParsed([{ itemName: "wool scarf", amount: 500, currency: "USD", state: "posted" }]);
+    for (const id of ["e1", "e2"]) {
+      const row = await deliver(t, { from: "store@nordstrom.com", text }, id);
+      await t.mutation(internal.intake.applyExtraction, { processedEventId: row._id, parsed });
+    }
+    expect(await evidenceRows(t)).toHaveLength(1);
+    const pasteId = await as.action(api.intake.paste, { text });
+    await t.mutation(internal.intake.applyExtraction, { processedEventId: pasteId, parsed });
+    const evs = await evidenceRows(t);
+    expect(evs).toHaveLength(1);
+    expect(evs[0].provenance).toBe("user_pasted"); // the user stands behind it now
+    expect((await ledgerRows(t)).map((e) => e.kind)).toEqual(["promised_credit"]); // a paste is the user's own act
+  });
+
+  it("D194: every inbound evidence row records senderAuth 'unavailable' (AgentMail 0.1.0 exposes no verdict)", async () => {
+    const t = setup();
+    await account(t);
+    for (const [i, from] of ["ann@home.example", "orders@nordstrom.com", "Refund Team"].entries()) {
+      const row = await deliver(t, { from, text: `Message number ${i}` }, `sa-${i}`);
+      await t.mutation(internal.intake.applyExtraction, { processedEventId: row._id, parsed: { kind: "other", order: null, refund: null, confidence: 0.5 } });
+    }
+    const rows = await evidenceRows(t);
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.senderAuth === "unavailable" && r.provenance === "unverified_sender")).toBe(true);
+  });
+
+  it("D194: no code path writes the reserved 'dmarc_aligned_pass' verdict today", () => {
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const path = join(dir, name);
+        if (name === "_generated" || name === "node_modules") continue;
+        if (statSync(path).isDirectory()) walk(path);
+        else if (name.endsWith(".ts") && !name.endsWith(".test.ts")) files.push(path);
+      }
+    };
+    walk("convex");
+    const mentions = files.filter((f) => readFileSync(f, "utf8").includes("dmarc_aligned_pass"));
+    expect(mentions).toEqual([join("convex", "schema.ts")]);
+  });
+
+  it.todo("D194: an aligned DMARC pass for the account's own domain → applied without the tap — once AgentMail exposes a sender-authentication verdict");
 
   it("senderAddress reads the bare address without a regex over unbounded input", () => {
     expect(senderAddress("Ann <Ann@Home.example>")).toBe("ann@home.example");
@@ -285,6 +338,7 @@ describe("HC-10: a refund in another currency is refused, not recorded", () => {
       processedEventId: row._id,
       parsed: refundParsed([{ itemName: "wool scarf", amount: 40, currency: "EUR", state: "posted" }]),
     });
+    await as.mutation(api.intake.confirmRefundEmail, { processedEventId: row._id }); // DA-B-3: only the user's tap applies it
     const after = (await t.run((ctx) => ctx.db.get(row._id)))!;
     expect(after.status).toBe("needs_review");
     expect(after.summary).toMatch(/EUR.*USD/);
@@ -301,6 +355,7 @@ describe("HC-10: a refund in another currency is refused, not recorded", () => {
       processedEventId: row._id,
       parsed: refundParsed([{ itemName: "wool scarf", amount: 40, currency: "??", state: "posted" }]),
     });
+    await as.mutation(api.intake.confirmRefundEmail, { processedEventId: row._id });
     expect((await t.run((ctx) => ctx.db.get(row._id)))!.status).toBe("needs_review");
     expect(await ledgerRows(t)).toHaveLength(0);
   });
@@ -358,5 +413,40 @@ describe("DA-A-35: intake's purchase has its transaction", () => {
     const txns = await t.run((ctx) => ctx.db.query("transactions").withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id)).collect());
     expect(txns).toHaveLength(1);
     expect(txns[0].purchaseId).toBe(purchase._id as Id<"purchases">);
+  });
+});
+
+describe("needsAttention shows a held refund so the user can confirm it (D194)", () => {
+  it("a held refund row says so and carries its amounts in minor units — never the payload", async () => {
+    const t = setup();
+    const { as } = await account(t);
+    await returnedPurchase(t, as);
+    const row = await deliver(t, { from: "store@nordstrom.com", text: "Refund issued." }, "held-1");
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: row._id,
+      parsed: refundParsed([
+        { itemName: "wool scarf", amount: 500, currency: "usd", state: "posted" },
+        { itemName: null, amount: -3, currency: "USD", state: "promised" }, // unreadable: dropped
+        { itemName: "hat", amount: 12.5, currency: "??", state: "promised" }, // unclear currency: dropped
+      ]),
+    });
+    const other = await deliver(t, { text: "Unrelated." }, "plain-1");
+    await t.mutation(internal.intake.applyExtraction, { processedEventId: other._id, parsed: { kind: "other", order: null, refund: null, confidence: 0.5 } });
+
+    const rows = await as.query(api.intake.needsAttention, {});
+    const held = rows.find((r) => r._id === row._id)!;
+    expect(held.refundAwaitingConfirmation).toBe(true);
+    expect(held.pendingRefund).toEqual({ merchant: "Nordstrom", credits: [{ itemName: "wool scarf", amountMinor: 50_000, currency: "USD" }] });
+    expect(held).not.toHaveProperty("payload");
+    const plain = rows.find((r) => r._id === other._id)!;
+    expect(plain.refundAwaitingConfirmation).toBe(false);
+    expect(plain.pendingRefund).toBeUndefined();
+
+    await as.mutation(api.intake.confirmRefundEmail, { processedEventId: row._id });
+    expect((await ledgerRows(t)).map((e) => [e.kind, e.cents])).toEqual([["promised_credit", 50_000]]);
+    // The two unreadable credits keep the row in review, but nothing waits for a tap any more.
+    const after = (await as.query(api.intake.needsAttention, {})).find((r) => r._id === row._id)!;
+    expect(after.refundAwaitingConfirmation).toBe(false);
+    expect(after.pendingRefund).toBeUndefined();
   });
 });
