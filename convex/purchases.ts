@@ -15,6 +15,7 @@ import { clearItemSchedule } from "./lib/schedule";
 import { schedulePolicyFetch } from "./policies";
 import { assertCoarseNow } from "./watches";
 import { ensurePurchaseTransaction } from "./transactions";
+import { putFact } from "./lib/facts/write";
 import schema, { processedStatus, verdictValidator } from "./schema";
 import {
   MAX_ITEMS_PER_PURCHASE,
@@ -167,6 +168,13 @@ export const confirm = mutation({
     merchantDomain: v.string(),
     orderRef: v.optional(v.string()),
     purchasedAt: v.number(),
+    /**
+     * The currency the user confirms (contract §7, DA-A-33). Optional so existing callers are unchanged; when given it
+     * is validated, written to the purchase, and recorded as a `retail.currency` user_confirmed fact — the only thing
+     * that makes a retail currency "confirmed" rather than an assumption. A CHANGE is refused once any claim exists on
+     * the purchase (its ledger and drafts are in the old currency).
+     */
+    currency: v.optional(v.string()),
     items: v.array(
       v.object({
         itemId: v.id("items"),
@@ -193,6 +201,15 @@ export const confirm = mutation({
     assertTimestamp(args.purchasedAt, "purchasedAt");
     const merchant = boundedLine(args.merchant, "merchant", MAX_MERCHANT_CHARS);
     const orderRef = cleanOrderRef(args.orderRef);
+    const currency = args.currency === undefined ? undefined : assertCurrency(args.currency);
+    if (currency !== undefined && currency !== purchase.currency) {
+      // Any claim at all (open, confirmed or dismissed) was opened, drafted and possibly paid in the old currency.
+      const claim = await ctx.db
+        .query("claims")
+        .withIndex("by_purchase_type", (q) => q.eq("purchaseId", args.purchaseId))
+        .first();
+      if (claim !== null) throw new ConvexError("The currency cannot change once a claim exists for this purchase");
+    }
     const cleanItems = [];
     for (const it of args.items) {
       const item = await ownedItem(ctx, it.itemId, userId);
@@ -212,13 +229,25 @@ export const confirm = mutation({
       merchantDomain,
       orderRef,
       purchasedAt: args.purchasedAt,
+      ...(currency !== undefined ? { currency } : {}),
       status: "active",
     });
     for (const { itemId, ...fields } of cleanItems) {
       await ctx.db.patch(itemId, fields);
     }
     // Contract §2.2: confirming re-syncs (or, for a legacy purchase, lazily creates) the transaction mirror.
-    await ensurePurchaseTransaction(ctx, args.purchaseId);
+    const transactionId = await ensurePurchaseTransaction(ctx, args.purchaseId);
+    if (currency !== undefined) {
+      // DA-A-33: only an explicit confirmation makes the currency known; an identical re-confirmation writes nothing.
+      await putFact(ctx, userId, {
+        transactionId,
+        subjectKey: "txn",
+        key: "retail.currency",
+        state: "user_confirmed",
+        value: { kind: "code", code: currency },
+        source: { kind: "user" },
+      });
+    }
     // C3(d)/D107: confirming is exactly the moment a needs_review item's
     // permanent-vs-transient classification can flip (it gains a
     // purchasedAt/productUrl, or its purchase becomes "active") -- un-stamp
