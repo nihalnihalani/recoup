@@ -1,3 +1,6 @@
+import type { FunctionArgs } from "convex/server";
+import type { api } from "../../convex/_generated/api";
+
 /**
  * Pure helpers behind Settings' "Export my data" button (T19, P09).
  *
@@ -5,8 +8,8 @@
  * `useConvex().query(...)` inside a click handler (T18's contract: one
  * table, one page, a cursor, repeat until `cursor` is `null` — not a React
  * hook called in a loop). Everything here is the pure, testable part of
- * that flow: the exact table list to walk (mirrors `convex/account.ts`'s
- * `EXPORT_TABLES` union literally, field for field), the paging loop shape
+ * that flow: the exact table list to walk (`EXPORT_TABLES` below, checked
+ * against the server at compile time and in the test), the paging loop shape
  * (parameterized over an injectable `fetchPage` so it needs no real Convex
  * client to test), and the JSON assembly that keeps the download bounded —
  * built as string parts, one table at a time, instead of holding the whole
@@ -14,11 +17,16 @@
  */
 
 /**
- * Mirrors `convex/account.ts`'s `EXPORT_TABLES` `v.union` of literals,
- * verbatim and in the same order — every table `exportPage` can serve.
- * Keep in sync by hand: this file does not import from `convex/**`
- * (out of this task's ownership) and the union has no runtime form to
- * import from anyway (it is a `v.union` of `v.literal`s, not an array).
+ * Every table `api.account.exportPage` can serve, in the server's order:
+ * a copy of `convex/account.ts`'s `EXPORT_TABLE_NAMES`. The list stays here
+ * rather than being imported because `account.ts` is server code (its
+ * imports reach `_generated/server` and the rate limiter), which must not be
+ * bundled into the browser. It cannot drift silently:
+ *  - compile time: `SameTables` below fails `npm run typecheck` unless this
+ *    list and `exportPage`'s `table` argument are the same set;
+ *  - run time: `accountExport.test.ts` imports `EXPORT_TABLE_NAMES` and
+ *    compares the two arrays, order included.
+ * M15 (D163): the seven wave-1 recovery tables M14 made exportable.
  */
 export const EXPORT_TABLES = [
   "purchases",
@@ -40,9 +48,24 @@ export const EXPORT_TABLES = [
   "processedEvents",
   "alertSettings",
   "profiles",
+  "transactions",
+  "facts",
+  "incidents",
+  "evidence",
+  "opportunities",
+  "evaluations",
+  "nonCashRemedies",
 ] as const;
 
 export type ExportTable = (typeof EXPORT_TABLES)[number];
+
+/** The `table` argument `exportPage` accepts, straight from the generated API types. */
+type ServerExportTable = FunctionArgs<typeof api.account.exportPage>["table"];
+/** `true` only when both unions hold exactly the same members. */
+type SameTables = [ServerExportTable] extends [ExportTable] ? ([ExportTable] extends [ServerExportTable] ? true : false) : false;
+type AssertTrue<T extends true> = T;
+/** Compile-time only: a table added to (or removed from) `exportPage` without this list makes this line a type error. */
+export type ExportTablesMatchServer = AssertTrue<SameTables>;
 
 /** One page of `api.account.exportPage`'s return shape. */
 export type ExportPage = { rows: unknown[]; cursor: string | null };

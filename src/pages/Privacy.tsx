@@ -1,14 +1,34 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
+import {
+  EVALUATION_RETENTION_DAYS,
+  EVIDENCE_RETENTION_DAYS,
+  ORPHAN_BLOB_MIN_AGE_HOURS,
+  PRIVACY_STATEMENTS,
+} from "../../convex/lib/privacyFacts";
+import {
+  RETENTION_KEEP_NEWEST,
+  RETENTION_MAILLOG_DAYS,
+  RETENTION_OBSERVATION_DAYS,
+  RETENTION_PAYLOAD_DAYS,
+  RETENTION_STASH_DAYS,
+  RETENTION_UNVERIFIED_DAYS,
+} from "../../convex/limits";
 import { DELETION_REMOVED_NOW, DELETION_WHAT_REMAINS } from "../lib/accountDeletion";
 
 /**
  * T19: public Privacy & services page, reachable signed in or signed out
  * (`src/App.tsx` mounts it as a sibling of the auth gate, not inside it).
- * Every number in "Retention" is copied from `convex/limits.ts` by hand
- * (this file cannot import server code) — if a constant there changes,
- * this page goes stale until someone updates it too; each figure says so
- * inline rather than presenting itself as an independent policy.
+ *
+ * M15 (DA-A-7, D146, D142, D163): every retention sentence below is
+ * `PRIVACY_STATEMENTS` from `convex/lib/privacyFacts.ts`, rendered verbatim,
+ * and every figure in the code chips is imported from the same backend
+ * constants `convex/retention.ts` enforces. Nothing here is copied by hand:
+ * `privacyFacts.ts` is frontend-importable on purpose (its only import is
+ * the import-free `convex/limits.ts`), so a changed window changes this page
+ * in the same commit. `Privacy.test.tsx` fails if a statement is added to
+ * `PRIVACY_STATEMENTS` without being rendered here, and `RETENTION_ROWS` is
+ * typed so the compiler refuses a missing key too.
  *
  * This is a plain-language description of what the code actually does
  * today, not a legal document — see "Limitations" below, which this file
@@ -56,7 +76,9 @@ export default function Privacy() {
               <Provider name="Convex">
                 Hosts the database and runs Recoup's server-side code, including sign-in. It stores your account
                 (email address, a salted password hash) and every row the app creates on your behalf — purchases,
-                items, claims, the ledger, drafts, replies, watches, price history and the mail log.
+                items, claims, the ledger, drafts, replies, watches, price history, the mail log, and for recovery
+                checks your transactions, the facts recorded about them, the evidence you forward, paste or upload,
+                recovery opportunities and the rule-check history behind them.
               </Provider>
               <Provider name="OpenAI">
                 Reads the text of order confirmations and merchant replies you paste or forward, and extracts
@@ -71,7 +93,8 @@ export default function Privacy() {
               <Provider name="AgentMail">
                 Gives you a dedicated Recoup inbox address to forward order confirmations and merchant replies to,
                 and sends the price-alert emails and the merchant/claim messages you review and approve. It handles
-                the email content you forward and the messages Recoup sends for you.
+                the email content you forward and the messages Recoup sends for you. Its own stored copy of your
+                inbound email is described under Retention below.
               </Provider>
               <Provider name="ShopSavvy">
                 A paid market-data API Recoup queries for a product's price history and the other stores selling it,
@@ -84,35 +107,22 @@ export default function Privacy() {
 
           <Section id="retention" title="Retention">
             <p className={bodyClass}>
-              These figures are mirrored from <code className={codeClass}>limits.ts</code>, the code's own
-              configuration, not a separate document that can drift from what actually runs.
+              Every sentence and figure here is read from the code's own configuration (
+              <code className={codeClass}>privacyFacts.ts</code> and <code className={codeClass}>limits.ts</code>), the
+              same values the clean-up jobs use — not a separate document that can drift from what actually runs.
             </p>
-            <ul className="mt-4 space-y-3">
-              <RetentionItem constant="RETENTION_PAYLOAD_DAYS = 30">
-                The raw content of a processed inbound email (an order confirmation or merchant reply) is cleared 30
-                days after Recoup finishes handling it — what was extracted from it stays; the original message body
-                does not.
-              </RetentionItem>
-              <RetentionItem constant="RETENTION_OBSERVATION_DAYS = 180, RETENTION_KEEP_NEWEST = 30">
-                Individual price-check and offer-check observations older than 180 days are pruned, always keeping
-                at least the newest 30 per item regardless of age, so a chart never loses its most recent shape.
-              </RetentionItem>
-              <RetentionItem constant="RETENTION_MAILLOG_DAYS = 90">
-                Finished mail-log rows (sent, failed or suppressed) are pruned after 90 days.
-              </RetentionItem>
-              <RetentionItem constant="RETENTION_STASH_DAYS = 7">
-                Small internal bookkeeping rows (pending-event markers, sign-up code capture used only in testing)
-                are pruned after 7 days.
-              </RetentionItem>
-              <RetentionItem constant="RETENTION_UNVERIFIED_DAYS = 7">
-                An account that never verifies its email is pruned after 7 days — it owns no purchases, claims or
-                watches yet, since those require a verified sign-in.
-              </RetentionItem>
-              <RetentionItem constant="kept until you delete your account">
-                Purchases, claims, the ledger, drafts and replies are <strong>never</strong> pruned automatically —
-                they are your money history, and only account deletion (below) removes them.
-              </RetentionItem>
-            </ul>
+            {RETENTION_GROUPS.map((group) => (
+              <div key={group.title} className="mt-5">
+                <h3 className="text-sm font-semibold text-gray-900">{group.title}</h3>
+                <ul className="mt-2 space-y-3">
+                  {group.keys.map((key) => (
+                    <RetentionItem key={key} constant={RETENTION_ROWS[key]}>
+                      {PRIVACY_STATEMENTS[key]}
+                    </RetentionItem>
+                  ))}
+                </ul>
+              </div>
+            ))}
           </Section>
 
           <Section id="alerts" title="Alerts &amp; consent">
@@ -174,6 +184,40 @@ export default function Privacy() {
     </div>
   );
 }
+
+type StatementKey = keyof typeof PRIVACY_STATEMENTS;
+
+/**
+ * The code chip beside each statement: the constant(s) its number comes from,
+ * with the value imported, never typed. A `Record` over every statement key,
+ * so a statement M14 adds without a row here is a compile error.
+ */
+const RETENTION_ROWS: Record<StatementKey, string> = {
+  evidenceText: `EVIDENCE_RETENTION_DAYS = ${EVIDENCE_RETENTION_DAYS}`,
+  evidenceAfterClearing: "kept after clearing: headers, fingerprint, fact quotes",
+  uploads: `EVIDENCE_RETENTION_DAYS = ${EVIDENCE_RETENTION_DAYS}`,
+  unfinishedUploads: `ORPHAN_BLOB_MIN_AGE_HOURS = ${ORPHAN_BLOB_MIN_AGE_HOURS}`,
+  mailComponentCopy: "kept until you delete your account",
+  evaluations: `EVALUATION_RETENTION_DAYS = ${EVALUATION_RETENTION_DAYS}`,
+  inboundPayload: `RETENTION_PAYLOAD_DAYS = ${RETENTION_PAYLOAD_DAYS}`,
+  observations: `RETENTION_OBSERVATION_DAYS = ${RETENTION_OBSERVATION_DAYS}, RETENTION_KEEP_NEWEST = ${RETENTION_KEEP_NEWEST}`,
+  mailLog: `RETENTION_MAILLOG_DAYS = ${RETENTION_MAILLOG_DAYS}`,
+  stash: `RETENTION_STASH_DAYS = ${RETENTION_STASH_DAYS}`,
+  unverifiedAccounts: `RETENTION_UNVERIFIED_DAYS = ${RETENTION_UNVERIFIED_DAYS}`,
+  moneyHistory: "kept until you delete your account",
+};
+
+/** Reading order. `Privacy.test.tsx` checks that the page renders every statement exactly once. */
+const RETENTION_GROUPS: readonly { title: string; keys: readonly StatementKey[] }[] = [
+  {
+    title: "Email, pasted text and uploads",
+    keys: ["evidenceText", "evidenceAfterClearing", "uploads", "unfinishedUploads", "inboundPayload", "mailComponentCopy"],
+  },
+  { title: "Rule checks", keys: ["evaluations"] },
+  { title: "Prices and mail", keys: ["observations", "mailLog"] },
+  { title: "Accounts and bookkeeping", keys: ["stash", "unverifiedAccounts"] },
+  { title: "Your money history", keys: ["moneyHistory"] },
+];
 
 const bodyClass = "mt-3 text-sm leading-relaxed text-gray-700 first:mt-0";
 const codeClass = "rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-900";
