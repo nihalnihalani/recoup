@@ -47,7 +47,7 @@ import { alertGate, isTombstoned, type MailReason } from "./lib/accountState";
 import { requireUserId } from "./lib/access";
 import { rateLimiter } from "./lib/rateLimits";
 import { sanitizeError } from "./lib/errors";
-import { BACKOFF_MS, TERMINAL_FAILURES } from "./drafts";
+import { BACKOFF_MS, isAmbiguousSendFailure, isTerminalSendFailure } from "./drafts";
 import { clearPendingMailEvent, getPendingMailEvent } from "./mailEvents";
 import {
   DROP_EMAIL_COUNT_SCAN,
@@ -470,7 +470,9 @@ async function suppressUnlessTombstoned(
  * callers, and tests drive the transitions directly.
  *
  * - `complained` -> stays `sent` (it was delivered), providerStatus recorded, address suppressed
- * - `failed | bounced | rejected` -> `failed`, reason `send_failed`, providerStatus recorded; `bounced` also suppresses
+ * - `bounced | rejected`, or `failed` from a provider 4xx -> `failed`, reason `send_failed`, providerStatus recorded;
+ *   `bounced` also suppresses
+ * - `failed` for any other reason (S-M03-1: lost response, timeout, 5xx) -> `unknown`, never re-claimed
  * - a real `agentmailMessageId` (any other status) -> `sent`, unless F8's
  *   `mailEvents.onEvent` already recorded an early bounce/complaint for this
  *   same message id (it can arrive before we ever learn the id ourselves) --
@@ -504,7 +506,7 @@ export async function applyDropOutcome(
     return "sent";
   }
 
-  if (status && (TERMINAL_FAILURES as readonly string[]).includes(status.status)) {
+  if (status && isTerminalSendFailure(status)) {
     await ctx.db.patch(mailLogId, {
       status: "failed",
       reason: "send_failed",
@@ -517,6 +519,20 @@ export async function applyDropOutcome(
     });
     if (status.status === "bounced") await suppressUnlessTombstoned(ctx, row.userId, "bounced");
     return "failed";
+  }
+
+  // S-M03-1: a component `failed` that is not a provider 4xx (a lost response, a timeout, a 5xx) may have been
+  // accepted by the provider. It is `unknown`, never `failed`/`send_failed`, so the D70 24-hour re-claim (which only
+  // re-sends `failed`/`suppressed` rows) can never mail the same alert twice. The sweep keeps re-checking it like any
+  // other unknown row; the component row is final, so it stays unknown unless a delivery webhook says otherwise.
+  if (status && isAmbiguousSendFailure(status)) {
+    await ctx.db.patch(mailLogId, {
+      status: "unknown",
+      providerStatus: "failed",
+      nextCheckAt: now + MAIL_RECONCILE_STALL_MS,
+      lastCheckedAt: now,
+    });
+    return "unknown";
   }
 
   if (status?.agentmailMessageId) {
