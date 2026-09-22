@@ -52,4 +52,13 @@ export const rateLimiter = new RateLimiter(components.rateLimiter, {
    * expected.
    */
   inboundPerInbox: { kind: "fixed window", rate: 60, period: HOUR },
+  /**
+   * `facts.answer` per user (M11b), consumed before any write and keyed on the server-resolved userId. Every
+   * answer that changes a value adds a fact row and supersession keeps history, so unthrottled answering grows the
+   * table without bound. A person filling in a Questions form answers a handful of decisive facts per card and a few
+   * cards in a sitting: a burst capacity of 30 covers that with room to spare, and 120 per hour (one every 30 s,
+   * sustained) is far above anyone typing answers, while capping a scripted client at ~2,900 rows a day.
+   * Token bucket, so a legitimate burst is never cut at a window edge.
+   */
+  factsAnswer: { kind: "token bucket", rate: 120, period: HOUR, capacity: 30 },
 });

@@ -5,6 +5,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { putFact, readCellRows, type PutFactInput } from "./lib/facts/write";
 import { MAX_LIVE_FACTS_PER_TRANSACTION } from "./limits";
+import { FACT_SPECS, type FactSpec, type FactValue } from "./lib/facts/catalog";
+import { legacyRetailRows } from "./lib/facts/legacyRetail";
 
 type T = ReturnType<typeof setup>;
 
@@ -375,32 +377,34 @@ describe("facts public functions (ownership, D142, DA-A-1)", () => {
   it("list: the resolved cells of a retail transaction — legacy values, the currency assumption, stored answers", async () => {
     const t = setup();
     const r = await retail(t);
-    await r.as.mutation(api.facts.answer, { transactionId: r.transactionId, subjectKey: r.item2, key: "retail.quantity", value: { kind: "user_unknown" } });
+    // An internal user_confirmed writer (not facts.answer: retail.quantity is legacy-backed, M11b).
+    await put(t, r.userId, { transactionId: r.transactionId, subjectKey: r.item2, key: "retail.quantity", state: "user_confirmed", value: { kind: "user_unknown" }, source: user });
     const cells = await r.as.query(api.facts.list, { transactionId: r.transactionId });
     const get = (s: string, k: string) => cells.find((c) => c.subjectKey === s && c.key === k);
-    expect(get("txn", "retail.merchant")).toMatchObject({ status: "confirmed", value: { kind: "text", text: "Northwind Outfitters" }, source: { kind: "legacy_purchase" }, userAssertable: true });
+    expect(get("txn", "retail.merchant")).toMatchObject({ status: "confirmed", value: { kind: "text", text: "Northwind Outfitters" }, source: { kind: "legacy_purchase" }, userAssertable: true, answerVia: "purchases.confirm" });
     expect(get("txn", "retail.currency")).toMatchObject({ status: "candidate", capsOutcomeAt: "likely_eligible", question: { prompt: "Which currency did you pay in?" } });
     expect(get(r.item, "retail.unit_price")).toMatchObject({ status: "confirmed", value: usd(8000) });
     // DA-A-1 end to end: "I don't know" is never read as the legacy value it replaced.
     expect(get(r.item2, "retail.quantity")).toEqual({
       subjectKey: r.item2, key: "retail.quantity", status: "user_unknown", capsOutcomeAt: null, userAssertable: true,
-      question: { prompt: "How many did you buy?", why: "The difference is owed per unit." },
+      answerVia: "purchases.confirm", question: { prompt: "How many did you buy?", why: "The difference is owed per unit." },
     });
   });
 
   it("answer: records a confirmation through putFact (masked), and an identical re-answer writes nothing", async () => {
     const t = setup();
-    const r = await retail(t);
-    const args = { transactionId: r.transactionId, subjectKey: r.item, key: "retail.item_name", value: { kind: "text" as const, text: "Sweater 5555 5555 5555 4444" } };
-    const first = await r.as.mutation(api.facts.answer, args);
+    const { as, userId } = await signedIn(t);
+    const standalone = await t.run((ctx) =>
+      ctx.db.insert("transactions", { userId, category: "retail_order", status: "active", counterpartyName: "Shop", currency: "USD", liveFactCount: 0 }),
+    );
+    const args = { transactionId: standalone, subjectKey: "txn", key: "retail.merchant", value: { kind: "text" as const, text: "Shop 5555 5555 5555 4444" } };
+    const first = await as.mutation(api.facts.answer, args);
     expect(first.outcome).toBe("inserted");
-    expect(await r.as.mutation(api.facts.answer, args)).toEqual({ factId: first.factId, outcome: "unchanged" });
-    const cells = await r.as.query(api.facts.list, { transactionId: r.transactionId });
-    // The legacy item row still says "Merino sweater": two user statements disagree (D152 confirmed_vs_confirmed).
-    expect(cells.find((c) => c.subjectKey === r.item && c.key === "retail.item_name")).toMatchObject({
-      status: "conflicting",
-      conflict: { kind: "confirmed_vs_confirmed", values: [{ value: { kind: "text", text: "Sweater •••• 4444" } }, { value: { kind: "text", text: "Merino sweater" } }] },
-    });
+    expect(await as.mutation(api.facts.answer, args)).toEqual({ factId: first.factId, outcome: "unchanged" });
+    const cells = await as.query(api.facts.list, { transactionId: standalone });
+    expect(cells).toEqual([
+      expect.objectContaining({ key: "retail.merchant", status: "confirmed", value: { kind: "text", text: "Shop •••• 4444" }, answerVia: "facts.answer" }),
+    ]);
   });
 
   it("answer: refuses keys only the system states and off-catalogue keys; writes nothing", async () => {
@@ -429,7 +433,7 @@ describe("facts public functions (ownership, D142, DA-A-1)", () => {
     const foreignAnswer = await b.as.mutation(api.facts.answer, { ...answer, transactionId: a.transactionId }).catch((e: Error) => e.message);
     expect(foreignAnswer).toBe(foreignList);
     // B's own transaction, A's item as the subject.
-    await expect(b.as.mutation(api.facts.answer, { transactionId: b.transactionId, subjectKey: a.item, key: "retail.quantity", value: { kind: "count", n: 1 } })).rejects.toThrow(/Item not found/);
+    await expect(b.as.mutation(api.facts.answer, { transactionId: b.transactionId, subjectKey: a.item, key: "retail.quantity", value: { kind: "count", n: 1 } })).rejects.toThrow();
     expect(await rows(t, a.transactionId)).toHaveLength(0);
     expect(await rows(t, b.transactionId)).toHaveLength(0);
   });
@@ -451,5 +455,74 @@ describe("facts public functions (ownership, D142, DA-A-1)", () => {
       ctx.db.insert("transactions", { userId, category: "air_travel", status: "active", counterpartyName: "Air", currency: "USD", liveFactCount: 0 }),
     );
     expect(await as.query(api.facts.list, { transactionId: air })).toEqual([]);
+  });
+});
+
+describe("M11b: legacy-backed retail keys have one source of truth (the purchase record)", () => {
+  const LEGACY_BACKED = ["retail.merchant", "retail.order_ref", "retail.purchase_date", "retail.currency", "retail.item_name", "retail.quantity", "retail.unit_price"];
+
+  it("facts.answer refuses every legacy-backed key on a purchase-backed transaction, pointing at the purchase edit; nothing is written", async () => {
+    const t = setup();
+    const r = await retail(t);
+    const answers: Array<{ subjectKey: string; key: string; value: FactValue }> = [
+      { subjectKey: "txn", key: "retail.merchant", value: { kind: "text", text: "Northwind Co" } },
+      { subjectKey: "txn", key: "retail.order_ref", value: { kind: "identifier", scheme: "order_ref", value: "NW-9" } },
+      { subjectKey: "txn", key: "retail.purchase_date", value: { kind: "instant", epochMs: Date.UTC(2026, 7, 20) } },
+      { subjectKey: "txn", key: "retail.currency", value: { kind: "code", code: "EUR" } },
+      { subjectKey: r.item, key: "retail.item_name", value: { kind: "text", text: "Sweater" } },
+      { subjectKey: r.item, key: "retail.quantity", value: { kind: "user_unknown" } },
+      { subjectKey: r.item, key: "retail.unit_price", value: usd(7000) },
+    ];
+    expect(answers.map((a) => a.key)).toEqual(LEGACY_BACKED);
+    for (const a of answers) {
+      await expect(r.as.mutation(api.facts.answer, { transactionId: r.transactionId, ...a }), a.key).rejects.toThrow(/edit the purchase/);
+    }
+    expect(await rows(t, r.transactionId)).toHaveLength(0);
+    expect(await liveCount(t, r.transactionId)).toBe(0);
+  });
+
+  it("the same correction through purchases.confirm updates the snapshot, with no conflict", async () => {
+    const t = setup();
+    const r = await retail(t);
+    await expect(r.as.mutation(api.facts.answer, { transactionId: r.transactionId, subjectKey: r.item, key: "retail.unit_price", value: usd(7000) })).rejects.toThrow(/edit the purchase/);
+    await r.as.mutation(api.purchases.confirm, {
+      purchaseId: r.purchaseId, merchant: "Northwind Outfitters", merchantDomain: "northwind.example", purchasedAt: basePurchase.purchasedAt,
+      items: [
+        { itemId: r.itemIds[0], name: "Merino sweater", unitCents: 7000, qty: 1 },
+        { itemId: r.itemIds[1], name: "Wool scarf", unitCents: 4000, qty: 2 },
+      ],
+    });
+    const cells = await r.as.query(api.facts.list, { transactionId: r.transactionId });
+    expect(cells.find((c) => c.subjectKey === r.item && c.key === "retail.unit_price")).toMatchObject({ status: "confirmed", value: usd(7000), source: { kind: "legacy_purchase" } });
+    expect(cells.filter((c) => c.status === "conflicting")).toEqual([]);
+  });
+
+  it("the catalogue flag and the legacy adapter agree on which keys the purchase record backs", () => {
+    const flagged = (FACT_SPECS as readonly FactSpec[]).filter((s) => s.sourceOfTruth === "purchase_record").map((s) => s.key).sort();
+    expect(flagged).toEqual([...LEGACY_BACKED].sort());
+    const emitted = new Set(legacyRetailRows({
+      purchase: { _id: "p" as Id<"purchases">, _creationTime: 0, userId: "u" as Id<"users">, merchant: "M", merchantDomain: "m.example", orderRef: "R-1", purchasedAt: 1, currency: "USD", status: "active" },
+      items: [{ _id: "i" as Id<"items">, _creationTime: 0, purchaseId: "p" as Id<"purchases">, userId: "u" as Id<"users">, name: "N", unitCents: 1, qty: 1, returned: false }],
+      latestAccepted: {},
+    }).map((r) => r.key));
+    expect([...emitted].sort()).toEqual([...LEGACY_BACKED].sort());
+  });
+});
+
+describe("M11b: facts.answer is rate-limited per user (factsAnswer bucket)", () => {
+  it("a burst of 30 answers passes; the 31st is refused before any write; another user is unaffected", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t, "Burst");
+    const other = await signedIn(t, "Other");
+    const standalone = async (uid: Id<"users">) =>
+      t.run((ctx) => ctx.db.insert("transactions", { userId: uid, category: "retail_order", status: "active", counterpartyName: "Shop", currency: "USD", liveFactCount: 0 }));
+    const mine = await standalone(userId);
+    const theirs = await standalone(other.userId);
+    const answer = (transactionId: Id<"transactions">, text: string) => ({ transactionId, subjectKey: "txn", key: "retail.merchant", value: { kind: "text" as const, text } });
+    for (let i = 0; i < 30; i++) await as.mutation(api.facts.answer, answer(mine, `Shop ${i}`));
+    const before = await rows(t, mine);
+    await expect(as.mutation(api.facts.answer, answer(mine, "Shop 30"))).rejects.toThrow(/too many answers/);
+    expect(await rows(t, mine)).toEqual(before);
+    expect((await other.as.mutation(api.facts.answer, answer(theirs, "Theirs"))).outcome).toBe("inserted");
   });
 });

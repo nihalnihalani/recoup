@@ -68,6 +68,13 @@ export interface FactSpec {
    * observation or the rule pack's parameter source supplies (e.g. an observed price, a policy's window).
    */
   userAssertable: boolean;
+  /**
+   * `purchase_record` (M11b): on a transaction that mirrors a purchase, the purchase/item row IS this fact's source of
+   * truth — `lib/facts/legacyRetail.ts` reads it as the cell's base layer. The user changes it by editing the purchase
+   * (`purchases.confirm`), never through `facts.answer`, so a user's own correction can never contradict their own
+   * purchase record (confirmed_vs_confirmed → manual_review). Absent: the fact has no row behind it.
+   */
+  sourceOfTruth?: "purchase_record";
 }
 
 export const FACT_SPECS = [...RETAIL_FACT_SPECS, ...ORDER_FACT_SPECS, ...AIR_FACT_SPECS, ...CARD_FACT_SPECS] as const;

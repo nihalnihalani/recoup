@@ -4,6 +4,10 @@
  * parameters (`window_days`, `policy_confirmed`, `policy_temporal`) are catalogued so packs can name them, but only
  * the pack's parameter source supplies them — the user never asserts them.
  *
+ * `sourceOfTruth: "purchase_record"` marks the keys the purchase/item rows back (M11b): they are edited through
+ * `purchases.confirm`, never answered through `facts.answer`. `facts.test.ts` checks the flag against the keys the
+ * legacy adapter emits, so the two lists cannot drift.
+ *
  * Fixture alignment: these are the key names used by `docs/rules/fixtures/R01.json`. Keys are never renamed.
  */
 import type { FactSpec } from "./catalog";
@@ -15,6 +19,7 @@ export const RETAIL_FACT_SPECS = [
   {
     key: "retail.merchant",
     domain: "retail",
+    sourceOfTruth: "purchase_record",
     categories: RETAIL,
     subject: ["transaction"],
     value: "text",
@@ -25,6 +30,7 @@ export const RETAIL_FACT_SPECS = [
   {
     key: "retail.order_ref",
     domain: "retail",
+    sourceOfTruth: "purchase_record",
     categories: RETAIL,
     subject: ["transaction"],
     value: "identifier",
@@ -36,6 +42,7 @@ export const RETAIL_FACT_SPECS = [
   {
     key: "retail.purchase_date",
     domain: "retail",
+    sourceOfTruth: "purchase_record",
     categories: RETAIL,
     subject: ["transaction"],
     value: "instant",
@@ -49,6 +56,7 @@ export const RETAIL_FACT_SPECS = [
   {
     key: "retail.currency",
     domain: "retail",
+    sourceOfTruth: "purchase_record",
     categories: RETAIL,
     subject: ["transaction"],
     value: "code",
@@ -63,6 +71,7 @@ export const RETAIL_FACT_SPECS = [
   {
     key: "retail.item_name",
     domain: "retail",
+    sourceOfTruth: "purchase_record",
     categories: RETAIL,
     subject: ["item"],
     value: "text",
@@ -73,6 +82,7 @@ export const RETAIL_FACT_SPECS = [
   {
     key: "retail.quantity",
     domain: "retail",
+    sourceOfTruth: "purchase_record",
     categories: RETAIL,
     subject: ["item"],
     value: "count",
@@ -85,6 +95,7 @@ export const RETAIL_FACT_SPECS = [
   {
     key: "retail.unit_price",
     domain: "retail",
+    sourceOfTruth: "purchase_record",
     categories: RETAIL,
     subject: ["item"],
     value: "money",

@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
+import { convexTest } from "convex-test";
+import schema from "./schema";
+import { PROCESSED_EVENTS_PAGE } from "./limits";
 import {
   RETENTION_KEEP_NEWEST,
   RETENTION_MAILLOG_DAYS,
@@ -53,10 +56,13 @@ async function opsCursor(t: T) {
 }
 
 describe("retention.sweep — bounded and resumable", () => {
-  it("never writes more than RETENTION_PAGE rows in one call, and resumes across calls instead of restarting (cursor persists)", async () => {
+  // D163 (lead-authorized, M14b): this test pinned 200 rows per processedEvents call, the page size that
+  // wedged the sweep on large multibyte payloads. It now asserts the byte-aware bound (PROCESSED_EVENTS_PAGE);
+  // the resume-not-restart property it checks is unchanged.
+  it("never writes more than PROCESSED_EVENTS_PAGE rows in one processedEvents call (D163), and resumes across calls instead of restarting (cursor persists)", async () => {
     const t = setup();
     const { userId } = await signedIn(t);
-    const TOTAL = RETENTION_PAGE + 50; // spans two pages of the FIRST step (processedEvents)
+    const TOTAL = RETENTION_PAGE + 50; // spans many pages of the FIRST step (processedEvents)
     for (let i = 0; i < TOTAL; i++) {
       await t.run(async (ctx) =>
         ctx.db.insert("processedEvents", {
@@ -71,24 +77,33 @@ describe("retention.sweep — bounded and resumable", () => {
     }
     vi.advanceTimersByTime((RETENTION_PAYLOAD_DAYS + 1) * DAY_MS);
 
-    // Call 1: page 1 of the processedEvents step -- exactly RETENTION_PAGE rows, not done with this step yet.
+    // Call 1: page 1 of the processedEvents step -- exactly PROCESSED_EVENTS_PAGE rows, not done with this step yet.
     const first = await t.mutation(internal.retention.sweep, {});
     expect(first.table).toBe("processedEvents");
-    expect(first.patched).toBe(RETENTION_PAGE);
-    expect(first.patched + first.deleted).toBeLessThanOrEqual(RETENTION_PAGE);
+    expect(first.patched).toBe(PROCESSED_EVENTS_PAGE);
+    expect(first.patched + first.deleted).toBeLessThanOrEqual(PROCESSED_EVENTS_PAGE);
     expect(first.done).toBe(false);
     const midCursor = await opsCursor(t);
     expect(midCursor?.cursor).toBeTruthy();
 
-    // Call 2: MUST resume from where call 1 left off (the remaining 50), not
-    // restart at the first RETENTION_PAGE rows (already patched, a no-op) and
-    // never reach the rest -- that would be observable as this call also
-    // reporting up to RETENTION_PAGE "patched" instead of exactly 50, and as
-    // rows 201-250 never getting cleared below.
+    // Call 2: MUST resume from where call 1 left off, not restart at the
+    // first page (already patched, a no-op) -- a restart would be observable
+    // as this call reporting 0 "patched" instead of a full page, and as the
+    // later rows never getting cleared below.
     const second = await t.mutation(internal.retention.sweep, {});
     expect(second.table).toBe("processedEvents");
-    expect(second.patched).toBe(50);
-    expect(second.patched + second.deleted).toBeLessThanOrEqual(RETENTION_PAGE);
+    expect(second.patched).toBe(PROCESSED_EVENTS_PAGE);
+    expect(second.patched + second.deleted).toBeLessThanOrEqual(PROCESSED_EVENTS_PAGE);
+
+    // The rest of the step, one bounded page per call, until the sweep moves on to the next step.
+    let patched = first.patched + second.patched;
+    for (let i = 0; i < 40; i++) {
+      const next = await t.mutation(internal.retention.sweep, {});
+      if (next.table !== "processedEvents") break;
+      expect(next.patched).toBeLessThanOrEqual(PROCESSED_EVENTS_PAGE);
+      patched += next.patched;
+    }
+    expect(patched).toBe(TOTAL);
 
     const rows = await t.run((ctx) => ctx.db.query("processedEvents").collect());
     expect(rows).toHaveLength(TOTAL);
@@ -915,5 +930,99 @@ describe("M14 SEC-UP-7 / DA-A-28(d) — orphan blob sweep (retention.sweepOrphan
     for (const c of calls) expect(c.scanned).toBeLessThanOrEqual(ORPHAN_SWEEP_PAGE);
     expect(calls.reduce((n, c) => n + c.deleted, 0)).toBe(TOTAL);
     for (const id of ids) expect(await blobExists(t, id)).toBe(false);
+  });
+});
+
+// ===========================================================================
+// M14b (D163): `retention.sweep`'s processedEvents step read 200 rows per
+// page. A row's `payload` holds up to 60,000 chars (`inbound.ts`
+// MAX_TEXT_CHARS); at 3 bytes/char (CJK) 100 such rows are ~18 MB, over
+// Convex's 16 MiB per-transaction read limit, so the call threw -- and every
+// daily run re-read the same cursor, wedging the D75 sweep for good. The
+// step now pages PROCESSED_EVENTS_PAGE rows (the 6b-6 budget account.ts
+// already uses for this table).
+// ===========================================================================
+
+/** convex-test only enforces the 16 MiB read limit with `transactionLimits: true` (same harness as account.test.ts's `setupWithLimits`). */
+function setupWithReadLimits() {
+  return convexTest({ schema, modules: import.meta.glob("./**/*.*s"), transactionLimits: true });
+}
+
+async function seedCjkEvents(t: ReturnType<typeof setupWithReadLimits>, userId: Id<"users">, count: number, status: "succeeded" | "received" = "succeeded") {
+  const text = "語".repeat(60_000);
+  for (let start = 0; start < count; start += 20) {
+    await t.run(async (ctx) => {
+      for (let i = start; i < Math.min(count, start + 20); i++) {
+        await ctx.db.insert("processedEvents", {
+          externalId: `cjk-${status}-${i}`, kind: "agentmail.message.received", status, attempts: 1, userId,
+          payload: { subject: "s", from: "f@x.example", text },
+        });
+      }
+    });
+  }
+}
+
+describe("M14b (D163) — retention.sweep's processedEvents step is byte-aware", () => {
+  it("100 rows of 60,000 CJK chars no longer exceed the 16 MiB read limit: the cycle completes and every old terminal payload is cleared", async () => {
+    const t = setupWithReadLimits();
+    const userId = await t.run((ctx) => ctx.db.insert("users", { name: "cjk" }));
+    await seedCjkEvents(t, userId, 100);
+    vi.advanceTimersByTime((RETENTION_PAYLOAD_DAYS + 1) * DAY_MS);
+
+    const calls = await runFullCycle(t as unknown as T);
+
+    const eventCalls = calls.filter((c) => c.table === "processedEvents");
+    for (const c of eventCalls) expect(c.patched).toBeLessThanOrEqual(PROCESSED_EVENTS_PAGE);
+    expect(eventCalls.reduce((n, c) => n + c.patched, 0)).toBe(100);
+    const rows = await t.run((ctx) => ctx.db.query("processedEvents").collect());
+    expect(rows.every((r) => r.payload === undefined)).toBe(true);
+  }, 60_000);
+
+  it("the same page stays under the limit when the payloads are NOT yet clearable (young or non-terminal rows are still read)", async () => {
+    const t = setupWithReadLimits();
+    const userId = await t.run((ctx) => ctx.db.insert("users", { name: "cjk" }));
+    await seedCjkEvents(t, userId, 100, "received");
+    const calls = await runFullCycle(t as unknown as T);
+    expect(calls.at(-1)?.done).toBe(true);
+    expect(calls.reduce((n, c) => n + c.patched, 0)).toBe(0);
+  }, 60_000);
+
+  it("resumable: a large backlog interrupted mid-step completes across later calls, each row cleared exactly once", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const TOTAL = PROCESSED_EVENTS_PAGE * 8 + 11; // many pages of the first step
+    await t.run(async (ctx) => {
+      for (let i = 0; i < TOTAL; i++) {
+        await ctx.db.insert("processedEvents", {
+          externalId: `bk-${i}`, kind: "agentmail.message.received", status: i % 2 ? "succeeded" : "failed", attempts: 1, userId,
+          payload: { subject: "s", text: "t", from: "f@x.example", messageId: null },
+        });
+      }
+    });
+    vi.advanceTimersByTime((RETENTION_PAYLOAD_DAYS + 1) * DAY_MS);
+
+    // Three pages, then the chain "dies" (no scheduled continuation is run here, as after a crash or redeploy).
+    const early: Array<{ patched: number }> = [];
+    for (let i = 0; i < 3; i++) early.push(await t.mutation(internal.retention.sweep, {}));
+    expect(early.map((c) => c.patched)).toEqual([PROCESSED_EVENTS_PAGE, PROCESSED_EVENTS_PAGE, PROCESSED_EVENTS_PAGE]);
+    const midCursor = await opsCursor(t);
+    expect(JSON.parse(midCursor!.cursor!)).toMatchObject({ step: 0 });
+    expect(JSON.parse(midCursor!.cursor!).page).toBeTruthy();
+
+    const clearedCount = async () => (await t.run((ctx) => ctx.db.query("processedEvents").collect())).filter((r) => r.payload === undefined).length;
+    expect(await clearedCount()).toBe(3 * PROCESSED_EVENTS_PAGE);
+
+    // A later run resumes from the persisted cursor. (The clock is NOT advanced: under fake timers that would
+    // run the three self-scheduled continuations and hide what a fresh call does.) A restart would re-read the
+    // already-cleared first pages and patch 0 here; resuming clears the next full page.
+    const resumed = await t.mutation(internal.retention.sweep, {});
+    expect(resumed).toMatchObject({ table: "processedEvents", patched: PROCESSED_EVENTS_PAGE });
+    const rest = await runFullCycle(t);
+    for (const c of rest) expect(c.patched + c.deleted).toBeLessThanOrEqual(RETENTION_PAGE);
+    for (const c of rest.filter((r) => r.table === "processedEvents")) expect(c.patched).toBeLessThanOrEqual(PROCESSED_EVENTS_PAGE);
+    const total = [...early, resumed, ...rest].reduce((n, c) => n + c.patched, 0);
+    expect(total).toBe(TOTAL); // each row cleared exactly once, across the interruption
+    const rows = await t.run((ctx) => ctx.db.query("processedEvents").collect());
+    expect(rows.every((r) => r.payload === undefined)).toBe(true);
   });
 });
