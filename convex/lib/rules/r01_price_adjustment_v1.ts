@@ -709,6 +709,8 @@ export const r01PriceAdjustmentV1: RulePack<R01Snapshot, R01Params, R01CaseConte
     { subjectPattern: "txn", key: "retail.currency", class: "assumption", assumptionText: "the purchase currency read from the order is right (DA-A-33)" },
   ],
   fixturesPath: "docs/rules/fixtures/R01.json",
+  lateAskDeadlineIds: [R01_V1_WINDOW_ID],
+  overlap: [],
   knownLimitations: [
     "L1: legacy per-purchase policy snapshots are not versioned packs; the best outcome is likely_eligible.",
     "Windows are whole 24-hour periods from the purchase instant, not calendar days (O15); R01 v2 (M37) reads calendar days.",
