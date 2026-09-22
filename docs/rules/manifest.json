@@ -11,6 +11,14 @@
       "lifecycle": "reviewed",
       "packFile": "convex/lib/rules/r01_price_adjustment_v1.ts",
       "packFileSha256": "c0ea84d560a6665691d19beecdfed1d31307ac7c52ac86435d66daddfe0bce50",
+      "engineRoots": [
+        "convex/lib/rules/r01_price_adjustment_v1.ts",
+        "convex/lib/facts/snapshot_retail.ts",
+        "convex/lib/facts/resolve.ts",
+        "convex/lib/rules/outcome.ts",
+        "convex/lib/deadlines/engine.ts"
+      ],
+      "engineClosureSha256": "76893d8ec8af531cf97a56fceeff95fce68e725e55dc1a924c964b35e36cb248",
       "reviewer": "opus-rules-reviewer",
       "reviewedAt": "2026-09-23",
       "reviews": {

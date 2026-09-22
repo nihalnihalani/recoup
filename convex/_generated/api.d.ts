@@ -59,6 +59,7 @@ import type * as lib_ledger from "../lib/ledger.js";
 import type * as lib_log from "../lib/log.js";
 import type * as lib_money from "../lib/money.js";
 import type * as lib_offerMatch from "../lib/offerMatch.js";
+import type * as lib_opportunityClosure from "../lib/opportunityClosure.js";
 import type * as lib_pan from "../lib/pan.js";
 import type * as lib_passage from "../lib/passage.js";
 import type * as lib_policyText from "../lib/policyText.js";
@@ -161,6 +162,7 @@ declare const fullApi: ApiFromModules<{
   "lib/log": typeof lib_log;
   "lib/money": typeof lib_money;
   "lib/offerMatch": typeof lib_offerMatch;
+  "lib/opportunityClosure": typeof lib_opportunityClosure;
   "lib/pan": typeof lib_pan;
   "lib/passage": typeof lib_passage;
   "lib/policyText": typeof lib_policyText;

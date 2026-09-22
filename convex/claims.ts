@@ -10,6 +10,7 @@ import schema, { claimStatus, eventKind, money, nonCashKind } from "./schema";
 import { cancelPending } from "./followUps";
 import { claimBalance, claimEvents, balanceValidator } from "./lib/balance";
 import { isClosedForAsk } from "./lib/claimState";
+import { syncOpportunityClosure } from "./lib/opportunityClosure";
 import { agentmail } from "./mail";
 
 /**
@@ -338,7 +339,10 @@ async function writeConfirmedCredit(
   currency: string | undefined,
 ) {
   assertUserAmount(cents, "cents");
-  return await appendLedgerEvent(ctx, claim, "confirmed_credit", cents, evidence, idempotencyKey, undefined, currency);
+  const result = await appendLedgerEvent(ctx, claim, "confirmed_credit", cents, evidence, idempotencyKey, undefined, currency);
+  // DA-B-7: a settled claim closes its opportunity in this same mutation.
+  await syncOpportunityClosure(ctx, claim._id);
+  return result;
 }
 
 /** The claim's currency (`lib/money.claimCurrency`): its own, else its purchase's; null when neither is known. */
@@ -611,6 +615,8 @@ export const dismiss = mutation({
     if (claim.status === "confirmed") throw new ConvexError("A confirmed claim cannot be dismissed");
     await cancelPending(ctx, claim._id);
     await ctx.db.patch(claim._id, { status: "dismissed", version: claim.version + 1, attentionAt: undefined });
+    // DA-B-7: the opportunity reopens in this same mutation, not at the next evaluation.
+    await syncOpportunityClosure(ctx, claim._id);
 
     // D57: dismissing a claim with a send in flight best-effort cancels it
     // with AgentMail so it doesn't land after the user has walked away. A
