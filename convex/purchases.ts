@@ -16,6 +16,8 @@ import { schedulePolicyFetch } from "./policies";
 import { assertCoarseNow } from "./watches";
 import { ensurePurchaseTransaction } from "./transactions";
 import { putFact } from "./lib/facts/write";
+import { evaluateTransaction } from "./opportunities";
+import { evaluationScope } from "./lib/facts/subject";
 import schema, { processedStatus, verdictValidator } from "./schema";
 import {
   MAX_ITEMS_PER_PURCHASE,
@@ -211,19 +213,33 @@ export const confirm = mutation({
       if (claim !== null) throw new ConvexError("The currency cannot change once a claim exists for this purchase");
     }
     const cleanItems = [];
+    /** M11d: the item subjects whose values this confirm changes (for the scoped re-evaluation below). */
+    const changedItemSubjects: string[] = [];
     for (const it of args.items) {
       const item = await ownedItem(ctx, it.itemId, userId);
       if (item.purchaseId !== args.purchaseId) {
         throw new ConvexError("Item does not belong to this purchase");
       }
-      cleanItems.push({
+      const clean = {
         itemId: it.itemId,
         name: cleanItemName(it.name),
         unitCents: assertCents(it.unitCents, "unitCents"),
         qty: assertQty(it.qty),
         productUrl: cleanProductUrl(it.productUrl),
-      });
+      };
+      if (clean.name !== item.name || clean.unitCents !== item.unitCents || clean.qty !== item.qty || clean.productUrl !== item.productUrl) {
+        changedItemSubjects.push(`item:${it.itemId}`);
+      }
+      cleanItems.push(clean);
     }
+    // M11d: purchase-level fields feed every item's evaluation (date, currency, status, merchant, order ref).
+    let purchaseLevelChanged =
+      purchase.status !== "active" ||
+      purchase.merchant !== merchant ||
+      purchase.merchantDomain !== merchantDomain ||
+      purchase.orderRef !== orderRef ||
+      purchase.purchasedAt !== args.purchasedAt ||
+      (currency !== undefined && currency !== purchase.currency);
     await ctx.db.patch(args.purchaseId, {
       merchant,
       merchantDomain,
@@ -239,7 +255,7 @@ export const confirm = mutation({
     const transactionId = await ensurePurchaseTransaction(ctx, args.purchaseId);
     if (currency !== undefined) {
       // DA-A-33: only an explicit confirmation makes the currency known; an identical re-confirmation writes nothing.
-      await putFact(ctx, userId, {
+      const confirmation = await putFact(ctx, userId, {
         transactionId,
         subjectKey: "txn",
         key: "retail.currency",
@@ -247,6 +263,22 @@ export const confirm = mutation({
         value: { kind: "code", code: currency },
         source: { kind: "user" },
       });
+      // A first confirmation turns the currency assumption into a known fact: every item's result can change.
+      if (confirmation.outcome !== "unchanged") purchaseLevelChanged = true;
+    }
+    // C43 (M11d): re-evaluate in this SAME mutation, so the opportunity card shows the new outcome reactively.
+    // Scoped to the changed items (DA-A-32); a purchase-level change re-evaluates every item; nothing changed → no
+    // evaluation work. Budget: a whole 50-item purchase (the item cap) evaluates inside this transaction —
+    // facts.reevaluate.test.ts measures confirm + full re-evaluation on 50 items under real limits — so no scheduled
+    // follow-up, and no window in which the card shows a stale outcome.
+    if (purchaseLevelChanged || changedItemSubjects.length > 0) {
+      await evaluateTransaction(
+        ctx,
+        transactionId,
+        "fact_change",
+        Date.now(),
+        purchaseLevelChanged ? {} : evaluationScope(changedItemSubjects),
+      );
     }
     // C3(d)/D107: confirming is exactly the moment a needs_review item's
     // permanent-vs-transient classification can flip (it gains a
