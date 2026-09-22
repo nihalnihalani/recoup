@@ -46,11 +46,32 @@ file.
   as `VITE_CONVEX_URL`/`VITE_CONVEX_SITE_URL` in `.env.local`, not as
   `E2E_BASE_URL`.
 
-The suite reads which deployment to target from `CONVEX_DEPLOYMENT` if it is
-already set in the environment (CI), otherwise it parses the
-`CONVEX_DEPLOYMENT=…` line out of `.env.local` (the same file `npx convex
-dev` itself writes — see `resolveDeployment()` in `e2e/fixtures.ts`). Seeding
-and reset calls shell out to the locally installed Convex CLI
+### Which deployment the suite seeds (`resolveTarget()` in `e2e/fixtures.ts`)
+
+- **Locally (unchanged):** `CONVEX_DEPLOYMENT` from the environment if set,
+  otherwise the `CONVEX_DEPLOYMENT=…` line of `.env.local` (the file
+  `npx convex dev` writes). The browser side gets `VITE_CONVEX_URL` from
+  `.env.local` through Vite as usual.
+- **With `E2E_DEPLOY_KEY` set (CI, M08/QA-9):** seeding uses that deploy
+  key as the CLI's `CONVEX_DEPLOY_KEY` (and drops `CONVEX_DEPLOYMENT`).
+  - Only the key's non-secret `<kind>:<deployment>` prefix is ever checked
+    or printed, and only `dev:`/`prod:` keys are accepted.
+  - `playwright.config.ts` starts the dev server with
+    `VITE_CONVEX_URL = VITE_CONVEX_URL || E2E_CONVEX_URL` (unless
+    `E2E_BASE_URL` points at an already running app). An empty value, as an
+    unset GitHub secret arrives, counts as unset.
+  - The deployment named in the key must match the host of `E2E_CONVEX_URL`
+    and `VITE_CONVEX_URL` when they are set, so seeding and the browser can
+    never talk to two different deployments.
+  - A deployment other than `adorable-lion-138` needs
+    `E2E_ALLOW_UNKNOWN_DEPLOYMENT=true` (the CI job sets it). Under `CI` the
+    shared `adorable-lion-138` is refused outright: CI uses a dedicated E2E
+    deployment (`docs/ops/RELEASE.md` §4).
+- **Always:** the production deployment `cool-oyster-399` is refused
+  wherever it appears: the target deployment, the key, `E2E_CONVEX_URL`,
+  `VITE_CONVEX_URL` or `E2E_BASE_URL`.
+
+Seeding and reset calls shell out to the locally installed Convex CLI
 (`node_modules/.bin/convex run testing:<fn> '<json>'`), the same mechanism a
 human operator would use, because `convex/testing.ts`'s exports are
 `internal` — deliberately unreachable from the browser client itself.
@@ -128,9 +149,14 @@ look like real regressions, not evidence of a new defect.
   test-results/.../trace.zip`.
 - None of the above are committed (`.gitignore`: `/test-results/`,
   `/playwright-report/`, `/blob-report/`, `/playwright/.cache/`).
-- CI (`.github/workflows/ci.yml`'s `e2e` job, T17): only runs when
-  `E2E_CONVEX_URL`/`E2E_DEPLOY_KEY` secrets are configured, and uploads
-  `playwright-report/` as a build artifact on every run.
+- CI (`.github/workflows/ci.yml`'s `e2e` job): runs only when the
+  `E2E_CONVEX_URL`/`E2E_DEPLOY_KEY` repo secrets are configured (not yet
+  provisioned). Without them the job raises a `::warning::` annotation and a
+  step-summary line saying Playwright did not run, rather than passing
+  silently. When it runs, it uploads `playwright-report/` as a build
+  artifact. The dedicated deployment needs `E2E_SEED_ENABLED=true`,
+  placeholder provider keys and the commit's functions already deployed; the
+  job does not deploy.
 
 ## File map
 

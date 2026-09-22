@@ -1,0 +1,298 @@
+// @vitest-environment node
+/**
+ * M19: unit tests for scripts/check-rule-packs.mjs on fixture manifests
+ * (in memory, plus one throwaway git repo for BASE resolution). The live
+ * repository is checked last, and must pass with "no active packs" until
+ * M12/M18 land activation.
+ */
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, describe, expect, it } from "vitest";
+import {
+  checkRulePacks,
+  parseDecisions,
+  readAtRev,
+  readExportedLiteral,
+  resolveBase,
+} from "../../scripts/check-rule-packs.mjs";
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+
+const PACK_FILE = "convex/lib/rules/r09_example_v1.ts";
+const PACK_SRC = "export const pack = { ruleId: 'R09.example', version: 1 };\n";
+const FIXTURES = "docs/rules/fixtures/R09.json";
+const FIXTURES_SRC = '{"cases":[]}\n';
+const CAPTURE = "docs/rules/sources/example.txt";
+const CAPTURE_SRC = "# URL: https://example.gov/x\ncaptured text\n";
+
+type Manifest = {
+  packs: Array<Record<string, unknown>>;
+  sources: Array<Record<string, unknown>>;
+  fixtures: Record<string, string>;
+};
+
+function manifest(lifecycle = "reviewed", extra: Record<string, unknown> = {}): Manifest {
+  return {
+    packs: [
+      {
+        ruleId: "R09.example",
+        scenarioId: "R09",
+        version: 1,
+        lifecycle,
+        fixtures: FIXTURES,
+        sources: ["example-src"],
+        packFile: PACK_FILE,
+        packFileSha256: sha(PACK_SRC),
+        ...extra,
+      },
+      { ruleId: "R08.draft", scenarioId: "R08", version: 1, lifecycle: "researched", fixtures: null, sources: [] },
+    ],
+    sources: [{ sourceId: "example-src", capturedPath: CAPTURE, capturedSha256: sha(CAPTURE_SRC), rawResponseSha256: sha("raw") }],
+    fixtures: { [FIXTURES]: sha(FIXTURES_SRC) },
+  };
+}
+
+const DECISIONS = [
+  "## Mission 2",
+  "- D170 · **R09.example v1 activated.** Reviewed by M27; the lead records activation.",
+  "- D171 · **Something else entirely.**",
+  "- D172 · **R09.example v1 withdrawn** (source changed).",
+].join("\n");
+
+function activation(entries: Array<Record<string, unknown>>): string {
+  return [
+    "export type Activation = { ruleId: string; version: number; status: \"active\" | \"withdrawn\"; decision: string };",
+    `export const ACTIVATIONS: readonly Activation[] = ${JSON.stringify(entries, null, 2)};`,
+    "",
+  ].join("\n");
+}
+
+const ACTIVE = { ruleId: "R09.example", version: 1, status: "active", decision: "D170" };
+
+function files(overrides: Record<string, string | null> = {}) {
+  const map: Record<string, string | null> = { [PACK_FILE]: PACK_SRC, [FIXTURES]: FIXTURES_SRC, [CAPTURE]: CAPTURE_SRC, ...overrides };
+  return (rel: string) => (map[rel] === null || map[rel] === undefined ? null : Buffer.from(map[rel] as string));
+}
+
+function run(opts: Partial<Parameters<typeof checkRulePacks>[0]> = {}) {
+  return checkRulePacks({
+    manifest: manifest(),
+    baseManifest: null,
+    activationSource: null,
+    baseActivationSource: null,
+    verificationSource: null,
+    decisionsText: DECISIONS,
+    readRepoFile: files(),
+    today: "2026-09-23",
+    engineVersionPresent: false,
+    ...opts,
+  });
+}
+
+describe("check-rule-packs: activation", () => {
+  it("passes with 'no active packs' when activation.ts does not exist (before M12)", () => {
+    const r = run();
+    expect(r.errors).toEqual([]);
+    expect(r.activeCount).toBe(0);
+    expect(r.notes.join("\n")).toMatch(/activation\.ts not present: no active packs/);
+    expect(r.notes.join("\n")).toMatch(/ENGINE_VERSION: no engine yet/);
+  });
+
+  it("passes with 'no active packs' for an empty ACTIVATIONS array", () => {
+    const r = run({ activationSource: activation([]) });
+    expect(r.errors).toEqual([]);
+    expect(r.notes).toContain("no active packs");
+  });
+
+  it("accepts a consistent activation: reviewed manifest pack, pinned pack file, DECISIONS entry naming the ruleId", () => {
+    const r = run({ activationSource: activation([ACTIVE]) });
+    expect(r.errors).toEqual([]);
+    expect(r.activeCount).toBe(1);
+  });
+
+  it("fails when the cited DECISIONS id does not exist, or its text does not mention the ruleId", () => {
+    expect(run({ activationSource: activation([{ ...ACTIVE, decision: "D999" }]) }).errors.join("\n")).toMatch(/cites D999, which is not in docs\/team\/DECISIONS\.md/);
+    expect(run({ activationSource: activation([{ ...ACTIVE, decision: "D171" }]) }).errors.join("\n")).toMatch(/cites D171, whose text does not mention R09\.example/);
+  });
+
+  it("fails when the manifest pack is missing or below reviewed", () => {
+    expect(run({ activationSource: activation([{ ...ACTIVE, version: 2 }]) }).errors.join("\n")).toMatch(/no pack with that ruleId and version/);
+    expect(run({ manifest: manifest("researched"), activationSource: activation([ACTIVE]) }).errors.join("\n")).toMatch(/lifecycle is "researched" \(needs >= reviewed\)/);
+  });
+
+  it("fails when the manifest says active but activation.ts does not (and passes when both agree)", () => {
+    expect(run({ manifest: manifest("active"), activationSource: activation([]) }).errors.join("\n")).toMatch(/"active" in the manifest but not active/);
+    expect(run({ manifest: manifest("active"), activationSource: activation([ACTIVE]) }).errors).toEqual([]);
+  });
+
+  it("the last entry for a (ruleId, version) wins: an appended withdrawal deactivates", () => {
+    const r = run({ activationSource: activation([ACTIVE, { ...ACTIVE, status: "withdrawn", decision: "D172" }]) });
+    expect(r.errors).toEqual([]);
+    expect(r.activeCount).toBe(0);
+  });
+
+  it("rejects malformed entries and non-literal (executable) content", () => {
+    expect(run({ activationSource: activation([{ ...ACTIVE, status: "on" }]) }).errors.join("\n")).toMatch(/status must be "active" or "withdrawn"/);
+    expect(run({ activationSource: activation([{ ...ACTIVE, decision: "170" }]) }).errors.join("\n")).toMatch(/decision must be a DECISIONS id/);
+    expect(run({ activationSource: activation([{ ...ACTIVE, reviewer: "x" }]) }).errors.join("\n")).toMatch(/unknown keys: reviewer/);
+    expect(run({ activationSource: "export const ACTIVATIONS = [...OTHER];" }).errors.join("\n")).toMatch(/is not a literal/);
+    expect(run({ activationSource: "export const ACTIVATIONS = load();" }).errors.join("\n")).toMatch(/is not a literal/);
+    expect(run({ activationSource: "export const OTHER = [];" }).errors.join("\n")).toMatch(/has no `export const ACTIVATIONS`/);
+  });
+});
+
+describe("check-rule-packs: reviewed-pack immutability", () => {
+  it("fails when a reviewed pack's code file was edited", () => {
+    const r = run({ readRepoFile: files({ [PACK_FILE]: `${PACK_SRC}// tweak\n` }) });
+    expect(r.errors.join("\n")).toMatch(/r09_example_v1\.ts was edited .* A reviewed pack never changes/);
+  });
+
+  it("fails when the pinned pack file is missing, or only one of packFile/packFileSha256 is recorded", () => {
+    expect(run({ readRepoFile: files({ [PACK_FILE]: null }) }).errors.join("\n")).toMatch(/pack file .* does not exist/);
+    expect(run({ manifest: manifest("reviewed", { packFileSha256: undefined }) }).errors.join("\n")).toMatch(/must record both packFile and packFileSha256/);
+  });
+
+  it("requires an active pack to pin its code file; a reviewed pack without code yet is allowed", () => {
+    const noFile = { packFile: undefined, packFileSha256: undefined };
+    expect(run({ manifest: manifest("reviewed", noFile) }).errors).toEqual([]);
+    expect(run({ manifest: manifest("active", noFile), activationSource: activation([ACTIVE]) }).errors.join("\n")).toMatch(/is active but pins no code file/);
+  });
+
+  it("fails when a reviewed pack's fixture file no longer matches its manifest hash", () => {
+    expect(run({ readRepoFile: files({ [FIXTURES]: '{"cases":[1]}\n' }) }).errors.join("\n")).toMatch(/fixture file .* does not match its manifest hash/);
+  });
+
+  it("does not pin a researched pack's files", () => {
+    const r = run({ manifest: manifest("researched"), readRepoFile: files({ [PACK_FILE]: "edited", [FIXTURES]: "edited" }) });
+    expect(r.errors).toEqual([]);
+  });
+
+  it("fails when a capture file does not match capturedSha256", () => {
+    expect(run({ readRepoFile: files({ [CAPTURE]: `${CAPTURE_SRC}edited\n` }) }).errors.join("\n")).toMatch(/capture: example-src: .* hashes to/);
+  });
+});
+
+describe("check-rule-packs: append-only against BASE", () => {
+  it("fails when a reviewed entry's recorded hash changes (code file re-pinned to a new hash)", () => {
+    const edited = `${PACK_SRC}// v1 edited in place\n`;
+    const r = run({
+      baseManifest: manifest(),
+      manifest: manifest("reviewed", { packFileSha256: sha(edited) }),
+      readRepoFile: files({ [PACK_FILE]: edited }),
+    });
+    expect(r.errors.join("\n")).toMatch(/append-only: pack R09\.example v1 \(reviewed at base\): packFileSha256 changed/);
+  });
+
+  it("fails when a source cited by a reviewed pack gets a new hash, or the entry is removed or moves backwards", () => {
+    const base = manifest();
+    const cur = manifest();
+    cur.sources[0].rawResponseSha256 = sha("raw v2");
+    expect(run({ baseManifest: base, manifest: cur }).errors.join("\n")).toMatch(/source example-src rawResponseSha256 changed/);
+
+    const removed = manifest();
+    removed.packs = removed.packs.filter((p) => p.ruleId !== "R09.example");
+    expect(run({ baseManifest: base, manifest: removed }).errors.join("\n")).toMatch(/was reviewed at base and has been removed/);
+
+    expect(run({ baseManifest: base, manifest: manifest("researched") }).errors.join("\n")).toMatch(/lifecycle moved backwards: reviewed → researched/);
+  });
+
+  it("allows forward lifecycle moves, new entries, and any change to entries still at draft/researched", () => {
+    const base = manifest();
+    const cur = manifest("active");
+    cur.packs.push({ ruleId: "R09.example", scenarioId: "R09", version: 2, lifecycle: "researched", fixtures: null, sources: [] });
+    cur.packs[1] = { ...cur.packs[1], fixtures: "docs/rules/fixtures/R08.json" };
+    cur.fixtures["docs/rules/fixtures/R08.json"] = sha("new researched fixture");
+    expect(run({ baseManifest: base, manifest: cur, activationSource: activation([ACTIVE]) }).errors).toEqual([]);
+
+    const researchedBase = manifest("researched");
+    const rehashed = manifest("researched");
+    rehashed.fixtures[FIXTURES] = sha("revised by the researcher");
+    expect(run({ baseManifest: researchedBase, manifest: rehashed }).errors).toEqual([]);
+  });
+
+  it("ACTIVATIONS is append-only: editing or removing an earlier entry fails; appending passes", () => {
+    const base = activation([ACTIVE]);
+    const withdrawn = { ...ACTIVE, status: "withdrawn", decision: "D172" };
+    expect(run({ baseActivationSource: base, activationSource: activation([ACTIVE, withdrawn]) }).errors).toEqual([]);
+    expect(run({ baseActivationSource: base, activationSource: activation([withdrawn]) }).errors.join("\n")).toMatch(/ACTIVATIONS\[0\] was edited/);
+    expect(run({ baseActivationSource: base, activationSource: activation([]) }).errors.join("\n")).toMatch(/ACTIVATIONS\[0\] was removed/);
+    expect(run({ baseActivationSource: base, activationSource: null }).errors.join("\n")).toMatch(/was deleted but had 1 entries at base/);
+  });
+});
+
+describe("check-rule-packs: verification.ts", () => {
+  const good = { lastVerifiedAt: "2026-09-23", sha256: sha("x"), method: "fetch" };
+  const src = (v: Record<string, unknown>) => `export const VERIFICATION = ${JSON.stringify(v)} as const;\n`;
+
+  it("accepts entries keyed by manifest sourceIds with valid dates, hashes and methods", () => {
+    expect(run({ verificationSource: src({ "example-src": good }) }).errors).toEqual([]);
+  });
+
+  it("rejects unknown keys, future dates, bad hashes and methods", () => {
+    const errs = run({
+      verificationSource: src({
+        "no-such-source": good,
+        "example-src": { lastVerifiedAt: "2026-09-24", sha256: "abc", method: "guess" },
+      }),
+    }).errors.join("\n");
+    expect(errs).toMatch(/no-such-source is not a manifest sourceId/);
+    expect(errs).toMatch(/2026-09-24 is in the future/);
+    expect(errs).toMatch(/sha256 must be 64 lowercase hex/);
+    expect(errs).toMatch(/method must be "fetch" or "browser"/);
+  });
+});
+
+describe("check-rule-packs: parsing helpers", () => {
+  it("reads literal exports through `as const`, annotations and satisfies, without executing anything", () => {
+    const text = 'export const A: readonly { x: number }[] = [{ x: 1 }, { x: -2 }] as const;\nexport const B = { "k": [true, null, `t`] } satisfies object;\n';
+    expect(readExportedLiteral(text, "A", "t.ts")).toEqual([{ x: 1 }, { x: -2 }]);
+    expect(readExportedLiteral(text, "B", "t.ts")).toEqual({ k: [true, null, "t"] });
+    expect(readExportedLiteral(text, "C", "t.ts")).toBeUndefined();
+    expect(() => readExportedLiteral("export const A = { [k]: 1 };", "A", "t.ts")).toThrow(/computed property names/);
+  });
+
+  it("parses DECISIONS entries up to the next entry or heading", () => {
+    const d = parseDecisions("## H\n- D1 · one\n  continued\n- D2 · two\n## Next\ntext");
+    expect(d.get("D1")).toBe("- D1 · one\n  continued");
+    expect(d.get("D2")).toBe("- D2 · two");
+  });
+});
+
+describe("check-rule-packs: BASE resolution in a real git repository", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "recoup-m19-git-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  const g = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
+
+  it("uses HEAD~1 without origin/main, honours an explicit base, and reads files at a revision", () => {
+    g("init", "-q");
+    g("config", "user.email", "t@example.com");
+    g("config", "user.name", "t");
+    writeFileSync(path.join(dir, "m.json"), '{"v":1}');
+    g("add", "m.json");
+    g("commit", "-q", "-m", "one");
+    const first = g("rev-parse", "HEAD");
+    writeFileSync(path.join(dir, "m.json"), '{"v":2}');
+    g("commit", "-q", "-am", "two");
+
+    expect(resolveBase(dir, {})).toEqual({ rev: first, how: "HEAD~1" });
+    expect(resolveBase(dir, { explicit: "abc123" })).toEqual({ rev: "abc123", how: "--base" });
+    expect(resolveBase(dir, { explicit: "0000000000000000000000000000000000000000" }).how).toBe("HEAD~1");
+    expect(readAtRev(dir, first, "m.json")).toBe('{"v":1}');
+    expect(readAtRev(dir, first, "missing.json")).toBeNull();
+    expect(readAtRev(dir, "f".repeat(40), "m.json")).toBeUndefined();
+  });
+});
+
+describe("check-rule-packs: this repository", () => {
+  it("the CLI passes on the current tree", () => {
+    const res = spawnSync(process.execPath, ["scripts/check-rule-packs.mjs"], { cwd: REPO_ROOT, encoding: "utf8" });
+    expect(res.stderr).toBe("");
+    expect(res.status).toBe(0);
+    expect(res.stdout).toMatch(/\[check-rule-packs\] OK/);
+  });
+});
