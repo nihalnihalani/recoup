@@ -1053,7 +1053,7 @@ Pipeline: channel → `processedEvents` (existing dedupe) → **masked** evidenc
 - **Assertion mapping (rev 5.5, D158)**, implemented in M12's fixture harness and mirrored in M08's loader documentation. Assertions compare **sets of (key, reason-class)**:
   - fixture `missing_facts` ↔ contract `missingFacts` entries whose reason is in the **missing class**: `missing` or `conflicting` (unresolved → `needs_facts`);
   - fixture `unconfirmed_decisive_facts` ↔ entries whose reason is in the **unconfirmed class**: `candidate_unconfirmed` (D158's "unconfirmed") or `conflict_capped` (the `likely_eligible` cap);
-  - `user_unknown` is placed in the missing class because the fact stays unresolved (§2.5). This placement is **the architect's reading, flagged to the lead**; D158 does not name it.
+  - `user_unknown` is in the missing class: the fact stays unresolved, and a required unknown gives `needs_facts` (§2.5; confirmed by the lead, D161).
 - M02's fixture categories pass unchanged through M08's loader, with `likely_eligible_missing_evidence` mapped to `likely_eligible` and **`not_yet_due` passed through 1:1 with `reevaluate_at` → `reevaluate.at` and `reevaluate_when` → `reevaluate.when`** (rev 5.2).
 - Evaluating twice gives one evaluation row.
 - 30 alternating price observations give a bounded number of evaluation rows (DA-A-32).
@@ -1459,3 +1459,4 @@ README X2 and the fixtures are aligned by M2E and re-checked by M09c. The same-s
 | Id | What changed | Section(s) / task |
 |---|---|---|
 | D158 | `sameAnswer` = same outcome AND same amount (comment); assertion mapping recorded: fixture `missing_facts` ↔ `missingFacts` reason missing/conflicting, `unconfirmed_decisive_facts` ↔ reason candidate_unconfirmed/conflict_capped, compared as sets of (key, reason-class); new reason value `conflict_capped` for 5c (schema delta to M10); M29's attention sweep also covers `manual_review` opportunities with a running user deadline | §2.4, §4, §10, §11 M29 · M10, M12, M29 |
+| D161 | `user_unknown` confirmed in the missing class; the "pending lead confirmation" marker removed; the explicit `conflict_capped` literal adopted | §10 · M12 |
