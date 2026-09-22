@@ -1,0 +1,1554 @@
+{
+  "schema": "recoup.rule-fixtures/v1",
+  "rule_id": "R01.retail_price_adjustment",
+  "rule_version": "v1",
+  "tier": "v1 legacy per-purchase policy snapshot tier (not the reviewed merchant-pack tier, R01 v2)",
+  "spec": "docs/rules/R01-retail-price-adjustment.md",
+  "construction": "Constructed by hand by opus-rules-researcher (M02, task M1C) on 2026-09-23 from the R01 spec (§1.4, §4, L1) and the R01 v1 behaviour specified in contract rev 4 (044b20d) §2.7 and §10, D145, and DA-A-2 / DA-A-13 / DA-A-22 / DA-A-33. No new R01 v1 evaluator exists yet (M12), and none was consulted. Legacy parity values (the drop threshold, 24-hour-multiple window arithmetic, observation rejection bars) were cross-checked against TODAY's legacy behaviour in convex/lib/ledger.ts (priceDropCents, windowEndsAt) and convex/priceWatch.ts (recordCheck, rejectionReason, implausiblyCheap) at 044b20d. That code is the parity reference, not the code under test. `legacy_note` values are informative strings from that path; an evaluator is not required to emit them.",
+  "conventions": {
+    "fact_encoding": "facts.<key> = {type, value, state}; state in {user_confirmed, extracted_candidate, derived, missing, conflicting, assumption}. Fact keys follow contract §2.7: retail.purchase_date, retail.unit_price, retail.quantity, retail.observed_price, retail.window_days, retail.policy_confirmed, retail.policy_temporal, retail.currency. money = {amount_minor:int, currency:ISO-4217}. datetime = ISO-8601 with offset.",
+    "observation": "An observation is accepted only if it is a single price (not a range), > 0, variantMatch 'exact', currency equal to the purchase currency, confidence >= 0.7, and not implausibly cheap (>= round(10% of the unit price paid)). A rejected observation never becomes retail.observed_price.",
+    "threshold": "A drop qualifies when (unit_price - observed) >= max(100 minor units, round(2% of unit_price)). The claim amount is (unit_price - observed) x quantity.",
+    "after_settled_claim": "If confirmed (paid) price-adjustment claims on the item total S > 0, the new ask is (drop x qty) - S, and it opens only if that remainder >= max(100, round(2% of unit_price x quantity)). Each ask is a new loss key (n+1).",
+    "window": "Legacy window end = purchasedAt + windowDays x 86,400,000 ms (24-hour multiples from the purchase instant, contract HC-11 / O15), NOT calendar days. Auto-open is allowed while now <= windowEndsAt. After windowEndsAt no new claim auto-opens. Sending an existing claim after windowEndsAt is NOT refused: it requires the acknowledgment `window_may_have_passed` (D145 DA-A-21/O14).",
+    "best_outcome": "R01 v1's best outcome is likely_eligible (fixture alias likely_eligible_missing_evidence), never eligible. retail.policy_temporal is always present in v1 (A-T1 or A-T2), per contract §2.7.",
+    "assumption_class": "retail.policy_confirmed, retail.policy_temporal and retail.currency (legacy currency not confirmed, DA-A-33) are assumption-class. They appear in expected.assumptions, never in expected.missing_facts, and never block a claim (DA-A-2).",
+    "temporal_assumptions": "A-T1 = policy snapshot retrieved within +/-7 days of purchasedAt ('policy text retrieved within a week of your purchase; assumed to be the policy then'). A-T2 = otherwise ('retrieved N days after purchase; the policy may have changed'; next action 'refresh policy'). Contract §2.7 does not say whether exactly 7 days counts as 'within'; no case tests that instant.",
+    "staleness": "R01 v1 has no external-source refresh window (D145 d): freshness is measured against the purchase date and only adds an assumption. Unlike R02-11 / R03-10 / R04-10 / R05-11, no R01 case expects source_unverified for staleness. R01-11 is the stale-snapshot case, and it is assumption-only.",
+    "claim_block": "expected.claim = {opens: bool, amount, windowEndsAt, loss_key_note?, legacy_note?}. opens=false with outcome likely_eligible means the evaluation qualifies but the legacy guard (open claim, already settled) prevents a second claim.",
+    "loader": "Same as R02-R05: a case has EITHER a top-level `expected` OR an `expected` on every variant; `clock`/`source` may be on the case or the variant (variant wins); `facts_from` + `facts_override` copy another case's facts; a variant's `change` replaces the named facts; `context_change` replaces named context entries. `action` defaults to 'evaluate'; 'send_existing_claim' (R01-05d) exercises the send path (M13 drafts.prepareSend/approveAndSend) and carries expected.send in addition to the outcome. `context` holds non-fact state (existing claims on the item, ShopSavvy history, unconfirmed offers).",
+    "outcome_vocabulary": [
+      "eligible",
+      "likely_eligible_missing_evidence",
+      "possible_contract_benefit",
+      "needs_facts",
+      "manual_review",
+      "not_eligible",
+      "deadline_passed",
+      "source_unverified",
+      "unsupported"
+    ]
+  },
+  "cases": [
+    {
+      "id": "R01-01",
+      "title": "Qualifying drop above max($1, 2%) on a confirmed policy snapshot",
+      "categories": [
+        "positive"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T10:00:00-04:00",
+      "facts": {
+        "retail.purchase_date": {
+          "type": "datetime",
+          "value": "2026-09-10T15:00:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.unit_price": {
+          "type": "money",
+          "value": {
+            "amount_minor": 49999,
+            "currency": "USD"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.quantity": {
+          "type": "integer",
+          "value": 1,
+          "state": "user_confirmed"
+        },
+        "retail.currency": {
+          "type": "string",
+          "value": "USD",
+          "state": "user_confirmed"
+        },
+        "retail.observed_price": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 44999,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.92,
+            "isRange": false,
+            "observedAt": "2026-09-20T10:00:00-04:00",
+            "source": "merchant product page"
+          },
+          "state": "extracted_candidate"
+        },
+        "retail.window_days": {
+          "type": "integer",
+          "value": 30,
+          "state": "derived",
+          "from": "policy snapshot"
+        },
+        "policy_snapshot": {
+          "type": "object",
+          "value": {
+            "merchant": "example-electronics.com",
+            "retrievedAt": "2026-09-10T15:05:00-04:00",
+            "confirmedByUser": true,
+            "windowDays": 30
+          },
+          "state": "derived"
+        },
+        "retail.policy_confirmed": {
+          "type": "boolean",
+          "value": true,
+          "state": "user_confirmed"
+        }
+      },
+      "context": {
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "likely_eligible_missing_evidence",
+        "missing_facts": [],
+        "assumptions": [
+          "A-T1"
+        ],
+        "amount": {
+          "estimate": {
+            "amount_minor": 5000,
+            "currency": "USD"
+          },
+          "formula": "(49,999 - 44,999) x 1",
+          "threshold_minor": 1000
+        },
+        "deadline": {
+          "kind": "price_window_ends_at",
+          "instant": "2026-10-10T19:00:00Z",
+          "semantics": "purchasedAt + 30 x 86,400,000 ms; auto-open while now <= this instant"
+        },
+        "claim": {
+          "opens": true,
+          "amount": {
+            "amount_minor": 5000,
+            "currency": "USD"
+          },
+          "windowEndsAt": "2026-10-10T19:00:00Z"
+        },
+        "forbidden_outputs": [
+          "outcome eligible (v1 always carries the temporal assumption)"
+        ]
+      },
+      "justification": {
+        "passages": [
+          "R01 spec §4 (calculation)",
+          "R01 spec §1.4 (unknown applicability → capped)",
+          "contract §2.7 R01 v1 FactRequirements",
+          "contract §10 R01"
+        ],
+        "reasoning": "Drop 5,000 >= max(100, round(49,999 x 2%) = 1,000). The snapshot was retrieved 5 minutes after purchase → A-T1. Best v1 outcome is likely_eligible."
+      }
+    },
+    {
+      "id": "R01-02",
+      "title": "Drop threshold boundary: 2% tier and $1 floor tier",
+      "categories": [
+        "boundary_time",
+        "negative",
+        "calculation"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-05T12:00:00-04:00",
+      "facts": {
+        "retail.purchase_date": {
+          "type": "datetime",
+          "value": "2026-09-01T12:00:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.unit_price": {
+          "type": "money",
+          "value": {
+            "amount_minor": 20000,
+            "currency": "USD"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.quantity": {
+          "type": "integer",
+          "value": 1,
+          "state": "user_confirmed"
+        },
+        "retail.currency": {
+          "type": "string",
+          "value": "USD",
+          "state": "user_confirmed"
+        },
+        "retail.window_days": {
+          "type": "integer",
+          "value": 14,
+          "state": "derived"
+        },
+        "policy_snapshot": {
+          "type": "object",
+          "value": {
+            "retrievedAt": "2026-09-01T12:10:00-04:00",
+            "confirmedByUser": true,
+            "windowDays": 14
+          },
+          "state": "derived"
+        },
+        "retail.policy_confirmed": {
+          "type": "boolean",
+          "value": true,
+          "state": "user_confirmed"
+        }
+      },
+      "context": {
+        "price_claims_on_item": []
+      },
+      "variants": [
+        {
+          "id": "R01-02a",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 19601,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "drop": "399 (< 400)",
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "claim": {
+              "opens": false,
+              "legacy_note": "Drop below threshold"
+            }
+          }
+        },
+        {
+          "id": "R01-02b",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 19600,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "drop": "400 (= threshold)",
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "assumptions": [
+              "A-T1"
+            ],
+            "claim": {
+              "opens": true,
+              "amount": {
+                "amount_minor": 400,
+                "currency": "USD"
+              },
+              "windowEndsAt": "2026-09-15T16:00:00Z"
+            }
+          }
+        },
+        {
+          "id": "R01-02c",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 19599,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "drop": "401",
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "assumptions": [
+              "A-T1"
+            ],
+            "claim": {
+              "opens": true,
+              "amount": {
+                "amount_minor": 401,
+                "currency": "USD"
+              },
+              "windowEndsAt": "2026-09-15T16:00:00Z"
+            }
+          }
+        },
+        {
+          "id": "R01-02d",
+          "change": {
+            "retail.unit_price": {
+              "type": "money",
+              "value": {
+                "amount_minor": 3000,
+                "currency": "USD"
+              },
+              "state": "user_confirmed"
+            },
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 2901,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "drop": "99 (< $1 floor; 2% would be 60)",
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "claim": {
+              "opens": false,
+              "legacy_note": "Drop below threshold"
+            }
+          }
+        },
+        {
+          "id": "R01-02e",
+          "change": {
+            "retail.unit_price": {
+              "type": "money",
+              "value": {
+                "amount_minor": 3000,
+                "currency": "USD"
+              },
+              "state": "user_confirmed"
+            },
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 2900,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "drop": "100 (= $1 floor)",
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "assumptions": [
+              "A-T1"
+            ],
+            "claim": {
+              "opens": true,
+              "amount": {
+                "amount_minor": 100,
+                "currency": "USD"
+              },
+              "windowEndsAt": "2026-09-15T16:00:00Z"
+            }
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "contract §10 R01 (threshold behaviour preserved)",
+          "legacy priceDropCents (parity reference)"
+        ],
+        "reasoning": "Threshold = max(100, round(unit x 2%)): 400 for a 20,000 item, 100 (the $1 floor) for a 3,000 item. A drop exactly at the threshold qualifies."
+      }
+    },
+    {
+      "id": "R01-03",
+      "title": "Unconfirmed policy snapshot + qualifying drop → still likely_eligible and exactly one claim",
+      "categories": [
+        "assumption_class",
+        "positive"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T10:00:00-04:00",
+      "facts_from": "R01-01",
+      "facts_override": {
+        "policy_snapshot": {
+          "type": "object",
+          "value": {
+            "merchant": "example-electronics.com",
+            "retrievedAt": "2026-09-10T15:05:00-04:00",
+            "confirmedByUser": false,
+            "windowDays": 30
+          },
+          "state": "derived"
+        },
+        "retail.policy_confirmed": {
+          "type": "boolean",
+          "value": null,
+          "state": "assumption"
+        }
+      },
+      "context": {
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "likely_eligible_missing_evidence",
+        "missing_facts": [],
+        "assumptions": [
+          "retail.policy_confirmed",
+          "A-T1"
+        ],
+        "amount": {
+          "estimate": {
+            "amount_minor": 5000,
+            "currency": "USD"
+          }
+        },
+        "claim": {
+          "opens": true,
+          "count": 1,
+          "amount": {
+            "amount_minor": 5000,
+            "currency": "USD"
+          },
+          "windowEndsAt": "2026-10-10T19:00:00Z"
+        },
+        "forbidden_outputs": [
+          "needs_facts",
+          "no claim",
+          "retail.policy_confirmed listed as a missing required fact"
+        ]
+      },
+      "justification": {
+        "passages": [
+          "DA-A-2",
+          "D145 (O1 agree with DA-A-2 conditions)",
+          "contract §2.7 assumption-class list",
+          "R01 spec §1.4"
+        ],
+        "reasoning": "Today an unconfirmed policy still opens a claim. retail.policy_confirmed is assumption-class and does not set factsKnown, so the outcome is likely_eligible and the claim opens (parity)."
+      }
+    },
+    {
+      "id": "R01-04",
+      "title": "No policy snapshot (or a snapshot without windowDays)",
+      "categories": [
+        "missing_source",
+        "negative"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T10:00:00-04:00",
+      "facts_from": "R01-01",
+      "facts_override": {
+        "policy_snapshot": {
+          "type": "object",
+          "value": null,
+          "state": "missing"
+        },
+        "retail.window_days": {
+          "type": "integer",
+          "value": null,
+          "state": "missing"
+        },
+        "retail.policy_confirmed": {
+          "type": "boolean",
+          "value": null,
+          "state": "missing"
+        }
+      },
+      "context": {
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "source_unverified",
+        "missing_facts": [],
+        "claim": {
+          "opens": false,
+          "legacy_note": "No open price window"
+        },
+        "amount": null
+      },
+      "variants": [
+        {
+          "id": "R01-04b",
+          "change": {
+            "policy_snapshot": {
+              "type": "object",
+              "value": {
+                "retrievedAt": "2026-09-10T15:05:00-04:00",
+                "confirmedByUser": true,
+                "windowDays": null
+              },
+              "state": "derived"
+            },
+            "retail.window_days": {
+              "type": "integer",
+              "value": null,
+              "state": "missing"
+            }
+          },
+          "expected": {
+            "outcome": "source_unverified",
+            "missing_facts": [],
+            "claim": {
+              "opens": false,
+              "legacy_note": "No open price window"
+            }
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "contract §2.7 ('retail.window_days … missing → source_unverified')",
+          "contract §10 R01 ('no policy or no window → source_unverified, no claim')"
+        ],
+        "reasoning": "Without a window there is no merchant promise to evaluate."
+      }
+    },
+    {
+      "id": "R01-05",
+      "title": "Window end by legacy 24-hour multiples across the DST change; late send warns, never refuses",
+      "categories": [
+        "boundary_time",
+        "deadline"
+      ],
+      "mission_domain_fixture": null,
+      "facts": {
+        "retail.purchase_date": {
+          "type": "datetime",
+          "value": "2026-10-25T12:00:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.unit_price": {
+          "type": "money",
+          "value": {
+            "amount_minor": 129900,
+            "currency": "USD"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.quantity": {
+          "type": "integer",
+          "value": 1,
+          "state": "user_confirmed"
+        },
+        "retail.currency": {
+          "type": "string",
+          "value": "USD",
+          "state": "user_confirmed"
+        },
+        "retail.observed_price": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 119900,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.95,
+            "isRange": false
+          },
+          "state": "extracted_candidate"
+        },
+        "retail.window_days": {
+          "type": "integer",
+          "value": 14,
+          "state": "derived"
+        },
+        "policy_snapshot": {
+          "type": "object",
+          "value": {
+            "retrievedAt": "2026-10-25T12:03:00-04:00",
+            "confirmedByUser": true,
+            "windowDays": 14
+          },
+          "state": "derived"
+        },
+        "retail.policy_confirmed": {
+          "type": "boolean",
+          "value": true,
+          "state": "user_confirmed"
+        }
+      },
+      "context": {
+        "price_claims_on_item": []
+      },
+      "window_end": {
+        "instant": "2026-11-08T16:00:00Z",
+        "local": "2026-11-08T11:00:00-05:00",
+        "note": "12:00 EDT + 14 x 24 h = 11:00 EST, because 2026-11-01 ends daylight time. A calendar-day reading ('through Nov 8') would give a different answer; v1 keeps the legacy instant (O15), and R01 v2 (M37) is where calendar days belong."
+      },
+      "variants": [
+        {
+          "id": "R01-05a",
+          "clock": "2026-11-08T10:59:00-05:00",
+          "action": "evaluate",
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "assumptions": [
+              "A-T1"
+            ],
+            "claim": {
+              "opens": true,
+              "amount": {
+                "amount_minor": 10000,
+                "currency": "USD"
+              },
+              "windowEndsAt": "2026-11-08T16:00:00Z"
+            }
+          }
+        },
+        {
+          "id": "R01-05b",
+          "clock": "2026-11-08T11:00:00-05:00",
+          "action": "evaluate",
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "assumptions": [
+              "A-T1"
+            ],
+            "claim": {
+              "opens": true,
+              "amount": {
+                "amount_minor": 10000,
+                "currency": "USD"
+              },
+              "windowEndsAt": "2026-11-08T16:00:00Z"
+            },
+            "note": "now == windowEndsAt is still open (closed only when windowEndsAt < now)"
+          }
+        },
+        {
+          "id": "R01-05c",
+          "clock": "2026-11-08T11:01:00-05:00",
+          "action": "evaluate",
+          "expected": {
+            "outcome": "deadline_passed",
+            "missing_facts": [],
+            "claim": {
+              "opens": false,
+              "legacy_note": "No open price window"
+            },
+            "note": "Closes this path only; it is not 'no recovery available'."
+          }
+        },
+        {
+          "id": "R01-05d",
+          "clock": "2026-11-08T11:01:00-05:00",
+          "action": "send_existing_claim",
+          "context_change": {
+            "price_claims_on_item": [
+              {
+                "status": "drafted",
+                "expectedCents": 10000,
+                "currency": "USD",
+                "windowEndsAt": "2026-11-08T16:00:00Z",
+                "openedAt": "2026-11-05T09:00:00-05:00"
+              }
+            ]
+          },
+          "expected": {
+            "outcome": "deadline_passed",
+            "missing_facts": [],
+            "send": {
+              "refused": false,
+              "requires_acknowledgment": "window_may_have_passed",
+              "with_acknowledgment": "sends",
+              "identical_for_linked_and_unlinked": true
+            },
+            "note": "The auto-open path is closed (as R01-05c), but sending the claim that already exists is warned, not refused (M13 drafts path)."
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "contract HC-11 and O15 (24 h multiples in R01 v1)",
+          "D145 DA-A-21/O14 (warn, not refuse)",
+          "contract §10 R01 ('window + 1 minute → warning with acknowledgment, not a refusal')",
+          "legacy windowEndsAt (parity reference)"
+        ],
+        "reasoning": "The legacy window ends at an instant, not at a calendar day. Opening stops after it; sending an already-open claim after it needs an explicit acknowledgment and is never hard-refused."
+      }
+    },
+    {
+      "id": "R01-06",
+      "title": "Observation fails an acceptance bar: wrong variant, unsure variant, low confidence, range, implausibly cheap",
+      "categories": [
+        "exclusion",
+        "negative"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T10:00:00-04:00",
+      "facts_from": "R01-01",
+      "facts_override": {},
+      "context": {
+        "price_claims_on_item": [],
+        "prior_accepted_observations": []
+      },
+      "variants": [
+        {
+          "id": "R01-06a",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 39999,
+                "currency": "USD",
+                "variantMatch": "none",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [
+              "retail.observed_price"
+            ],
+            "claim": {
+              "opens": false
+            },
+            "observation_accepted": false,
+            "legacy_note": "The page does not price this product"
+          }
+        },
+        {
+          "id": "R01-06b",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 39999,
+                "currency": "USD",
+                "variantMatch": "unsure",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [
+              "retail.observed_price"
+            ],
+            "claim": {
+              "opens": false
+            },
+            "observation_accepted": false,
+            "legacy_note": "Could not tell which variant the price is for"
+          }
+        },
+        {
+          "id": "R01-06c",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 39999,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.69,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [
+              "retail.observed_price"
+            ],
+            "claim": {
+              "opens": false
+            },
+            "observation_accepted": false,
+            "legacy_note": "Low confidence in the extracted price"
+          }
+        },
+        {
+          "id": "R01-06d",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 39999,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": true
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [
+              "retail.observed_price"
+            ],
+            "claim": {
+              "opens": false
+            },
+            "observation_accepted": false,
+            "legacy_note": "Page shows a price range, not a single price"
+          }
+        },
+        {
+          "id": "R01-06e",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 4999,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [
+              "retail.observed_price"
+            ],
+            "claim": {
+              "opens": false
+            },
+            "observation_accepted": false,
+            "note": "4,999 < round(10% of 49,999) = 5,000: looks like an accessory, deposit or monthly payment"
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "contract §2.7 (observed_price requires variantMatch exact and confidence >= 0.7)",
+          "contract §10 R01 ('wrong variant, currency, range or confidence → no claim')",
+          "R01 spec §3 (identity never inferred from a similar title)"
+        ],
+        "reasoning": "A rejected reading is stored but never becomes the observed price, so no drop is known and no claim opens."
+      }
+    },
+    {
+      "id": "R01-07",
+      "title": "Currency: GBP purchase with a USD observation (rejected) vs a GBP observation (claim opens)",
+      "categories": [
+        "unsupported_product",
+        "positive"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-15T09:00:00+01:00",
+      "facts": {
+        "retail.purchase_date": {
+          "type": "datetime",
+          "value": "2026-09-08T11:00:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.unit_price": {
+          "type": "money",
+          "value": {
+            "amount_minor": 89900,
+            "currency": "GBP"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.quantity": {
+          "type": "integer",
+          "value": 1,
+          "state": "user_confirmed"
+        },
+        "retail.currency": {
+          "type": "string",
+          "value": "GBP",
+          "state": "user_confirmed"
+        },
+        "retail.window_days": {
+          "type": "integer",
+          "value": 30,
+          "state": "derived"
+        },
+        "policy_snapshot": {
+          "type": "object",
+          "value": {
+            "retrievedAt": "2026-09-08T11:20:00-04:00",
+            "confirmedByUser": false,
+            "windowDays": 30
+          },
+          "state": "derived"
+        },
+        "retail.policy_confirmed": {
+          "type": "boolean",
+          "value": null,
+          "state": "assumption"
+        }
+      },
+      "context": {
+        "price_claims_on_item": []
+      },
+      "variants": [
+        {
+          "id": "R01-07a",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 79900,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.93,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [
+              "retail.observed_price"
+            ],
+            "claim": {
+              "opens": false
+            },
+            "observation_accepted": false,
+            "legacy_note": "Page price is in USD, the purchase was in GBP",
+            "forbidden_outputs": [
+              "any currency conversion",
+              "a claim of 10,000 in either currency"
+            ]
+          }
+        },
+        {
+          "id": "R01-07b",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 84900,
+                "currency": "GBP",
+                "variantMatch": "exact",
+                "confidence": 0.93,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "assumptions": [
+              "retail.policy_confirmed",
+              "A-T1"
+            ],
+            "claim": {
+              "opens": true,
+              "amount": {
+                "amount_minor": 5000,
+                "currency": "GBP"
+              },
+              "windowEndsAt": "2026-10-08T15:00:00Z"
+            },
+            "note": "DA-A-13 carve-out: R01 v1 keeps any 2-decimal ISO currency; the GBP total stays on its own currency row and is never summed with USD.",
+            "forbidden_outputs": [
+              "unsupported (USD-only rule does not apply to R01 v1)"
+            ]
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "DA-A-13",
+          "D145 (O6 agree + explicit R01 carve-out, 2-decimal assertCurrency set)",
+          "mission §6 (never sum different currencies)"
+        ],
+        "reasoning": "An observation must be in the purchase currency. Non-USD R01 claims keep opening (parity)."
+      }
+    },
+    {
+      "id": "R01-08",
+      "title": "Two units at 12,000 each, eligible matching price 9,500 → 5,000",
+      "categories": [
+        "positive",
+        "calculation"
+      ],
+      "mission_domain_fixture": "mission §17 core: two units at 12,000 with eligible matching price 9,500 → 5,000 difference",
+      "clock": "2026-09-20T10:00:00-04:00",
+      "facts": {
+        "retail.purchase_date": {
+          "type": "datetime",
+          "value": "2026-09-10T15:00:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.unit_price": {
+          "type": "money",
+          "value": {
+            "amount_minor": 12000,
+            "currency": "USD"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.quantity": {
+          "type": "integer",
+          "value": 2,
+          "state": "user_confirmed"
+        },
+        "retail.currency": {
+          "type": "string",
+          "value": "USD",
+          "state": "user_confirmed"
+        },
+        "retail.observed_price": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 9500,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.9,
+            "isRange": false
+          },
+          "state": "extracted_candidate"
+        },
+        "retail.window_days": {
+          "type": "integer",
+          "value": 30,
+          "state": "derived"
+        },
+        "policy_snapshot": {
+          "type": "object",
+          "value": {
+            "retrievedAt": "2026-09-10T15:05:00-04:00",
+            "confirmedByUser": true,
+            "windowDays": 30
+          },
+          "state": "derived"
+        },
+        "retail.policy_confirmed": {
+          "type": "boolean",
+          "value": true,
+          "state": "user_confirmed"
+        }
+      },
+      "context": {
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "likely_eligible_missing_evidence",
+        "missing_facts": [],
+        "assumptions": [
+          "A-T1"
+        ],
+        "amount": {
+          "estimate": {
+            "amount_minor": 5000,
+            "currency": "USD"
+          },
+          "formula": "(12,000 - 9,500) x 2",
+          "threshold_minor_per_unit": 240
+        },
+        "claim": {
+          "opens": true,
+          "count": 1,
+          "amount": {
+            "amount_minor": 5000,
+            "currency": "USD"
+          },
+          "windowEndsAt": "2026-10-10T19:00:00Z"
+        }
+      },
+      "justification": {
+        "passages": [
+          "mission §17 core financial fixtures",
+          "contract §10 R01",
+          "R01 spec §4 (worked example)"
+        ],
+        "reasoning": "Per-unit drop 2,500 >= max(100, 240); claim = drop x quantity."
+      }
+    },
+    {
+      "id": "R01-09",
+      "title": "A further drop after a paid (confirmed) claim → only the remainder",
+      "categories": [
+        "overlapping_remedy",
+        "calculation"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-28T10:00:00-04:00",
+      "facts_from": "R01-08",
+      "facts_override": {},
+      "context": {
+        "price_claims_on_item": [
+          {
+            "status": "confirmed",
+            "expectedCents": 5000,
+            "currency": "USD",
+            "openedFromObservation": 9500,
+            "lossKey": "n"
+          }
+        ]
+      },
+      "variants": [
+        {
+          "id": "R01-09a",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 9000,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "assumptions": [
+              "A-T1"
+            ],
+            "amount": {
+              "estimate": {
+                "amount_minor": 1000,
+                "currency": "USD"
+              },
+              "formula": "(12,000 - 9,000) x 2 - 5,000 settled",
+              "remainder_threshold_minor": 480
+            },
+            "claim": {
+              "opens": true,
+              "amount": {
+                "amount_minor": 1000,
+                "currency": "USD"
+              },
+              "loss_key_note": "new loss key n+1; the settled 5,000 is never asked again"
+            }
+          }
+        },
+        {
+          "id": "R01-09b",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 9400,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "claim": {
+              "opens": false,
+              "legacy_note": "Drop already claimed"
+            },
+            "note": "Remainder (12,000 - 9,400) x 2 - 5,000 = 200 < max(100, round(12,000 x 2 x 2%) = 480)."
+          }
+        },
+        {
+          "id": "R01-09c",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 9500,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "claim": {
+              "opens": false,
+              "legacy_note": "Drop already claimed"
+            },
+            "note": "Same price as the paid claim: remainder 0."
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "contract §10 R01 ('a settled 5,000 followed by a deeper drop → only the remainder (new loss key n+1)')",
+          "mission §6 (the same money is never claimed twice)",
+          "legacy settledPriceClaimCents (parity reference)"
+        ],
+        "reasoning": "A price that falls further after a payout is a fresh, smaller ask; the already-paid 5,000 is subtracted."
+      }
+    },
+    {
+      "id": "R01-10",
+      "title": "After a DENIED claim: same price → no automatic re-ask; lower price → the difference only (wave-2 rule)",
+      "categories": [
+        "duplicate_evaluation",
+        "overlapping_remedy"
+      ],
+      "mission_domain_fixture": null,
+      "applies_from": "wave 2 (M2C in priceWatch; contract §2.8 'After a denial'). Not a wave-1 parity case.",
+      "clock": "2026-09-25T10:00:00-04:00",
+      "facts_from": "R01-08",
+      "facts_override": {},
+      "context": {
+        "price_claims_on_item": [
+          {
+            "status": "denied",
+            "expectedCents": 5000,
+            "currency": "USD",
+            "openedFromPriceCheckId.observedCents": 9500
+          }
+        ]
+      },
+      "variants": [
+        {
+          "id": "R01-10a",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 9500,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "assumptions": [
+              "A-T1"
+            ],
+            "claim": {
+              "opens": false,
+              "reason": "denied for this drop; only a user-initiated 'ask again' (openCase userInitiated: true) may reopen it"
+            }
+          }
+        },
+        {
+          "id": "R01-10b",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 9200,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "assumptions": [
+              "A-T1"
+            ],
+            "amount": {
+              "estimate": {
+                "amount_minor": 600,
+                "currency": "USD"
+              },
+              "formula": "(9,500 denied observation - 9,200) x 2"
+            },
+            "claim": {
+              "opens": true,
+              "amount": {
+                "amount_minor": 600,
+                "currency": "USD"
+              },
+              "note": "passes the threshold under either reading (per unit 300 >= 240; total 600 >= 480)"
+            }
+          }
+        },
+        {
+          "id": "R01-10c",
+          "change": {
+            "retail.observed_price": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 9450,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.9,
+                "isRange": false
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "assumptions": [
+              "A-T1"
+            ],
+            "claim": {
+              "opens": false,
+              "reason": "difference (9,500 - 9,450) x 2 = 100 is below the threshold under either reading (per unit 50 < 240; total 100 < 480)"
+            }
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "DA-A-22",
+          "D145 (O1 with DA-A-22 condition)",
+          "contract §2.8 'After a denial'",
+          "mission: 'not a system for manufacturing disputes'"
+        ],
+        "reasoning": "A denial ends the automatic ask for that drop. Only a strictly lower observation re-opens automatically, and only for the new difference."
+      }
+    },
+    {
+      "id": "R01-11",
+      "title": "Policy snapshot retrieved long before the purchase → assumption A-T2 only",
+      "categories": [
+        "stale_source",
+        "assumption_class"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T10:00:00-04:00",
+      "facts_from": "R01-01",
+      "facts_override": {
+        "policy_snapshot": {
+          "type": "object",
+          "value": {
+            "merchant": "example-electronics.com",
+            "retrievedAt": "2026-07-15T09:00:00-04:00",
+            "confirmedByUser": true,
+            "windowDays": 30
+          },
+          "state": "derived"
+        }
+      },
+      "context": {
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "likely_eligible_missing_evidence",
+        "missing_facts": [],
+        "assumptions": [
+          "A-T2"
+        ],
+        "next_action": "refresh policy",
+        "claim": {
+          "opens": true,
+          "amount": {
+            "amount_minor": 5000,
+            "currency": "USD"
+          },
+          "windowEndsAt": "2026-10-10T19:00:00Z"
+        },
+        "note": "The snapshot is 57 days older than the purchase. Contract A-T2 wording says 'retrieved N days after purchase'; for a snapshot taken BEFORE the purchase the copy should say 'N days before' — flagged for M12/M15.",
+        "forbidden_outputs": [
+          "source_unverified",
+          "no claim",
+          "outcome eligible"
+        ]
+      },
+      "variants": [
+        {
+          "id": "R01-11b",
+          "change": {
+            "policy_snapshot": {
+              "type": "object",
+              "value": {
+                "retrievedAt": "2026-09-13T15:00:00-04:00",
+                "confirmedByUser": true,
+                "windowDays": 30
+              },
+              "state": "derived"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "assumptions": [
+              "A-T1"
+            ],
+            "claim": {
+              "opens": true,
+              "amount": {
+                "amount_minor": 5000,
+                "currency": "USD"
+              }
+            },
+            "note": "retrieved 3 days after purchase → within +/-7 days"
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "contract §2.7 'Reconciliation for R01 v1 (D145 d)'",
+          "docs/rules/README.md rule 3 (R01 v1 freshness sentence)",
+          "R01 spec §1.4"
+        ],
+        "reasoning": "For the v1 snapshot tier freshness is measured against the purchase and only adds an assumption; it never blocks and never yields eligible."
+      }
+    },
+    {
+      "id": "R01-12",
+      "title": "Duplicate evaluation: two qualifying checks a minute apart; a claim is already open",
+      "categories": [
+        "duplicate_evaluation"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T10:01:00-04:00",
+      "facts_from": "R01-01",
+      "facts_override": {},
+      "context": {
+        "price_claims_on_item": [
+          {
+            "status": "detected",
+            "expectedCents": 5000,
+            "currency": "USD",
+            "openedAt": "2026-09-20T10:00:00-04:00"
+          }
+        ]
+      },
+      "expected": {
+        "outcome": "likely_eligible_missing_evidence",
+        "missing_facts": [],
+        "assumptions": [
+          "A-T1"
+        ],
+        "claim": {
+          "opens": false,
+          "legacy_note": "Claim already open"
+        },
+        "dedupe": "identical fact snapshot → identical result (one evaluation row); no second claim"
+      },
+      "justification": {
+        "passages": [
+          "contract §10 common ('Evaluating twice gives one evaluation row')",
+          "mission §7 (no multiple active cases for one remedy via repeated evaluation)"
+        ],
+        "reasoning": "The second check re-derives the same outcome but the open claim blocks a duplicate."
+      }
+    },
+    {
+      "id": "R01-13",
+      "title": "ShopSavvy history and an unconfirmed alternate offer never change the outcome",
+      "categories": [
+        "negative",
+        "exclusion"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T10:00:00-04:00",
+      "facts": {
+        "retail.purchase_date": {
+          "type": "datetime",
+          "value": "2026-09-10T15:00:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.unit_price": {
+          "type": "money",
+          "value": {
+            "amount_minor": 12000,
+            "currency": "USD"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.quantity": {
+          "type": "integer",
+          "value": 1,
+          "state": "user_confirmed"
+        },
+        "retail.currency": {
+          "type": "string",
+          "value": "USD",
+          "state": "user_confirmed"
+        },
+        "retail.observed_price": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 11800,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.9,
+            "isRange": false
+          },
+          "state": "extracted_candidate"
+        },
+        "retail.window_days": {
+          "type": "integer",
+          "value": 30,
+          "state": "derived"
+        },
+        "policy_snapshot": {
+          "type": "object",
+          "value": {
+            "retrievedAt": "2026-09-10T15:05:00-04:00",
+            "confirmedByUser": true,
+            "windowDays": 30
+          },
+          "state": "derived"
+        },
+        "retail.policy_confirmed": {
+          "type": "boolean",
+          "value": true,
+          "state": "user_confirmed"
+        }
+      },
+      "context": {
+        "price_claims_on_item": [],
+        "shopsavvy_history": {
+          "lowest_minor": 9000,
+          "currency": "USD",
+          "source": "ShopSavvy (optional context)"
+        },
+        "alternate_offers": [
+          {
+            "price_minor": 9200,
+            "currency": "USD",
+            "seller": "other-store.example",
+            "state": "candidate_unconfirmed"
+          }
+        ]
+      },
+      "expected": {
+        "outcome": "not_eligible",
+        "missing_facts": [],
+        "claim": {
+          "opens": false,
+          "legacy_note": "Drop below threshold"
+        },
+        "note": "The accepted observation 11,800 gives a drop of 200 < max(100, 240). The 9,000 history low and the 9,200 unconfirmed offer are context only.",
+        "forbidden_outputs": [
+          "a claim or estimate based on 9,000 or 9,200"
+        ]
+      },
+      "justification": {
+        "passages": [
+          "mission §10 R01 ('ShopSavvy history is optional context and never independently authorizes a claim or alert')",
+          "contract §10 R01 ('ShopSavvy data and unconfirmed offers never change the outcome')",
+          "R01 spec §3"
+        ],
+        "reasoning": "Only an accepted observation of the merchant's own price for the exact variant can support a claim."
+      }
+    }
+  ]
+}

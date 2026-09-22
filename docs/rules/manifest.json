@@ -10,7 +10,7 @@
       "version": 1,
       "lifecycle": "researched",
       "spec": "docs/rules/R01-retail-price-adjustment.md",
-      "fixtures": null,
+      "fixtures": "docs/rules/fixtures/R01.json",
       "sources": [],
       "merchantPacks": [
         {
@@ -57,7 +57,8 @@
           "url": "https://www.homedepot.com/c/price-match-and-price-check",
           "status": "source_blocked"
         }
-      ]
+      ],
+      "fixturesTier": "v1 legacy snapshot tier (contract rev 4 \u00a72.7, task M1C)"
     },
     {
       "ruleId": "R02.airline_fare_refund.us_dot",
@@ -257,6 +258,7 @@
     }
   ],
   "fixtures": {
+    "docs/rules/fixtures/R01.json": "192a9852799e78f0618e31e85bed2774a9d23378b8c7b4738efdf1010cdd8255",
     "docs/rules/fixtures/R02.json": "bc1e8fb5cc9e8eb0f420b3a0735421c845083d03e1f4029ec364731105dfbc4b",
     "docs/rules/fixtures/R03.json": "c82d3124093ae5325a45543f358a78e92eb05b34a6d06c977f345ef803cabbd4",
     "docs/rules/fixtures/R04.json": "9e03d5409bff8b185bda4f468c7b939865ec75bac3e6fb0bb34977b0cc81cd7b",

@@ -16,6 +16,7 @@ docs/rules/
   R04-baggage.md                    14 CFR 260.5 (bag fee) + 14 CFR 254 (liability) — three paths
   R05-mail-internet-order.md        16 CFR 435 (MITOR)
   TRIAGE.md                         R06–R25 sources, legal status, verdicts
+  fixtures/R01.json                 13 cases, R01 v1 legacy snapshot tier (M1C)
   fixtures/R02.json … R05.json      12 cases each, constructed from source text, never from code
   sources/                          captured first-party text (US federal works) + excerpts file
 ```
@@ -39,7 +40,8 @@ draft ──► researched ──► reviewed ──► active ──► superse
 Rules:
 1. **Immutability.** A pack version never changes after `reviewed`. Any change to a passage, threshold, or logic makes a new version (`v2`). The old spec stays in git history and in `manifest.json` as `superseded`.
 2. **Scraped updates never rewrite logic.** A changed source hash opens a review item. The diff is reviewed; affected fixtures are re-run; prior versions are preserved (mission §8).
-3. **Staleness blocks conclusions.** Each pack has a refresh window (R02 30 days, R03 90, R04 30 with monthly checks until the 2026 biennial adjustment, R05 180, R01 merchant packs 7). An evaluation whose pack was last verified outside the window returns `source_unverified`. Fixtures `R0x-10/11` test this.
+3. **Staleness blocks conclusions.** Each pack has a refresh window (R02 30 days, R03 90, R04 30 with monthly checks until the 2026 biennial adjustment, R05 180, reviewed R01 merchant packs 7). An evaluation whose pack was last verified outside the window returns `source_unverified`. Fixtures R02-11, R03-10, R04-10 and R05-11 test this.
+   **R01 v1 exception (legacy per-purchase policy snapshots).** For R01 v1, freshness is measured against the purchase date and only adds an assumption. It never blocks and never makes the outcome `eligible`. The 7-day merchant freshness window applies to reviewed merchant packs (the R01 v2 tier). Contract rev 4 (`044b20d`) §2.7, "Reconciliation for R01 v1 (D145 d)", in its own words: "So README rule 3's 7-day merchant window applies to **reviewed merchant packs** (the R01 v2 tier). For the v1 snapshot tier, freshness is measured **relative to the purchase**". A snapshot retrieved within ±7 days of `purchasedAt` gets assumption A-T1; otherwise it gets A-T2 and the next action "refresh policy". "Both are assumption-class. Neither yields `eligible` or blocks the case, so parity holds (KM1)." Fixture R01-11 tests this: a stale snapshot is assumption-only, **not** `source_unverified`.
 4. **Text presence ≠ legal force.** eCFR still displays §1026.62 (overdraft rule disapproved by Pub. L. 119-10) and the stayed §1026.52 $8 late-fee safe harbor. A pack records legal status separately (TRIAGE, cross-cutting finding).
 5. **Temporal applicability.** A pack version applies to a transaction only if its effective date is on or before the anchor date and no later version was effective at the anchor. When applicability is unknown, see R01 §1.4 (unknown → capped at likely eligible with an explicit assumption; known mismatch → `source_unverified`).
 
@@ -90,6 +92,8 @@ A fixture loader should map `likely_eligible_missing_evidence` → `likely_eligi
 - `facts_from: "<case id>"` + `facts_override: {…}` copies another case's facts. A variant's `change` replaces the named facts for that variant.
 - `expected` may also carry `missing_facts`, `amount`, `deadline` (`kind`, `date`, `semantics`, `anchor`), `packet_readiness`, `dedupe`, `overlap`, `totals`, and `forbidden_outputs` (things the UI or evaluator must **not** produce, e.g. displaying a liability cap as the payout).
 - `justification.passages` cite passage ids from the spec or `sources/federal-web-pages-excerpts.md`.
+- `context` holds non-fact state (existing claims on the item, price history, unconfirmed offers); a variant's `context_change` replaces named entries. `action` defaults to `evaluate`; R01-05d uses `send_existing_claim` to test the late-send warning.
+- `fixtures/R01.json` covers the **R01 v1 legacy snapshot tier** (contract rev 4 §2.7, task M1C). Its best outcome is `likely_eligible`; it has no staleness → `source_unverified` case (rule 3 exception).
 - Every fixture clock must be injected as `now`. Evaluators must not read the wall clock (D138).
 
 ## Captured sources
