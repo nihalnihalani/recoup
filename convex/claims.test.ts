@@ -521,7 +521,6 @@ import { applyEvent } from "./claims";
 import { MAX_USER_AMOUNT_MINOR } from "./limits";
 
 describe("M10 provisional credits (DA-A-16, D148 N5)", () => {
-  const usd = (amountMinor: number) => ({ amountMinor, currency: "USD" });
   const recordProvisional = (as: any, claimId: Id<"claims">, amountMinor: number, idempotencyKey: string, currency = "USD") =>
     as.mutation(api.claims.recordProvisionalCredit, { claimId, amount: { amountMinor, currency }, evidence: "issuer letter", idempotencyKey });
   const finalize = (as: any, claimId: Id<"claims">, cents: number, idempotencyKey: string) =>
@@ -685,7 +684,6 @@ describe("M10 provisional credits (DA-A-16, D148 N5)", () => {
     const c = await detail(alice, claimId);
     expect(c.events).toHaveLength(1);
     expect(c.nonCashRemedies).toHaveLength(0);
-    expect(usd(1)).toEqual({ amountMinor: 1, currency: "USD" });
   });
 });
 
