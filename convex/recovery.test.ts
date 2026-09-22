@@ -286,6 +286,19 @@ describe("recovery.summary (query)", () => {
     expect(s.currencies.map((c) => [c.currency, c.tiles.ready.amountMinor, c.recoveredMinor])).toEqual([["EUR", 3_000, 0], ["USD", 4_000, 0]]);
   });
 
+  it("a legacy JPY claim (expectedCents 120000 = ¥1,200 in hundredths) is never shown or summed as ¥120,000", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const yen = await seedItem(t, userId, "JPY");
+    await claimRow(t, userId, yen, { expected: 120_000, confirmed: 20_000 });
+    const usdItem = await seedItem(t, userId, "USD");
+    await claimRow(t, userId, usdItem, { expected: 1_000 });
+    const s = await as.query(api.recovery.summary, { now: NOW });
+    expect(s.currencies.map((c) => c.currency)).toEqual(["USD"]);
+    expect(JSON.stringify(s)).not.toMatch(/120000|20000/);
+    expect(s.unsupportedCurrencies).toEqual([{ currency: "JPY", claims: 1 }]);
+  });
+
   it("a real cut past 200 claims reports complete: false; a foreign user sees nothing", async () => {
     const t = setup();
     const { userId, as } = await signedIn(t);

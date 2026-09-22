@@ -298,6 +298,23 @@ describe("openCase / dismiss / queries", () => {
     await expect(other.as.mutation(api.opportunities.openCase, { opportunityId: opp._id })).rejects.toThrow("Opportunity not found");
   });
 
+  it("reevaluate (user_request): the caller's purchase or transaction; foreign ids → identical not-found; limited", async () => {
+    const t = setup();
+    const { owner, other } = await twoUsers(t);
+    const w = await world(t, owner.userId, { items: 2 });
+    expect(await owner.as.mutation(api.opportunities.reevaluate, { purchaseId: w.purchaseId })).toEqual({ evaluated: 2 });
+    expect(await owner.as.mutation(api.opportunities.reevaluate, { transactionId: w.transactionId })).toEqual({ evaluated: 2 });
+    const opps = await oppsOf(t, w.transactionId);
+    expect(opps).toHaveLength(2);
+    for (const o of opps) expect((await evalsOf(t, o._id)).map((e) => e.trigger)).toEqual(["user_request"]);
+    await expect(other.as.mutation(api.opportunities.reevaluate, { purchaseId: w.purchaseId })).rejects.toThrow("Purchase not found");
+    await expect(other.as.mutation(api.opportunities.reevaluate, { transactionId: w.transactionId })).rejects.toThrow("Transaction not found");
+    await expect(owner.as.mutation(api.opportunities.reevaluate, {})).rejects.toThrow("exactly one");
+    for (let i = 0; i < 58; i++) await owner.as.mutation(api.opportunities.reevaluate, { transactionId: w.transactionId });
+    await expect(owner.as.mutation(api.opportunities.reevaluate, { transactionId: w.transactionId })).rejects.toThrow("Too many checks");
+    expect(await t.run((ctx) => ctx.db.query("claims").collect())).toEqual([]); // re-evaluation never opens a case
+  });
+
   it("refuses a non-approvable result without throwing (the evaluation is committed)", async () => {
     const t = setup();
     const { userId, as } = await signedIn(t);

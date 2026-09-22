@@ -714,6 +714,37 @@ export const openCase = mutation({
   },
 });
 
+/**
+ * The UI's explicit "check again" (trigger `user_request`) for one of the caller's purchases or transactions:
+ * ownership and tombstone first (identical not-found for foreign or missing ids), then the per-user `evaluate` bucket,
+ * then `ensurePurchaseTransaction` (a legacy purchase gets its transaction here) and an evaluation. Nothing opens:
+ * case opening is `openCase`.
+ */
+export const reevaluate = mutation({
+  args: { purchaseId: v.optional(v.id("purchases")), transactionId: v.optional(v.id("transactions")) },
+  returns: v.object({ evaluated: v.number() }),
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    if ((args.purchaseId === undefined) === (args.transactionId === undefined)) {
+      throw new ConvexError("Give exactly one of purchaseId or transactionId");
+    }
+    let transactionId: Id<"transactions">;
+    if (args.purchaseId !== undefined) {
+      await ownedPurchase(ctx, args.purchaseId, userId);
+      const limit = await rateLimiter.limit(ctx, "evaluate", { key: userId });
+      if (!limit.ok) throw new ConvexError("Too many checks in a short time. Try again in a minute.");
+      transactionId = await ensurePurchaseTransaction(ctx, args.purchaseId);
+    } else {
+      await ownedTransaction(ctx, args.transactionId!, userId);
+      const limit = await rateLimiter.limit(ctx, "evaluate", { key: userId });
+      if (!limit.ok) throw new ConvexError("Too many checks in a short time. Try again in a minute.");
+      transactionId = args.transactionId!;
+    }
+    const evaluated = await evaluateTransaction(ctx, transactionId, "user_request", Date.now());
+    return { evaluated: evaluated.length };
+  },
+});
+
 /** The caller dismisses an opportunity with no open case; it stays dismissed (§2.8 Closing). */
 export const dismiss = mutation({
   args: { opportunityId: v.id("opportunities") },
