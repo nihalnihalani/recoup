@@ -12,9 +12,12 @@
  *   tile(K)   = furthest state over open members: promised > asked > sending_or_unknown > ready > potential;
  *               `ready` is the CATCH-ALL for every open claim not in a higher tile (C4)
  *   provisional(K) = min(outstanding(K), Σ provisional) — shown "of which provisional" inside tile(K)
- *   per-transaction cap: Σ (recovered + outstanding) over the components anchored on a transaction ≤ its confirmed
- *               paid total (retail: a confirmed `retail.order_total`, else Σ unit × qty labelled partial); the
- *               excess comes off outstanding in the order potential → ready → sending → asked → promised
+ *   per-transaction cap (D145, D188), per transaction per currency, against its confirmed paid total P (retail: a
+ *               confirmed `retail.order_total`, else Σ unit × qty labelled `paidTotalPartial`):
+ *               1. Recovered: Σ recovered ≤ P — confirmed money above what was paid moves to the over-credit line
+ *                  (visible, never dropped; mission §6). The ledger is untouched: display/accounting only.
+ *               2. Outstanding: Σ (recovered + outstanding) ≤ P — the rest comes off outstanding in the order
+ *                  potential → ready → sending → asked → promised (an unpaid ask is trimmed, never an over-credit)
  *
  * Alternatives (components) count once across ALL tiles, including components with cases. Currencies are never
  * summed or converted. Legacy `…Cents` fields are hundredths of the major unit for EVERY currency (HC-8), so a claim
@@ -154,7 +157,12 @@ export function components(claims: readonly SummaryClaim[], opps: readonly Summa
   });
 }
 
-/** Applies the per-transaction paid-total cap (D145), lowest tile first. Mutates the components; returns flags. */
+/**
+ * Applies the per-transaction paid-total cap (D145, D188). Mutates the components; returns flags. First confirmed
+ * money: Σ recovered on the transaction is capped at P and the excess moves to `excess` (the over-credit line), so
+ * I2 (recovered + over-credit = Σ net) still holds. Then outstanding, lowest tile first, until Σ (recovered +
+ * outstanding) ≤ P (I4).
+ */
 export function applyPaidCap(comps: Component[], paid: ReadonlyMap<string, PaidTotal>, currency: string): { capped: boolean; partial: boolean } {
   let capped = false;
   let partial = false;
@@ -163,6 +171,26 @@ export function applyPaidCap(comps: Component[], paid: ReadonlyMap<string, PaidT
   for (const [anchor, ks] of byAnchor) {
     const p = paid.get(anchor);
     if (!p || p.currency !== currency) continue;
+    const mark = () => {
+      capped = true;
+      if (p.partial) partial = true;
+    };
+    // 1. Confirmed money never shows above what was paid; the excess stays visible as over-credit (D188).
+    let overRecovered = ks.reduce((a, k) => a + k.recovered, 0) - p.amountMinor;
+    if (overRecovered > 0) {
+      const byKey = [...ks].sort((a, b) => (a.lossKeys.join("|") < b.lossKeys.join("|") ? -1 : 1));
+      for (const k of byKey) {
+        if (overRecovered <= 0) break;
+        const cut = Math.min(k.recovered, overRecovered);
+        if (cut > 0) {
+          k.recovered -= cut;
+          k.excess += cut;
+          overRecovered -= cut;
+          mark();
+        }
+      }
+    }
+    // 2. Then what is still being asked, lowest tile first.
     let over = ks.reduce((a, k) => a + k.recovered + k.outstanding, 0) - p.amountMinor;
     if (over <= 0) continue;
     const ordered = [...ks].filter((k) => k.tile !== null).sort((a, b) => TILE_RANK[a.tile!] - TILE_RANK[b.tile!]);
@@ -173,8 +201,7 @@ export function applyPaidCap(comps: Component[], paid: ReadonlyMap<string, PaidT
         k.outstanding -= cut;
         k.provisional = Math.min(k.provisional, k.outstanding);
         over -= cut;
-        capped = true;
-        if (p.partial) partial = true;
+        mark();
       }
     }
   }

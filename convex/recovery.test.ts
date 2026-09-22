@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import type { Delivery } from "./lib/claimState";
-import { components, computeSummary, type PaidTotal, type SummaryClaim, type SummaryOpportunity, TILES } from "./recovery";
+import { applyPaidCap, components, computeSummary, type PaidTotal, type SummaryClaim, type SummaryOpportunity, TILES } from "./recovery";
 import { pinClockEach, setup, signedIn } from "./test.setup";
 
 const claim = (o: Partial<SummaryClaim> & Pick<SummaryClaim, "id" | "expectedMinor" | "lossKeys">): SummaryClaim => ({
@@ -75,6 +75,48 @@ describe("DA-A-4 (D145): alternatives count once across ALL tiles; per-transacti
       claim({ id: "diff", expectedMinor: 2_000, lossKeys: ["k"] }),
     ]);
     expect(s.tiles.ready.amountMinor).toBe(2_000);
+  });
+});
+
+describe("D188 (QA-M16-1): confirmed money per transaction per currency never exceeds the paid total; excess → over-credit", () => {
+  const paid = (amountMinor: number, currency = "USD", partial = true) => new Map([["purchase:p1", { amountMinor, currency, partial }]]);
+  const confirmed = (id: string, key: string, amount: number, currency = "USD") =>
+    claim({ id, expectedMinor: amount, lossKeys: [key], status: "confirmed", closedForAsk: true, confirmedMinor: amount, currency });
+
+  it("a confirmed 2,000 price adjustment + a confirmed 4,000 refund on a 4,000 item → Recovered 4,000, over-credit 2,000", () => {
+    const s = usd([confirmed("pa", "item:i:price_diff:1", 2_000), confirmed("rf", "item:i:return_credit", 4_000)], [], paid(4_000));
+    expect(s.recoveredMinor).toBe(4_000);
+    expect(s.overCreditMinor).toBe(2_000); // visible, never dropped (mission §6)
+    expect(s.cappedAtPaidTotal).toBe(true);
+    expect(s.paidTotalPartial).toBe(true); // item totals only: "cap based on item prices only"
+    expect(TILES.every((t) => s.tiles[t].amountMinor === 0)).toBe(true);
+  });
+
+  it("a confirmed order total (not partial) caps the same way, without the partial label", () => {
+    const s = usd([confirmed("pa", "a", 2_000), confirmed("rf", "b", 4_000)], [], paid(4_500, "USD", false));
+    expect([s.recoveredMinor, s.overCreditMinor, s.cappedAtPaidTotal, s.paidTotalPartial]).toEqual([4_500, 1_500, true, false]);
+  });
+
+  it("with no excess nothing changes: 2,000 + 1,000 confirmed on a 4,000 purchase", () => {
+    const s = usd([confirmed("pa", "a", 2_000), confirmed("pa2", "b", 1_000)], [], paid(4_000));
+    expect([s.recoveredMinor, s.overCreditMinor, s.cappedAtPaidTotal]).toEqual([3_000, 0, false]);
+  });
+
+  it("confirmed money at the cap leaves no outstanding on that transaction (Σ recovered + outstanding ≤ paid)", () => {
+    const s = usd([confirmed("rf", "b", 4_000), claim({ id: "open", expectedMinor: 1_500, lossKeys: ["c"], delivery: "sent" })], [], paid(4_000));
+    expect(s.recoveredMinor).toBe(4_000);
+    expect(TILES.reduce((a, t) => a + s.tiles[t].amountMinor, 0)).toBe(0);
+    expect(s.overCreditMinor).toBe(0); // an unpaid ask is trimmed, not an over-credit
+  });
+
+  it("mixed currencies stay separate: a USD paid total never caps EUR money on the same anchor", () => {
+    const rows = computeSummary(
+      [confirmed("u1", "a", 3_000), confirmed("u2", "b", 3_000), confirmed("e1", "c", 3_000, "EUR"), confirmed("e2", "d", 3_000, "EUR")],
+      [],
+      paid(4_000),
+    );
+    const byCur = Object.fromEntries(rows.map((r) => [r.currency, [r.recoveredMinor, r.overCreditMinor, r.cappedAtPaidTotal]]));
+    expect(byCur).toEqual({ USD: [4_000, 2_000, true], EUR: [6_000, 0, false] });
   });
 });
 
@@ -192,14 +234,14 @@ describe("I1–I5 per currency over the C4 generator (every status × delivery �
         const uncapped = comps.reduce((a, k) => a + k.outstanding, 0);
         expect(tileSum).toBeLessThanOrEqual(uncapped);
         if (!cur.cappedAtPaidTotal) expect(tileSum).toBe(uncapped);
-        // I4: a capped transaction's Σ (recovered + outstanding) never exceeds its paid total unless recovered does.
+        // I4 (D188): per transaction per currency, Σ (recovered + outstanding) ≤ the paid total after the cap —
+        // confirmed money included; anything above it sits on the over-credit line.
         const p = paid.get("purchase:p1");
-        if (cur.cappedAtPaidTotal && p && p.currency === cur.currency) {
-          const anchored = comps.filter((k) => k.anchor === "purchase:p1");
-          const rec = anchored.reduce((a, k) => a + k.recovered, 0);
-          const before = anchored.reduce((a, k) => a + k.recovered + k.outstanding, 0);
-          expect(before).toBeGreaterThan(0);
-          expect(rec).toBeLessThanOrEqual(Math.max(rec, p.amountMinor));
+        if (p && p.currency === cur.currency) {
+          const capped = components(cs, os);
+          applyPaidCap(capped, paid, cur.currency);
+          const anchored = capped.filter((k) => k.anchor === "purchase:p1");
+          expect(anchored.reduce((a, k) => a + k.recovered + k.outstanding, 0)).toBeLessThanOrEqual(p.amountMinor);
         }
         // I5: no cap value or face value enters a sum: every figure is bounded by the members' own amounts.
         const lossBound = comps.reduce((a, k) => a + Math.max(0, ...k.claims.map((c) => c.expectedMinor), ...k.opportunities.map((o) => o.estimateMinor)), 0);
@@ -260,6 +302,20 @@ describe("recovery.summary (query)", () => {
     expect(usdRow.recoveredMinor).toBe(2_000);
     expect(usdRow.tiles.ready.amountMinor).toBe(1_000);
     expect(s.complete).toBe(true);
+  });
+
+  it("D188: a confirmed 2,000 price adjustment + a confirmed 4,000 return refund on a 4,000 item → Recovered 4,000, over-credit 2,000", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const w = await t.run(async (ctx) => {
+      const purchaseId = await ctx.db.insert("purchases", { userId, merchant: "Summit", merchantDomain: "summit.example", purchasedAt: NOW - 86_400_000, currency: "USD", status: "active" });
+      const itemId = await ctx.db.insert("items", { purchaseId, userId, name: "Fleece", unitCents: 4_000, qty: 1, returned: true });
+      return { purchaseId, itemId };
+    });
+    await claimRow(t, userId, w, { expected: 2_000, status: "confirmed", confirmed: 2_000 });
+    await claimRow(t, userId, w, { expected: 4_000, status: "confirmed", confirmed: 4_000, type: "return_credit" });
+    const usdRow = (await as.query(api.recovery.summary, { now: NOW })).currencies.find((c) => c.currency === "USD")!;
+    expect([usdRow.recoveredMinor, usdRow.overCreditMinor, usdRow.cappedAtPaidTotal, usdRow.paidTotalPartial]).toEqual([4_000, 2_000, true, true]);
   });
 
   it("examples are excluded (claims, their ledger and non-cash rows, and example opportunities)", async () => {

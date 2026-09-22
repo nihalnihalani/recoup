@@ -513,9 +513,9 @@ describe("H2. confirmed money on one item above what was paid (contract §3.4 I4
    * line. Through public flows: a 2,000 price adjustment confirmed, then the 4,000 item returned and refunded in
    * full → Recovered 6,000 on a 4,000 purchase. Expected per I4 and mission §6 (confirmed recovery is never
    * inflated; a possible double credit is shown, never erased): Recovered ≤ 4,000 with the rest on the over-credit
-   * line. `it.fails` documents the defect and turns red (so it is noticed) the day it is fixed.
+   * line. Fixed by M12c (D188): the paid-total cap now also caps Recovered; this pinned test is the regression test.
    */
-  it.fails("a confirmed price adjustment + a confirmed full return refund never show more Recovered than the 4,000 paid", async () => {
+  it("a confirmed price adjustment + a confirmed full return refund never show more Recovered than the 4,000 paid", async () => {
     const t = setup();
     const { userId, as } = await signedIn(t);
     const { itemIds } = await buy(as, {
