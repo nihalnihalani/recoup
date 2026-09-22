@@ -9,7 +9,7 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | Role | Agent name | Wave | Status |
 |---|---|---|---|
 | Lead | this session | – | active |
-| Product architect | opus-product-architect | 0 | idle (M01 delivered) |
+| Product architect | opus-product-architect | 0–1 | idle (M01, M06–M06f delivered) |
 | Rules researcher | opus-rules-researcher | 0 | idle (M02 delivered) |
 | Security & privacy reviewer | opus-security-privacy-reviewer | 0 | idle (M03 delivered) |
 | QA engineer | opus-qa-engineer | 0 | idle (M04 delivered) |
@@ -33,8 +33,11 @@ Statuses: pending · ready · in_progress · review · changes_requested · veri
 | M06b | 1 | opus-product-architect | M07 | Contract rev 5: C1–C4, N2–N7, wave-2 notes (D148) | docs/team/contracts/2026-09-23-M01-*.md | verified (c081a17; M10 delta forwarded; R04 §10 per D147 → M06c) |
 | M08 | 1 | opus-qa-engineer | – | Test infra + CI: DOM env for *.test.tsx (QA-13), rule-fixture loader (hash + alias), twoUsers/clock helpers + time-bomb lint test, CI lint 0 / floor / e2e typecheck / concurrency / env-driven e2e fixtures | vitest.config.mts, package.json, package-lock.json, convex/test.setup.ts, convex/testing/**, src/test/**, .github/workflows/ci.yml, scripts/check-test-count.mjs, e2e/fixtures.ts, playwright.config.ts, docs/reviews/2026-09-23-M08-test-infra.md | in_progress |
 | M09 | 1 | opus-rules-reviewer | – | Independent spec-level review of R01–R05 against captured primary text + blind fixture check (activation gate, DA-A-11) | docs/reviews/2026-09-23-rules-review-R01-R05.md | verified (8fd1e3f; R01 reject-resubmit, R02–R05 approve-with-changes; rulings D147) |
-| M2D | 1 | opus-rules-researcher | M09, M1C | Apply M09's 27 edits + R01 window-event redesign + fixture construction fixes; capture every uncaptured normative source; D147 rulings | docs/rules/** | pending (after M1C) |
-| M09b | 1 | opus-rules-reviewer | M2D | Re-review of revised specs/fixtures; activation gate | docs/reviews/2026-09-23-rules-review-R01-R05.md (addendum) | pending |
+| M2D | 1 | opus-rules-researcher | M09, M1C | Apply M09's 27 edits + R01 window-event redesign + fixture construction fixes; capture every uncaptured normative source; D147 rulings | docs/rules/** | verified (2743862 et al.; 23/23 hashes; D151) |
+| M09b | 1 | opus-rules-reviewer | M2D | Re-review of revised specs/fixtures; activation gate | docs/reviews/2026-09-23-rules-review-R01-R05.md (addendum) | verified (4bcf07b; R01 v1 approve_for_activation; others approve_with_changes; D154) |
+| M2E | 1 | opus-rules-researcher | M09b | Apply M09b §B.8 edits; README rule 3 cap; confirmed-vs-observed fixture per file | docs/rules/** | in_progress |
+| M09c | 1 | opus-rules-reviewer | M2E | Re-check changed items only | review addendum | pending |
+| M06f | 1 | opus-product-architect | M09b | Contract §4 5c decided + disputed-anchor deadline rule + not_yet_due next action (D154) | contract | verified (ab72962, e780129; M12 briefed) |
 
 ---
 
@@ -582,7 +585,7 @@ release-candidate.md: commit SHA, tag `rc-<date>`, node/npm versions, lockfile s
 |---|---|---|
 | M10 | opus-backend-engineer | in_progress (commit 1 schema 92993cb landed) |
 | M11 | opus-backend-engineer-2 | in_progress (from 92993cb) |
-| M12 | opus-backend-engineer-3 | pending (M10, M11, M09, M1C) |
+| M12 | opus-backend-engineer-3 | in_progress (pure modules first; integration after M10 ledger/claims + M11) |
 | M13 | opus-ingestion-integrations-engineer | pending (M10–M12, M1B) |
 | M14 | opus-backend-engineer-5 | in_progress (from 92993cb) |
 | M15 | opus-frontend-ux-engineer | pending (M08, M12–M14) |

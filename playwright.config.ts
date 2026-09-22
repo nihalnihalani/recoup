@@ -1,6 +1,17 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
+ * M08 (QA-9): the Convex URL the dev server's app talks to. Locally neither
+ * variable is usually set, and Vite reads VITE_CONVEX_URL from `.env.local`
+ * exactly as before. In CI there is no `.env.local`, so the app gets the
+ * dedicated E2E deployment's URL (`E2E_CONVEX_URL`). `e2e/fixtures.ts`
+ * refuses to seed if this and the deploy key name different deployments,
+ * or if either is production.
+ */
+// `||`, not `??`: an unset GitHub secret arrives as an empty string.
+const appConvexUrl = process.env.VITE_CONVEX_URL || process.env.E2E_CONVEX_URL;
+
+/**
  * T20 (P10 browser acceptance suite, D104). Runs against the app's own dev
  * server (`npm run dev`, Vite on 5173) talking to the disposable Convex dev
  * deployment `adorable-lion-138` (D83 item 3) -- the one deployment where
@@ -29,7 +40,8 @@ export default defineConfig({
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : [["list"], ["html", { open: "never" }]],
 
   use: {
-    baseURL: process.env.E2E_BASE_URL ?? "http://localhost:5173",
+    // `||`: CI passes `secrets.E2E_BASE_URL`, which is "" when not configured.
+    baseURL: process.env.E2E_BASE_URL || "http://localhost:5173",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
@@ -47,10 +59,10 @@ export default defineConfig({
   ],
 
   // Boots the real dev server unless E2E_BASE_URL already points somewhere
-  // running (CI's `e2e` job in .github/workflows/ci.yml, per T17, only runs
-  // this suite when E2E_* secrets point at a deployed preview/target -- it
-  // does not spawn `npm run dev` itself in that path). Locally, this starts
-  // Vite and waits for it before any test runs.
+  // running. CI's `e2e` job (.github/workflows/ci.yml) runs only when the
+  // E2E_CONVEX_URL/E2E_DEPLOY_KEY secrets exist; without E2E_BASE_URL it
+  // starts Vite here with VITE_CONVEX_URL = E2E_CONVEX_URL. Locally this
+  // starts Vite (reading `.env.local`) and waits for it before any test runs.
   webServer: process.env.E2E_BASE_URL
     ? undefined
     : {
@@ -58,5 +70,6 @@ export default defineConfig({
         url: "http://localhost:5173",
         reuseExistingServer: !process.env.CI,
         timeout: 60_000,
+        ...(appConvexUrl ? { env: { VITE_CONVEX_URL: appConvexUrl } } : {}),
       },
 });

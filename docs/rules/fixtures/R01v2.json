@@ -1,0 +1,1975 @@
+{
+  "schema": "recoup.rule-fixtures/v1",
+  "rule_id": "R01v2.retail_price_adjustment.merchant_packs",
+  "rule_version": "v1",
+  "tier": "R01 v2 reviewed merchant-pack tier (sample packs: Best Buy, Target, Costco.com, Apple Retail US)",
+  "spec": "docs/rules/R01-retail-price-adjustment.md",
+  "construction": "Constructed by hand by opus-rules-researcher (M2D) on 2026-09-23 from the R01 spec §1–§7 and the merchant passages re-verified verbatim that day (passage hashes in the spec). No merchant-pack evaluator exists (R01 v2 is a wave-3 task); none was consulted.",
+  "conventions": {
+    "fact_encoding": "facts.<key> = {type, value, state} per README 'Fixture format'. Keys: retail.merchant_id, retail.channel, retail.purchase_date, retail.received_at, retail.request_at, retail.price_change_at, retail.item_identity, retail.product_category, retail.membership_tier, retail.quantity, retail.unit_price, retail.comparison_offer (observation), retail.prior_adjustments, retail.buyer_is_reseller, retail.target_plus_partner_item, retail.purchase_store_id, retail.promotional_item, retail.promotion_dates, retail.policy_confirmed.",
+    "pack_context": "context.pack describes the merchant pack version in force (effective_from, window with `constrains`, discretion, limits). context.pack = null means the merchant has no pack.",
+    "windows": "Each window tests the event named by `constrains` (price_change | request | both). Day counting: the anchor day is day 0 unless the passage says the period 'begins the day you receive' (Best Buy: receipt day = day 1). Last day inclusive (assumption). Calendar days are the buyer's local dates (R01 spec §2 calendar_zone). Best Buy's return period 'begins the day you receive' (BB-3): the receipt day is day 1, last day = received_at + length − 1 (R01 spec §5, §7.1).",
+    "temporal": "R01 spec §1.4: displayed effective date ≤ purchase → applicable (can reach eligible); displayed effective date after purchase → source_unverified + ask_anyway; not displayed → capped at likely_eligible_missing_evidence with assumption and missing fact retail.policy_confirmed.",
+    "decisive_facts": "D147(2): eligible requires every decisive fact user_confirmed, observed, or derived from those.",
+    "refresh": "Merchant packs refresh every 7 days; case/variant `source` gives last_verified_on with refresh_window_days 7.",
+    "loader": "Same rules as R02-R05 (README 'Fixture format'). File stem R01v2 = the R01 v2 merchant-pack tier; its manifest pack's scenarioId is R01v2 and its rule_id starts with 'R01v2.'.",
+    "outcome_vocabulary": [
+      "eligible",
+      "likely_eligible_missing_evidence",
+      "possible_contract_benefit",
+      "needs_facts",
+      "manual_review",
+      "not_eligible",
+      "deadline_passed",
+      "source_unverified",
+      "unsupported",
+      "not_yet_due"
+    ],
+    "conflicting": "D152/D154 (README cross-pack rule 3): conflict_kind 'candidates' → different outcomes or amounts = needs_facts; same outcome and amount = capped at likely_eligible_missing_evidence (fact listed in unconfirmed_decisive_facts). conflict_kind 'confirmed_vs_observed' / 'confirmed_vs_confirmed' → manual_review. A conflicting or extracted-only deadline anchor never gives a firm date: deadline.date = null, status disputed_anchor / unknown_anchor, and (user-obligor paths only) advisory_act_by from the earliest candidate."
+  },
+  "cases": [
+    {
+      "id": "R01v2-01",
+      "title": "Best Buy own-price drop during the return period; purchase after the policy's effective date; 2 x 12,000 → 9,500",
+      "categories": [
+        "positive"
+      ],
+      "mission_domain_fixture": "mission §17 core: two units at 12,000 with eligible matching price 9,500 → 5,000 difference",
+      "clock": "2026-09-18T12:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-18",
+        "refresh_window_days": 7
+      },
+      "facts": {
+        "retail.merchant_id": {
+          "type": "string",
+          "value": "bestbuy",
+          "state": "user_confirmed"
+        },
+        "retail.channel": {
+          "type": "enum",
+          "value": "store",
+          "state": "user_confirmed"
+        },
+        "retail.purchase_date": {
+          "type": "datetime",
+          "value": "2026-09-10T14:00:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.received_at": {
+          "type": "datetime",
+          "value": "2026-09-10T14:05:00-04:00",
+          "state": "user_confirmed",
+          "note": "store pickup"
+        },
+        "retail.item_identity": {
+          "type": "object",
+          "value": {
+            "brand": "ExampleBrand",
+            "model_number": "SB-500",
+            "color": "black",
+            "condition": "new",
+            "sku": "6500001"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.product_category": {
+          "type": "enum",
+          "value": "audio",
+          "state": "user_confirmed"
+        },
+        "retail.membership_tier": {
+          "type": "enum",
+          "value": "standard",
+          "state": "user_confirmed"
+        },
+        "retail.quantity": {
+          "type": "integer",
+          "value": 2,
+          "state": "user_confirmed"
+        },
+        "retail.unit_price": {
+          "type": "money",
+          "value": {
+            "amount_minor": 12000,
+            "currency": "USD"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.comparison_offer": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 9500,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.95,
+            "isRange": false,
+            "observedAt": "2026-09-18T09:00:00-04:00",
+            "seller": "bestbuy",
+            "channel": "online",
+            "source": "bestbuy.com product page"
+          },
+          "state": "observed"
+        },
+        "retail.price_change_at": {
+          "type": "datetime",
+          "value": "2026-09-18T09:00:00-04:00",
+          "state": "derived",
+          "from": "first accepted observation of the lower price"
+        },
+        "retail.prior_adjustments": {
+          "type": "money[]",
+          "value": [],
+          "state": "user_confirmed"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.bestbuy.all_channels",
+          "pack_version": 1,
+          "effective_from": "2026-09-02",
+          "constituents": {
+            "price_match_guarantee": "2026-09-02",
+            "return_exchange_policy": "2026-02-23"
+          },
+          "window": {
+            "length_days": {
+              "standard": 15,
+              "plus_total": 60,
+              "activatable_device": 14
+            },
+            "anchor": "receipt_date",
+            "constrains": "price_change",
+            "passage": "BB-1, BB-3"
+          }
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "eligible",
+        "missing_facts": [],
+        "amount": {
+          "estimate": {
+            "amount_minor": 5000,
+            "currency": "USD"
+          },
+          "formula": "(12,000 - 9,500) x 2"
+        },
+        "deadline": {
+          "kind": "price_change_window_ends",
+          "date": "2026-09-24",
+          "semantics": "return period of 15 days beginning the day of receipt (2026-09-10 = day 1; assumption); constrains the PRICE CHANGE (BB-1), which happened 2026-09-18"
+        },
+        "claim": {
+          "opens": true,
+          "amount": {
+            "amount_minor": 5000,
+            "currency": "USD"
+          }
+        }
+      },
+      "justification": {
+        "passages": [
+          "BB-1",
+          "BB-3",
+          "R01 spec §1.4(a)",
+          "R01 spec §4"
+        ],
+        "reasoning": "Pack effective 2026-09-02 ≤ purchase 2026-09-10 (§1.4(a)); the lower Best Buy price appeared inside the return period; every decisive fact confirmed or observed."
+      }
+    },
+    {
+      "id": "R01v2-02",
+      "title": "Best Buy purchase dated before the policy's displayed effective date → known mismatch",
+      "categories": [
+        "stale_or_changing_source"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-22T12:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-18",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-01",
+      "facts_override": {
+        "retail.purchase_date": {
+          "type": "datetime",
+          "value": "2026-08-25T14:00:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.received_at": {
+          "type": "datetime",
+          "value": "2026-08-25T14:05:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.comparison_offer": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 9500,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.95,
+            "isRange": false,
+            "observedAt": "2026-09-20T09:00:00-04:00",
+            "seller": "bestbuy",
+            "channel": "online"
+          },
+          "state": "observed"
+        },
+        "retail.price_change_at": {
+          "type": "datetime",
+          "value": "2026-09-20T09:00:00-04:00",
+          "state": "derived"
+        },
+        "retail.membership_tier": {
+          "type": "enum",
+          "value": "plus_total",
+          "state": "user_confirmed"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.bestbuy.all_channels",
+          "pack_version": 1,
+          "effective_from": "2026-09-02",
+          "constituents": {
+            "price_match_guarantee": "2026-09-02",
+            "return_exchange_policy": "2026-02-23"
+          },
+          "window": {
+            "length_days": {
+              "standard": 15,
+              "plus_total": 60,
+              "activatable_device": 14
+            },
+            "anchor": "receipt_date",
+            "constrains": "price_change",
+            "passage": "BB-1, BB-3"
+          }
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "source_unverified",
+        "missing_facts": [],
+        "amount": null,
+        "claim": {
+          "opens": false
+        },
+        "next_action": "ask_anyway",
+        "user_message": "The merchant changed this policy after your purchase (effective 2026-09-02); we don't have the version that applied on 2026-08-25. You can still ask.",
+        "note": "Plus/Total member (60-day period), so only the policy version blocks this purchase: the captured pack is effective 2026-09-02, after the 2026-08-25 purchase."
+      },
+      "justification": {
+        "passages": [
+          "R01 spec §1.4 known mismatch",
+          "D143(1)"
+        ],
+        "reasoning": "The captured version's effective date postdates the purchase, so it is affirmatively not the purchase-date policy."
+      }
+    },
+    {
+      "id": "R01v2-03",
+      "title": "Target (no effective date displayed): request within 14 days of purchase → capped at likely eligible",
+      "categories": [
+        "positive",
+        "assumption_class"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-22T10:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-20",
+        "refresh_window_days": 7
+      },
+      "facts": {
+        "retail.merchant_id": {
+          "type": "string",
+          "value": "target",
+          "state": "user_confirmed"
+        },
+        "retail.channel": {
+          "type": "enum",
+          "value": "online",
+          "state": "user_confirmed"
+        },
+        "retail.purchase_date": {
+          "type": "datetime",
+          "value": "2026-09-15T20:00:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.item_identity": {
+          "type": "object",
+          "value": {
+            "brand": "ExampleBrand",
+            "model_number": "KB-12",
+            "color": "white",
+            "size": "standard",
+            "condition": "new"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.quantity": {
+          "type": "integer",
+          "value": 1,
+          "state": "user_confirmed"
+        },
+        "retail.unit_price": {
+          "type": "money",
+          "value": {
+            "amount_minor": 4999,
+            "currency": "USD"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.comparison_offer": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 3999,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.95,
+            "isRange": false,
+            "observedAt": "2026-09-21T08:00:00-04:00",
+            "seller": "target",
+            "channel": "target.com"
+          },
+          "state": "observed"
+        },
+        "retail.request_at": {
+          "type": "datetime",
+          "value": "2026-09-22T10:00:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.target_plus_partner_item": {
+          "type": "boolean",
+          "value": false,
+          "state": "user_confirmed"
+        },
+        "retail.policy_confirmed": {
+          "type": "boolean",
+          "value": null,
+          "state": "assumption"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.target.all_channels",
+          "pack_version": 1,
+          "effective_from": "unknown",
+          "window": {
+            "length_days": 14,
+            "anchor": "purchase_date",
+            "constrains": "request",
+            "passage": "TG-1"
+          },
+          "target_plus_comparison": "Target.com only (TG-2)"
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "likely_eligible_missing_evidence",
+        "missing_facts": [
+          "retail.policy_confirmed"
+        ],
+        "assumptions": [
+          "the current policy text is assumed to be the one in effect on 2026-09-15"
+        ],
+        "amount": {
+          "estimate": {
+            "amount_minor": 1000,
+            "currency": "USD"
+          }
+        },
+        "deadline": {
+          "kind": "request_window_ends",
+          "date": "2026-09-29",
+          "semantics": "TG-1 constrains the REQUEST: bought 'today, or in the past 14 days' (2026-09-15 + 14 days, inclusive assumption)"
+        }
+      },
+      "variants": [
+        {
+          "id": "R01v2-03b",
+          "change": {
+            "retail.request_at": {
+              "type": "datetime",
+              "value": "2026-09-30T10:00:00-04:00",
+              "state": "user_confirmed"
+            }
+          },
+          "clock": "2026-09-30T10:00:00-04:00",
+          "day": 15,
+          "expected": {
+            "outcome": "deadline_passed",
+            "missing_facts": [],
+            "amount": null,
+            "note": "The request falls on day 15; TG-1 constrains the request."
+          },
+          "source": {
+            "last_verified_on": "2026-09-29",
+            "refresh_window_days": 7,
+            "note": "pack re-verified within 7 days of the variant clock (M09b B.8)"
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "TG-1",
+          "R01 spec §1.4 unknown applicability"
+        ],
+        "reasoning": "No displayed effective date → capped; the window constrains the request date."
+      }
+    },
+    {
+      "id": "R01v2-04",
+      "title": "Apple two clocks: price drop within 14 calendar days of receipt, request within 14 days of the drop (day 14 / day 15 on each)",
+      "categories": [
+        "boundary_time"
+      ],
+      "mission_domain_fixture": null,
+      "source": {
+        "last_verified_on": "2026-09-19",
+        "refresh_window_days": 7
+      },
+      "facts": {
+        "retail.merchant_id": {
+          "type": "string",
+          "value": "apple",
+          "state": "user_confirmed"
+        },
+        "retail.channel": {
+          "type": "enum",
+          "value": "store",
+          "state": "user_confirmed"
+        },
+        "retail.purchase_date": {
+          "type": "datetime",
+          "value": "2026-08-30T18:00:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.received_at": {
+          "type": "datetime",
+          "value": "2026-09-01T12:00:00-04:00",
+          "state": "user_confirmed",
+          "note": "delivered"
+        },
+        "retail.item_identity": {
+          "type": "object",
+          "value": {
+            "brand": "Apple",
+            "model_number": "EXAMPLE-PHONE-256",
+            "color": "blue",
+            "capacity": "256GB",
+            "condition": "new"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.quantity": {
+          "type": "integer",
+          "value": 1,
+          "state": "user_confirmed"
+        },
+        "retail.unit_price": {
+          "type": "money",
+          "value": {
+            "amount_minor": 99900,
+            "currency": "USD"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.comparison_offer": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 89900,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.95,
+            "isRange": false,
+            "observedAt": "2026-09-15T09:00:00-04:00",
+            "seller": "apple",
+            "channel": "store",
+            "limited_time": false
+          },
+          "state": "observed"
+        },
+        "retail.price_change_at": {
+          "type": "datetime",
+          "value": "2026-09-15T09:00:00-04:00",
+          "state": "derived"
+        },
+        "retail.request_at": {
+          "type": "datetime",
+          "value": "2026-09-20T11:00:00-04:00",
+          "state": "user_confirmed"
+        },
+        "retail.policy_confirmed": {
+          "type": "boolean",
+          "value": null,
+          "state": "assumption"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.apple.retail_us",
+          "pack_version": 1,
+          "effective_from": "unknown",
+          "windows": [
+            {
+              "length_days": 14,
+              "anchor": "receipt_date",
+              "constrains": "price_change"
+            },
+            {
+              "length_days": 14,
+              "anchor": "price_change_date",
+              "constrains": "request"
+            }
+          ],
+          "quantity_limit": 10,
+          "channels_captured": [
+            "store"
+          ],
+          "passage": "AP-1, AP-2"
+        },
+        "price_claims_on_item": []
+      },
+      "variants": [
+        {
+          "id": "R01v2-04a",
+          "clock": "2026-09-20T11:00:00-04:00",
+          "day": 14,
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [
+              "retail.policy_confirmed"
+            ],
+            "amount": {
+              "estimate": {
+                "amount_minor": 10000,
+                "currency": "USD"
+              }
+            },
+            "deadline": {
+              "kind": "request_window_ends",
+              "date": "2026-09-29",
+              "semantics": "clock 1: drop on 2026-09-15 = day 14 after receipt 2026-09-01 (inclusive assumption); clock 2: request by 2026-09-15 + 14 days"
+            }
+          }
+        },
+        {
+          "id": "R01v2-04b",
+          "clock": "2026-09-20T11:00:00-04:00",
+          "day": 15,
+          "change": {
+            "retail.comparison_offer": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 89900,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.95,
+                "isRange": false,
+                "observedAt": "2026-09-16T09:00:00-04:00",
+                "seller": "apple",
+                "channel": "store",
+                "limited_time": false
+              },
+              "state": "observed"
+            },
+            "retail.price_change_at": {
+              "type": "datetime",
+              "value": "2026-09-16T09:00:00-04:00",
+              "state": "derived"
+            }
+          },
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "amount": null,
+            "note": "the price drop fell on day 15 after receipt — outside clock 1"
+          }
+        },
+        {
+          "id": "R01v2-04c",
+          "clock": "2026-09-29T15:00:00-04:00",
+          "day": 14,
+          "change": {
+            "retail.request_at": {
+              "type": "datetime",
+              "value": "2026-09-29T15:00:00-04:00",
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [
+              "retail.policy_confirmed"
+            ],
+            "amount": {
+              "estimate": {
+                "amount_minor": 10000,
+                "currency": "USD"
+              }
+            },
+            "note": "request on day 14 after the drop — inside clock 2"
+          },
+          "source": {
+            "last_verified_on": "2026-09-28",
+            "refresh_window_days": 7,
+            "note": "pack re-verified within 7 days of the variant clock (M09b B.8)"
+          }
+        },
+        {
+          "id": "R01v2-04d",
+          "clock": "2026-09-30T15:00:00-04:00",
+          "day": 15,
+          "change": {
+            "retail.request_at": {
+              "type": "datetime",
+              "value": "2026-09-30T15:00:00-04:00",
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "deadline_passed",
+            "missing_facts": [],
+            "amount": null,
+            "note": "request on day 15 after the drop — clock 2 closed"
+          },
+          "source": {
+            "last_verified_on": "2026-09-29",
+            "refresh_window_days": 7,
+            "note": "pack re-verified within 7 days of the variant clock (M09b B.8)"
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "AP-1"
+        ],
+        "reasoning": "AP-1 limits both when the price is reduced (relative to receipt) and when the request is made (relative to the price change)."
+      }
+    },
+    {
+      "id": "R01v2-05",
+      "title": "Costco.com drop within 30 days (discretion clause → merchant decides); reseller; promo item requested after the promotion",
+      "categories": [
+        "positive",
+        "exclusion"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-21T09:00:00-07:00",
+      "source": {
+        "last_verified_on": "2026-09-20",
+        "refresh_window_days": 7
+      },
+      "facts": {
+        "retail.merchant_id": {
+          "type": "string",
+          "value": "costco",
+          "state": "user_confirmed"
+        },
+        "retail.channel": {
+          "type": "enum",
+          "value": "online",
+          "state": "user_confirmed"
+        },
+        "retail.purchase_date": {
+          "type": "datetime",
+          "value": "2026-09-05T09:00:00-07:00",
+          "state": "user_confirmed"
+        },
+        "retail.item_identity": {
+          "type": "object",
+          "value": {
+            "brand": "ExampleBrand",
+            "model_number": "VAC-9",
+            "color": "grey",
+            "condition": "new"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.quantity": {
+          "type": "integer",
+          "value": 1,
+          "state": "user_confirmed"
+        },
+        "retail.unit_price": {
+          "type": "money",
+          "value": {
+            "amount_minor": 29999,
+            "currency": "USD"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.comparison_offer": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 24999,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.95,
+            "isRange": false,
+            "observedAt": "2026-09-20T07:00:00-07:00",
+            "seller": "costco",
+            "channel": "costco.com"
+          },
+          "state": "observed"
+        },
+        "retail.price_change_at": {
+          "type": "datetime",
+          "value": "2026-09-20T07:00:00-07:00",
+          "state": "derived"
+        },
+        "retail.buyer_is_reseller": {
+          "type": "boolean",
+          "value": false,
+          "state": "user_confirmed"
+        },
+        "retail.promotional_item": {
+          "type": "boolean",
+          "value": false,
+          "state": "user_confirmed"
+        },
+        "retail.policy_confirmed": {
+          "type": "boolean",
+          "value": null,
+          "state": "assumption"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.costco.online",
+          "pack_version": 1,
+          "effective_from": "unknown",
+          "discretion_clause": true,
+          "window": {
+            "length_days": 30,
+            "anchor": "purchase_date",
+            "constrains": "price_change",
+            "promo_items_also_request": true,
+            "passage": "CO-1, CO-3"
+          },
+          "eligible_buyer": "non_reseller_member"
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "likely_eligible_missing_evidence",
+        "missing_facts": [
+          "retail.policy_confirmed"
+        ],
+        "amount": {
+          "estimate": {
+            "amount_minor": 5000,
+            "currency": "USD"
+          },
+          "guaranteed": false,
+          "label": "merchant decides (CO-2 sole discretion)"
+        },
+        "forbidden_outputs": [
+          "a guaranteed or promised amount"
+        ]
+      },
+      "variants": [
+        {
+          "id": "R01v2-05b",
+          "change": {
+            "retail.buyer_is_reseller": {
+              "type": "boolean",
+              "value": true,
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "amount": null,
+            "note": "CO-1 applies to members other than resellers"
+          }
+        },
+        {
+          "id": "R01v2-05c",
+          "change": {
+            "retail.promotional_item": {
+              "type": "boolean",
+              "value": true,
+              "state": "user_confirmed"
+            },
+            "retail.promotion_dates": {
+              "type": "object",
+              "value": {
+                "start": "2026-09-10",
+                "end": "2026-09-18"
+              },
+              "state": "user_confirmed"
+            },
+            "retail.request_at": {
+              "type": "datetime",
+              "value": "2026-09-21T09:00:00-07:00",
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "deadline_passed",
+            "missing_facts": [],
+            "amount": null,
+            "note": "CO-3: for items with specific sale dates the request must fall within the promotional dates as well as 30 days"
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "CO-1",
+          "CO-2",
+          "CO-3"
+        ],
+        "reasoning": "A qualifying drop under a sole-discretion clause is never a guaranteed amount."
+      }
+    },
+    {
+      "id": "R01v2-06",
+      "title": "Target cross-store and Target Plus comparisons",
+      "categories": [
+        "exclusion",
+        "negative"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-22T10:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-20",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-03",
+      "facts_override": {
+        "retail.channel": {
+          "type": "enum",
+          "value": "store",
+          "state": "user_confirmed"
+        },
+        "retail.purchase_store_id": {
+          "type": "string",
+          "value": "T-1234",
+          "state": "user_confirmed"
+        },
+        "retail.comparison_offer": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 3999,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.95,
+            "isRange": false,
+            "observedAt": "2026-09-21T08:00:00-04:00",
+            "seller": "target",
+            "channel": "store",
+            "store_id": "T-5678"
+          },
+          "state": "observed"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.target.all_channels",
+          "pack_version": 1,
+          "effective_from": "unknown",
+          "window": {
+            "length_days": 14,
+            "anchor": "purchase_date",
+            "constrains": "request",
+            "passage": "TG-1"
+          },
+          "target_plus_comparison": "Target.com only (TG-2)"
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "not_eligible",
+        "missing_facts": [],
+        "amount": null,
+        "note": "TG-3: bought in a Target store and the lower price is from a different Target store"
+      },
+      "variants": [
+        {
+          "id": "R01v2-06b",
+          "change": {
+            "retail.channel": {
+              "type": "enum",
+              "value": "online",
+              "state": "user_confirmed"
+            },
+            "retail.target_plus_partner_item": {
+              "type": "boolean",
+              "value": true,
+              "state": "user_confirmed"
+            },
+            "retail.comparison_offer": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 3999,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.95,
+                "isRange": false,
+                "observedAt": "2026-09-21T08:00:00-04:00",
+                "seller": "target",
+                "channel": "store",
+                "store_id": "T-5678"
+              },
+              "state": "observed"
+            }
+          },
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "amount": null,
+            "note": "TG-2: a Target Plus Partner item is matched only against Target.com"
+          }
+        },
+        {
+          "id": "R01v2-06c",
+          "change": {
+            "retail.channel": {
+              "type": "enum",
+              "value": "online",
+              "state": "user_confirmed"
+            },
+            "retail.target_plus_partner_item": {
+              "type": "boolean",
+              "value": true,
+              "state": "user_confirmed"
+            },
+            "retail.comparison_offer": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 3999,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.95,
+                "isRange": false,
+                "observedAt": "2026-09-21T08:00:00-04:00",
+                "seller": "target",
+                "channel": "target.com"
+              },
+              "state": "observed"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [
+              "retail.policy_confirmed"
+            ],
+            "amount": {
+              "estimate": {
+                "amount_minor": 1000,
+                "currency": "USD"
+              }
+            }
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "TG-2",
+          "TG-3"
+        ],
+        "reasoning": "The comparison source must be one the pack accepts."
+      }
+    },
+    {
+      "id": "R01v2-07",
+      "title": "Only a ShopSavvy history price is lower; no accepted merchant observation",
+      "categories": [
+        "missing_fact",
+        "negative"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-22T10:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-20",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-03",
+      "facts_override": {
+        "retail.comparison_offer": {
+          "type": "observation",
+          "value": null,
+          "state": "missing"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.target.all_channels",
+          "pack_version": 1,
+          "effective_from": "unknown",
+          "window": {
+            "length_days": 14,
+            "anchor": "purchase_date",
+            "constrains": "request",
+            "passage": "TG-1"
+          },
+          "target_plus_comparison": "Target.com only (TG-2)"
+        },
+        "price_claims_on_item": [],
+        "shopsavvy_history": {
+          "lowest_minor": 3499,
+          "currency": "USD"
+        }
+      },
+      "expected": {
+        "outcome": "needs_facts",
+        "missing_facts": [
+          "retail.comparison_offer"
+        ],
+        "amount": null,
+        "claim": {
+          "opens": false
+        },
+        "forbidden_outputs": [
+          "a claim or estimate from the 3,499 ShopSavvy figure"
+        ]
+      },
+      "justification": {
+        "passages": [
+          "mission §10 R01",
+          "R01 spec §3"
+        ],
+        "reasoning": "ShopSavvy is context only; the pack needs Target's own current price."
+      }
+    },
+    {
+      "id": "R01v2-08",
+      "title": "Apple quantity above the 10-unit limit",
+      "categories": [
+        "positive",
+        "calculation"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T11:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-19",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-04",
+      "facts_override": {
+        "retail.quantity": {
+          "type": "integer",
+          "value": 12,
+          "state": "user_confirmed"
+        },
+        "retail.unit_price": {
+          "type": "money",
+          "value": {
+            "amount_minor": 24900,
+            "currency": "USD"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.item_identity": {
+          "type": "object",
+          "value": {
+            "brand": "Apple",
+            "model_number": "EXAMPLE-EARBUDS",
+            "color": "white",
+            "condition": "new"
+          },
+          "state": "user_confirmed"
+        },
+        "retail.comparison_offer": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 19900,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.95,
+            "isRange": false,
+            "observedAt": "2026-09-15T09:00:00-04:00",
+            "seller": "apple",
+            "channel": "store",
+            "limited_time": false
+          },
+          "state": "observed"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.apple.retail_us",
+          "pack_version": 1,
+          "effective_from": "unknown",
+          "windows": [
+            {
+              "length_days": 14,
+              "anchor": "receipt_date",
+              "constrains": "price_change"
+            },
+            {
+              "length_days": 14,
+              "anchor": "price_change_date",
+              "constrains": "request"
+            }
+          ],
+          "quantity_limit": 10,
+          "channels_captured": [
+            "store"
+          ],
+          "passage": "AP-1, AP-2"
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "likely_eligible_missing_evidence",
+        "missing_facts": [
+          "retail.policy_confirmed"
+        ],
+        "amount": {
+          "estimate": {
+            "amount_minor": 50000,
+            "currency": "USD"
+          },
+          "formula": "(24,900 - 19,900) x min(12, 10)"
+        }
+      },
+      "justification": {
+        "passages": [
+          "AP-2",
+          "R01 spec §4"
+        ],
+        "reasoning": "Price protection is limited to 10 units of a product."
+      }
+    },
+    {
+      "id": "R01v2-09",
+      "title": "Pack stale, pack record missing, or channel not captured",
+      "categories": [
+        "stale_source",
+        "missing_source"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-23T10:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-10",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-03",
+      "facts_override": {},
+      "context": {
+        "pack": {
+          "pack": "R01.target.all_channels",
+          "pack_version": 1,
+          "effective_from": "unknown",
+          "window": {
+            "length_days": 14,
+            "anchor": "purchase_date",
+            "constrains": "request",
+            "passage": "TG-1"
+          },
+          "target_plus_comparison": "Target.com only (TG-2)"
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "source_unverified",
+        "missing_facts": [],
+        "amount": null,
+        "note": "13 days since the Target pack was verified > 7"
+      },
+      "variants": [
+        {
+          "id": "R01v2-09b",
+          "source": {
+            "record": "missing"
+          },
+          "expected": {
+            "outcome": "source_unverified",
+            "missing_facts": [],
+            "amount": null,
+            "note": "X5: no current record for an existing pack"
+          }
+        },
+        {
+          "id": "R01v2-09c",
+          "source": {
+            "last_verified_on": "2026-09-19",
+            "refresh_window_days": 7
+          },
+          "change": {
+            "retail.merchant_id": {
+              "type": "string",
+              "value": "apple",
+              "state": "user_confirmed"
+            },
+            "retail.channel": {
+              "type": "enum",
+              "value": "online",
+              "state": "user_confirmed"
+            },
+            "retail.item_identity": {
+              "type": "object",
+              "value": {
+                "brand": "Apple",
+                "model_number": "EXAMPLE-WATCH-45",
+                "color": "black",
+                "condition": "new"
+              },
+              "state": "user_confirmed"
+            }
+          },
+          "context_change": {
+            "pack": {
+              "pack": "R01.apple.retail_us",
+              "pack_version": 1,
+              "effective_from": "unknown",
+              "windows": [
+                {
+                  "length_days": 14,
+                  "anchor": "receipt_date",
+                  "constrains": "price_change"
+                },
+                {
+                  "length_days": 14,
+                  "anchor": "price_change_date",
+                  "constrains": "request"
+                }
+              ],
+              "quantity_limit": 10,
+              "channels_captured": [
+                "store"
+              ],
+              "passage": "AP-1, AP-2"
+            }
+          },
+          "expected": {
+            "outcome": "source_unverified",
+            "missing_facts": [],
+            "amount": null,
+            "note": "Apple pack exists for retail stores only; the online-store policy page returned 404 (channel not captured)"
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "R01 spec §6",
+          "R01 header refresh policy"
+        ],
+        "reasoning": "An existing pack that is stale, missing its record, or lacking the channel → source_unverified."
+      }
+    },
+    {
+      "id": "R01v2-10",
+      "title": "Re-evaluation of R01v2-01 after the claim opened",
+      "categories": [
+        "duplicate_evaluation"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-18T12:05:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-18",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-01",
+      "facts_override": {},
+      "context": {
+        "pack": {
+          "pack": "R01.bestbuy.all_channels",
+          "pack_version": 1,
+          "effective_from": "2026-09-02",
+          "constituents": {
+            "price_match_guarantee": "2026-09-02",
+            "return_exchange_policy": "2026-02-23"
+          },
+          "window": {
+            "length_days": {
+              "standard": 15,
+              "plus_total": 60,
+              "activatable_device": 14
+            },
+            "anchor": "receipt_date",
+            "constrains": "price_change",
+            "passage": "BB-1, BB-3"
+          }
+        },
+        "price_claims_on_item": [
+          {
+            "status": "detected",
+            "expectedCents": 5000,
+            "currency": "USD"
+          }
+        ]
+      },
+      "expected": {
+        "outcome": "eligible",
+        "missing_facts": [],
+        "amount": {
+          "estimate": {
+            "amount_minor": 5000,
+            "currency": "USD"
+          }
+        },
+        "claim": {
+          "opens": false
+        },
+        "dedupe": "identical snapshot → identical result; reuse the open claim"
+      },
+      "justification": {
+        "passages": [
+          "mission §7"
+        ],
+        "reasoning": "One remedy, one active case."
+      }
+    },
+    {
+      "id": "R01v2-11",
+      "title": "Wrong variant or wrong currency in the comparison offer",
+      "categories": [
+        "negative"
+      ],
+      "mission_domain_fixture": "mission §17: wrong variant/currency → no false price claim",
+      "clock": "2026-09-18T12:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-18",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-01",
+      "facts_override": {
+        "retail.comparison_offer": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 9500,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.95,
+            "isRange": false,
+            "observedAt": "2026-09-18T09:00:00-04:00",
+            "seller": "bestbuy",
+            "channel": "online",
+            "color": "white"
+          },
+          "state": "observed"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.bestbuy.all_channels",
+          "pack_version": 1,
+          "effective_from": "2026-09-02",
+          "constituents": {
+            "price_match_guarantee": "2026-09-02",
+            "return_exchange_policy": "2026-02-23"
+          },
+          "window": {
+            "length_days": {
+              "standard": 15,
+              "plus_total": 60,
+              "activatable_device": 14
+            },
+            "anchor": "receipt_date",
+            "constrains": "price_change",
+            "passage": "BB-1, BB-3"
+          }
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "not_eligible",
+        "missing_facts": [],
+        "amount": null,
+        "claim": {
+          "opens": false
+        },
+        "note": "identity mismatch: the offer is for the white variant; BB requires matching model number and color"
+      },
+      "variants": [
+        {
+          "id": "R01v2-11b",
+          "change": {
+            "retail.comparison_offer": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 9500,
+                "currency": "CAD",
+                "variantMatch": "exact",
+                "confidence": 0.95,
+                "isRange": false,
+                "observedAt": "2026-09-18T09:00:00-04:00",
+                "seller": "bestbuy",
+                "channel": "bestbuy.ca"
+              },
+              "state": "observed"
+            }
+          },
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "amount": null,
+            "note": "different currency and not the US merchant's price; never converted"
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "BB-1",
+          "R01 spec §4"
+        ],
+        "reasoning": "No false price claim for a different variant or currency."
+      }
+    },
+    {
+      "id": "R01v2-12",
+      "title": "Excluded comparison prices: open-box / clearance (Best Buy) and a special sales event (Apple)",
+      "categories": [
+        "exclusion"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-18T12:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-18",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-01",
+      "facts_override": {
+        "retail.comparison_offer": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 9500,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.95,
+            "isRange": false,
+            "observedAt": "2026-09-18T09:00:00-04:00",
+            "seller": "bestbuy",
+            "channel": "online",
+            "condition": "open_box",
+            "is_open_box": true
+          },
+          "state": "observed"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.bestbuy.all_channels",
+          "pack_version": 1,
+          "effective_from": "2026-09-02",
+          "constituents": {
+            "price_match_guarantee": "2026-09-02",
+            "return_exchange_policy": "2026-02-23"
+          },
+          "window": {
+            "length_days": {
+              "standard": 15,
+              "plus_total": 60,
+              "activatable_device": 14
+            },
+            "anchor": "receipt_date",
+            "constrains": "price_change",
+            "passage": "BB-1, BB-3"
+          }
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "not_eligible",
+        "missing_facts": [],
+        "amount": null,
+        "note": "open-box items are excluded from the Price Match Guarantee"
+      },
+      "variants": [
+        {
+          "id": "R01v2-12b",
+          "clock": "2026-11-27T11:00:00-05:00",
+          "change": {
+            "retail.merchant_id": {
+              "type": "string",
+              "value": "apple",
+              "state": "user_confirmed"
+            },
+            "retail.received_at": {
+              "type": "datetime",
+              "value": "2026-11-20T12:00:00-05:00",
+              "state": "user_confirmed"
+            },
+            "retail.comparison_offer": {
+              "type": "observation",
+              "value": {
+                "amount_minor": 9500,
+                "currency": "USD",
+                "variantMatch": "exact",
+                "confidence": 0.95,
+                "isRange": false,
+                "observedAt": "2026-11-27T09:00:00-05:00",
+                "seller": "apple",
+                "channel": "store",
+                "special_sales_event": "Black Friday"
+              },
+              "state": "observed"
+            },
+            "retail.item_identity": {
+              "type": "object",
+              "value": {
+                "brand": "Apple",
+                "model_number": "EXAMPLE-WATCH-45",
+                "color": "black",
+                "condition": "new"
+              },
+              "state": "user_confirmed"
+            }
+          },
+          "context_change": {
+            "pack": {
+              "pack": "R01.apple.retail_us",
+              "pack_version": 1,
+              "effective_from": "unknown",
+              "windows": [
+                {
+                  "length_days": 14,
+                  "anchor": "receipt_date",
+                  "constrains": "price_change"
+                },
+                {
+                  "length_days": 14,
+                  "anchor": "price_change_date",
+                  "constrains": "request"
+                }
+              ],
+              "quantity_limit": 10,
+              "channels_captured": [
+                "store"
+              ],
+              "passage": "AP-1, AP-2"
+            }
+          },
+          "source": {
+            "last_verified_on": "2026-11-26",
+            "refresh_window_days": 7
+          },
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "amount": null,
+            "note": "AP-1 excludes limited-time price reductions and special sales events such as Black Friday"
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "BB page exclusions (summarized in spec §7.1)",
+          "AP-1"
+        ],
+        "reasoning": "Excluded comparison prices never support a claim."
+      }
+    },
+    {
+      "id": "R01v2-13",
+      "title": "Price adjustment vs return-and-rebuy, with a prior partial adjustment",
+      "categories": [
+        "overlapping_remedy"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-18T12:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-18",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-01",
+      "facts_override": {
+        "retail.prior_adjustments": {
+          "type": "money[]",
+          "value": [
+            {
+              "amount_minor": 2000,
+              "currency": "USD",
+              "label": "in-store adjustment 2026-09-12"
+            }
+          ],
+          "state": "user_confirmed"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.bestbuy.all_channels",
+          "pack_version": 1,
+          "effective_from": "2026-09-02",
+          "constituents": {
+            "price_match_guarantee": "2026-09-02",
+            "return_exchange_policy": "2026-02-23"
+          },
+          "window": {
+            "length_days": {
+              "standard": 15,
+              "plus_total": 60,
+              "activatable_device": 14
+            },
+            "anchor": "receipt_date",
+            "constrains": "price_change",
+            "passage": "BB-1, BB-3"
+          }
+        },
+        "price_claims_on_item": [],
+        "other_paths": [
+          {
+            "path": "merchant return window",
+            "relationship": "alternative"
+          }
+        ]
+      },
+      "expected": {
+        "outcome": "eligible",
+        "missing_facts": [],
+        "amount": {
+          "estimate": {
+            "amount_minor": 3000,
+            "currency": "USD"
+          },
+          "formula": "(12,000 - 9,500) x 2 - 2,000 already adjusted"
+        },
+        "overlap": {
+          "with": "merchant return window",
+          "relationship": "alternative",
+          "note": "return-and-rebuy recovers the same difference; never add the two"
+        },
+        "totals": {
+          "potential_minor_USD": 3000
+        }
+      },
+      "justification": {
+        "passages": [
+          "R01 spec §4",
+          "R01 spec §8",
+          "mission §6"
+        ],
+        "reasoning": "Prior adjustments reduce the ask; alternative paths are not additive."
+      }
+    },
+    {
+      "id": "R01v2-14",
+      "title": "Merchant with no pack at all (The Home Depot)",
+      "categories": [
+        "unsupported_product"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T10:00:00-04:00",
+      "facts_from": "R01v2-01",
+      "facts_override": {
+        "retail.merchant_id": {
+          "type": "string",
+          "value": "homedepot",
+          "state": "user_confirmed"
+        }
+      },
+      "context": {
+        "pack": null,
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "unsupported",
+        "missing_facts": [],
+        "amount": null,
+        "claim": {
+          "opens": false
+        },
+        "note": "no merchant pack exists (page bot-walled on 2026-09-23); unsupported is not 'not eligible'"
+      },
+      "justification": {
+        "passages": [
+          "R01 spec §6",
+          "R01 spec §7.5"
+        ],
+        "reasoning": "No pack at all → unsupported."
+      }
+    },
+    {
+      "id": "R01v2-15",
+      "title": "Apple receipt date conflicts: candidates straddle clock 1, then agree",
+      "categories": [
+        "contradictory_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-20T11:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-19",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-04",
+      "facts_override": {
+        "retail.comparison_offer": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 89900,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.95,
+            "isRange": false,
+            "observedAt": "2026-09-16T09:00:00-04:00",
+            "seller": "apple",
+            "channel": "store",
+            "limited_time": false
+          },
+          "state": "observed"
+        },
+        "retail.price_change_at": {
+          "type": "datetime",
+          "value": "2026-09-16T09:00:00-04:00",
+          "state": "derived"
+        },
+        "retail.received_at": {
+          "type": "datetime",
+          "value": null,
+          "state": "conflicting",
+          "candidates": [
+            {
+              "value": "2026-09-01T12:00:00-04:00",
+              "evidence": "carrier tracking 'delivered'",
+              "drop_day": 15
+            },
+            {
+              "value": "2026-09-03T12:00:00-04:00",
+              "evidence": "user: 'picked it up from the leasing office on the 3rd'",
+              "drop_day": 13
+            }
+          ],
+          "conflict_kind": "candidates"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.apple.retail_us",
+          "pack_version": 1,
+          "effective_from": "unknown",
+          "windows": [
+            {
+              "length_days": 14,
+              "anchor": "receipt_date",
+              "constrains": "price_change"
+            },
+            {
+              "length_days": 14,
+              "anchor": "price_change_date",
+              "constrains": "request"
+            }
+          ],
+          "quantity_limit": 10,
+          "channels_captured": [
+            "store"
+          ],
+          "passage": "AP-1, AP-2"
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "needs_facts",
+        "missing_facts": [
+          "retail.received_at"
+        ],
+        "amount": null,
+        "note": "The drop on 2026-09-16 is day 15 under one candidate (outside clock 1) and day 13 under the other."
+      },
+      "variants": [
+        {
+          "id": "R01v2-15b",
+          "change": {
+            "retail.received_at": {
+              "type": "datetime",
+              "value": null,
+              "state": "conflicting",
+              "candidates": [
+                {
+                  "value": "2026-09-03T12:00:00-04:00",
+                  "evidence": "user",
+                  "drop_day": 13
+                },
+                {
+                  "value": "2026-09-04T12:00:00-04:00",
+                  "evidence": "carrier tracking",
+                  "drop_day": 12
+                }
+              ],
+              "conflict_kind": "candidates"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [
+              "retail.policy_confirmed"
+            ],
+            "unconfirmed_decisive_facts": [
+              "retail.received_at"
+            ],
+            "amount": {
+              "estimate": {
+                "amount_minor": 10000,
+                "currency": "USD"
+              }
+            }
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "AP-1",
+          "README cross-pack rule 3"
+        ],
+        "reasoning": "A material conflict on the anchor must be resolved; a non-material one is carried as unconfirmed."
+      }
+    },
+    {
+      "id": "R01v2-16",
+      "title": "Best Buy: receipt date or membership tier unknown",
+      "categories": [
+        "missing_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-10-05T12:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-10-01",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-01",
+      "facts_override": {
+        "retail.received_at": {
+          "type": "datetime",
+          "value": null,
+          "state": "missing"
+        },
+        "retail.comparison_offer": {
+          "type": "observation",
+          "value": {
+            "amount_minor": 9500,
+            "currency": "USD",
+            "variantMatch": "exact",
+            "confidence": 0.95,
+            "isRange": false,
+            "observedAt": "2026-10-05T09:00:00-04:00",
+            "seller": "bestbuy",
+            "channel": "online"
+          },
+          "state": "observed"
+        },
+        "retail.price_change_at": {
+          "type": "datetime",
+          "value": "2026-10-05T09:00:00-04:00",
+          "state": "derived"
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.bestbuy.all_channels",
+          "pack_version": 1,
+          "effective_from": "2026-09-02",
+          "constituents": {
+            "price_match_guarantee": "2026-09-02",
+            "return_exchange_policy": "2026-02-23"
+          },
+          "window": {
+            "length_days": {
+              "standard": 15,
+              "plus_total": 60,
+              "activatable_device": 14
+            },
+            "anchor": "receipt_date",
+            "constrains": "price_change",
+            "passage": "BB-1, BB-3"
+          }
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "needs_facts",
+        "missing_facts": [
+          "retail.received_at"
+        ],
+        "amount": null,
+        "note": "the return period begins the day the product is received (BB-3)"
+      },
+      "variants": [
+        {
+          "id": "R01v2-16b",
+          "change": {
+            "retail.received_at": {
+              "type": "datetime",
+              "value": "2026-09-10T14:05:00-04:00",
+              "state": "user_confirmed"
+            },
+            "retail.membership_tier": {
+              "type": "enum",
+              "value": null,
+              "state": "missing"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [
+              "retail.membership_tier"
+            ],
+            "amount": null,
+            "note": "the drop on 2026-10-05 is day 26 after receipt: outside the 15-day Standard period, inside the 60-day Plus/Total period"
+          }
+        }
+      ],
+      "justification": {
+        "passages": [
+          "BB-3",
+          "R01 spec §7.1"
+        ],
+        "reasoning": "The window cannot be placed without the receipt date or, here, the membership tier."
+      }
+    },
+    {
+      "id": "R01v2-17",
+      "title": "Best Buy: user-confirmed receipt date contradicts the store pickup record (confirmed vs observed)",
+      "categories": [
+        "contradictory_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-18T12:00:00-04:00",
+      "source": {
+        "last_verified_on": "2026-09-18",
+        "refresh_window_days": 7
+      },
+      "facts_from": "R01v2-01",
+      "facts_override": {
+        "retail.received_at": {
+          "type": "datetime",
+          "value": null,
+          "state": "conflicting",
+          "conflict_kind": "confirmed_vs_observed",
+          "candidates": [
+            {
+              "value": "2026-09-12T11:00:00-04:00",
+              "state": "user_confirmed",
+              "evidence": "user: 'I picked it up on the 12th'"
+            },
+            {
+              "value": "2026-09-10T14:05:00-04:00",
+              "state": "observed",
+              "evidence": "merchant order-status record: picked up 2026-09-10 14:05"
+            }
+          ]
+        }
+      },
+      "context": {
+        "pack": {
+          "pack": "R01.bestbuy.all_channels",
+          "pack_version": 1,
+          "effective_from": "2026-09-02"
+        },
+        "price_claims_on_item": []
+      },
+      "expected": {
+        "outcome": "manual_review",
+        "missing_facts": [],
+        "amount": null,
+        "claim": {
+          "opens": false
+        },
+        "explanation": "The return period starts on the day you received the item. You said the 12th; the store's pickup record says the 10th. Check your pickup receipt; the merchant's record will usually decide.",
+        "note": "D152 5a even though both dates put the 2026-09-18 drop inside the window."
+      },
+      "justification": {
+        "passages": [
+          "BB-3",
+          "D152",
+          "D154 condition 4"
+        ],
+        "reasoning": "Confirmed vs observed conflicts go to manual review."
+      }
+    }
+  ]
+}

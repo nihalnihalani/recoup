@@ -24,7 +24,7 @@
     ],
     "loader": "A case has EITHER a top-level `expected` OR an `expected` on every variant. `clock` (and optional `source`) may be set on the case or on a variant; a variant value overrides the case value. `facts_from: <case id>` + `facts_override: {...}` means: copy that case's facts, then replace the named facts. A variant's `change` object replaces the named facts for that variant only. Every `facts` value is an object; no prose placeholders.",
     "fact_states": "user_confirmed | observed | derived | extracted_candidate | conflicting | missing | assumption. Contract §2.5 mapping: user_confirmed→confirmed, observed→observed, derived→derived, extracted_candidate→candidate, conflicting→conflicting, missing→missing (value null), assumption→assumption-class candidate. D147(2)/X1: `eligible` requires every decisive fact to be user_confirmed, or observed/derived from confirmed facts; an extracted_candidate decisive fact caps the outcome at likely_eligible_missing_evidence (the case lists it in expected.unconfirmed_decisive_facts). Since M2D the baseline cases use user_confirmed for decisive facts (the state after the user's fact review); each file has explicit cap variants.",
-    "conflicting": "A conflicting fact carries `candidates: [{value, evidence, ...}]` (README cross-pack rule 3). If every candidate gives the same outcome the conflict is not material, but the fact is still unconfirmed, so the outcome is capped at likely_eligible_missing_evidence; if candidates diverge the outcome is needs_facts. Advisory dates use the earliest candidate.",
+    "conflicting": "D152/D154 (README cross-pack rule 3): conflict_kind 'candidates' → different outcomes or amounts = needs_facts; same outcome and amount = capped at likely_eligible_missing_evidence (fact listed in unconfirmed_decisive_facts). conflict_kind 'confirmed_vs_observed' / 'confirmed_vs_confirmed' → manual_review. A conflicting or extracted-only deadline anchor never gives a firm date: deadline.date = null, status disputed_anchor / unknown_anchor, and (user-obligor paths only) advisory_act_by from the earliest candidate.",
     "not_yet_due": "D147(6)/X3: a path that is not ripe yet has outcome not_yet_due with expected.reevaluate_at (ISO date) or expected.reevaluate_when (event); never not_eligible.",
     "missing_source": "X5: a variant with source.record = 'missing' means no current source record exists for the pack → source_unverified.",
     "path_a_eligible": "D147(1): path a (bag-fee refund, 260.5) may reach eligible when its decisive facts are confirmed; the likely_eligible cap applies to paths b and c only (no carrier contract of carriage captured)."
@@ -204,6 +204,39 @@
               "P-260.5-B"
             ],
             "reasoning": "Declared lost + MBR + fee paid → the bag-fee refund is due."
+          }
+        },
+        {
+          "id": "R04-01d",
+          "clock": "2024-09-20T12:00:00-07:00",
+          "change": {
+            "deplane_opportunity_at": {
+              "type": "datetime",
+              "value": "2024-09-12T21:40:00-07:00",
+              "state": "user_confirmed"
+            },
+            "bag_delivered_or_picked_up_at": {
+              "type": "datetime",
+              "value": "2024-09-13T10:55:00-07:00",
+              "state": "user_confirmed"
+            },
+            "mbr_filed_at": {
+              "type": "datetime",
+              "value": "2024-09-12T22:05:00-07:00",
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "source_unverified",
+            "missing_facts": [],
+            "amount": null,
+            "reason": "refund conditions met on 2024-09-13, before the part 260 bag-fee compliance date 2024-10-28 (spec §15 step 1b)"
+          },
+          "justification": {
+            "passages": [
+              "FR-2024-07177-COMPLIANCE"
+            ],
+            "reasoning": "Path a does not evaluate events before the compliance date."
           }
         }
       ]
@@ -1163,7 +1196,8 @@
               "evidence": "user statement",
               "delay": "12h50m"
             }
-          ]
+          ],
+          "conflict_kind": "candidates"
         },
         "mbr_filed": {
           "type": "boolean",
@@ -1208,7 +1242,8 @@
                   "evidence": "courier delivery record",
                   "delay": "13h30m"
                 }
-              ]
+              ],
+              "conflict_kind": "candidates"
             }
           },
           "expected": {
@@ -1416,6 +1451,53 @@
           "DOT-BAG-1"
         ],
         "reasoning": "Each actual expense can be recovered once. The carrier path is limited to lines not already recovered elsewhere."
+      }
+    },
+    {
+      "id": "R04-13",
+      "title": "User-confirmed delivery time contradicts the courier's delivery scan (confirmed vs observed)",
+      "categories": [
+        "contradictory_fact"
+      ],
+      "mission_domain_fixture": null,
+      "path": "R04.a",
+      "clock": "2026-09-23T12:00:00-07:00",
+      "facts_from": "R04-01",
+      "facts_override": {
+        "bag_delivered_or_picked_up_at": {
+          "type": "datetime",
+          "value": null,
+          "state": "conflicting",
+          "conflict_kind": "confirmed_vs_observed",
+          "candidates": [
+            {
+              "value": "2026-09-13T10:55:00-07:00",
+              "state": "user_confirmed",
+              "evidence": "user",
+              "delay": "13h15m"
+            },
+            {
+              "value": "2026-09-13T08:30:00-07:00",
+              "state": "observed",
+              "evidence": "courier delivery-scan record",
+              "delay": "10h50m"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "outcome": "manual_review",
+        "missing_facts": [],
+        "amount": null,
+        "explanation": "You said the bag arrived at 10:55; the courier's scan says 08:30. The 12-hour threshold depends on which is right. Check the courier notification or door-camera time."
+      },
+      "justification": {
+        "passages": [
+          "P-260.5-A",
+          "D152",
+          "D154 condition 4"
+        ],
+        "reasoning": "Confirmed vs observed → manual review."
       }
     }
   ]

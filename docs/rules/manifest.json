@@ -2,7 +2,7 @@
   "schema": "recoup.rules-manifest/v1",
   "generatedAt": "2026-09-23",
   "generatedBy": "opus-rules-researcher (M02)",
-  "note": "Lifecycle values: draft | researched | reviewed | active | superseded | withdrawn. Nothing here is reviewed or active. capturedSha256 hashes the file committed in this repo; rawResponseSha256 hashes the upstream HTTP response the capture was rendered from (when available).",
+  "note": "Lifecycle values: draft | researched | reviewed | active | superseded | withdrawn. Nothing here is reviewed or active. capturedSha256 hashes the file committed in this repo; rawResponseSha256 hashes the upstream HTTP response the capture was rendered from (when available). contentHash (R01 merchant packs) = SHA-256 of the normalized section text per R01 spec \u00a72.1 (reproducible); rawResponseSha256 is provenance only.",
   "packs": [
     {
       "ruleId": "R01.retail_price_adjustment",
@@ -18,10 +18,24 @@
           "version": 1,
           "lifecycle": "researched",
           "url": "https://www.bestbuy.com/site/help-topics/price-match-guarantee/pcmcat290300050002.c?id=pcmcat290300050002",
-          "effectiveDate": "2026-09-02",
+          "effectiveDate": "2026-09-02 (max of PMG 2026-09-02 and returns 2026-02-23)",
           "retrievedAt": "2026-09-23",
           "rawResponseSha256": null,
-          "note": "browser capture; companion return policy effective 2026-02-23"
+          "note": "browser capture; companion return policy effective 2026-02-23",
+          "contentHash": null,
+          "contentHashNote": "curl bot-walled; browser capture only \u2014 passage hashes, lower assurance",
+          "passageHashes": {
+            "BB-1": "aabf2ce52cc07c1982d967be3f95260c1401aab69bde186ecfe8795513586d9a",
+            "BB-2": "045d49b060534c4ec415a3e58f65c8ba1c4c08f0664cfe57b654f95469a4b40b",
+            "BB-3": "970f0ccdb13118101fde0e744a55283fcb50cb4b1b91e4bdea93973b874adb9a"
+          },
+          "windows": [
+            {
+              "anchor": "receipt_date",
+              "constrains": "price_change",
+              "passage": "BB-1/BB-3"
+            }
+          ]
         },
         {
           "ruleId": "R01.target.all_channels",
@@ -30,7 +44,25 @@
           "url": "https://help.target.com/help/SubCategoryArticle?childcat=Price+Match+Guarantee&parentcat=Policies+%26+Guidelines",
           "effectiveDate": "unknown",
           "retrievedAt": "2026-09-23",
-          "rawResponseSha256": null
+          "rawResponseSha256": null,
+          "contentHash": "9cc32d9c6c333b26fc9b5654ea5e5a92a6f66000bf74b71e27c28f39e035ee81",
+          "contentHashSection": [
+            "It may qualify for a price match if...",
+            "Was this information helpful?"
+          ],
+          "passageHashes": {
+            "TG-1": "19fc316eb92b4b5351a56e9232059da1c1538beff76aa353c2999778b8f06ccd",
+            "TG-2": "298aa788b12d2a7d92239943631977aa49710a4f06351c7341cda9dc3999caa2",
+            "TG-3": "85d8936f52c573a5d7d1c1dc4fe50d5d19e430699fe12a717c87b2f88b286b9a"
+          },
+          "windows": [
+            {
+              "anchor": "purchase_date",
+              "length": 14,
+              "constrains": "request",
+              "passage": "TG-1"
+            }
+          ]
         },
         {
           "ruleId": "R01.costco.online",
@@ -39,7 +71,32 @@
           "url": "https://customerservice.costco.com/app/answers/detail/a_id/628/~/price-adjustment---costco.com-orders",
           "effectiveDate": "unknown",
           "retrievedAt": "2026-09-23",
-          "rawResponseSha256": null
+          "rawResponseSha256": null,
+          "contentHash": "02f32d906b5d83c08693dd32f8fad4407b539ba8f7e852d1528b1ee3792eab95",
+          "contentHashSection": [
+            "Please read the following to understand what purchases may be eligible for a price match",
+            "How to Request a Price Match"
+          ],
+          "passageHashes": {
+            "CO-1": "e9098b0d300071d277167b108d3bd94d0e97fcbc4eb921dc9b1b32c8fcff49e7",
+            "CO-2": "2d62b24f1bcdc5f4863d64c9eb1b4ef945ecd4bcb3f47ab223dbf8968b5da469",
+            "CO-3": "299c753d6ee9aa9e40ec174b4f46f9da9427041db44c16c789355e5e1c17c999"
+          },
+          "windows": [
+            {
+              "anchor": "purchase_date",
+              "length": 30,
+              "constrains": "price_change",
+              "passage": "CO-1"
+            },
+            {
+              "anchor": "purchase_date",
+              "length": 30,
+              "constrains": "request",
+              "appliesTo": "items with specific sale dates",
+              "passage": "CO-3"
+            }
+          ]
         },
         {
           "ruleId": "R01.apple.retail_us",
@@ -48,17 +105,62 @@
           "url": "https://www.apple.com/legal/sales-support/sales-policies/retail_us.html",
           "effectiveDate": "unknown",
           "retrievedAt": "2026-09-23",
-          "rawResponseSha256": "99bc751ea16bf7371b985f99ba04b2aff042f1e0004aadc41222c16bc41355d2"
+          "rawResponseSha256": "99bc751ea16bf7371b985f99ba04b2aff042f1e0004aadc41222c16bc41355d2",
+          "contentHash": "2a44c2f69131c1c58d635fd44ade672e3d88f447f5964273de2597fb13415bb9",
+          "contentHashSection": [
+            "Pricing and Price Reductions/Corrections",
+            "Order Acceptance/Confirmation"
+          ],
+          "passageHashes": {
+            "AP-1": "7b90910bf4335b5c4410ffee0c7a107516fc1b9fcfc0f09293c6210a473e2362",
+            "AP-2": "86efde271bd810b0652c916b2be3c622019d6ab4966d40586f5857715559a72e"
+          },
+          "rawResponseSha256Note": "provenance only; not reproducible (M09)",
+          "windows": [
+            {
+              "anchor": "receipt_date",
+              "length": 14,
+              "constrains": "price_change",
+              "passage": "AP-1"
+            },
+            {
+              "anchor": "price_change_date",
+              "length": 14,
+              "constrains": "request",
+              "passage": "AP-1"
+            }
+          ]
         },
         {
           "ruleId": "R01.homedepot",
           "version": null,
           "lifecycle": "draft",
           "url": "https://www.homedepot.com/c/price-match-and-price-check",
-          "status": "source_blocked"
+          "status": "no pack \u2192 unsupported"
         }
       ],
-      "fixturesTier": "v1 legacy snapshot tier (contract rev 4 \u00a72.7, task M1C)"
+      "fixturesTier": "v1 legacy snapshot tier (contract rev 4 \u00a72.7, task M1C)",
+      "dates": {
+        "published": "n/a (merchant pages)",
+        "effective": "per merchant pack (Best Buy 2026-09-02; others not displayed)",
+        "compliance": "n/a"
+      }
+    },
+    {
+      "ruleId": "R01v2.retail_price_adjustment.merchant_packs",
+      "scenarioId": "R01v2",
+      "version": 1,
+      "lifecycle": "researched",
+      "spec": "docs/rules/R01-retail-price-adjustment.md",
+      "fixtures": "docs/rules/fixtures/R01v2.json",
+      "tier": "R01 v2 reviewed merchant-pack tier (wave 3)",
+      "sources": [],
+      "refreshDays": 7,
+      "dates": {
+        "published": "n/a",
+        "effective": "per merchant pack",
+        "compliance": "n/a"
+      }
     },
     {
       "ruleId": "R02.airline_fare_refund.us_dot",
@@ -71,10 +173,16 @@
         "ecfr-14cfr260",
         "usc-49-42305",
         "ecfr-14cfr399.80l",
-        "federal-web-excerpts"
+        "federal-web-excerpts",
+        "fr-notices"
       ],
       "refreshDays": 30,
-      "mandatoryReviewBy": "2027-07-07"
+      "mandatoryReviewBy": "2027-07-07",
+      "dates": {
+        "published": "2024-04-26 (89 FR 32760); amended 2024-08-12 (89 FR 65534)",
+        "effective": "2024-06-25; amendment 2024-08-12",
+        "compliance": "2024-10-28"
+      }
     },
     {
       "ruleId": "R03.credit_billing_error.us_fcba",
@@ -89,9 +197,19 @@
         "usc-15-1666",
         "ecfr-12cfr1026.12c",
         "ecfr-12cfr1005.11",
-        "federal-web-excerpts"
+        "federal-web-excerpts",
+        "fr-notices",
+        "ecfr-12cfr1026.7-9",
+        "ecfr-12cfr1026.12b",
+        "ecfr-12cfr1005.6",
+        "ecfr-12cfr1005.11c"
       ],
-      "refreshDays": 90
+      "refreshDays": 90,
+      "dates": {
+        "published": "2011-12-22 (76 FR 79768); amended 2016-11-22 (81 FR 83934)",
+        "effective": "2011-12-30; amendment 2019-04-01 (after delays)",
+        "compliance": "not captured"
+      }
     },
     {
       "ruleId": "R04.baggage.us_dot",
@@ -103,10 +221,16 @@
       "sources": [
         "ecfr-14cfr260",
         "ecfr-14cfr254",
-        "federal-web-excerpts"
+        "federal-web-excerpts",
+        "fr-notices"
       ],
       "refreshDays": 30,
-      "note": "path b/c liability floor: monthly refresh from 2026-10-01 until the 2026 biennial adjustment is published"
+      "note": "path b/c liability floor: monthly refresh from 2026-10-01 until the 2026 biennial adjustment is published",
+      "dates": {
+        "published": "part 260: 2024-04-26; 254.4 figure: 2024-10-24 (89 FR 84815)",
+        "effective": "part 260: 2024-06-25; $4,700: 2025-01-22 (enforcement delayed to 2025-03-20)",
+        "compliance": "part 260 bag-fee refund: 2024-10-28"
+      }
     },
     {
       "ruleId": "R05.mitor_shipment.us_ftc",
@@ -117,9 +241,15 @@
       "fixtures": "docs/rules/fixtures/R05.json",
       "sources": [
         "ecfr-16cfr435",
-        "federal-web-excerpts"
+        "federal-web-excerpts",
+        "fr-notices"
       ],
-      "refreshDays": 180
+      "refreshDays": 180,
+      "dates": {
+        "published": "2014-09-17 (79 FR 55615)",
+        "effective": "2014-12-08",
+        "compliance": "not captured"
+      }
     }
   ],
   "sources": [
@@ -249,19 +379,75 @@
       "url": null,
       "kind": "agency_guidance_and_fr_notices",
       "capturedPath": "docs/rules/sources/federal-web-pages-excerpts.md",
-      "capturedSha256": "570f8186780ecaf20c1b9305af8212a63c05274a10bb42ef9b7c67141bda6e8b",
+      "capturedSha256": "77d887379edf11f2c174b3ed8dc804cfa0387af2619b35e45b71b4cf7907697c",
       "rawResponseSha256": null,
       "retrievedAt": "2026-09-23",
       "lastVerifiedAt": "2026-09-23",
       "effectiveDate": "per passage (see file)",
       "note": "DOT refunds (updated 2025-11-07), DOT baggage (2025-10-29), DOT dashboard (2024-12-10), FTC MITOR guide, FTC credit-card page (May 2022), CFPB late-fee page, FR notices 2024-07177/2024-17602/2025-22140/2026-13675/2025-20042/2024-23588/2025-02814, Pub. L. 119-10"
+    },
+    {
+      "sourceId": "fr-notices",
+      "url": "https://www.federalregister.gov/documents/full_text/text/ (13 documents; see file)",
+      "kind": "federal_register_notices",
+      "capturedPath": "docs/rules/sources/federal-register-notices.txt",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "per document (see file)",
+      "capturedSha256": "c9f8ab0a2c1f7c33ee2bc87966217b3da9f4b333207c3098877ae2119a099cf9",
+      "rawResponseSha256": null
+    },
+    {
+      "sourceId": "ecfr-12cfr1026.7-9",
+      "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1026/subpart-B/section-1026.7",
+      "kind": "federal_regulation",
+      "capturedPath": "docs/rules/sources/ecfr-12cfr1026.7-9-excerpt.txt",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "unknown (as of 2026-09-18)",
+      "capturedSha256": "48a7bcf78187e36cb46c7efba5e6170d82a24dda848b625c31532b32c85c4c42",
+      "rawResponseSha256": "cec7f74c90ce867e73a90981ce0a6f6718d7516fafbe1ec6058dccb68e7bce8d"
+    },
+    {
+      "sourceId": "ecfr-12cfr1026.12b",
+      "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1026/subpart-B/section-1026.12",
+      "kind": "federal_regulation",
+      "capturedPath": "docs/rules/sources/ecfr-12cfr1026.12b-excerpt.txt",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "unknown (as of 2026-09-18)",
+      "capturedSha256": "b80a24516f76e0b2cee857dcf5cf6b834dea05a1f71c64bff05ab95bed2cb76c",
+      "rawResponseSha256": "c4b8895e2e492f97884b0ae344be89e437715fc16f521b5ef6f56e5264d38f67"
+    },
+    {
+      "sourceId": "ecfr-12cfr1005.6",
+      "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1005/subpart-A/section-1005.6",
+      "kind": "federal_regulation",
+      "capturedPath": "docs/rules/sources/ecfr-12cfr1005.6.txt",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "unknown (as of 2026-09-18)",
+      "capturedSha256": "477ae112472a090c77b6e3e7b50e639451cf479163183ba183297d61bb611165",
+      "rawResponseSha256": "0669a14f83f836f4086de21514f3bcd40041784e50c444b415f4d8e1909a10d0"
+    },
+    {
+      "sourceId": "ecfr-12cfr1005.11c",
+      "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1005/subpart-A/section-1005.11",
+      "kind": "federal_regulation",
+      "capturedPath": "docs/rules/sources/ecfr-12cfr1005.11c-excerpt.txt",
+      "retrievedAt": "2026-09-23",
+      "lastVerifiedAt": "2026-09-23",
+      "effectiveDate": "unknown (as of 2026-09-18)",
+      "capturedSha256": "21b8ac47f0a1eb06a5402bd2534d2df0e2f83eae71712038bfe968f71ea1b8c2",
+      "rawResponseSha256": "0669a14f83f836f4086de21514f3bcd40041784e50c444b415f4d8e1909a10d0"
     }
   ],
   "fixtures": {
-    "docs/rules/fixtures/R01.json": "192a9852799e78f0618e31e85bed2774a9d23378b8c7b4738efdf1010cdd8255",
-    "docs/rules/fixtures/R02.json": "d0a8023bde8199c92bdfbe8ebd2ee9be106fa20ec212b5f8143b6778255f16b3",
-    "docs/rules/fixtures/R03.json": "c90fc5dfaf43103af05477f81a93b779f860a989ef588ba575a7d6edb322a7df",
-    "docs/rules/fixtures/R04.json": "819cb1e0e0e4b8f23bc6bda4e9cff2fe338e9a477c4462695f346407cd147882",
-    "docs/rules/fixtures/R05.json": "2af54f859d1cf49c28642cd007b68793efe540904d0e76e9ed3e904ea3e4d795"
+    "docs/rules/fixtures/R01.json": "d24531e2e7a7fd32146816d96b6edb2060592003bcb4b0be2c9daa6decc1218c",
+    "docs/rules/fixtures/R01v2.json": "b446e0365c60511cfe704bb32bfcec4665c444c7729c914f3b82c282698d11dd",
+    "docs/rules/fixtures/R02.json": "b3bc2e71828d748db70210daf2370c1a5ec6be98b44e5d440d79aed9f7f5455f",
+    "docs/rules/fixtures/R03.json": "313ef7cd4e7880eeab489d668d56b866f37ffaaee4b69637714df14db75cb751",
+    "docs/rules/fixtures/R04.json": "f367a8df4ee2a809ab36f40d8e7dc6543749b608ffaa30b102ee9697d4fa6db6",
+    "docs/rules/fixtures/R05.json": "9fd037ffb2e82190ac1a7334f1d64f398a528a0eef20305223e4f09370019c32"
   }
 }

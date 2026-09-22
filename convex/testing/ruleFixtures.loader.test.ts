@@ -11,7 +11,6 @@ import {
   CONTRACT_OUTCOMES,
   FACT_STATES,
   FIXTURE_OUTCOME_ALIASES,
-  PENDING_OUTCOMES,
   REPO_ROOT,
   RuleFixtureError,
   fixtureRelPath,
@@ -43,13 +42,11 @@ function expectOnlyKnown(found: readonly string[], known: readonly string[], wha
 }
 
 /**
- * Mission §17 category groups a file does not cover yet. R01 v1 (72fe1a2)
- * tags no case missing_fact or contradictory_fact; contract §9's activation
- * gate needs every group, so this is reported to the lead in the M08 doc.
+ * Mission §17 category groups a file does not cover yet (contract §9's
+ * activation gate needs every group). Empty since M2D added R01-14/R01-15;
+ * a file that loses a group fails here.
  */
-const KNOWN_CATEGORY_GAPS: Readonly<Record<string, readonly string[]>> = {
-  R01: ["missing_fact", "contradictory_fact"],
-};
+const KNOWN_CATEGORY_GAPS: Readonly<Record<string, readonly string[]>> = {};
 
 function byId(file: RuleFixtureFile, id: string): RuleFixtureCase {
   const found = file.cases.find((c) => c.id === id);
@@ -68,7 +65,8 @@ function outcomesOf(c: RuleFixtureCase): string[] {
 describe("rule fixtures: committed files (docs/rules/fixtures)", () => {
   it("loads every manifest-registered file (hash-checked), R01–R05 included", () => {
     const files = loadAllRuleFixtures();
-    expect(files.map((f) => f.scenario)).toEqual([...SCENARIOS]);
+    // Order-insensitive: the loader orders by manifest path, SCENARIOS by stem ("R01-x.json" < "R01.json" but "R01" < "R01-x").
+    expect(files.map((f) => f.scenario).sort()).toEqual([...SCENARIOS].sort());
     expect(SCENARIOS).toEqual(expect.arrayContaining(["R01", "R02", "R03", "R04", "R05"]));
     const manifest = readRulesManifest();
     for (const f of files) expect(f.sha256).toBe(manifest.fixtures[f.relPath]);
@@ -95,16 +93,14 @@ describe("rule fixtures: committed files (docs/rules/fixtures)", () => {
       expectOnlyKnown(missingRequiredCategories(file), KNOWN_CATEGORY_GAPS[scenario] ?? [], `${scenario} category gap`);
     });
 
-    it("gives every runnable fixture a unique id, an offset clock, a finite now, facts, and contract (or flagged pending) outcomes only", () => {
+    it("gives every runnable fixture a unique id, an offset clock, a finite now, facts, and contract outcomes only", () => {
       expect(new Set(file.cases.map((c) => c.id)).size).toBe(file.cases.length);
       for (const c of file.cases) {
         expect(c.clock, c.id).toMatch(/(Z|[+-]\d{2}:\d{2})$/);
         expect(c.now, c.id).toBe(Date.parse(c.clock));
         expect(Number.isFinite(c.now), c.id).toBe(true);
         expect(Object.keys(c.facts).length, c.id).toBeGreaterThan(0);
-        const pending = outcomesOf(c).filter((o) => !(CONTRACT_OUTCOMES as readonly string[]).includes(o));
-        expectOnlyKnown(pending, PENDING_OUTCOMES, `${c.id} outcome outside the contract`);
-        expect(c.pendingContractOutcome, c.id).toBe(pending.length > 0);
+        for (const o of outcomesOf(c)) expect(CONTRACT_OUTCOMES, c.id).toContain(o);
       }
     });
 
@@ -153,7 +149,7 @@ describe("rule fixtures: committed files (docs/rules/fixtures)", () => {
       const c = rawById.get(id)!;
       return c.facts ?? { ...resolve(c.facts_from!), ...(c.facts_override ?? {}) };
     };
-    const mapOutcome = (o: string) => ((PENDING_OUTCOMES as readonly string[]).includes(o) ? o : FIXTURE_OUTCOME_ALIASES[o]);
+    const mapOutcome = (o: string) => FIXTURE_OUTCOME_ALIASES[o];
     const mappedOutcomes = (e: { outcome?: string; results?: Array<{ outcome: string }> }) =>
       e.outcome !== undefined ? [mapOutcome(e.outcome)] : (e.results ?? []).map((r) => mapOutcome(r.outcome));
 
@@ -189,24 +185,19 @@ describe("rule fixtures: committed files (docs/rules/fixtures)", () => {
     });
   });
 
-  it("advisory ratchet: only the known fact is state=missing with a non-null value", () => {
-    // Conventions: "Missing facts are state=missing with value null". R02-05's
-    // delay_cause_controllable is {value: "unknown", state: "missing"}; reported
-    // to the rules owner (M08 doc). A NEW occurrence fails here.
-    // README cross-pack rule 2 now states it; M2D fixes R02-05.
+  it("no fact is state=missing with a non-null value (README cross-pack rule 2)", () => {
+    // Found by this loader in R02-05 (value "unknown"); fixed in M2D.
     const found = SCENARIOS.flatMap((s) => missingFactsWithValues(loadRuleFixtureFile(s)));
-    expectOnlyKnown(found, ["R02-05.delay_cause_controllable"], "missing fact with a value");
+    expectOnlyKnown(found, [], "missing fact with a value");
   });
 
-  it("advisory ratchet: only the known amount_minor has no currency beside it", () => {
-    // R04-04's expected.amount.excluded[0] is {line, amount_minor, reason} with
-    // no currency (the conventions define money as amount_minor + ISO-4217);
-    // reported to the rules owner (M08 doc). A NEW occurrence fails here.
+  it("every amount_minor carries a currency (README: money on every money object)", () => {
+    // Found by this loader in R04-04 expected.amount.excluded[0]; fixed in M2D.
     const found = SCENARIOS.flatMap((s) => moneyWithoutCurrency(loadRuleFixtureFile(s)));
-    expectOnlyKnown(found, ["R04-04 expected.amount.excluded[0]"], "amount_minor without currency");
+    expectOnlyKnown(found, [], "amount_minor without currency");
   });
 
-  it("the alias table matches docs/rules/README.md 'Outcome vocabulary mapping'; pending rows are known; files use only known names", () => {
+  it("the alias table matches docs/rules/README.md 'Outcome vocabulary mapping' and the schema's evaluationOutcome; files use only known names", () => {
     const readme = readFileSync(path.join(REPO_ROOT, "docs/rules/README.md"), "utf8");
     const section = readme.split(/^### Outcome vocabulary mapping\s*$/m)[1]?.split(/^#{1,3} /m)[0];
     expect(section, "README section '### Outcome vocabulary mapping' not found").toBeDefined();
@@ -217,10 +208,17 @@ describe("rule fixtures: committed files (docs/rules/fixtures)", () => {
     });
     const pending = tableRows.filter((l) => /\|\s*\*\*none yet\*\*/.test(l)).map((l) => l.match(/`([a-z_]+)`/)![1]);
     expect(mapped.length + pending.length, "every README row is either mapped or 'none yet'").toBe(tableRows.length);
-    expect(Object.fromEntries(mapped)).toEqual({ ...FIXTURE_OUTCOME_ALIASES });
-    expectOnlyKnown(pending, PENDING_OUTCOMES, "README 'none yet' outcome the loader does not know");
-    const known = [...Object.keys(FIXTURE_OUTCOME_ALIASES), ...PENDING_OUTCOMES];
-    for (const s of SCENARIOS) expectOnlyKnown(loadRuleFixtureFile(s).outcomeVocabulary, known, `${s} vocabulary entry`);
+    for (const [from, to] of mapped) expect(FIXTURE_OUTCOME_ALIASES[from], `README maps ${from} → ${to}`).toBe(to);
+    // A README "none yet" row is tolerated only while README lags the schema:
+    // the outcome must already be a contract value that the loader maps 1:1
+    // (not_yet_due: contract rev 5.2 / convex/schema.ts before the README row
+    // was updated). Otherwise the loader could not map it at all.
+    for (const name of pending) {
+      expect(CONTRACT_OUTCOMES, `README "none yet" outcome ${name} is not in convex/schema.ts evaluationOutcome`).toContain(name);
+      expect(FIXTURE_OUTCOME_ALIASES[name], name).toBe(name);
+    }
+    expect([...mapped.map(([from]) => from), ...pending].sort()).toEqual(Object.keys(FIXTURE_OUTCOME_ALIASES).sort());
+    for (const s of SCENARIOS) expectOnlyKnown(loadRuleFixtureFile(s).outcomeVocabulary, Object.keys(FIXTURE_OUTCOME_ALIASES), `${s} vocabulary entry`);
     expect([...new Set(Object.values(FIXTURE_OUTCOME_ALIASES))].sort()).toEqual([...CONTRACT_OUTCOMES].sort());
   });
 
@@ -274,7 +272,7 @@ describe("rule fixtures: drift fails loudly", () => {
 // Synthetic documents: resolution rules and every validation failure
 // ---------------------------------------------------------------------------
 
-const VOCAB = [...Object.keys(FIXTURE_OUTCOME_ALIASES), ...PENDING_OUTCOMES];
+const VOCAB = Object.keys(FIXTURE_OUTCOME_ALIASES);
 const fact = (value: unknown, type = "string", state = "user_confirmed") => ({ type, value, state });
 
 function doc(cases: unknown[]) {
@@ -393,7 +391,7 @@ describe("rule fixtures: synthetic documents", () => {
     expect(() => parse(cases)).toThrow(message);
   });
 
-  it("passes a README 'none yet' outcome through unmapped and flags the fixture (not_yet_due, D147(6))", () => {
+  it("maps not_yet_due 1:1 and keeps reevaluate_at (D147(6), contract rev 5.2); it is never folded into not_eligible", () => {
     const file = parse([
       kase("RX-01", {
         expected: undefined,
@@ -404,8 +402,8 @@ describe("rule fixtures: synthetic documents", () => {
       }),
     ]);
     expect(byId(file, "RX-01a").expected.outcome).toBe("not_yet_due");
-    expect(byId(file, "RX-01a").pendingContractOutcome).toBe(true);
-    expect(byId(file, "RX-01b").pendingContractOutcome).toBe(false);
+    expect(byId(file, "RX-01a").expected.reevaluate_at).toBe("2026-10-11");
+    expect(byId(file, "RX-01b").expected.outcome).toBe("not_eligible");
   });
 
   it("rejects a vocabulary entry the alias table does not know", () => {
