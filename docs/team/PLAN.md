@@ -596,5 +596,7 @@ release-candidate.md: commit SHA, tag `rc-<date>`, node/npm versions, lockfile s
 | M1A | opus-ingestion-integrations-engineer-2 | verified (ccdd61f; 99/99; D149) |
 | M1B | opus-backend-engineer-4 | verified (34a2f87 via lead integration feaa52a; D156) |
 | M1C | opus-rules-researcher | done (72fe1a2; → M09b re-review with M2D) |
+**Wave 1 CLOSED at 0c7cbb7 (D237).** Wave 2 in progress: M20 (released), M21b/M22b (M27 fixes), M23 (pure pieces landed; integration after M20), M24 (part 1 landed; part 2 after M20), M2A (landed 32725c6), M27 (review done, re-review after fixes), M28/M29/M2C/M25/M26 next. Research: wave-3/4 specs in workflow (rules3 worktree); spec errata in workflow (errata worktree); P01–P12 re-audit in workflow (paudit worktree).
+
 | M21 | opus-commerce-payments-engineer | in_progress (early start D192: R05 then R03 pure packs; packets wait for M20) |
 | M22 | opus-travel-engineer | in_progress (early start D192: R02 then R04 pure packs; packets wait for M20) |
