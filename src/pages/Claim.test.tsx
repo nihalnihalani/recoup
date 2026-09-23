@@ -17,14 +17,16 @@ import Claim from "./Claim";
 const confirmCredit = vi.fn(async (_args: Record<string, unknown>) => ({ deduped: false }));
 const recordNonCashResolution = vi.fn(async (_args: Record<string, unknown>) => ({ deduped: false, remedyId: "r1" }));
 const recordDenial = vi.fn(async (_args: Record<string, unknown>) => null);
+const confirmHeldPromise = vi.fn(async (_args: Record<string, unknown>) => ({ ledgerWritten: true }));
 let claimData: unknown;
+let overviewItems: unknown[] = [];
 
 vi.mock("convex/react", () => ({
   useQuery: (ref: FunctionReference<"query">, args: unknown) => {
     if (args === "skip") return undefined;
     const name = getFunctionName(ref);
     if (name === "claims:get") return claimData;
-    if (name === "tracking:overview") return { items: [], totals: { byCurrency: {}, primaryCurrency: "USD" }, truncated: false };
+    if (name === "tracking:overview") return { items: overviewItems, totals: { byCurrency: {}, primaryCurrency: "USD" }, truncated: false };
     if (name === "packets:listForClaim") return { packets: [], submissions: [] };
     return undefined;
   },
@@ -33,6 +35,7 @@ vi.mock("convex/react", () => ({
     if (name === "claims:confirmCredit") return confirmCredit;
     if (name === "claims:recordNonCashResolution") return recordNonCashResolution;
     if (name === "claims:recordDenial") return recordDenial;
+    if (name === "replies:confirmHeldPromise") return confirmHeldPromise;
     return vi.fn(async () => null);
   },
   useAction: () => vi.fn(async () => null),
@@ -94,6 +97,8 @@ beforeEach(() => {
   confirmCredit.mockClear();
   recordNonCashResolution.mockClear();
   recordDenial.mockClear();
+  confirmHeldPromise.mockClear();
+  overviewItems = [];
   claimData = data();
 });
 
@@ -284,5 +289,87 @@ describe("item-less and manual-channel claims (M20)", () => {
     renderClaim();
     expect(screen.getByText("Message to the store")).toBeDefined();
     expect(screen.queryByText("Packet you file yourself")).toBeNull();
+  });
+});
+
+describe("held promises from a sender Recoup can't verify (D21/D178, M28)", () => {
+  const held = {
+    _id: "r1",
+    _creationTime: 5,
+    claimId: CLAIM_ID,
+    userId: "u1",
+    messageId: "m1",
+    from: "refunds@northwind-support.example",
+    classification: "promise",
+    summary: "We will refund the difference.",
+    promisedCents: 2_000,
+    senderMismatch: true,
+    receivedAt: 5,
+    heldForConfirmation: true,
+  };
+
+  it("is held and never money until the owner confirms it once", async () => {
+    claimData = data({ status: "sent" }, { replies: [held] });
+    renderClaim();
+    const panel = screen.getByRole("region", { name: "Held: we can't verify the sender" });
+    expect(panel.textContent).toContain("refunds@northwind-support.example");
+    expect(panel.textContent).toContain("not counted anywhere until you confirm");
+    // The timeline names the hold and shows no amount beside it.
+    const timelineEntry = screen.getAllByText("Held: we can't verify the sender").find((el) => el.closest("ol"));
+    expect(timelineEntry).toBeDefined();
+    expect(timelineEntry!.closest("li")!.textContent).not.toContain("$20.00");
+    expect(timelineEntry!.closest("li")!.textContent).toContain("Not counted until you confirm it");
+    // Nothing promised on the ledger.
+    expect(screen.getByText("You asked for")).toBeDefined();
+    const button = within(panel).getByRole("button", { name: "It's genuine: record the promise" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(confirmHeldPromise).toHaveBeenCalledTimes(1));
+    expect(confirmHeldPromise.mock.calls[0][0]).toEqual({ replyId: "r1" });
+    expect((await within(panel).findByRole("status")).textContent).toContain("Recorded as a promise of $20.00");
+  });
+
+  it("a confirmed reply is an ordinary promise, marked as confirmed by you", () => {
+    claimData = data({ status: "promised" }, { replies: [{ ...held, heldForConfirmation: false, confirmedByUserAt: 6 }] });
+    const text = renderClaim();
+    expect(screen.queryByRole("region", { name: "Held: we can't verify the sender" })).toBeNull();
+    expect(text).toContain("confirmed by you");
+  });
+
+  it("F3 regression: a held promise on a DISMISSED claim offers no confirm action and never claims a promise was recorded", async () => {
+    // replies.recordPromise (convex/replies.ts) skips both the ledger write and the status change for a dismissed
+    // claim (D53), so confirmHeldPromise always resolves {ledgerWritten:false} here -- the old unconditional copy
+    // ("Recorded as a promise…") would have told the user something was recorded when nothing was.
+    claimData = data({ status: "dismissed" }, { replies: [held] });
+    confirmHeldPromise.mockResolvedValueOnce({ ledgerWritten: false });
+    renderClaim();
+    const panel = screen.getByRole("region", { name: "Held: we can't verify the sender" });
+    expect(within(panel).queryByRole("button", { name: "It's genuine: record the promise" })).toBeNull();
+    expect(panel.textContent).toContain("This claim is dismissed, so confirming it would record nothing.");
+    expect(confirmHeldPromise).not.toHaveBeenCalled();
+  });
+});
+
+describe("P06-OW-2: the claim page never presents an out-of-date price as today's", () => {
+  const tracked = (over: Record<string, unknown>) => ({
+    itemId: "i1", purchaseId: "p1", name: "Kettle", merchant: "Northwind", merchantDomain: "northwind.example", currency: "USD", qty: 1,
+    paidCents: 12_500, isExample: false, points: [{ at: 1, cents: 10_000 }], checks: 1, lastCheckedAt: 1, lastObservedAt: 1,
+    priceStale: false, latestCents: 10_000, lowestCents: 10_000, dropCents: 2_500, ...over,
+  });
+
+  it("a stale price is 'Last price read', flagged out of date, with no drop badge", () => {
+    overviewItems = [tracked({ priceStale: true })];
+    const text = renderClaim();
+    expect(screen.queryByText("Now")).toBeNull();
+    expect(screen.getByText("Last price read")).toBeDefined();
+    expect(text).toContain("Out of date: price read");
+  });
+
+  it("a fresh price is 'Now' with its age", () => {
+    overviewItems = [tracked({})];
+    const text = renderClaim();
+    expect(screen.getByText("Now")).toBeDefined();
+    expect(text).toMatch(/Price read .* ago/);
+    expect(text).not.toContain("Out of date");
   });
 });

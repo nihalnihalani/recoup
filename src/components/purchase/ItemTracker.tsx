@@ -10,6 +10,7 @@ import { DeltaBadge } from "../DeltaBadge";
 import { fmt } from "../../lib/money";
 import { ProductThumb } from "../ProductThumb";
 import { boughtVerdict, priceStats, type VerdictTone } from "../../lib/priceStats";
+import { priceAge } from "../../lib/time";
 import {
   bigNumberClass,
   cardClass,
@@ -136,6 +137,9 @@ export function ItemTracker({
     latestCents: latest?.cents,
     windowEndsAt,
     claimStatus: liveClaim?.status,
+    sendUnknown: liveClaim?.sendUnknown === true,
+    priceStale: item.priceStale,
+    priceObservedAt: item.lastObservedAt,
     now,
     currency,
   });
@@ -193,11 +197,17 @@ export function ItemTracker({
         </header>
 
         <div className="px-5 pt-5">
-          <p className={mutedLabelClass}>Current price</p>
+          {/* P06-OW-2: an out-of-date price is labelled by its age, never as the current price. */}
+          <p className={mutedLabelClass}>{latest && item.priceStale ? "Last price read" : "Current price"}</p>
           <div className="mt-1 flex flex-wrap items-center gap-2.5">
             <p className={bigNumberClass}>{latest ? fmt(latest.cents, currency) : dash}</p>
-            <DeltaBadge paidCents={item.unitCents} latestCents={latest?.cents} currency={currency} />
+            {!item.priceStale && <DeltaBadge paidCents={item.unitCents} latestCents={latest?.cents} currency={currency} />}
           </div>
+          {latest && (
+            <p className="mt-1 text-xs text-gray-600">
+              {item.priceStale ? `Out of date: ${priceAge(item.lastObservedAt ?? latest.at, now)}` : `Price ${priceAge(item.lastObservedAt ?? latest.at, now)}`}
+            </p>
+          )}
           {held !== null && stats.count >= 2 && (
             <p className="mt-1 text-xs text-gray-400">
               {held === 0 ? "At this price for less than a day" : `At this price for ${held} ${held === 1 ? "day" : "days"}`}
@@ -313,7 +323,7 @@ export function ItemTracker({
               <p className={`mt-1 ${bigNumberClass}`}>{fmt(claim.expectedCents, currency)}</p>
             </div>
             <div className="mt-5">
-              <StatusSteps status={claim.status} />
+              <StatusSteps status={claim.status} sendUnknown={claim.sendUnknown === true} />
             </div>
           </section>
         ))}

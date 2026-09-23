@@ -274,3 +274,74 @@ describe("OpportunityCard: review_amount (DA-B-2)", () => {
     expect(screen.queryByRole("link", { name: "Open the claim" })).toBeNull();
   });
 });
+
+describe("P06-OW-1 display: a stored path past its user deadline is never shown as claimable", () => {
+  const passed = () =>
+    view(
+      { outcome: "likely_eligible", nextAction: { kind: "open_case" }, deadlines: [userWindow({ dueAt: NOW - 3_600_000 })] },
+      { outcome: "likely_eligible", nextDeadlineAt: NOW - 3_600_000 },
+    );
+
+  it("replaces the outcome, the estimate and 'Start a claim' with a check-again state", () => {
+    const text = renderCard(passed(), { onOpenCase: vi.fn(), onCheckAgain: vi.fn(async () => {}) });
+    expect(screen.queryByText(OUTCOME_COPY.likely_eligible.label)).toBeNull();
+    expect(text).not.toContain(formatMinor(2_500, "USD"));
+    expect(screen.queryByRole("button", { name: "Start a claim" })).toBeNull();
+    expect(screen.getByText("Window may have passed")).toBeDefined();
+    expect(text).toContain("The window may have passed. Check again so Recoup can confirm.");
+    expect(screen.getByRole("button", { name: "Check again" })).toBeDefined();
+  });
+
+  it("the same path before its deadline is unchanged", () => {
+    const text = renderCard(
+      view({ outcome: "likely_eligible", nextAction: { kind: "open_case" }, deadlines: [userWindow()] }, { outcome: "likely_eligible" }),
+      { onOpenCase: vi.fn() },
+    );
+    expect(screen.getByText(OUTCOME_COPY.likely_eligible.label)).toBeDefined();
+    expect(text).toContain(formatMinor(2_500, "USD"));
+    expect(screen.getByRole("button", { name: "Start a claim" })).toBeDefined();
+    expect(screen.queryByText("Window may have passed")).toBeNull();
+  });
+});
+
+describe("F1 regression: a case asked in time (case_open, active claim) after the window end", () => {
+  // An R01 claim sent on day 28 of a 30-day window: the stored evaluation's deadlines[0] stays {obligor:"user",
+  // status:"open", dueAt: day 30} because only R03 ever calls markMet. Without gating on case_open/activeClaimId,
+  // passedUserDeadline would keep flagging this claimed-in-time path as "Window may have passed" for the whole life
+  // of the open case, even though the server's own isExpired (convex/lib/claimState.ts) never expires it.
+  const caseOpen = () =>
+    view(
+      { outcome: "likely_eligible", nextAction: { kind: "continue_case", claimId: "c1" as Id<"claims"> }, deadlines: [userWindow({ dueAt: NOW - 3_600_000 })] },
+      { outcome: "likely_eligible", status: "case_open", activeClaimId: "c1" as Id<"claims">, nextDeadlineAt: NOW - 3_600_000 },
+    );
+
+  it("does not show 'Window may have passed' or hide the estimate once a claim is open", () => {
+    const text = renderCard(caseOpen());
+    expect(screen.queryByText("Window may have passed")).toBeNull();
+    expect(text).not.toContain("not shown as claimable");
+  });
+});
+
+describe("M29 deadline attention (D241)", () => {
+  const due = NOW + 5 * DAY;
+  it("shows 'Deadline soon' while the stored attention is current", () => {
+    const text = renderCard(
+      view(
+        { deadlines: [userWindow({ dueAt: due })] },
+        { nextDeadlineAt: due, deadlineAttention: { setAt: NOW - DAY, dueAt: due, deadlineId: "r01.window" } },
+      ),
+    );
+    expect(screen.getByText("Deadline soon")).toBeDefined();
+    expect(text).toContain("Your deadline is coming up");
+  });
+
+  it("stale attention (the next deadline moved) is not shown", () => {
+    renderCard(
+      view(
+        { deadlines: [userWindow({ dueAt: due + DAY })] },
+        { nextDeadlineAt: due + DAY, deadlineAttention: { setAt: NOW - DAY, dueAt: due, deadlineId: "r01.window" } },
+      ),
+    );
+    expect(screen.queryByText("Deadline soon")).toBeNull();
+  });
+});

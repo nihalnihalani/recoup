@@ -1326,3 +1326,47 @@ describe("the extracted product name never degrades the readable default", () =>
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// P03-A: the market lookup's state and when a manual retry is accepted reach the client, so a watch stuck in
+// empty_result or terminal_failure can be retried from the UI (`market.refresh`).
+// ---------------------------------------------------------------------------
+describe("watches.get projects the market lookup state (P03-A)", () => {
+  const FETCHED = T0 - 2 * DAY;
+  const cases = [
+    { state: "not_configured", refreshableAt: null },
+    { state: "queued", refreshableAt: null },
+    { state: "running", refreshableAt: null },
+    { state: "success", refreshableAt: FETCHED + 7 * DAY },
+    { state: "empty_result", refreshableAt: FETCHED },
+    { state: "retryable_failure", refreshableAt: T0 + HOUR },
+    { state: "terminal_failure", refreshableAt: FETCHED },
+  ] as const;
+
+  for (const { state, refreshableAt } of cases) {
+    it(`${state} → marketState ${state}, refreshable ${refreshableAt === null ? "never (null)" : "from a set instant"}`, async () => {
+      const t = setup();
+      const { as, userId } = await signedIn(t);
+      const watchId = await seedWatch(t, userId);
+      await t.run((ctx) =>
+        ctx.db.patch(watchId, {
+          marketState: state,
+          marketFetchedAt: FETCHED,
+          ...(state === "retryable_failure" ? { marketNextRetryAt: T0 + HOUR } : {}),
+        }),
+      );
+      const got = await as.query(api.watches.get, { watchId });
+      expect(got!.watch.marketState).toBe(state);
+      expect(got!.watch.marketRefreshableAt).toBe(refreshableAt);
+    });
+  }
+
+  it("a watch with no lookup yet → null state and nothing to retry", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    const got = await as.query(api.watches.get, { watchId });
+    expect(got!.watch.marketState).toBeNull();
+    expect(got!.watch.marketRefreshableAt).toBeNull();
+  });
+});

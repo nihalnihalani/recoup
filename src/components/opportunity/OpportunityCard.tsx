@@ -1,19 +1,22 @@
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { formatMinor } from "../../lib/money";
-import { cardClass, errorText, primaryButtonClass, secondaryButtonClass } from "../../lib/ui";
+import { cardClass, errorText, primaryButtonClass, secondaryButtonClass, useNow } from "../../lib/ui";
 import { DotChip } from "../purchase/parts";
 import { AuthorityBadge } from "./AuthorityBadge";
 import { DeadlineLine } from "./DeadlineLine";
 import {
   amountHeading,
   CASH_COPY,
+  deadlineAttentionActive,
   docTypeWords,
+  formatDue,
   explanationLines,
   formatInstant,
   formatLocalDate,
   humanizeKeys,
   OUTCOME_COPY,
+  passedUserDeadline,
   relationCopy,
   SCENARIO_TITLES,
   sharedLossViews,
@@ -67,6 +70,12 @@ export function OpportunityCard({
   const title = SCENARIO_TITLES[opportunity.scenarioId];
   const outcome = evaluation?.outcome ?? opportunity.outcome;
   const cash = CASH_COPY[opportunity.cashClass];
+  const clock = useNow();
+  const at = now ?? clock;
+  // P06-OW-1 (display only, D73): a stored evaluation past its running user deadline is never shown as claimable.
+  const passed = passedUserDeadline(evaluation, at, opportunity);
+  // M29 (D241): the sweep's in-app deadline attention, shown while it is current.
+  const attention = passed === null && deadlineAttentionActive(opportunity, at) ? opportunity.deadlineAttention : undefined;
 
   return (
     // An article, not a region: several items can each carry the same kind of path, and landmarks must be unique.
@@ -75,7 +84,12 @@ export function OpportunityCard({
         <p className={labelClass}>Recovery path</p>
         <h3 className="mt-0.5 text-base font-semibold text-gray-900">{title}</h3>
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <DotChip dot={OUTCOME_COPY[outcome].dot}>{OUTCOME_COPY[outcome].label}</DotChip>
+          {passed ? (
+            <DotChip dot="bg-gray-400">Window may have passed</DotChip>
+          ) : (
+            <DotChip dot={OUTCOME_COPY[outcome].dot}>{OUTCOME_COPY[outcome].label}</DotChip>
+          )}
+          {attention && <DotChip dot="bg-gold">Deadline soon</DotChip>}
           <AuthorityBadge authority={opportunity.authorityClass} />
           <span
             className="inline-flex items-center whitespace-nowrap rounded-lg border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs font-medium text-gray-700"
@@ -85,7 +99,19 @@ export function OpportunityCard({
           </span>
           {opportunity.status === "case_open" && <DotChip dot="bg-gray-900">Claim open</DotChip>}
         </div>
+        {attention && (
+          <p className="mt-2 text-sm text-gray-900">
+            Your deadline is coming up: {formatDue({ dueAt: attention.dueAt })}. Act before then.
+          </p>
+        )}
       </header>
+
+      {passed && (
+        <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 px-3.5 py-3 text-sm text-gray-700">
+          Your deadline ({passed.label}) has passed by this device's clock, so this path is not shown as claimable. Check
+          again so Recoup can confirm where it stands.
+        </div>
+      )}
 
       {evaluation === null ? (
         <p className="mt-4 text-sm text-gray-600">This path has not been checked yet.</p>
@@ -100,10 +126,17 @@ export function OpportunityCard({
           counterparty={counterparty}
           onAnswer={onAnswer}
           now={now}
+          windowPassed={passed !== null}
         />
       )}
 
-      <NextStep view={view} onOpenCase={onOpenCase} onCheckAgain={onCheckAgain} counterparty={counterparty} />
+      <NextStep
+        view={view}
+        onOpenCase={onOpenCase}
+        onCheckAgain={onCheckAgain}
+        counterparty={counterparty}
+        windowPassed={passed !== null}
+      />
     </article>
   );
 }
@@ -127,6 +160,7 @@ function EvaluationBody({
   counterparty,
   onAnswer,
   now,
+  windowPassed,
 }: {
   opportunity: Opportunity;
   evaluation: Evaluation;
@@ -137,9 +171,11 @@ function EvaluationBody({
   counterparty?: string;
   onAnswer?: (answer: FactAnswer) => Promise<void>;
   now?: number;
+  windowPassed: boolean;
 }) {
   const heading = amountHeading(evaluation.outcome, evaluation.amount);
-  const amount = heading !== null ? evaluation.amount : null;
+  // P06-OW-1: no estimate is shown as claimable once the user's deadline has passed.
+  const amount = heading !== null && !windowPassed ? evaluation.amount : null;
   const why = explanationLines(evaluation);
   const exclusions = evaluation.conditions.filter((c) => c.kind === "exclusion");
   const deadlines = evaluation.deadlines.filter((d) => d.status !== "not_applicable");
@@ -292,11 +328,13 @@ function NextStep({
   onOpenCase,
   onCheckAgain,
   counterparty = "The business",
+  windowPassed = false,
 }: {
   view: OpportunityView;
   onOpenCase?: () => Promise<OpenCaseResult>;
   onCheckAgain?: () => Promise<void>;
   counterparty?: string;
+  windowPassed?: boolean;
 }) {
   const { opportunity, evaluation } = view;
   const [busy, setBusy] = useState<"open" | "check" | null>(null);
@@ -336,6 +374,9 @@ function NextStep({
         Open the claim
       </Link>
     );
+  } else if (windowPassed) {
+    // P06-OW-1: never "Start a claim" on a path whose user deadline has passed; the check again confirms it.
+    text = "The window may have passed. Check again so Recoup can confirm.";
   } else if (action) {
     switch (action.kind) {
       case "open_case":

@@ -122,6 +122,33 @@ describe("tracking.overview", () => {
     expect(out.totals.mixedCurrencies).toBe(false);
     expect(out.totals.primaryCurrency).toBe("USD");
   });
+
+  it("F4 regression (fe2 review, P02-OW-4): a queued claim's sendUnknown reaches the overview item", async () => {
+    // Without the value spread at the claim's projection, this stays undefined even though the dashboard's
+    // StatusPill/StatusSteps read it to avoid a forever-pulsing "Sending…" for a claim whose delivery is unknown
+    // (P02-OW-4/P02-SK-2). Every OTHER test in this file builds its Item objects by hand, so dropping the field on
+    // the server silently keeps typecheck and the rest of the suite green.
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const purchaseId = await t.run((ctx) =>
+      ctx.db.insert("purchases", {
+        userId, merchant: "S", merchantDomain: "s.example", purchasedAt: Date.now() - 2 * 86_400_000, currency: "USD", status: "active",
+      }),
+    );
+    const itemId = await t.run((ctx) =>
+      ctx.db.insert("items", { purchaseId, userId, name: "K", unitCents: 10_000, qty: 1, returned: false }),
+    );
+    await t.run((ctx) =>
+      ctx.db.insert("claims", {
+        purchaseId, itemId, userId, type: "price_adjustment", expectedCents: 2_000, status: "queued", sendUnknown: true, token: "tok", version: 1,
+      }),
+    );
+
+    const out = await as.query(api.tracking.overview, {});
+    const item = out.items.find((i) => i.name === "K");
+    expect(item?.claim?.status).toBe("queued");
+    expect(item?.claim?.sendUnknown).toBe(true);
+  });
 });
 
 describe("D115 6b-3 / T18.3: a tombstoned caller sees the same empty dashboard a signed-out caller does", () => {

@@ -62,6 +62,9 @@ const activityKind = v.union(
   v.literal("credit_promised"),
   v.literal("credit_confirmed"),
   v.literal("charged_again"),
+  /** §3.2: a provisional credit is not recovery; the feed names it "not final" and never as money back. */
+  v.literal("credit_provisional"),
+  v.literal("provisional_resolved"),
 );
 
 const activityEvent = v.object({
@@ -82,6 +85,15 @@ const activityEvent = v.object({
 });
 
 type ActivityEvent = typeof activityEvent.type;
+
+/** Every ledger kind's feed kind. A `Record`, so a new ledger kind without a feed kind is a compile error. */
+const ACTIVITY_KIND_OF_LEDGER: Readonly<Record<Doc<"ledgerEvents">["kind"], ActivityEvent["kind"]>> = {
+  confirmed_credit: "credit_confirmed",
+  promised_credit: "credit_promised",
+  later_debit: "charged_again",
+  provisional_credit: "credit_provisional",
+  provisional_released: "provisional_resolved",
+};
 
 /** Turns one product's observations (newest first) into drop / rise / first-seen / unreadable events. */
 function priceEvents(
@@ -365,19 +377,13 @@ export const activity = query({
         }
 
         for (const entry of ledger) {
-          // Provisional credits are not recovery events (§3.2). A feed entry for them needs a new activity kind that the
-          // dashboard's exhaustive kind maps (ActivityTimeline, NotificationBell) render first; the frontend owns that.
-          if (entry.kind === "provisional_credit" || entry.kind === "provisional_released") continue;
+          // Provisional credits are not recovery (§3.2): their own kinds, labelled "not final" by the feed's exhaustive
+          // kind maps (ActivityTimeline, NotificationBell), never folded into credit or charged-again.
           claimEvents.push({
             ...base,
             id: entry._id,
             at: entry._creationTime,
-            kind:
-              entry.kind === "confirmed_credit"
-                ? "credit_confirmed"
-                : entry.kind === "promised_credit"
-                  ? "credit_promised"
-                  : "charged_again",
+            kind: ACTIVITY_KIND_OF_LEDGER[entry.kind],
             cents: entry.cents,
           });
         }

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { remainingLabel } from "./ui";
 
 /**
  * Matches `convex/watches.ts`'s `assertCoarseNow` (P06/D73): a reactive
@@ -81,4 +82,14 @@ export function isSearching(searchingUntil: number | undefined, now: number): bo
  */
 export function canFindOtherStores(nextFindAt: number | undefined, now: number): boolean {
   return nextFindAt === undefined || nextFindAt <= now;
+}
+
+/**
+ * P06-OW-2: a price's own age in words, from its newest PRICED read ("read 20d 4h ago"). Never the last check
+ * ATTEMPT (`lastCheckedAt`), which counts failed reads and would make an old price look fresh.
+ */
+export function priceAge(lastObservedAt: number | null | undefined, now: number): string {
+  if (lastObservedAt === null || lastObservedAt === undefined) return "no price read yet";
+  const diff = now - lastObservedAt;
+  return diff < 60_000 ? "read just now" : `read ${remainingLabel(diff)} ago`;
 }

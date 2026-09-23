@@ -220,7 +220,37 @@ describe("StatCards money (DA-A-34, QA-2)", () => {
     expect(card.textContent).toContain("Partial");
     expect(card.textContent).toContain("the example is never counted");
     expect(card.textContent).not.toMatch(/\$|USD/);
-    expect(screen.getByText(/checks supported recovery paths/)).toBeDefined();
+    // P05-OW3 (SK-3): the Recovery panel is labelled partial too, and its empty state does not claim there is nothing.
+    const panel = screen.getByRole("region", { name: "Recovery by currency" });
+    expect(panel.textContent).toContain("Partial");
+    expect(panel.textContent).toContain("Some records were too many to read in full");
+    expect(panel.textContent).not.toContain("No recovery paths with an amount yet");
+    expect(panel.textContent).toContain("Some records were too many to read in full, so there may be some.");
+  });
+
+  it("P05-OW3: a partial summary WITH currency rows labels the Recovery panel as partial", () => {
+    renderCards(
+      summary({
+        complete: false,
+        currencies: [
+          { currency: "USD", recoveredMinor: 0, overCreditMinor: 0, extraCreditedMinor: 0, possibleDoubleCreditMinor: 0, tiles: emptyTiles, askedUserReportedMinor: 0, cappedAtPaidTotal: false, paidTotalPartial: false },
+        ],
+      }),
+    );
+    const panel = screen.getByRole("region", { name: "Recovery by currency" });
+    expect(panel.textContent).toContain("Partial");
+    // F7 fix: cause-neutral wording. `complete: false` has several distinct server-side causes (a per-claim
+    // ledger-event cut, a per-claim draft/packet/submission cut, the 2x scan caps, a non-cash-remedy cut, and the
+    // claims/open-paths caps) -- the UI does not know which one fired, so it must not name only the caps.
+    expect(panel.textContent).toContain("Some records were too many to read in full, so these totals may be missing some money.");
+    expect(panel.textContent).not.toContain("most recent 200 claims");
+  });
+
+  it("P05-OW3: a complete summary is not labelled partial, and its empty state says so plainly", () => {
+    renderCards(summary({ complete: true }));
+    const panel = screen.getByRole("region", { name: "Recovery by currency" });
+    expect(panel.textContent).not.toContain("Partial");
+    expect(panel.textContent).toContain("No recovery paths with an amount yet");
   });
 
   it("names the claims left out because their currency is not two-decimal, instead of showing them as money", () => {

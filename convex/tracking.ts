@@ -115,6 +115,8 @@ const trackedItem = v.object({
       expectedCents: v.number(),
       unresolvedCents: v.number(),
       confirmedCents: v.number(),
+      /** P02-OW-4: the send's outcome could not be confirmed (`claims.sendUnknown`); shown as "Delivery unknown". */
+      sendUnknown: v.optional(v.boolean()),
     }),
   ),
 });
@@ -348,6 +350,7 @@ export const overview = query({
                   expectedCents: priceClaim.expectedCents,
                   unresolvedCents: balance.unresolved,
                   confirmedCents: balance.confirmed,
+                  ...(priceClaim.sendUnknown === true ? { sendUnknown: true } : {}),
                 }
               : undefined,
         });

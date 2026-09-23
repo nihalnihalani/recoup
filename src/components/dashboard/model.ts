@@ -46,6 +46,9 @@ export function itemVerdict(item: Item, now: number): BoughtVerdict {
     latestCents: item.latestCents,
     windowEndsAt: item.windowEndsAt,
     claimStatus: item.claim?.status,
+    sendUnknown: item.claim?.sendUnknown === true,
+    priceStale: item.priceStale,
+    priceObservedAt: item.lastObservedAt,
     now,
     currency: item.currency,
   });
@@ -54,6 +57,8 @@ export function itemVerdict(item: Item, now: number): BoughtVerdict {
 /** A drop that can still be claimed: price is below paid, the window has not shut, the money is not back yet. */
 export function openDropCents(item: Item, now: number): number {
   if (item.dropCents === undefined || item.dropCents <= 0) return 0;
+  // P06-OW-2: a drop resting on an out-of-date price is not an open drop.
+  if (item.priceStale) return 0;
   if (item.windowEndsAt !== undefined && item.windowEndsAt <= now) return 0;
   if (item.claim?.status === "confirmed") return 0;
   return item.dropCents * item.qty;

@@ -3,11 +3,12 @@ import type { FunctionReturnType } from "convex/server";
 import { Link } from "react-router-dom";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import { deadlineAttentionActive } from "../components/opportunity/model";
 import { OpportunityRow } from "../components/opportunity/OpportunityRow";
 import { Loading } from "../components/States";
 import { CATEGORY_LABELS } from "../components/transaction/labels";
 import { coverageSummary } from "../lib/coverageCopy";
-import { cardClass, pageTitleClass } from "../lib/ui";
+import { cardClass, pageTitleClass, useNow } from "../lib/ui";
 
 type Item = FunctionReturnType<typeof api.opportunities.listMine>["items"][number];
 type Group = { transactionId: Id<"transactions">; category: Item["category"]; counterpartyName: string; items: Item[] };
@@ -34,8 +35,11 @@ function groupByTransaction(items: readonly Item[]): Group[] {
  */
 export default function Opportunities() {
   const list = useQuery(api.opportunities.listMine, {});
+  const now = useNow();
   if (list === undefined) return <Loading rows={4} />;
   const groups = groupByTransaction(list.items);
+  // M29 (D241): paths whose own user deadline is coming up, from the sweep's stored attention.
+  const soon = list.items.filter((item) => deadlineAttentionActive(item.opportunity, now)).length;
   return (
     <div className="space-y-6">
       <div>
@@ -44,6 +48,12 @@ export default function Opportunities() {
           Grouped by purchase or transaction. {coverageSummary()} Paths for the same loss are alternatives, so they are
           never added together; see the dashboard for totals by currency.
         </p>
+        {soon > 0 && (
+          <p className="mt-3 inline-flex items-center gap-2 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-1.5 text-sm font-medium text-gray-900">
+            <span aria-hidden="true" className="size-2 rounded-full bg-gold" />
+            {soon === 1 ? "1 path has a deadline of yours coming up." : `${soon} paths have a deadline of yours coming up.`}
+          </p>
+        )}
       </div>
       {groups.length === 0 ? (
         <section className={`${cardClass} border-dashed px-6 py-12 text-center`}>

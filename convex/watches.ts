@@ -24,7 +24,7 @@ import {
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { variantMatch, verdictValidator, watchStatus } from "./schema";
+import { marketState, variantMatch, verdictValidator, watchStatus } from "./schema";
 import { ownedWatch, requireUserId } from "./lib/access";
 import { isTombstoned } from "./lib/accountState";
 import { isPriceStale } from "./lib/freshness";
@@ -45,6 +45,7 @@ import {
   GLOBAL_DAILY_BUDGETS,
   INELIGIBLE_REST_MS,
   MARKET_MAX_POINTS,
+  MARKET_REFRESH_MIN_AGE_MS,
   MAX_PURCHASES_PER_USER,
   MAX_WATCHES_PER_USER,
   MAX_WATCH_CREATES_PER_HOUR,
@@ -169,7 +170,34 @@ const watchSummary = v.object({
     }),
     v.null(),
   ),
+  /** P03-A: where the ShopSavvy lookup stands (D71 state machine); null before any lookup state exists. */
+  marketState: v.union(marketState, v.null()),
+  /**
+   * P03-A: the earliest instant `market.refresh` accepts a manual retry (an instant in the past means now): the
+   * success's age limit, now for empty_result / terminal_failure, the backoff end for retryable_failure. Null while a
+   * lookup is queued or running, and when lookups are not configured.
+   */
+  marketRefreshableAt: v.union(v.number(), v.null()),
 });
+
+/** P03-A: when a manual "Try again" is accepted, mirroring `market.requestLookup`'s manual-trigger gates. */
+function marketRefreshableAt(watch: Doc<"watches">): number | null {
+  const since = watch.marketFetchedAt ?? watch._creationTime;
+  switch (watch.marketState) {
+    case "success":
+      return since + MARKET_REFRESH_MIN_AGE_MS;
+    case "empty_result":
+    case "terminal_failure":
+      return since;
+    case "retryable_failure":
+      return watch.marketNextRetryAt ?? since;
+    case "queued":
+    case "running":
+    case "not_configured":
+    case undefined:
+      return null;
+  }
+}
 
 const watchCheckView = v.object({
   _id: v.id("watchChecks"),
@@ -322,6 +350,8 @@ function summarise(
             since: marketPoints[0].observedAt,
             note: watch.marketNote ?? null,
           },
+    marketState: watch.marketState ?? null,
+    marketRefreshableAt: marketRefreshableAt(watch),
   };
 }
 

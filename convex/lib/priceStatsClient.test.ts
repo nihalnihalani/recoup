@@ -80,7 +80,9 @@ describe("boughtVerdict", () => {
     const base = { paidCents: 10000, latestCents: 8000, windowEndsAt: open, now };
     expect(boughtVerdict({ ...base, claimStatus: "confirmed" })).toMatchObject({ kind: "recovered", label: "Back on card", tone: "green" });
     expect(boughtVerdict({ ...base, claimStatus: "promised" }).kind).toBe("promised");
-    for (const claimStatus of ["queued", "sent", "packet"]) {
+    // P02-OW-4: a queued send is not yet confirmed sent, so it reads "sending", not "asked".
+    expect(boughtVerdict({ ...base, claimStatus: "queued" }).kind).toBe("sending");
+    for (const claimStatus of ["sent", "packet"]) {
       expect(boughtVerdict({ ...base, claimStatus }).kind).toBe("asked");
     }
     for (const claimStatus of ["detected", "drafted", "reopened", "dismissed"]) {

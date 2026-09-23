@@ -1,29 +1,31 @@
 import { Authenticated, AuthLoading, Unauthenticated } from "convex/react";
-import { lazy, Suspense, type ReactNode } from "react";
+import { Suspense, useState, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Shell } from "./components/Shell";
 import { Loading } from "./components/States";
+import { lazyWithRetry, resetFailedChunks } from "./lib/lazyWithRetry";
 import SignIn from "./pages/SignIn";
 
 // Route-level code splitting (P10): each page becomes its own chunk instead
 // of all riding in the main bundle, so a visit to /watching never pays for
 // /settings. SignIn stays a static import — it's what unauthenticated users
-// see immediately, so lazily fetching it buys nothing.
-const Board = lazy(() => import("./pages/Board"));
-const Add = lazy(() => import("./pages/Add"));
-const Transaction = lazy(() => import("./pages/Transaction"));
-const Opportunities = lazy(() => import("./pages/Opportunities"));
-const Claim = lazy(() => import("./pages/Claim"));
-const Purchase = lazy(() => import("./pages/Purchase"));
-const Settings = lazy(() => import("./pages/Settings"));
-const Watching = lazy(() => import("./pages/Watching"));
+// see immediately, so lazily fetching it buys nothing. P10-MW-1: `lazyWithRetry`, so a chunk that failed once
+// (offline, or a release that removed old assets) loads again on "Try again" or on navigating back.
+const Board = lazyWithRetry(() => import("./pages/Board"));
+const Add = lazyWithRetry(() => import("./pages/Add"));
+const Transaction = lazyWithRetry(() => import("./pages/Transaction"));
+const Opportunities = lazyWithRetry(() => import("./pages/Opportunities"));
+const Claim = lazyWithRetry(() => import("./pages/Claim"));
+const Purchase = lazyWithRetry(() => import("./pages/Purchase"));
+const Settings = lazyWithRetry(() => import("./pages/Settings"));
+const Watching = lazyWithRetry(() => import("./pages/Watching"));
 // T19: public, unauthenticated-reachable — deliberately outside the
 // Authenticated/Unauthenticated gate below (its own top-level route, not
 // nested under <Shell>), so it renders identically whether or not anyone is
 // signed in.
-const Privacy = lazy(() => import("./pages/Privacy"));
+const Privacy = lazyWithRetry(() => import("./pages/Privacy"));
 
 /**
  * Wraps one route's page in its own error boundary and suspense fallback.
@@ -35,9 +37,19 @@ function RoutedPage({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
   return (
     <ErrorBoundary key={pathname}>
+      <FreshChunks />
       <Suspense fallback={<Loading rows={4} />}>{children}</Suspense>
     </ErrorBoundary>
   );
+}
+
+/**
+ * P10-MW-1: arriving at a route (the boundary above is keyed by path, so this mounts once per visit) gives any chunk
+ * that failed earlier a fresh import. Runs once per mount, never during a failing render.
+ */
+function FreshChunks() {
+  useState(resetFailedChunks);
+  return null;
 }
 
 export default function App() {

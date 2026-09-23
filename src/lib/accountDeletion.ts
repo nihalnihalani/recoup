@@ -75,3 +75,35 @@ export const DELETION_WHAT_REMAINS =
   "what Recoup's own backend keeps, the mail provider separately keeps its own copies of all of this on its " +
   "own retention schedule, outside Recoup's control. Either way, emails already sent to stores before " +
   "deletion cannot be recalled or unsent.";
+
+/**
+ * P09-SK-2: the final outcome as a signed-in tab shows it, from `deletionStatus` read literally. A failed remote
+ * inbox delete or an unfinished mail purge is said plainly; "removed" is claimed only when both are done.
+ */
+export function deletionHeadline(status: {
+  status: "deleting" | "deleted";
+  inboxDeleted?: boolean;
+  mailDataPurged?: boolean;
+}): { title: string; body: string } {
+  if (status.status === "deleting") {
+    return {
+      title: "Deletion in progress",
+      body: "Your data is being removed. This can take a little while and does not need this page open.",
+    };
+  }
+  const inboxFailed = status.inboxDeleted === false;
+  const purgeUnfinished = status.mailDataPurged === false;
+  if (!inboxFailed && !purgeUnfinished) {
+    return { title: "Account deleted", body: "This account and its data have been removed." };
+  }
+  const parts = [
+    inboxFailed ? "deleting your Recoup inbox from the mail provider failed" : null,
+    purgeUnfinished ? "the purge of the mail system's stored copies did not finish" : null,
+  ].filter((part): part is string => part !== null);
+  return {
+    title: "Account deleted, mail clean-up incomplete",
+    body:
+      `Your account and app data are removed, but ${parts.join(" and ")}. This is recorded on the deletion record ` +
+      "for Recoup's operator; nothing more is needed from you.",
+  };
+}

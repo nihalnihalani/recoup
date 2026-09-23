@@ -78,13 +78,15 @@ export function priceStats(points: PricePoint[], now?: number): PriceStats {
 
 export type BoughtVerdictKind =
   | "claim_now"
+  | "sending"
   | "asked"
   | "promised"
   | "recovered"
   | "hold"
   | "above_paid"
   | "window_closed"
-  | "no_price";
+  | "no_price"
+  | "stale";
 
 export type VerdictTone = "green" | "violet" | "yellow" | "gray" | "red";
 
@@ -131,6 +133,12 @@ export function boughtVerdict(args: {
   latestCents?: number;
   windowEndsAt?: number;
   claimStatus?: string;
+  /** P02-OW-4: a queued send whose outcome could not be confirmed. */
+  sendUnknown?: boolean;
+  /** P06-OW-2: the newest priced read is older than `STALE_PRICE_MS` (the server's `priceStale`). */
+  priceStale?: boolean;
+  /** P06-OW-2: when that newest priced read was taken, for the reason's words. */
+  priceObservedAt?: number;
   now: number;
   /** ISO currency for the amounts in `reason`. Defaults to USD. */
   currency?: string;
@@ -152,8 +160,38 @@ export function boughtVerdict(args: {
       tone: "yellow",
     };
   }
-  if (claimStatus === "queued" || claimStatus === "sent" || claimStatus === "packet") {
+  // P02-OW-4: a queued message is not confirmed sent, so it never reads "Asked".
+  if (claimStatus === "queued") {
+    return args.sendUnknown
+      ? {
+          kind: "sending",
+          label: "Delivery unknown",
+          shortLabel: "Delivery unknown",
+          reason: "Recoup couldn't confirm the message was sent. Open the claim to check it or send it again.",
+          tone: "gray",
+        }
+      : {
+          kind: "sending",
+          label: "Sending, not confirmed",
+          shortLabel: "Sending",
+          reason: "The message is on its way but not confirmed as sent yet.",
+          tone: "gray",
+        };
+  }
+  if (claimStatus === "sent" || claimStatus === "packet") {
     return { kind: "asked", label: "Asked", shortLabel: "Asked", reason: "The store has been asked for the difference. Waiting on its reply.", tone: "violet" };
+  }
+
+  // P06-OW-2: an old price is never judged as today's; a stale drop is not "Claim now".
+  if (args.priceStale) {
+    const age = args.priceObservedAt !== undefined ? `is from ${timeLeft(Math.max(0, now - args.priceObservedAt))} ago` : "is old";
+    return {
+      kind: "stale",
+      label: "Price out of date",
+      shortLabel: "Out of date",
+      reason: `The newest price Recoup read ${age}, so it may have changed. Check the price again.`,
+      tone: "gray",
+    };
   }
 
   const dropCents = paidCents - latestCents;

@@ -239,3 +239,38 @@ export function describeFactValue(value: FactValue): string {
   }
 }
 
+
+/**
+ * D241 display rule for `opportunities.deadlineAttention` (M29), mirrored from `convex/deadlines.ts`
+ * `deadlineAttentionActive` so server code stays out of the browser bundle; `model.test.ts` checks the two agree.
+ * The stored attention is current only for a live card whose next user deadline is still the one it was set for and
+ * not passed.
+ */
+export function deadlineAttentionActive(
+  o: Pick<Opportunity, "status" | "nextDeadlineAt" | "deadlineAttention">,
+  now: number,
+): boolean {
+  const a = o.deadlineAttention;
+  return a !== undefined && (o.status === "open" || o.status === "case_open") && a.dueAt === o.nextDeadlineAt && now < a.dueAt;
+}
+
+/**
+ * P06-OW-1, display only (D73): a running user deadline of the stored evaluation whose due instant has passed by this
+ * device's clock. The server's deadline sweep re-evaluates such a path; until it has, no card presents it as claimable.
+ *
+ * F1 fix: this display rule is skipped once a case is open (`status === "case_open"` or `activeClaimId` set). A
+ * stored `deadlines[0]` obligor:"user" entry stays `status: "open"` for the life of an open case (only R03 ever
+ * calls `markMet`), so without this gate every R01 claim sent before its window closed would still show "Window may
+ * have passed" / "Your deadline passed" for as long as the case stays open. The server's own display rule
+ * (`convex/lib/claimState.ts` `isExpired`) never expires a submitted or closed-for-ask claim, so once a case is
+ * open the claim page's server-derived state is the source of truth, not this client deadline projection.
+ */
+export function passedUserDeadline(
+  evaluation: Pick<Evaluation, "deadlines"> | null,
+  now: number,
+  opportunity?: Pick<Opportunity, "status" | "activeClaimId">,
+): DeadlineResult | null {
+  if (evaluation === null) return null;
+  if (opportunity && (opportunity.status === "case_open" || opportunity.activeClaimId !== undefined)) return null;
+  return evaluation.deadlines.find((d) => d.obligor === "user" && d.status === "open" && d.dueAt !== undefined && d.dueAt <= now) ?? null;
+}

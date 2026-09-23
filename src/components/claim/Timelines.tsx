@@ -127,6 +127,20 @@ export function ClaimTimeline({
   }
   for (const reply of replies) {
     const config = REPLY[reply.classification];
+    if (reply.heldForConfirmation === true) {
+      // D21/D178: held until the owner confirms it; its amount is never shown as money in the meantime.
+      entries.push({
+        key: reply._id,
+        at: reply.receivedAt,
+        tone: "waiting",
+        glyph: "alert",
+        title: "Held: we can't verify the sender",
+        detail: reply.summary,
+        party: `From ${reply.from}`,
+        warning: "Not counted until you confirm it",
+      });
+      continue;
+    }
     entries.push({
       key: reply._id,
       at: reply.receivedAt,
@@ -135,7 +149,7 @@ export function ClaimTimeline({
       title: config.title,
       amount: reply.promisedCents !== undefined ? fmt(reply.promisedCents, currency) : undefined,
       detail: reply.summary,
-      party: `From ${reply.from}`,
+      party: reply.confirmedByUserAt !== undefined ? `From ${reply.from} · confirmed by you` : `From ${reply.from}`,
       warning: reply.senderMismatch ? "Different sender domain" : undefined,
     });
   }

@@ -102,10 +102,12 @@ export function PriceHistoryCard({ now }: { now: number }) {
   }
 
   const primary = history.stores.find((store) => store.isPrimary) ?? history.stores[0];
+  // P06-OW-2: the age of the newest PRICED read, never the last check attempt (which counts failed reads).
+  const pricedAt = primary && primary.points.length > 0 ? Math.max(...primary.points.map((p) => p.at)) : undefined;
   const subline = [
     primary ? storeInfo(primary.domain).name : undefined,
     STATUS[history.status],
-    primary?.lastCheckedAt ? `checked ${agoLong(primary.lastCheckedAt, now)}` : undefined,
+    pricedAt !== undefined ? `price read ${agoLong(pricedAt, now)}` : primary ? "no price read yet" : undefined,
     history.lowest ? `lowest ${fmt(history.lowest.cents, history.currency)} at ${storeInfo(history.lowest.domain).name}` : undefined,
   ].filter((part): part is string => part !== undefined);
 

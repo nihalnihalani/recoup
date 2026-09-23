@@ -7,6 +7,15 @@ import { perDay, startOfDay, watchedTotalsByCurrency } from "./model";
 import type { ActivityEvent, RecoverySummary, SeriesPoint, Watch } from "./model";
 import { Bone, RecentNote } from "./parts";
 
+/**
+ * P05-OW3 (F7 fix): why a summary is partial. `recovery.summary` (convex/recovery.ts) can set `complete: false` for
+ * several different bounded reads, not only the claims-and-open-paths caps this used to name unconditionally: a
+ * per-claim ledger-event cut, a per-claim draft/packet/submission cut, the 2x scan caps, and a non-cash-remedy cut
+ * can each cause it too, on an account with far fewer claims than that cap. Cause-neutral wording is accurate for
+ * all of them; the server does not currently say which one fired.
+ */
+const PARTIAL_WHY = "Some records were too many to read in full, so these totals may be missing some money.";
+
 const WEEK = 7 * 86_400_000;
 /** insights.activity returns at most this many events; at the cap, older days are unknown. */
 const FEED_CAP = 40;
@@ -183,13 +192,10 @@ export function StatCards({
   );
 }
 
-/** The summary read a bounded window (≤ 200 claims, ≤ 200 open opportunities): labelled, never presented as complete. */
+/** The summary read a bounded window: labelled, never presented as complete. */
 function PartialNote() {
   return (
-    <span
-      className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600"
-      title="Totals cover your 200 most recent claims and open opportunities; older ones are not included."
-    >
+    <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600" title={PARTIAL_WHY}>
       Partial
     </span>
   );
@@ -249,15 +255,22 @@ function RecoveryPanel({ summary }: { summary: RecoverySummary }) {
   return (
     <section aria-labelledby="recovery-title" className={`${cardClass} p-5`}>
       <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <h2 id="recovery-title" className="font-semibold text-gray-900">
-          Recovery by currency
-        </h2>
-        <p className="text-sm text-gray-500">Each amount counts once, in the furthest step it has reached. Currencies are never added together.</p>
+        <div className="flex items-center gap-2">
+          <h2 id="recovery-title" className="font-semibold text-gray-900">
+            Recovery by currency
+          </h2>
+          {!summary.complete && <PartialNote />}
+        </div>
+        <p className="text-sm text-gray-600">Each amount counts once, in the furthest step it has reached. Currencies are never added together.</p>
       </header>
+      {/* P05-OW3: every figure below (tiles, outstanding, counts, non-cash) is partial too; say so in words. */}
+      {!summary.complete && <p className="mt-2 text-sm text-gray-700">Partial totals. {PARTIAL_WHY}</p>}
 
       {summary.currencies.length === 0 ? (
-        <p className="mt-4 text-sm text-gray-500">
-          No recovery paths with an amount yet. Recoup checks supported recovery paths as prices and details come in.
+        <p className="mt-4 text-sm text-gray-600">
+          {summary.complete
+            ? "No recovery paths with an amount yet. Recoup checks supported recovery paths as prices and details come in."
+            : "No recovery paths with an amount among the records read. Some records were too many to read in full, so there may be some."}
         </p>
       ) : (
         <div className="mt-4 space-y-5">

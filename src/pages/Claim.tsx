@@ -11,11 +11,13 @@ import { WindowMeter } from "../components/charts/WindowMeter";
 import { Card, StatLabel } from "../components/claim/Card";
 import { Composer, PacketRow } from "../components/claim/Composer";
 import { CreditLandedForm } from "../components/claim/CreditLandedForm";
+import { HeldPromise } from "../components/claim/HeldPromise";
 import { MoneyForm } from "../components/claim/MoneyForm";
 import { ClaimTimeline } from "../components/claim/Timelines";
 import { DeltaBadge } from "../components/DeltaBadge";
 import { PacketSection } from "../components/packet/PacketSection";
 import { fmt, formatMinor } from "../lib/money";
+import { priceAge, useCoarseNow } from "../lib/time";
 import { SCENARIO_TITLES } from "../lib/scenarioTitles";
 import { Empty, ErrorBox, Loading } from "../components/States";
 import {
@@ -184,17 +186,22 @@ export default function Claim() {
   const { id } = useParams();
   const claimId = id as Id<"claims"> | undefined;
   const data = useQuery(api.claims.get, claimId ? { claimId } : "skip");
-  const overview = useQuery(api.tracking.overview, claimId ? {} : "skip");
+  // P06-OW-2: a coarse `now` lets the server judge the price's age (`priceStale`).
+  const coarseNow = useCoarseNow();
+  const overview = useQuery(api.tracking.overview, claimId ? { now: coarseNow } : "skip");
 
   const generate = useAction(api.drafts.generate);
   const confirmCredit = useMutation(api.claims.confirmCredit);
   const recordNonCashResolution = useMutation(api.claims.recordNonCashResolution);
   const recordLaterDebit = useMutation(api.claims.recordLaterDebit);
   const dismiss = useMutation(api.claims.dismiss);
+  const confirmHeldPromise = useMutation(api.replies.confirmHeldPromise);
 
   const [actionError, setActionError] = useState<string | null>(null);
   const [dismissError, setDismissError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Held replies confirmed on this page stay listed with their result, so the confirmation is not lost on re-render.
+  const [confirmedHere, setConfirmedHere] = useState<ReadonlySet<string>>(new Set());
 
   if (!claimId) return <Empty title="No claim selected" />;
   if (data === undefined) return <Loading rows={4} />;
@@ -214,6 +221,7 @@ export default function Claim() {
     claim.status === "denied" ||
     claim.nonCashResolvedAt !== undefined;
   const isPacketClaim = manualChannel(claim);
+  const heldReplies = replies.filter((reply) => reply.heldForConfirmation === true || confirmedHere.has(reply._id));
   // Price history, the price-adjustment window and Paid/Now/Lowest belong to a purchased item; an item-less
   // scenario claim (M20, e.g. a delayed flight) has none of them.
   const isRetail = item !== null || purchase !== null;
@@ -276,9 +284,28 @@ export default function Claim() {
           </p>
         </div>
         <div className="w-full min-w-0 shrink-0 lg:w-96">
-          <StatusSteps status={claim.status} />
+          <StatusSteps status={claim.status} sendUnknown={claim.sendUnknown === true} />
         </div>
       </div>
+
+      {/* D21/D178: promises from a sender Recoup can't verify, held until the owner confirms each one once. */}
+      {heldReplies.length > 0 && (
+        <div className="space-y-3">
+          {heldReplies.map((reply) => (
+            <HeldPromise
+              key={reply._id}
+              reply={reply}
+              currency={currency}
+              claimStatus={claim.status}
+              onConfirm={async (replyId) => {
+                const result = await confirmHeldPromise({ replyId });
+                setConfirmedHere((ids) => new Set(ids).add(replyId));
+                return result;
+              }}
+            />
+          ))}
+        </div>
+      )}
 
       <div className="grid grid-cols-12 gap-5">
         {/* Row 1: the evidence. What is owed, how far the price fell, and the history. */}
@@ -298,18 +325,31 @@ export default function Claim() {
                 <StatLabel>{hero.label}</StatLabel>
                 <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
                   <span className={`${bigNumberClass} text-4xl! ${hero.tone}`}>{fmt(hero.cents, currency)}</span>
-                  {paidCents !== undefined && (
+                  {paidCents !== undefined && !tracked?.priceStale && (
                     <DeltaBadge paidCents={paidCents} latestCents={tracked?.latestCents} currency={currency} />
                   )}
                 </div>
               </div>
             )}
             {isRetail && (
-              <dl className="flex flex-wrap gap-x-6 gap-y-2">
-                <Figure label="Paid" cents={paidCents} currency={currency} />
-                <Figure label="Now" cents={tracked?.latestCents} currency={currency} />
-                <Figure label="Lowest" cents={tracked?.lowestCents} currency={currency} />
-              </dl>
+              <div>
+                <dl className="flex flex-wrap gap-x-6 gap-y-2">
+                  <Figure label="Paid" cents={paidCents} currency={currency} />
+                  {/* P06-OW-2: an out-of-date price is never labelled "Now". */}
+                  <Figure
+                    label={tracked?.priceStale && tracked.latestCents !== undefined ? "Last price read" : "Now"}
+                    cents={tracked?.latestCents}
+                    currency={currency}
+                  />
+                  <Figure label="Lowest" cents={tracked?.lowestCents} currency={currency} />
+                </dl>
+                {tracked?.latestCents !== undefined && (
+                  <p className="mt-1.5 text-xs text-gray-600">
+                    {tracked.priceStale ? "Out of date: price " : "Price "}
+                    {priceAge(tracked.lastObservedAt, coarseNow)}
+                  </p>
+                )}
+              </div>
             )}
           </div>
           {isRetail ? (

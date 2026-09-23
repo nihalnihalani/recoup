@@ -57,6 +57,19 @@ export function RecentNote({ windowNote }: { windowNote: string }) {
  * rather than the app's `yellow-500/20` + `yellow-700` chip tone, which
  * measures only 4.32:1 against its own tinted background and would fail AA.
  */
+/** P06-OW-2: the same muted flag for a purchase's own price, older than `STALE_PRICE_MS` or never read. */
+export function OutOfDateBadge() {
+  return (
+    <span
+      className="inline-flex shrink-0 items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600"
+      aria-label="This price may be out of date"
+      title="This price may be out of date"
+    >
+      Out of date
+    </span>
+  );
+}
+
 export function StaleBadge() {
   return (
     <span
@@ -76,7 +89,7 @@ export function StaleBadge() {
 export function PctChange({ pct, versus = "the first price read" }: { pct: number | null | undefined; versus?: string }) {
   if (pct === null || pct === undefined || !Number.isFinite(pct) || Math.abs(pct) < 0.05) {
     return (
-      <span className="text-xs font-medium text-gray-400" aria-label={pct === null || pct === undefined ? "No change known yet" : `Same as ${versus}`}>
+      <span className="text-xs font-medium text-gray-600" aria-label={pct === null || pct === undefined ? "No change known yet" : `Same as ${versus}`}>
         —
       </span>
     );
@@ -124,7 +137,7 @@ export function VerdictChip({ item, now }: { item: Item; now: number }) {
   if (item.claim && CLAIM_SPEAKS.has(item.claim.status) && toClaim) {
     return (
       <Link to={toClaim} aria-label={`Claim for ${item.name}`} className={linkClass}>
-        <StatusPill status={item.claim.status} />
+        <StatusPill status={item.claim.status} sendUnknown={item.claim.sendUnknown === true} />
       </Link>
     );
   }

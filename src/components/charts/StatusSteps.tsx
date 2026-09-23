@@ -1,7 +1,8 @@
 const STEPS = [
   { label: "Found", statuses: ["detected"] },
-  { label: "Drafted", statuses: ["drafted"] },
-  { label: "Asked", statuses: ["queued", "sent", "packet"] },
+  // P02-OW-4: a queued message is not confirmed sent, so "Asked" is not reached until it is.
+  { label: "Drafted", statuses: ["drafted", "queued"] },
+  { label: "Asked", statuses: ["sent", "packet"] },
   { label: "Promised", statuses: ["promised"] },
   { label: "Back on card", statuses: ["confirmed"] },
 ] as const;
@@ -20,8 +21,16 @@ const TERMINAL: Record<string, { label: string; dot: string; text: string }> = {
  * is near-black with a halo, the ones ahead are gray. Reopened, denied and dismissed
  * sit outside the path as a dot-and-label chip.
  */
-export function StatusSteps({ status }: { status: string }) {
+export function StatusSteps({ status, sendUnknown = false }: { status: string; sendUnknown?: boolean }) {
   const terminal = TERMINAL[status];
+  // A queued send sits on "Drafted" with a note beside it; it never pulses forever or claims the store was asked.
+  const note =
+    status === "queued"
+      ? sendUnknown
+        ? { label: "Delivery unknown", dot: "bg-gray-400", text: "text-gray-900" }
+        : { label: "Sending, not confirmed", dot: "bg-gold", text: "text-gray-900" }
+      : undefined;
+  const chip = terminal ?? note;
   const current = STEPS.findIndex((step) => (step.statuses as readonly string[]).includes(status));
   // A reopened claim had reached the end; a denied one was asked; a dismissed one shows no progress.
   const reached = status === "reopened" ? STEPS.length - 1 : status === "denied" ? ASKED : current;
@@ -63,12 +72,12 @@ export function StatusSteps({ status }: { status: string }) {
           );
         })}
       </ol>
-      {terminal && (
+      {chip && (
         <span
-          className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-2 py-0.5 text-xs font-medium ${terminal.text}`}
+          className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-2 py-0.5 text-xs font-medium ${chip.text}`}
         >
-          <span aria-hidden="true" className={`size-1.5 rounded-full ${terminal.dot}`} />
-          {terminal.label}
+          <span aria-hidden="true" className={`size-1.5 rounded-full ${chip.dot}`} />
+          {chip.label}
         </span>
       )}
     </div>

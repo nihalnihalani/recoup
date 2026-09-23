@@ -2,7 +2,7 @@ import { useAuthActions } from "@convex-dev/auth/react";
 import { isRateLimitError } from "@convex-dev/rate-limiter";
 import { ConvexError } from "convex/values";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { coverageSummary } from "../lib/coverageCopy";
 import { inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "../lib/ui";
 
@@ -80,6 +80,10 @@ function formatCountdown(ms: number): string {
 
 export default function SignIn() {
   const { signIn } = useAuthActions();
+  // P09-SK-2: Settings lands here after "Delete my account" with this route state; say what happened and what the
+  // signed-out tab can no longer show, instead of an unexplained sign-in screen.
+  const location = useLocation();
+  const accountDeleted = (location.state as { accountDeleted?: unknown } | null)?.accountDeleted === true;
   const [flow, setFlow] = useState<Flow>("signIn");
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -354,6 +358,17 @@ export default function SignIn() {
             {flow === "reset" && "Enter your email and, if it has an account, we'll send a code to reset your password."}
             {flow === "resetVerify" && "Enter the code we sent and choose a new password."}
           </p>
+
+          {accountDeleted && flow === "signIn" && (
+            <div role="status" className="mt-5 space-y-1 rounded-xl border border-gray-200 bg-gray-50 px-3.5 py-3 text-sm text-gray-700">
+              <p className="font-semibold text-gray-900">Your account is being deleted, and you are signed out.</p>
+              <p>
+                Your data is being removed now. Removing your Recoup inbox from the mail provider can take several hours
+                of retries; its final result is recorded for Recoup's operator, because this signed-out page cannot show
+                it.
+              </p>
+            </div>
+          )}
 
           {(flow === "signIn" || flow === "signUp") && (
             <form onSubmit={(event) => void handlePasswordSubmit(event)} className="mt-6 space-y-4" aria-busy={locked}>

@@ -3,9 +3,10 @@ import { WindowMeter } from "../charts/WindowMeter";
 import { fmt } from "../../lib/money";
 import { ProductThumb } from "../ProductThumb";
 import { cardClass, cardTitleClass } from "../../lib/ui";
+import { priceAge } from "../../lib/time";
 import { storeInfo } from "../../lib/stores";
 import type { Item } from "./model";
-import { Bone, ExampleChip, PctChange, RecentNote, VerdictChip, focusRing } from "./parts";
+import { Bone, ExampleChip, OutOfDateBadge, PctChange, RecentNote, VerdictChip, focusRing } from "./parts";
 
 /**
  * `tracking.overview` has no `windowNote` of its own (unlike `insights.activity`/`sources`), since
@@ -15,7 +16,8 @@ import { Bone, ExampleChip, PctChange, RecentNote, VerdictChip, focusRing } from
 const PURCHASES_WINDOW_NOTE = "recent purchases (up to 60) and each purchase's most recent items";
 
 function changePct(item: Item): number | null {
-  if (item.latestCents === undefined || item.paidCents <= 0) return null;
+  // P06-OW-2: an out-of-date price is not compared with what was paid as if it were today's.
+  if (item.latestCents === undefined || item.paidCents <= 0 || item.priceStale) return null;
   return ((item.latestCents - item.paidCents) / item.paidCents) * 100;
 }
 
@@ -43,14 +45,25 @@ function Name({ item }: { item: Item }) {
   );
 }
 
+// F2 fix: the price and the "Out of date" badge stack (not a non-wrapping inline-flex row), so the badge always
+// gets its own line instead of overflowing the fixed-width "Now" column (86px at 375px, w-36 at 800px+) and
+// overlapping the Change column or the WindowMeter next to it.
 function NowPrice({ item }: { item: Item }) {
   return item.latestCents === undefined ? (
-    <span className="text-gray-400" aria-label="No price read yet">
+    <span className="text-gray-600" aria-label="No price read yet">
       —
     </span>
   ) : (
-    <span className="font-medium tabular-nums text-gray-900">{fmt(item.latestCents, item.currency)}</span>
+    <span className="flex flex-col items-start gap-1">
+      <span className="font-medium tabular-nums text-gray-900">{fmt(item.latestCents, item.currency)}</span>
+      {item.priceStale && <OutOfDateBadge />}
+    </span>
   );
+}
+
+/** P06-OW-2: the price's own age (its newest priced read), never the last check attempt. */
+function PriceAge({ item, now }: { item: Item; now: number }) {
+  return <span className="block text-xs tabular-nums text-gray-600">{priceAge(item.lastObservedAt, now)}</span>;
 }
 
 export function PurchasesTable({ items, now, truncated }: { items: Item[]; now: number; truncated: boolean }) {
@@ -101,7 +114,8 @@ export function PurchasesTable({ items, now, truncated }: { items: Item[]; now: 
                         <NowPrice item={item} />
                         <PctChange pct={changePct(item)} versus="what you paid" />
                       </span>
-                      <span className="block text-xs tabular-nums text-gray-400">paid {fmt(item.paidCents, item.currency)}</span>
+                      <span className="block text-xs tabular-nums text-gray-600">paid {fmt(item.paidCents, item.currency)}</span>
+                      {item.latestCents !== undefined && <PriceAge item={item} now={now} />}
                     </td>
                     <td className={`px-4 py-3 ${rule}`}>
                       <WindowMeter purchasedAt={item.purchasedAt} endsAt={item.windowEndsAt} />
@@ -121,15 +135,18 @@ export function PurchasesTable({ items, now, truncated }: { items: Item[]; now: 
                 <Name item={item} />
                 <dl className="mt-3 grid grid-cols-3 gap-2 text-sm">
                   <div>
-                    <dt className="text-xs text-gray-400">Paid</dt>
+                    <dt className="text-xs text-gray-600">Paid</dt>
                     <dd className="tabular-nums text-gray-600">{fmt(item.paidCents, item.currency)}</dd>
                   </div>
                   <div>
-                    <dt className="text-xs text-gray-400">Now</dt>
-                    <dd><NowPrice item={item} /></dd>
+                    <dt className="text-xs text-gray-600">{item.priceStale ? "Last read" : "Now"}</dt>
+                    <dd>
+                      <NowPrice item={item} />
+                      {item.latestCents !== undefined && <PriceAge item={item} now={now} />}
+                    </dd>
                   </div>
                   <div>
-                    <dt className="text-xs text-gray-400">Change</dt>
+                    <dt className="text-xs text-gray-600">Change</dt>
                     <dd>
                       <PctChange pct={changePct(item)} versus="what you paid" />
                     </dd>

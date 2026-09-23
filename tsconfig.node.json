@@ -5,6 +5,10 @@
     "lib": ["ES2023"],
     "types": ["node"],
     "skipLibCheck": true,
+    // F6 (fe2 review, P12-W6): vite.config.ts imports buildId() from scripts/buildId.mjs (plain JS, so its logic is
+    // unit-testable in convex/testing/buildId.test.ts without a real Vite build); allowJs lets that import
+    // typecheck without a hand-written .d.ts, matching convex/tsconfig.json's existing allowJs for the same reason.
+    "allowJs": true,
 
     /* Bundler mode */
     "module": "nodenext",

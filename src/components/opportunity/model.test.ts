@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { SCENARIO_TITLES as SERVER_TITLES } from "../../../convex/lib/rules/coverage";
 import { authorityClass } from "../../../convex/schema";
-import { AUTHORITY_COPY, amountHeading, explanationLines, humanizeKeys, remainingCopy, SCENARIO_TITLES, sharedLossViews } from "./model";
+import { deadlineAttentionActive as serverAttentionActive } from "../../../convex/deadlines";
+import {
+  AUTHORITY_COPY,
+  amountHeading,
+  deadlineAttentionActive,
+  explanationLines,
+  humanizeKeys,
+  passedUserDeadline,
+  remainingCopy,
+  SCENARIO_TITLES,
+  sharedLossViews,
+} from "./model";
 import { view } from "../../test/opportunityFixtures";
 import type { Id } from "../../../convex/_generated/dataModel";
 
@@ -49,5 +60,44 @@ describe("opportunity copy", () => {
     const b = view({}, { _id: "o2" as Id<"opportunities"> });
     const c = view({}, { _id: "o3" as Id<"opportunities">, lossKeys: ["other"] });
     expect(sharedLossViews(a, [a, b, c]).map((v) => v.opportunity._id)).toEqual(["o2"]);
+  });
+});
+
+describe("deadline attention and a passed window (M29 D241; P06-OW-1 display)", () => {
+  const DUE = Date.UTC(2026, 9, 1, 12);
+  const base = { status: "open" as const, nextDeadlineAt: DUE, deadlineAttention: { setAt: DUE - 5 * 86_400_000, dueAt: DUE, deadlineId: "d" } };
+  const cases = [
+    { name: "active before the deadline", o: base, now: DUE - 1 },
+    { name: "not active at the deadline", o: base, now: DUE },
+    { name: "not active once the next deadline moved", o: { ...base, nextDeadlineAt: DUE + 1 }, now: DUE - 1 },
+    { name: "active on an open case", o: { ...base, status: "case_open" as const }, now: DUE - 1 },
+    { name: "not active on a closed path", o: { ...base, status: "closed" as const }, now: DUE - 1 },
+    { name: "not active with no attention", o: { status: "open" as const, nextDeadlineAt: DUE }, now: DUE - 1 },
+  ];
+  for (const c of cases) {
+    it(`matches the server rule: ${c.name}`, () => {
+      expect(deadlineAttentionActive(c.o, c.now)).toBe(serverAttentionActive(c.o, c.now));
+    });
+  }
+  it("the server rule is really exercised both ways", () => {
+    expect(cases.map((c) => serverAttentionActive(c.o, c.now))).toEqual([true, false, false, true, false, false]);
+  });
+
+  it("a running user deadline at or before now is passed; a counterparty one, a met one or a future one is not", () => {
+    const d = (over: Record<string, unknown>) => ({ id: "w", label: "Window", obligor: "user", status: "open", dueAt: DUE, mustBe: "filed", basis: "x", ...over });
+    const ev = (deadlines: unknown[]) => ({ deadlines }) as never;
+    expect(passedUserDeadline(ev([d({})]), DUE)?.id).toBe("w");
+    expect(passedUserDeadline(ev([d({})]), DUE - 1)).toBeNull();
+    expect(passedUserDeadline(ev([d({ obligor: "counterparty" })]), DUE + 1)).toBeNull();
+    expect(passedUserDeadline(ev([d({ status: "met" })]), DUE + 1)).toBeNull();
+    expect(passedUserDeadline(null, DUE + 1)).toBeNull();
+  });
+
+  it("F1 regression: a passed user deadline is not flagged once the case is open, only while it is still 'open'", () => {
+    const d = (over: Record<string, unknown>) => ({ id: "w", label: "Window", obligor: "user", status: "open", dueAt: DUE, mustBe: "filed", basis: "x", ...over });
+    const ev = (deadlines: unknown[]) => ({ deadlines }) as never;
+    expect(passedUserDeadline(ev([d({})]), DUE, { status: "open" })?.id).toBe("w");
+    expect(passedUserDeadline(ev([d({})]), DUE, { status: "case_open" })).toBeNull();
+    expect(passedUserDeadline(ev([d({})]), DUE, { status: "open", activeClaimId: "c1" as never })).toBeNull();
   });
 });

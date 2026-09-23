@@ -6,6 +6,14 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { ConfigMissing } from "./components/ConfigMissing";
 import "./index.css";
+import { reloadOnceForChunkError } from "./lib/lazyWithRetry";
+
+// P10-MW-1: a module preload that fails (usually a release removed the old assets) gets one guarded full reload,
+// which fetches the new build; `preventDefault` stops Vite rethrowing it. Offline, or after one reload, the route's
+// error boundary shows "Try again" and "Reload the page" instead.
+window.addEventListener("vite:preloadError", (event) => {
+  if (reloadOnceForChunkError()) event.preventDefault();
+});
 
 const convexUrl = import.meta.env.VITE_CONVEX_URL;
 

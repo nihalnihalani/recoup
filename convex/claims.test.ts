@@ -488,7 +488,7 @@ describe("claims", () => {
 // never "charged again".
 // ---------------------------------------------------------------------------
 describe("provisional ledger kinds and existing readers (D156)", () => {
-  it("a provisional_credit / provisional_released row produces no charged_again (or credit) item in insights.activity", async () => {
+  it("a provisional_credit / provisional_released row produces no charged_again (or credit) item in insights.activity, only its own not-final kinds", async () => {
     const t = setup();
     const { as, userId } = await signedIn(t);
     const { scarf } = await purchaseWithItems(as);
@@ -505,6 +505,9 @@ describe("provisional ledger kinds and existing readers (D156)", () => {
     const mine = events.filter((e) => e.claimId === claimId);
     expect(mine.some((e) => e.kind === "claim_opened")).toBe(true);
     expect(mine.filter((e) => ["charged_again", "credit_confirmed", "credit_promised"].includes(e.kind))).toEqual([]);
+    // They have their own feed kinds, which the dashboard labels "not final" (never money back).
+    expect(mine.filter((e) => e.kind === "credit_provisional").map((e) => e.cents)).toEqual([2000]);
+    expect(mine.filter((e) => e.kind === "provisional_resolved").map((e) => e.cents)).toEqual([2000]);
     // And the claim's money is untouched by provisional rows.
     const c = await as.query(api.claims.get, { claimId });
     expect(c!.balance).toMatchObject({ confirmed: 0, debited: 0, unresolved: 4000 });

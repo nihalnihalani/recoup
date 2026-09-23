@@ -2,6 +2,8 @@ import { Component, createRef, type ErrorInfo, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ConvexError } from "convex/values";
 import { ErrorBox } from "./States";
+import { isChunkLoadError, resetFailedChunks } from "../lib/lazyWithRetry";
+import { BUILD_ID } from "../buildInfo";
 
 type Props = {
   children: ReactNode;
@@ -21,6 +23,10 @@ type State = { error: Error | null };
  * carry a stack trace or provider response text.
  */
 function fallbackMessage(error: Error): string {
+  // P10-MW-1: a page's code that did not download is not a crash of the page itself.
+  if (isChunkLoadError(error)) {
+    return "Part of Recoup didn't download. You may be offline, or Recoup was just updated. Try again, or reload the page.";
+  }
   if (error instanceof ConvexError) {
     const text = typeof error.data === "string" ? error.data : JSON.stringify(error.data);
     if (/not found/i.test(text)) {
@@ -64,7 +70,11 @@ export class ErrorBoundary extends Component<Props, State> {
     }
   }
 
-  reset = () => this.setState({ error: null });
+  // P10-MW-1: a failed route chunk gets a fresh import on retry, instead of React.lazy's cached rejection.
+  reset = () => {
+    resetFailedChunks();
+    this.setState({ error: null });
+  };
 
   render() {
     const { error } = this.state;
@@ -83,9 +93,20 @@ export class ErrorBoundary extends Component<Props, State> {
         <div className="mt-3 text-left">
           <ErrorBox error={fallbackMessage(error)} retry={this.reset} />
         </div>
+        {isChunkLoadError(error) && (
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className={`mt-3 inline-block ${backLinkClass}`}
+          >
+            Reload the page
+          </button>
+        )}
         <Link to="/" className={`mt-4 inline-block ${backLinkClass}`}>
           Go to board
         </Link>
+        {/* P12-W6/F6: the running build, for support -- never blocks or slows the fallback down. */}
+        <p className="mt-6 text-xs text-gray-300">Build {BUILD_ID}</p>
       </div>
     );
   }

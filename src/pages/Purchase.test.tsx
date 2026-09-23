@@ -191,3 +191,34 @@ describe("recovery paths on the purchase page (M12 queries)", () => {
     expect(link.getAttribute("href")).toBe(`/purchases/${PURCHASE_ID}?edit=details`);
   });
 });
+
+describe("P06-OW-2: the item's price shows its own age, and an out-of-date price is never 'Current'", () => {
+  function withPrice(stale: boolean) {
+    const observedAt = Date.now() - (stale ? 20 : 1) * 86_400_000;
+    const data = purchaseData("active", { currency: "USD" });
+    Object.assign(data.items[0], {
+      priceChecks: [{ _id: "pc1", _creationTime: observedAt, itemId: "i1", userId: "u1", observedAt, observedCents: 3_999, sourceUrl: "https://northwind.example/kettle" }],
+      lastObservedAt: observedAt,
+      priceStale: stale,
+    });
+    return data;
+  }
+
+  it("a 20-day-old price is 'Last price read', flagged out of date, and not 'Claim now'", () => {
+    queryResults["purchases:get"] = withPrice(true);
+    renderAt(`/purchases/${PURCHASE_ID}`);
+    const text = document.body.textContent ?? "";
+    expect(screen.queryByText("Current price")).toBeNull();
+    expect(screen.getByText("Last price read")).toBeDefined();
+    expect(text).toMatch(/Out of date: read 20d \dh ago/);
+    expect(screen.getAllByText("Price out of date").length).toBeGreaterThan(0);
+    expect(text).not.toContain("Claim now");
+  });
+
+  it("a fresh price is 'Current price' with its age", () => {
+    queryResults["purchases:get"] = withPrice(false);
+    renderAt(`/purchases/${PURCHASE_ID}`);
+    expect(screen.getByText("Current price")).toBeDefined();
+    expect(document.body.textContent).toMatch(/Price read 1d \dh ago/);
+  });
+});

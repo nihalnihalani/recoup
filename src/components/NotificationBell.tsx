@@ -17,6 +17,7 @@ const NEWS_KINDS = [
   "credit_promised",
   "credit_confirmed",
   "charged_again",
+  "credit_provisional",
 ] as const;
 type NewsKind = (typeof NEWS_KINDS)[number];
 type NewsEvent = ActivityEvent & { kind: NewsKind };
@@ -54,6 +55,7 @@ const TINTS: Record<NewsKind, string> = {
   credit_promised: "bg-yellow-500/20 text-yellow-700",
   credit_confirmed: "bg-green-500/15 text-green-700",
   charged_again: "bg-red-500/15 text-red-700",
+  credit_provisional: "bg-yellow-500/20 text-yellow-700",
 };
 
 /** The bold line names what happened; the muted line under it says to what, and for how much. */
@@ -65,6 +67,7 @@ const TITLES: Record<NewsKind, string> = {
   credit_promised: "Credit promised",
   credit_confirmed: "Money back on card",
   charged_again: "Charged again",
+  credit_provisional: "Provisional credit (not final)",
 };
 
 const GLYPHS: Record<NewsKind, string> = {
@@ -75,6 +78,7 @@ const GLYPHS: Record<NewsKind, string> = {
   credit_promised: "M12 7v5l3 2M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z",
   credit_confirmed: "M6 12.5l4 4 8-9",
   charged_again: "M12 18V6M7 11l5-5 5 5",
+  credit_provisional: "M12 7v5l3 2M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z",
 };
 
 function detail(event: NewsEvent): string {
@@ -91,6 +95,7 @@ function detail(event: NewsEvent): string {
     case "credit_promised":
     case "credit_confirmed":
     case "charged_again":
+    case "credit_provisional":
       return `${event.subject}${money ? `, ${money}` : ""}`;
   }
 }

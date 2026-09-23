@@ -34,6 +34,9 @@ const KINDS: Record<Kind, { title: string; icon: IconName; tone: Tone }> = {
   credit_promised: { title: "Credit promised", icon: "clock", tone: "promised" },
   credit_confirmed: { title: "Back on card", icon: "card", tone: "good" },
   charged_again: { title: "Charged again", icon: "alert", tone: "bad" },
+  // §3.2: provisional is not money back; the title says so, and it never uses the "good" tone.
+  credit_provisional: { title: "Provisional credit (not final)", icon: "clock", tone: "promised" },
+  provisional_resolved: { title: "Provisional credit resolved", icon: "clock", tone: "quiet" },
 };
 
 /** The product, the amounts that moved, and the store: one muted line. */
@@ -58,6 +61,8 @@ function detail(event: ActivityEvent): string {
     case "credit_promised":
     case "credit_confirmed":
     case "charged_again":
+    case "credit_provisional":
+    case "provisional_resolved":
       amounts = money;
       break;
     default:

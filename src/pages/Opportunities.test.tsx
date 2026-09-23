@@ -7,11 +7,11 @@
 import axe from "axe-core";
 import { getFunctionName, type FunctionReference } from "convex/server";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Id } from "../../convex/_generated/dataModel";
 import { formatMinor } from "../lib/money";
 import { render, screen, within } from "../test/dom";
-import { view } from "../test/opportunityFixtures";
+import { NOW, view } from "../test/opportunityFixtures";
 import Opportunities from "./Opportunities";
 
 let listMine: { items: unknown[]; truncated: boolean } | undefined;
@@ -45,6 +45,8 @@ const estimate = (amountMinor: number) => ({
 });
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW);
   queried.length = 0;
   listMine = {
     items: [
@@ -55,6 +57,10 @@ beforeEach(() => {
     ],
     truncated: false,
   };
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("/opportunities", () => {
@@ -106,6 +112,43 @@ describe("/opportunities", () => {
     expect(text).toContain("No recovery paths yet");
     expect(screen.getByRole("link", { name: "Add something" }).getAttribute("href")).toBe("/add");
     expect(text).not.toMatch(/\$0/);
+  });
+
+  it("P06-OW-1: a row past its user deadline shows no outcome chip and no estimate", () => {
+    const dueAt = NOW - 3_600_000;
+    listMine = {
+      items: [
+        item(
+          "t5",
+          "retail_order",
+          "Northwind",
+          view(
+            { outcome: "likely_eligible", ...estimate(2_500), deadlines: [{ id: "w", label: "Window", obligor: "user", status: "open", dueAt, mustBe: "n_a", basis: "x" }] },
+            { _id: "o5" as Id<"opportunities">, outcome: "likely_eligible", nextDeadlineAt: dueAt },
+          ),
+        ),
+      ],
+      truncated: false,
+    };
+    const text = renderPage();
+    expect(text).toContain("Window may have passed");
+    expect(text).not.toContain("Likely eligible");
+    expect(text).not.toContain(formatMinor(2_500, "USD"));
+    expect(text).toContain("Your deadline passed");
+  });
+
+  it("M29: current deadline attention is counted at the top and marked on its row", () => {
+    const due = NOW + 3 * 86_400_000;
+    listMine = {
+      items: [
+        item("t6", "air_travel", "Example Air", view({}, { _id: "o6" as Id<"opportunities">, nextDeadlineAt: due, deadlineAttention: { setAt: NOW, dueAt: due, deadlineId: "d" } })),
+        item("t6", "air_travel", "Example Air", view({}, { _id: "o7" as Id<"opportunities"> })),
+      ],
+      truncated: false,
+    };
+    const text = renderPage();
+    expect(text).toContain("1 path has a deadline of yours coming up.");
+    expect(screen.getAllByText("Deadline soon")).toHaveLength(1);
   });
 
   it("passes axe (structure, names, roles; contrast is checked in the browser)", async () => {

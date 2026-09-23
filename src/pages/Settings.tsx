@@ -4,7 +4,7 @@ import { type ReactNode, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import { DELETION_REMOVED_NOW, DELETION_WHAT_REMAINS } from "../lib/accountDeletion";
+import { DELETION_REMOVED_NOW, DELETION_WHAT_REMAINS, deletionHeadline } from "../lib/accountDeletion";
 import {
   EXPORT_CLOSE,
   EXPORT_TABLES,
@@ -527,17 +527,13 @@ function DeletionInProgress({
   status: { status: "deleting" | "deleted"; inboxDeleted?: boolean; mailDataPurged?: boolean; attempts: number };
 }) {
   const { signOut } = useAuthActions();
+  const headline = deletionHeadline(status);
   return (
     <div className="flex min-h-[60vh] items-center justify-center">
       <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-6 text-center">
-        <h1 className="text-xl font-semibold tracking-tight text-gray-900">
-          {status.status === "deleted" ? "Account deleted" : "Deletion in progress"}
-        </h1>
-        <p className="mt-2 text-sm leading-relaxed text-gray-500">
-          {status.status === "deleted"
-            ? "This account and its data have been removed."
-            : "Your data is being removed. This can take a little while and does not need this page open."}
-        </p>
+        {/* P09-SK-2: the headline follows the outcome; "removed" only when the mail clean-up finished too. */}
+        <h1 className="text-xl font-semibold tracking-tight text-gray-900">{headline.title}</h1>
+        <p className="mt-2 text-sm leading-relaxed text-gray-600">{headline.body}</p>
         <dl className="mt-4 space-y-1.5 rounded-xl border border-gray-200 bg-gray-50 px-3.5 py-3 text-left text-xs">
           <div className="flex items-center justify-between gap-3">
             <dt className="text-gray-500">Remote inbox</dt>
