@@ -1,0 +1,67 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`R02 v1 packet templates > carrier overdue → escalation naming the missed deadline; with the zone unknown, the latest local date (M20b E1) 1`] = `
+"Overdue refund: ticket 0012345678901 for flight XA100, originally scheduled to depart on October 5, 2026
+Reference: RC-TEST-0001
+
+The flight was cancelled. I rejected the alternative the airline offered, and I did not travel on a replacement flight. The refund was due by October 14, 2026, and I have not received it.
+
+The amount I am asking for is USD 448.80, to my original form of payment.
+
+Under 14 CFR 260.6, a carrier that is the merchant of record must provide a full refund of the airfare, including taxes and ancillary fees, in the original form of payment when a flight is cancelled or significantly changed and the passenger does not accept the alternative. The refund is automatic and due within 7 business days (credit card) or 20 calendar days (other forms of payment) of the refund request (14 CFR 260.2, prompt refund).
+
+If the refund is not issued, I will file a complaint with the U.S. Department of Transportation's Office of Aviation Consumer Protection."
+`;
+
+exports[`R02 v1 packet templates > ticket agent → refund request to the agency (399.80(l)) 1`] = `
+"Refund request: ticket 0012345678901 for flight XA100, originally scheduled to depart on October 5, 2026
+Reference: RC-TEST-0001
+
+You were the merchant of record for ticket 0012345678901 for flight XA100, originally scheduled to depart on October 5, 2026. The flight was cancelled. I rejected the alternative the airline offered, and I did not travel on a replacement flight.
+
+I request a refund of the airfare, taxes and fees. The amount I am asking for is USD 448.80, to my original form of payment.
+
+Under 14 CFR 399.80(l), a ticket agent that is the merchant of record must provide, upon request, a prompt refund of airfare that is due under 14 CFR part 260, including taxes and ancillary fees: within 7 business days for a credit card purchase, or within 20 calendar days for cash, check, debit card or other forms of payment.
+
+Please confirm the refund and tell me when it will be issued."
+`;
+
+exports[`R04 v1 packet templates > path a → bag-fee refund request 1`] = `
+"Bag-fee refund request: bag tag 0123456789 (Mishandled Baggage Report SEAXA12345)
+Reference: RC-TEST-0001
+
+My checked bag was significantly delayed, and I filed a Mishandled Baggage Report.
+
+I request a refund of the fee I paid to check it. The amount I am asking for is USD 40.00, to my original form of payment.
+
+Under 14 CFR 260.5, once a Mishandled Baggage Report has been filed and a checked bag is lost or significantly delayed, the carrier must refund at least the fee paid to transport that bag, in the original form of payment (14 CFR 260.10)."
+`;
+
+exports[`R04 v1 packet templates > path b → expense claim listing only documented, unallocated lines 1`] = `
+"Delayed-bag expense claim: my checked bag
+Reference: RC-TEST-0001
+
+My checked bag did not arrive with me. While it was delayed I bought the following essentials:
+
+Expense 1: USD 32.50, receipt attached.
+
+The total I am claiming is USD 32.50.
+
+DOT guidance states that airlines must compensate passengers for reasonable, verifiable and actual incidental expenses while their bags are delayed, and may not set an arbitrary daily amount for those expenses.
+
+Please tell me if you need anything else to process this claim."
+`;
+
+exports[`R04 v1 packet templates > path c → property claim with documented values as evidence, never the federal limit 1`] = `
+"Baggage property claim: bag tag 0123456789
+Reference: RC-TEST-0001
+
+My checked bag was declared lost. The affected items are:
+
+- laptop, value USD 2,400.00 (proof attached)
+- suitcase, value USD 500.00
+
+The amount I am claiming is USD 2,900.00. I understand you will assess the items under your contract of carriage.
+
+DOT guidance states that once an airline determines a bag is lost, it is responsible for compensating the passenger for the bag's contents, subject to depreciation and its liability limits."
+`;
