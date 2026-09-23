@@ -5,6 +5,7 @@ import type { Doc } from "../../convex/_generated/dataModel";
 import { OpportunityRow } from "../components/opportunity/OpportunityRow";
 import { Loading } from "../components/States";
 import { CATEGORY_LABELS } from "../components/transaction/labels";
+import { coverageSummary } from "../lib/coverageCopy";
 import { cardClass, day, pageTitleClass } from "../lib/ui";
 
 /** Transactions whose paths are listed at once (each is one live `forTransaction` read until `listMine` lands). */
@@ -24,15 +25,15 @@ export default function Opportunities() {
       <div>
         <h1 className={pageTitleClass}>Recovery paths</h1>
         <p className="mt-1 max-w-2xl text-sm text-gray-600">
-          Grouped by purchase or transaction. Recoup checks supported recovery paths only. Paths for the same loss are
-          alternatives, so they are never added together; see the dashboard for totals by currency.
+          Grouped by purchase or transaction. {coverageSummary()} Paths for the same loss are alternatives, so they are
+          never added together; see the dashboard for totals by currency.
         </p>
       </div>
       {list.transactions.length === 0 ? (
         <section className={`${cardClass} border-dashed px-6 py-12 text-center`}>
           <h2 className="text-base font-semibold text-gray-900">Nothing to check yet</h2>
           <p className="mx-auto mt-2 max-w-md text-sm text-gray-600">
-            Add a purchase, a flight or a card charge and Recoup checks the recovery paths it supports.
+            Add a purchase, a flight or a card charge. {coverageSummary()}
           </p>
           <Link to="/add" className="mt-4 inline-block font-semibold text-gray-900 underline underline-offset-4">
             Add something

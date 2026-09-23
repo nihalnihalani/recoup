@@ -1,8 +1,11 @@
 # Recoup
 
-Price dropped after you bought? Recoup gets the difference back. Haven't bought yet? It watches the price everywhere and tells you when to.
+Price dropped after you bought? Recoup checks the store's own price-adjustment policy and helps you ask for the difference. Haven't bought yet? It watches the price at the stores you add and tells you when it falls.
 
-- **Status:** the dev preview is `https://adorable-lion-138.convex.site` — this repo's own test deployment, with placeholder provider keys and no static frontend build currently deployed to it (`docs/ops/RUNBOOK.md`). Production is named in these docs as the co-author's deployment, `https://cool-oyster-399.convex.site`; its current status has not been verified in this mission (`docs/team/DECISIONS.md` D62, D83). The build log below records what has actually been run against real providers and when, rather than a single blanket "live" claim.
+Recoup checks supported recovery paths. Today that means a lower price inside a store's own price-adjustment window. This check is tested; live verification is still pending.
+
+- **Status:** Recoup runs on this repo's dev deployment only (`adorable-lion-138`), with placeholder provider keys. Deploying to production is not authorized in the current mission (`docs/team/DECISIONS.md` D191); a production deployment named in older docs, `cool-oyster-399`, is not claimed to be current. The build log below is historical: it records what was actually run against real providers and when, rather than a single blanket "live" claim.
+- There is no billing, no pricing and no paid plan. Recoup is not a law firm, does not represent you, and never promises that money will come back.
 - Demo video: TODO (placeholder, not recorded yet; under three minutes)
 
 ## What it does
@@ -11,7 +14,7 @@ Recoup is about one thing: the price of something you care about, before and aft
 
 **Before you buy.** Paste a product link on the Watching page, with a target price if you have one. Recoup reads the page, stores the price with its source link and the time it was read, and checks again about every two hours and whenever you press "check now". Each watched item carries a one-line verdict: good price, fair, wait, or discount looks inflated, with one sentence of why. The verdict is a pure function over Recoup's own stored observations plus the "was" price the page claims (`convex/lib/verdict.ts`). With fewer than three observations or less than a week of history it says "not enough history yet" instead of guessing.
 
-**After you buy.** If the store lowers the price inside its own price-adjustment window, Recoup opens a claim for the exact difference and helps you ask for it:
+**After you buy.** If the store lowers the price inside its own price-adjustment window, Recoup opens a claim for the exact difference and helps you ask for it. The store decides: its policy is its own promise, not a law, and the amount is an estimate until the money arrives.
 
 1. **Intake.** Paste an order confirmation, or forward it to your own Recoup inbox address. The order is extracted into a purchase with line items (name, unit price, quantity, product URL). Every extracted purchase starts as `needs_review`; nothing is active until you confirm it.
 2. **Policy.** On confirmation, Recoup searches the store's own site for its price-adjustment policy, scrapes the page, and stores a snapshot: window length, contact channel, contact email, the supporting sentence, the source URL and the retrieval time. The sentence is kept only if it is found verbatim in the scraped page.
@@ -20,17 +23,19 @@ Recoup is about one thing: the price of something you care about, before and aft
 5. **Reply.** Replies are routed back to the claim and classified as promise, credit issued, refusal, question or other. A promise moves the claim to `promised`. It never counts as money received.
 6. **Confirm.** Only you confirming a posted credit writes a `confirmed_credit` event. When confirmed credits cover the expected amount, the claim is `confirmed`. A later charge reopens that one claim without touching its history.
 
-The board shows three totals across the account: owed (unresolved), asked (unresolved on claims that are sent, packet or promised) and confirmed. Example records are labelled and excluded from the totals.
+At submission time the board showed three totals: unresolved, asked and confirmed. Since Mission 2 the dashboard reads one per-currency recovery summary instead: recovered (confirmed by you), then potential ("estimated, not guaranteed"), ready to ask, sending or unknown, asked, refused and promised, with provisional credit shown inside its step. Each loss counts once, alternatives for the same loss are never added together, and currencies are never summed. Example records are labelled and excluded from the totals.
 
-### In progress at the time of writing
+### Since the submission
 
-- **Price-drop email.** One email to the account address when a watched item gets cheaper, once per item per price, with a daily cap. The backend is written (`convex/notify.ts`: a `mailLog` row is claimed under a unique key in the same transaction that accepts the price, then the send is scheduled; the rows double as an in-app drops list). It has not been run live and is not in the UI yet.
-- **"I bought it".** Marking a watched item as bought turns it into a purchase that carries its price history, with the price-adjustment window counting down. The backend mutation is written (`watches.markBought`). It has not been run live and is not in the UI yet.
-- **Same item at other stores.** One Firecrawl web search for the product name, at most one page per store, each price-read with the same extractor and variant check. Every result is stored as a candidate; only an offer you confirm is re-checked or ranked. The backend is written (`convex/offers.ts`). It has not been run live and is not in the UI yet.
+- **Price-drop email, "I bought it" and the same item at other stores** are in the UI and were exercised live on the dev deployment on 2026-09-20 (see the build log).
+- **Returns.** A refund email for a returned item is held until you confirm it with one tap, because an email's sender cannot be verified. Once confirmed, it is recorded as a promised refund on a return-credit claim. It counts as money back only when you confirm it arrived.
+- **Mission 2: transactions and recovery paths.** Every purchase is also a transaction with facts (each labelled confirmed, observed, read from a document but not confirmed, or disputed), stored evidence, and recovery opportunities evaluated by versioned rule packs. Only an active pack produces a card, and the pages list the paths that were not checked. Flights and card charges can be entered by hand; no recovery path is checked for them until their packs are activated. Uploaded documents are stored, not read, while live reading is switched off.
 
 ### Not in the product today
 
-- Return-credit claims exist in the backend and are not surfaced.
+- Recovery paths other than the store price adjustment above. Code packs for late online orders (R05), airline refunds (R02) and delayed, lost or damaged bags (R04) exist but are not active; the rest of the mission's 25 paths are not checked.
+- Automatic reading of uploaded documents (switched off, D145).
+- No production deployment, no billing and no paid plan.
 
 ## What Recoup promises
 
@@ -44,9 +49,9 @@ Earlier tools in this category filed claims at scale without the customer in the
 ## Stack and what each sponsor does in the app
 
 **Convex** is the whole backend.
-- Database: 16 application tables plus the Convex Auth tables (`convex/schema.ts`).
+- Database: the application tables in `convex/schema.ts` plus the Convex Auth tables. The table list below is the submission-time set; Mission 2 added `transactions`, `facts`, `incidents`, `evidence`, `opportunities`, `evaluations` and `nonCashRemedies`.
 - Functions: queries, mutations and actions for purchases, claims, policies, drafts, replies, intake, price watch, watches, the price dashboard, profiles and follow-ups. Money arithmetic happens only in mutations, in integer minor units.
-- Crons (`convex/crons.ts`, five jobs): `price watch` every 2 hours (owned-item price reads), `watch sweep` hourly, `retry failed inbound` hourly (re-runs failed inbound processing that still has attempts left), `mail sweep` hourly (re-drives stalled outbound mail), and `retention sweep` daily (D75: prunes/redacts aged rows in bounded, resumable pages — see `convex/retention.ts`). The watch sweep is bounded: it reads one indexed page of at most 50 due watches (`by_status_nextCheck`), staggers the checks, and a tick with nothing due costs one indexed read. Each watch carries its own `nextCheckAt`, two hours after its last check. Spend is capped in `convex/limits.ts`: 50 watches per user, 20 new watches per hour, a ten-minute cooldown on manual checks, plus deployment-wide daily kill switches an operator can pause on demand (`docs/ops/RUNBOOK.md` §1).
+- Crons (`convex/crons.ts` is the source of truth; at submission there were five jobs): `price watch` every 2 hours (owned-item price reads), `watch sweep` hourly, `retry failed inbound` hourly (re-runs failed inbound processing that still has attempts left), `mail sweep` hourly (re-drives stalled outbound mail), and `retention sweep` daily (D75: prunes/redacts aged rows in bounded, resumable pages — see `convex/retention.ts`). The watch sweep is bounded: it reads one indexed page of at most 50 due watches (`by_status_nextCheck`), staggers the checks, and a tick with nothing due costs one indexed read. Each watch carries its own `nextCheckAt`, two hours after its last check. Spend is capped in `convex/limits.ts`: 50 watches per user, 20 new watches per hour, a ten-minute cooldown on manual checks, plus deployment-wide daily kill switches an operator can pause on demand (`docs/ops/RUNBOOK.md` §1).
 - Scheduler: inbound event processing, send reconciliation with backoff (30s, 60s, 120s, 300s, 600s), reminder follow-ups, on-demand price checks.
 - Auth: Convex Auth with the Password provider. Identity always comes from `ctx.auth`, never from an argument.
 - HTTP actions: auth routes and the AgentMail webhook at `/agentmail/webhook` (`convex/http.ts`).
@@ -72,7 +77,7 @@ All model output is proposed data. The verdict is computed from stored numbers a
 - inbound webhook, signature-verified by the component, routed to intake or to a claim's reply thread (`convex/inbound.ts`, `convex/intake.ts`, `convex/replies.ts`),
 - price-drop alerts to the account address from the user's own Recoup inbox (`convex/notify.ts`; written, not yet run live).
 
-Frontend: React 19, Vite, TypeScript, Tailwind 4, React Router. Pages: Board (price dashboard), Watching, Purchase, Claim, Settings, SignIn.
+Frontend: React 19, Vite, TypeScript, Tailwind 4, React Router. Pages: Board (dashboard), Add, Transaction, Recovery paths, Watching, Purchase, Claim, Settings, Privacy, SignIn.
 
 ## Architecture
 
@@ -89,7 +94,7 @@ Frontend: React 19, Vite, TypeScript, Tailwind 4, React Router. Pages: Board (pr
 | `watchChecks` | One observation of a watched page, including the page's claimed "was" price |
 | `mailLog` | Notification mail to the account holder, claimed by a unique dedupe key before any send (drop email, not yet run live) |
 | `offers` | The same product at another store; only user-confirmed offers are re-checked or ranked (not yet run live) |
-| `claims` | Money the store owes on one item for one reason. The product opens `price_adjustment` claims |
+| `claims` | What was asked of the store on one item, for one reason. The product opens `price_adjustment` and, from confirmed refund emails, `return_credit` claims |
 | `ledgerEvents` | Append-only money facts: `promised_credit`, `confirmed_credit`, `later_debit` |
 | `claimNotes` | Non-monetary audit trail: notes, status changes, expected-amount changes |
 | `drafts` | Versioned outbound messages; approval is bound to a claim version |

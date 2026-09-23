@@ -3,6 +3,7 @@ import { isRateLimitError } from "@convex-dev/rate-limiter";
 import { ConvexError } from "convex/values";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { coverageSummary } from "../lib/coverageCopy";
 import { inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "../lib/ui";
 
 /**
@@ -348,7 +349,7 @@ export default function SignIn() {
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-gray-500">
             {(flow === "signIn" || flow === "signUp") &&
-              "Price dropped after you bought? Recoup gets the difference back. Haven't bought yet? It watches the price everywhere and tells you when to."}
+              "Price dropped after you bought? Recoup checks the store's own price-adjustment policy and helps you ask for the difference. Haven't bought yet? It watches the price at the stores you add and tells you when it falls."}
             {flow === "verify" && "Enter the 8-digit code we emailed you to finish signing in."}
             {flow === "reset" && "Enter your email and, if it has an account, we'll send a code to reset your password."}
             {flow === "resetVerify" && "Enter the code we sent and choose a new password."}
@@ -625,7 +626,11 @@ export default function SignIn() {
                 </button>
               </p>
 
-              <ul className="mt-6 space-y-2 border-t border-dashed border-gray-200 pt-5 text-xs leading-relaxed text-gray-500">
+              {/* M2A (§20): what is checked, derived from the active rule packs (lib/coverageCopy), never typed here. */}
+              <p className="mt-6 border-t border-dashed border-gray-200 pt-5 text-xs leading-relaxed text-gray-600">
+                {coverageSummary()}
+              </p>
+              <ul className="mt-3 space-y-2 text-xs leading-relaxed text-gray-500">
                 {PROMISES.map((line) => (
                   <li key={line} className="flex gap-2">
                     <svg

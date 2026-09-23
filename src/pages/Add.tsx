@@ -6,6 +6,7 @@ import { ManualEntry } from "../components/add/ManualEntry";
 import { PastePanel } from "../components/add/PastePanel";
 import { RecentUploads } from "../components/add/RecentUploads";
 import { UploadPanel } from "../components/add/UploadPanel";
+import { coverageSummary } from "../lib/coverageCopy";
 import { pageTitleClass } from "../lib/ui";
 
 /**
@@ -21,8 +22,7 @@ export default function Add() {
       <div>
         <h1 className={pageTitleClass}>Add a purchase or transaction</h1>
         <p className="mt-1 max-w-2xl text-sm text-gray-600">
-          Recoup checks supported recovery paths for what you add. Anything read from an email or a document waits for
-          you to confirm it.
+          {coverageSummary()} Anything read from an email or a document waits for you to confirm it.
         </p>
       </div>
 
