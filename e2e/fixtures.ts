@@ -246,6 +246,51 @@ export function resetUser(email: string): { deleted: boolean } {
   return runConvex<{ deleted: boolean }>("testing:resetUser", { email });
 }
 
+// M16 (D202): the R01 browser flow. Each seeder stands in for ONE provider the dev deployment only has a placeholder
+// key for (D83) and writes through the real app path; the user's own steps stay in the browser.
+
+/** The policy research's snapshot for `merchantDomain` (unconfirmed; the user confirms it in the UI). */
+export function seedRetrievedPolicy(userId: string, merchantDomain: string): string {
+  return runConvex<string>("testing:seedRetrievedPolicy", { userId, merchantDomain });
+}
+
+/** A purchase's items, for a purchase the spec made through the UI. */
+export function purchaseItems(purchaseId: string): { itemId: string; productUrl: string | null }[] {
+  return runConvex<{ itemId: string; productUrl: string | null }[]>("testing:itemsOfPurchase", { purchaseId });
+}
+
+/** One price read through the cron's own write path (`priceWatch.recordCheck`). */
+export function recordObservation(args: { itemId: string; observedCents: number; sourceUrl?: string }): {
+  claimId: string | null;
+  accepted: boolean;
+  note?: string;
+} {
+  return runConvex("testing:recordObservation", args);
+}
+
+/** A synthetic `.example` Recoup inbox, so the Composer's `ensureInbox` never calls the inbox provider. */
+export function seedInbox(userId: string): string {
+  return runConvex<string>("testing:seedInbox", { userId });
+}
+
+/** A draft through the real `drafts.insert` (the model call's stand-in). */
+export function seedDraft(args: { claimId: string; userId: string; to?: string; subject?: string; body?: string }): string | null {
+  return runConvex<string | null>("testing:seedDraft", args);
+}
+
+export type SendTrace = {
+  mailLogRows: number;
+  drafts: number;
+  draftsWithOutbound: number;
+  draftsApproved: number;
+  claimsQueuedOrLater: number;
+};
+
+/** What a send would leave behind for this user (D202: "nothing is sent" is checked, not assumed). */
+export function sendTrace(userId: string): SendTrace {
+  return runConvex<SendTrace>("testing:sendTrace", { userId });
+}
+
 /**
  * `e2e.lead@example.com` scoped to one Playwright project (`desktop-chromium`
  * vs `mobile`), e.g. `e2e.lead.mobile@example.com`. Running two projects with
