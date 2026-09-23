@@ -7,42 +7,51 @@
  * of record: automatic refund, path R02.a) or 14 CFR 399.80(l) (ticket agent as merchant of record: refund on request,
  * path R02.b). The spec's ordered outline (§16) is implemented as stages; each stage is a tri-state condition and the
  * outcome comes ONLY from `deriveOutcome`:
- *   1  source freshness (30-day refresh; README rule 3) and the compliance-date gate (FR-2024-07177-COMPLIANCE)
+ *   1  source freshness (30-day refresh; README rule 3; the renumbered-flight pause end, L1) and the compliance-date
+ *      gate (FR-2024-07177-COMPLIANCE; an unknown date or zone → capped with an assumption, README rule 5, D234 (8))
  *   2  scope: a covered flight (P-260.2-COVERED; `non_us` → unsupported) and a nonrefundable ticket (refundable →
  *      unsupported in v1)
- *   3  event: cancellation (incl. a renumbered-only flight, P-260.2-CANCEL, which is manual_review under the
- *      enforcement pause, L1) or a significant delay/change (P-260.2-SIG criteria 1–5; an operational delay is judged
- *      on the carrier's revised scheduled arrival, and a revised schedule and actual arrival on opposite sides of the
- *      threshold → manual_review)
+ *   3  event (always decisive, M27 R02-02): cancellation (incl. a renumbered-only flight, P-260.2-CANCEL, which is
+ *      manual_review under the enforcement pause, L1) or a significant delay/change (P-260.2-SIG criteria 1–5; an
+ *      operational delay is judged on the carrier's revised scheduled arrival, and a revised schedule and actual arrival
+ *      on opposite sides of the threshold → manual_review)
  *   4  the passenger did not fly the changed/alternative flight (P-260.6-A1(i); L4 downgrade fare difference and L5
  *      accepted-but-not-flown → manual_review)
- *   5  a deemed refund request (P-260.6-A2 (i)/(ii)/(iii)) and no affirmatively accepted compensation (P-260.7); a
- *      no-response request whose trigger (a departure) is still in the future → not_yet_due at that date
- *   6  the path (merchant of record, P-260.2-MOR) and the carrier; for R02.a the deemed-request instant (the carrier
- *      timer's anchor and the compliance-date input, spec §11 "anchor unknown → needs_facts")
- *   7  the amount inputs (§8): fare + taxes + ancillary fees − already refunded, one currency; a partly flown itinerary
- *      keeps the outcome but has no estimate (A4)
+ *   5  a deemed refund request (P-260.6-A2 (i)/(ii)/(iii)) and no affirmatively accepted compensation (P-260.7: only the
+ *      user's own confirmation counts); a no-response request whose trigger (a departure) is still in the future →
+ *      not_yet_due at that date
+ *   6  the path (merchant of record, P-260.2-MOR); for R02.a the deemed-request instant (the carrier timer's anchor,
+ *      spec §11 "anchor unknown → needs_facts")
+ *   7  the amount inputs (§8): fare + taxes + ancillary fees − already refunded (before the case started), one
+ *      currency; a partly flown itinerary or a full prior refund keeps the outcome but has no estimate (A4; D235 (B))
  *
- * Questions (DA-A-24). Only decisive unknowns are listed, and only those of the FIRST unresolved stage in the order
- * above, so the user answers one step at a time (R02-04 asks only for the decision, R02-07 only for the disputed
- * arrival). Within the significance stage the criterion the event type names is asked first (arrival for a schedule
- * change or delay, cabin for a downgrade, …); the other criteria only when it fails. The disability criteria (6)/(7)
- * are raised by the passenger (260.6(b) "upon notification") and are never asked: a confirmed `true` gives
- * manual_review (L11). The carrier timer's time zone is never asked either.
+ * Unconfirmed values (D234 (1); M27 R02-01/09/11): a negative, not-yet-due or review verdict never rests on an
+ * extracted candidate. A fail, `unsupported`, `not_yet_due` or `manual_review` that a candidate would decide becomes a
+ * question instead (reason `candidate_unconfirmed`); a candidate that keeps the refund alive only caps it at
+ * likely_eligible (D147(2)). Two conflicting candidates that give the same NEGATIVE answer are asked, not capped.
  *
- * Carrier timer (DA-A-5, DA-A-25). A COUNTERPARTY deadline: 7 business days (credit card) or 20 calendar days (cash,
- * check, debit card, miles, other) after the deemed-request date (P-260.2-PROMPT), counted from the day after, US
- * federal holidays skipped, in the consumer's home time zone (A1; when unknown, the deadline engine's earliest-ending
- * US zone, noted in the explanation, never an assumption on the outcome). An unknown payment class selects no timer
- * and never changes the outcome. The DOT page's "20 business days" (DOT-REF-3) is disclosed on the 20-day timer (L2).
- * Next action: carrier → `track`, overdue → `escalate`; ticket agent → `request_refund` (D143.2).
+ * Questions (DA-A-24; D234 (2)). Only decisive unknowns are listed — the §16.8 list, each fact only when flipping it
+ * could change the outcome given the known facts — and only those of the FIRST unresolved stage in the order above
+ * (a stage whose only unknowns are "I don't know" answers does not hold the later stages back, M27 R02-23). Within
+ * significance the criterion the event type names is asked first. The disability criteria (6)/(7) are raised by the
+ * passenger (260.6(b) "upon notification") and never asked; only the user's own confirmed `true` gives manual_review
+ * (L11; D234 (7)). The carrier and `offer_type` on a rejection decide nothing in v1 and are not asked.
+ *
+ * Carrier timer (DA-A-5, DA-A-25; D234 (3), (6), (8); D235 (A)). A COUNTERPARTY deadline: 7 business days (credit
+ * card) or 20 calendar days (cash, check, debit card, miles, other) after the deemed-request date (P-260.2-PROMPT),
+ * counted from the day after, US federal holidays skipped, in the consumer's home time zone (A1). The payment class
+ * decides only which timer applies and never the outcome; while it is unconfirmed the timer has no date
+ * (`unknown_anchor`). With the home zone unknown the date shows as "on or about <earliest> – <latest>" across the US
+ * zones, and status, overdue and `escalate` wait for the LATEST-ending zone. A `manual_review` result shows no firm
+ * carrier date. The DOT page's "20 business days" (DOT-REF-3) is disclosed on the 20-day timer (L2). Next action:
+ * carrier → `track`, overdue → `escalate`; ticket agent → `request_refund` (D143.2).
  *
  * Status. This file declares `lifecycle: "researched"`; only the lead's activation entry and the manifest decide the
  * real status. "Active" would mean independently reviewed against the captured text — never legal certification.
  */
 import { currencyExponent, formatMinor } from "../money";
 import { alternatives, knownCell, withOverride, type Cell, type CellLookup as FactLookup } from "../facts/resolve";
-import { AIR_TXN_SUBJECT, buildAirSnapshot, r02BoundFacts, r02View, type AirSnapshotInput, type R02View } from "../facts/snapshot_air";
+import { AIR_TXN_SUBJECT, buildAirSnapshot, r02BoundFacts, r02View, r04Bags, type AirSnapshotInput, type R02View } from "../facts/snapshot_air";
 import { AIR_VOUCHER_ACCEPTANCE } from "../facts/keys_air";
 import { computeDeadlineDetailed, overdueCounterpartyDeadlines } from "../deadlines/engine";
 import { localParts, US_ZONES, zoneRule, type ZoneRule } from "../deadlines/usZones";
@@ -54,6 +63,7 @@ import {
   lookupFrom,
   unresolvedReason,
   type AmountCalc,
+  type Assumption,
   type BoundFactValue,
   type CaseContext,
   type CellLookup as EngineLookup,
@@ -73,7 +83,9 @@ import {
   type FactValue,
   type Flags,
   type MissingFact,
+  type MissingReason,
   type NextAction,
+  type OverlapDecl,
   type Outcome,
   type RulePack,
   type RuleSourceMeta,
@@ -84,9 +96,17 @@ import {
 export const R02_V1_RULE_ID = "R02.airline_fare_refund.us_dot";
 export const R02_V1_VERSION = 1;
 export const R02_REMEDY_KEY = "fare_refund";
+/**
+ * R03's remedy key, for the declared alternative (spec §16 steps 4 and 10: a credit-card payment dispute is a fallback
+ * channel for the same money, never additive; the same key R05 declares). M27 R02-18.
+ */
+export const R02_R03_REMEDY_KEY = "billing_error_credit";
+const R03_ALTERNATIVE: OverlapDecl = Object.freeze({ withScenario: "R03", withRemedyKey: R02_R03_REMEDY_KEY, relation: "alternative" });
 export const R02_CARRIER_TIMER_CREDIT_ID = "r02.v1.carrier_refund.credit_card";
 export const R02_CARRIER_TIMER_OTHER_ID = "r02.v1.carrier_refund.other";
 export const R02_AGENT_TIMER_ID = "r02.v1.agent_refund";
+/** The compliance-gate assumption (README rule 5; D234 (8)). */
+export const R02_GATE_ASSUMPTION_ID = "r02.v1.after_compliance_date";
 
 // ---------------------------------------------------------------------------
 // Parameters — every number/date below cites the passage it comes from (README "From spec to evaluator")
@@ -101,9 +121,16 @@ export interface R02Params {
   creditCardBusinessDays: number;
   /** "within 20 calendar days … for cash, check, debit card, or other forms of purchases" (P-260.2-PROMPT). */
   otherPaymentCalendarDays: number;
-  /** Refund provisions' compliance date "October 28, 2024" (FR-2024-07177-COMPLIANCE); spec §16 step 1b. */
+  /**
+   * Refund provisions' compliance date "October 28, 2024" (FR-2024-07177-COMPLIANCE; the quoted words are in
+   * `sources/federal-web-pages-excerpts.md`); spec §16 step 1b.
+   */
   refundComplianceDate: string;
-  /** Renumbered-flight enforcement pause "expiring on July 7, 2027" (FR-2026-13675-DATES); spec L1. Display only. */
+  /**
+   * Renumbered-flight enforcement pause "expiring on July 7, 2027" (FR-2026-13675-DATES; the quoted words are in
+   * `sources/federal-web-pages-excerpts.md`); spec L1. After it, a renumbered-only flight is `source_unverified` until
+   * the pack is re-reviewed (spec header "mandatory re-review on or before 2027-07-07").
+   */
   renumberedPauseEnds: string;
 }
 
@@ -132,10 +159,18 @@ const ECFR_399 = "https://www.ecfr.gov/current/title-14/chapter-II/subchapter-F/
 const DOT_REFUNDS = "https://www.transportation.gov/individuals/aviation-consumer-protection/refunds";
 const FR_2024_07177 = "https://www.federalregister.gov/documents/2024/04/26/2024-07177";
 const FR_2026_13675 = "https://www.federalregister.gov/documents/2026/07/07/2026-13675/airline-refunds-and-other-consumer-protections";
+/** Refresh window in days: spec header "Refresh policy — every 30 days"; README rule 3 (R02 30). */
 const REFRESH_DAYS = 30;
 
+/**
+ * Mandatory re-review date: manifest `mandatoryReviewBy` (spec header "mandatory re-review on or before 2027-07-07", the
+ * end of DOT's renumbered-flight enforcement pause, FR-2026-13675-DATES). From that date every source is stale until a
+ * verification dated on or after it exists (M20b E5).
+ */
+const MANDATORY_REVIEW_BY = "2027-07-07";
+
 const src = (sourceId: string, passageId: string, url: string, effective: string): RuleSourceMeta =>
-  Object.freeze({ sourceId, passageId, url, effective, refreshWindowDays: REFRESH_DAYS });
+  Object.freeze({ sourceId, passageId, url, effective, refreshWindowDays: REFRESH_DAYS, mandatoryReviewBy: MANDATORY_REVIEW_BY });
 
 /** Captured sources (manifest `sources`, spec §14). Every one has the 30-day refresh window (spec header). */
 export const R02_SOURCES: readonly RuleSourceMeta[] = Object.freeze([
@@ -197,11 +232,14 @@ const K = {
   refunded: "air.already_refunded",
   partlyFlown: "air.partly_flown",
   homeZone: "air.home_time_zone",
+  bagFee: "air.bag_fee_paid",
 } as const;
 
 /** Cabin order, highest first: a changed cabin later in the list is a downgrade (P-260.2-SIG (5)). */
 const CABIN_RANK: Readonly<Record<string, number>> = Object.freeze({ first: 0, business: 1, premium_economy: 2, economy: 3 });
 const OTHER_PAYMENTS = ["debit_card", "cash", "check", "miles", "other"] as const;
+/** Spec §5: airports are IATA codes; criterion (3) compares only codes (M27 R02-13). */
+const IATA = /^[A-Z]{3}$/;
 
 type Money = { amountMinor: number; currency: string };
 const valueOf = (c: Cell): FactValue | null => (c.status === "candidate" || c.known ? c.value : null);
@@ -217,6 +255,10 @@ function bool(c: Cell): boolean | null {
 function instant(c: Cell): number | null {
   const v = valueOf(c);
   return v?.kind === "instant" && Number.isFinite(v.epochMs) ? v.epochMs : null;
+}
+/** An instant from a KNOWN cell only (ripeness, the gate and departures never rest on candidates, D234 (1)). */
+function knownInstant(c: Cell): number | null {
+  return c.known ? instant(c) : null;
 }
 function count(c: Cell): number | null {
   const v = valueOf(c);
@@ -236,7 +278,7 @@ const ref = (c: Cell): FactRef => ({ subjectKey: c.subjectKey, key: c.key });
 function show(v: FactValue): string {
   switch (v.kind) {
     case "money": return formatMinor(v.amountMinor, v.currency);
-    case "instant": return new Date(v.epochMs).toISOString();
+    case "instant": return `${new Date(v.epochMs).toISOString().slice(0, 16).replace("T", " ")} UTC`;
     case "code": return v.code;
     case "bool": return v.value ? "yes" : "no";
     case "count": return String(v.n);
@@ -248,9 +290,9 @@ function show(v: FactValue): string {
     case "user_unknown": return "I don't know";
   }
 }
-/** "3h10m" from a millisecond span (display only). */
+/** "3h10m" from a millisecond span (display only; truncated, so a note never contradicts its result, M27 R02-22). */
 function hm(ms: number): string {
-  const total = Math.round(Math.abs(ms) / MINUTE_MS);
+  const total = Math.floor(Math.abs(ms) / MINUTE_MS);
   return `${ms < 0 ? "-" : ""}${Math.floor(total / 60)}h${String(total % 60).padStart(2, "0")}m`;
 }
 
@@ -259,27 +301,38 @@ function hm(ms: number): string {
 // ---------------------------------------------------------------------------
 
 /** Spec §16 order; questions come from the first stage with a decisive unknown. */
-const STAGES = ["scope", "event", "significance", "significance_other", "not_flown", "response", "path", "anchor", "amount"] as const;
+const STAGES = ["gate", "scope", "event", "significance", "significance_other", "not_flown", "response", "path", "anchor", "amount"] as const;
 type Stage = (typeof STAGES)[number];
 
+/**
+ * A computed condition. D234 (1): a `fail` that rests on an unconfirmed cell (a candidate, or an observed value where
+ * only the user's own confirmation counts) is never a fail — it is `unknown` and asks that cell (`candidate_unconfirmed`).
+ */
 function leaf(
   stage: Stage, id: string, text: string, kind: ConditionKind, result: Tri, used: readonly Cell[],
-  opts: { unknown?: readonly Cell[]; note?: string; passage?: string } = {},
+  opts: { unknown?: readonly Cell[]; note?: string; passage?: string; unconfirmed?: readonly Cell[] } = {},
 ): ComputedCondition {
-  const unknown = result === "unknown" ? (opts.unknown ?? []) : [];
+  let res = result;
+  let unknownFacts: { fact: FactRef; reason: MissingReason }[] = (opts.unknown ?? []).map((c) => ({ fact: ref(c), reason: unresolvedReason(c) }));
+  const guarded = res === "fail" ? [...used.filter((c) => c.status === "candidate"), ...(opts.unconfirmed ?? [])] : [];
+  if (guarded.length > 0) {
+    res = "unknown";
+    unknownFacts = guarded.map((c) => ({ fact: ref(c), reason: "candidate_unconfirmed" as const }));
+  }
+  const guardedIds = new Set(guarded.map((c) => `${c.subjectKey}\u0000${c.key}`));
   const seen = new Set<string>();
   const facts: FactRef[] = [];
-  for (const c of [...used, ...unknown]) {
+  for (const c of [...used, ...(opts.unknown ?? []), ...guarded]) {
     const id2 = `${c.subjectKey}\u0000${c.key}`;
     if (!seen.has(id2)) {
       seen.add(id2);
       facts.push(ref(c));
     }
   }
-  const candidateFacts = used.filter((c) => c.status === "candidate").map(ref);
+  const candidateFacts = used.filter((c) => c.status === "candidate" && !guardedIds.has(`${c.subjectKey}\u0000${c.key}`)).map(ref);
   return {
-    op: "computed", id, label: text, kind, result, facts,
-    ...(result === "unknown" ? { unknownFacts: unknown.map((c) => ({ fact: ref(c), reason: unresolvedReason(c) })) } : {}),
+    op: "computed", id, label: text, kind, result: res, facts,
+    ...(res === "unknown" ? { unknownFacts } : {}),
     ...(candidateFacts.length > 0 ? { candidateFacts } : {}),
     neededFor: [stage],
     ...(opts.note !== undefined ? { note: opts.note } : {}),
@@ -287,14 +340,14 @@ function leaf(
   };
 }
 
-/** A span measured against the scope's threshold; an unknown scope decides only when both thresholds agree. */
+/** A span measured against the scope's threshold; the scope is "used" only when it decides (both thresholds disagree). */
 function againstThreshold(spanMs: number, scope: Cell, p: R02Params): { result: Tri; used: Cell[]; unknown: Cell[] } {
   const domestic = spanMs >= p.domesticThresholdMinutes * MINUTE_MS;
   const international = spanMs >= p.internationalThresholdMinutes * MINUTE_MS;
+  if (domestic === international) return { result: domestic ? "pass" : "fail", used: [], unknown: [] };
   const s = code(scope);
   if (s === "domestic") return { result: domestic ? "pass" : "fail", used: [scope], unknown: [] };
   if (s === "international" || s === "non_us") return { result: international ? "pass" : "fail", used: [scope], unknown: [] };
-  if (domestic === international) return { result: domestic ? "pass" : "fail", used: [], unknown: [] };
   return { result: "unknown", used: [], unknown: [scope] };
 }
 
@@ -308,7 +361,7 @@ function thresholdLabel(scope: Cell, p: R02Params): string {
 /** How the refund request is deemed made (P-260.6-A2) and which fact holds its instant (the carrier timer's anchor). */
 interface Basis {
   kind: "rejected" | "no_response_flight" | "no_response_voucher" | "no_response_both" | "cancelled_nothing_offered";
-  /** The anchor facts; the earliest usable instant wins ("the earliest date the refund was requested", P-260.2-PROMPT). */
+  /** The anchor facts; the earliest instant wins ("the earliest date the refund was requested", P-260.2-PROMPT). */
   anchorKeys: string[];
   passage: string;
 }
@@ -345,21 +398,24 @@ interface Core {
   dims: Omit<Dimensions, "readyForApproval">;
   flags: Flags;
   conditions: ConditionResult[];
-  /** Decisive unresolved facts of the FIRST unresolved stage (the questions). */
+  /** Decisive unresolved facts of the first unresolved stage(s) (the questions). */
   missing: MissingFact[];
   /** Every decisive unresolved fact (all stages) — conflicts are candidate-tested only when decisive. */
   decisiveUnresolved: MissingFact[];
   /** Decisive facts used only as unconfirmed candidates (D147(2)): they cap the outcome. */
   unconfirmed: MissingFact[];
+  assumptions: Assumption[];
   amount: AmountCalc | null;
   deadlines: DeadlineResult[];
   path: "a" | "b" | null;
   /** Failing conditions that decide not_eligible (a failed criterion inside a passing "any" is not one). */
   disqualifierIds: string[];
   explanation: string[];
-  /** Notes about the carrier timer (disclosed source conflict, time-zone fallback): shown only with the timer. */
+  /** Notes about the carrier timer (disclosed source conflict, time-zone range): shown only with the timer. */
   deadlineNotes: string[];
   passages: string[];
+  /** The earliest known departure that a no-response request waits for (5c takes the minimum across alternatives). */
+  notYetDueAt?: number;
 }
 
 interface Env {
@@ -378,17 +434,12 @@ function localDates(epochMs: number, home: ZoneRule | null): string[] {
   }
 }
 
-/** Compliance gate: the event's local date is before `date` wherever the consumer may be. */
-function beforeDate(epochMs: number, home: ZoneRule | null, date: string): boolean {
-  return localDates(epochMs, home).every((d) => d < date);
-}
-
 /** A re-evaluation date: the earliest local date the instant falls on (re-checking early is harmless). */
 function earliestLocalDate(epochMs: number, home: ZoneRule | null): string {
   return [...localDates(epochMs, home)].sort()[0];
 }
 
-function carrierTimers(anchorKey: string, p: R02Params): DeadlineSpec[] {
+function carrierTimers(anchorKey: string, p: R02Params, zone: string | null): DeadlineSpec[] {
   const payIs = (codes: readonly string[], id: string): ConditionNode => ({
     op: "fact", id, label: "Payment method selects this timer", kind: "applicability",
     fact: { subjectKey: TXN, key: K.payment },
@@ -400,7 +451,7 @@ function carrierTimers(anchorKey: string, p: R02Params): DeadlineSpec[] {
     anchorKind: "refund_duty_start" as const,
     boundary: { anchorDayCounts: false, endInclusive: true },
     endOfDay: "local_end_of_day" as const,
-    timeZone: { from: "fact" as const, factKey: K.homeZone },
+    timeZone: zone === null ? { from: "fact" as const, factKey: K.homeZone } : { fixed: zone },
     mustBe: "paid" as const,
     sourcePassageId: "P-260.2-PROMPT",
   };
@@ -427,18 +478,40 @@ function carrierTimers(anchorKey: string, p: R02Params): DeadlineSpec[] {
 const L2_DISCLOSURE =
   "Source conflict (disclosed, L2): DOT's consumer page says '20 business days (for cash purchases)' in one place (DOT-REF-3); the regulation says 20 calendar days (P-260.2-PROMPT), which Recoup uses.";
 
+/**
+ * The airline's timer for one anchor (D234 (3)/(8); D235 (A)), computed by the deadline engine. With the home zone
+ * known (a KNOWN cell; a candidate zone decides nothing) it is fixed there. With it unknown, the engine's counterparty
+ * fallback (M20b E1) computes every US zone: status / overdue / escalate wait for the latest-ending zone, the shown date
+ * is the earliest local due date, and `dueLocalDateRange` carries "on or about <earliest> – <latest>". A candidate
+ * payment class selects no timer (E4 → `unknown_anchor`).
+ */
+function carrierTimer(anchorKey: string, p: R02Params, lookup: EngineLookup, home: ZoneRule | null, now: number): { result: DeadlineResult; notes: string[] } | null {
+  const guarded: EngineLookup = (s, k) => (s === TXN && k === K.homeZone && home === null ? { subjectKey: TXN, key: K.homeZone, status: "missing" } : lookup(s, k));
+  const selected = carrierTimers(anchorKey, p, home?.id ?? null)
+    .map((spec) => computeDeadlineDetailed(spec, guarded, now).result)
+    .find((d) => d.status !== "not_applicable");
+  if (!selected) return null;
+  const range = selected.dueLocalDateRange;
+  return {
+    result: selected,
+    notes: range ? [`On or about ${range.earliest} – ${range.latest}, depending on your time zone (not known yet); Recoup treats the airline as late only after the latest of these (A1).`] : [],
+  };
+}
+
 function core(v: R02View, env: Env): Core {
   const { p, now } = env;
   const cell = (key: string): Cell => v.lookup.get(TXN, key);
   const flags: Flags = emptyFlags();
   const explanation: string[] = [];
   const passages: string[] = ["P-260.6-A1"];
+  const assumptions: Assumption[] = [];
   if (env.stale) flags.sourceStale = true;
 
   const scope = cell(K.scope);
   const refundability = cell(K.refundability);
   const event = cell(K.event);
   const eventCode = code(event);
+  const eventKnown = event.known;
   const mor = cell(K.mor);
   const morCode = code(mor);
   const offer = cell(K.offer);
@@ -450,44 +523,62 @@ function core(v: R02View, env: Env): Core {
   const alt = cell(K.altDeparts);
   const cDep = cell(K.cDep);
   const oDep = cell(K.oDep);
-  const home = zoneRule(code(cell(K.homeZone)) ?? "");
+  const homeCell = cell(K.homeZone);
+  const home = homeCell.known ? zoneRule(code(homeCell) ?? "") : null;
   const leaves: ConditionNode[] = [];
 
-  // --- Stage: scope (P-260.2-COVERED; v1 nonrefundable tickets only) ---
+  // --- Stage: scope (P-260.2-COVERED; v1 nonrefundable tickets only). `unsupported` only from KNOWN cells. ---
   const scopeCode = code(scope);
-  if (scopeCode === "non_us") {
+  if (scopeCode === "non_us" && scope.known) {
     flags.unsupportedReason = "Not a covered flight: no point in the United States (14 CFR 260.2). Other regimes may apply; Recoup does not evaluate them.";
   }
   leaves.push(leaf("scope", "r02.v1.covered_flight", "A covered flight: to, from or within the United States", "applicability",
     scopeCode === null ? "unknown" : scopeCode === "non_us" ? "fail" : "pass", scopeCode === null ? [] : [scope],
-    { unknown: [scope], passage: "P-260.2-COVERED" }));
+    { unknown: [scope], passage: "P-260.2-COVERED", note: "v1 assumes scheduled service by a covered carrier; charters are not detected (M27 R02-05, spec gap)" }));
   const refundCode = code(refundability);
-  if (refundCode === "refundable") {
+  if (refundCode === "refundable" && refundability.known) {
     flags.unsupportedReason ??= "A fully refundable ticket has its own refund terms; R02 v1 covers nonrefundable tickets only.";
   }
   leaves.push(leaf("scope", "r02.v1.nonrefundable", "A nonrefundable ticket", "applicability",
     refundCode === null ? "unknown" : refundCode === "refundable" ? "fail" : "pass", refundCode === null ? [] : [refundability],
     { unknown: [refundability], passage: "P-260.6-A1" }));
 
-  // --- Stage: event and significance ---
-  const cancelled = eventCode === "cancellation" || eventCode === "renumbered_only";
-  if (eventCode === "renumbered_only") {
+  // --- Stage: event (always decisive: it selects the criteria and the L1 review, M27 R02-02) ---
+  const renumbered = eventCode === "renumbered_only";
+  leaves.push(leaf("event", "r02.v1.event_known", "What happened to the flight is known", "requirement",
+    eventCode === null || (renumbered && !eventKnown) ? "unknown" : "pass", eventCode === null || (renumbered && !eventKnown) ? [] : [event],
+    { unknown: eventCode === null ? [event] : [], unconfirmed: renumbered && !eventKnown ? [event] : [], passage: "P-260.2-SIG" }));
+  if (renumbered && !eventKnown) {
+    // Only a known "renumbered only" gives the L1 review (D234 (1)): an unconfirmed one is asked.
+    (leaves[leaves.length - 1] as ComputedCondition).unknownFacts = [{ fact: ref(event), reason: "candidate_unconfirmed" }];
+  }
+  if (renumbered && eventKnown) {
     flags.manualReviewReason = `The flight was only renumbered. The regulation's text treats that as a cancellation (P-260.2-CANCEL), but DOT is not enforcing the refund rules for renumbered flights with no significant change until ${p.renumberedPauseEnds} while it reconsiders the definition (Refund III, FR-2026-13675). A person reviews it.`;
     passages.push("FR-2026-13675-DATES");
+    if (new Date(now).toISOString().slice(0, 10) > p.renumberedPauseEnds) {
+      // M27 R02-20: after the pause the pack must be re-reviewed (spec header) before it says anything about it.
+      flags.sourceStale = true;
+      explanation.push(`DOT's enforcement pause for renumbered flights ended on ${p.renumberedPauseEnds}; Recoup re-checks the rule before evaluating renumbered flights again.`);
+    }
   }
-  const cancelLeaf = leaf(eventCode === null ? "event" : "significance", "r02.v1.cancelled", "The flight was cancelled", "requirement",
+
+  // --- Stage: significance ---
+  const cancelled = eventCode === "cancellation" || renumbered;
+  const cancelLeaf = leaf("significance", "r02.v1.cancelled", "The flight was cancelled", "requirement",
     eventCode === null ? "unknown" : cancelled ? "pass" : "fail", eventCode === null ? [] : [event],
     { unknown: [event], passage: "P-260.2-CANCEL" });
 
   const oArr = cell(K.oArr);
   const cArr = cell(K.cArr);
-  const criteria: { leaf: ComputedCondition; code: string }[] = [];
+  const actualCell = cell(K.actualArr);
+  const criteria: ComputedCondition[] = [];
+  let downgradeKnown = false;
   let downgradeHolds = false;
-  if (!cancelled) {
+  if (!cancelled && eventCode !== null) {
     const primaryOf: Record<string, string> = {
       schedule_change: "c2", operational_delay: "c2", downgrade: "c5", airport_change: "c3", added_connection: "c4",
     };
-    const primary = eventCode === null ? null : primaryOf[eventCode] ?? null;
+    const primary = primaryOf[eventCode] ?? null;
     const stageOf = (id: string): Stage => (primary === id ? "significance" : "significance_other");
     const span = (from: Cell, to: Cell, id: string, text: string, passage: string) => {
       const a = instant(from);
@@ -502,109 +593,152 @@ function core(v: R02View, env: Env): Core {
     };
     // (2) later arrival — for an operational delay, the carrier's revised scheduled arrival (spec §4, step 3). A revised
     // schedule and an actual arrival on opposite sides of the threshold (P-42305-D "arrives" vs P-260.2-SIG "scheduled
-    // to arrive") make the criterion undecidable here → manual_review (never not_eligible).
-    const actual = instant(cell(K.actualArr));
+    // to arrive") → manual_review, only from KNOWN values (D234 (1)); with a candidate among them it is asked.
+    const actual = instant(actualCell);
     const oA = instant(oArr);
     const cA = instant(cArr);
-    let straddle = false;
+    let straddle: ComputedCondition | null = null;
     if (eventCode === "operational_delay" && actual !== null && oA !== null && cA !== null) {
-      const revised = againstThreshold(cA - oA, scope, p).result;
-      const arrived = againstThreshold(actual - oA, scope, p).result;
-      if (revised !== "unknown" && arrived !== "unknown" && revised !== arrived) {
-        straddle = true;
-        flags.manualReviewReason ??= `The revised schedule is ${hm(cA - oA)} late but the flight actually arrived ${hm(actual - oA)} late: the statute counts when you arrive (P-42305-D), the regulation the schedule (P-260.2-SIG). A person reviews it.`;
-        passages.push("P-42305-D");
+      const revised = againstThreshold(cA - oA, scope, p);
+      const arrived = againstThreshold(actual - oA, scope, p);
+      if (revised.result !== "unknown" && arrived.result !== "unknown" && revised.result !== arrived.result) {
+        const inputs = [oArr, cArr, actualCell, event, ...revised.used, ...arrived.used];
+        const unconfirmed = inputs.filter((c) => !c.known);
+        straddle = leaf(stageOf("c2"), "r02.v1.sig.c2", "Scheduled to arrive 3 h (domestic) / 6 h (international) or more later", "requirement", "unknown", [],
+          { unconfirmed, note: "revised schedule and actual arrival disagree", passage: "P-260.2-SIG" });
+        if (unconfirmed.length > 0) {
+          straddle.unknownFacts = unconfirmed.map((c) => ({ fact: ref(c), reason: "candidate_unconfirmed" as const }));
+        } else {
+          straddle.unknownFacts = [];
+          flags.manualReviewReason ??= `The revised schedule is ${hm(cA - oA)} late but the flight actually arrived ${hm(actual - oA)} late: the statute counts when you arrive (P-42305-D), the regulation the schedule (P-260.2-SIG). A person reviews it.`;
+          passages.push("P-42305-D");
+        }
       }
     }
-    const arrivalText = "Scheduled to arrive 3 h (domestic) / 6 h (international) or more later";
-    criteria.push({
-      code: "c2",
-      leaf: straddle
-        ? leaf(stageOf("c2"), "r02.v1.sig.c2", arrivalText, "requirement", "unknown", [oArr, cArr, cell(K.actualArr)], { note: "revised schedule and actual arrival disagree (manual review)", passage: "P-260.2-SIG" })
-        : span(oArr, cArr, "c2", arrivalText, "P-260.2-SIG"),
-    });
+    criteria.push(straddle ?? span(oArr, cArr, "c2", "Scheduled to arrive 3 h (domestic) / 6 h (international) or more later", "P-260.2-SIG"));
     if (eventCode !== "operational_delay") {
       // (1) earlier departure: the changed departure is 3 h / 6 h or more before the original one.
-      criteria.push({ code: "c1", leaf: span(cDep, oDep, "c1", "Scheduled to depart 3 h (domestic) / 6 h (international) or more earlier", "P-260.2-SIG") });
-      // (3) a different origin or destination airport.
+      criteria.push(span(cDep, oDep, "c1", "Scheduled to depart 3 h (domestic) / 6 h (international) or more earlier", "P-260.2-SIG"));
+      // (3) a different origin or destination airport — compared only as IATA codes (spec §5; M27 R02-13).
       const pairs: [Cell, Cell][] = [[cell(K.oOrigin), cell(K.cOrigin)], [cell(K.oDest), cell(K.cDest)]];
-      const differs = pairs.find(([a, b]) => label(a) !== null && label(b) !== null && label(a) !== label(b));
-      const allKnown = pairs.every(([a, b]) => label(a) !== null && label(b) !== null);
-      criteria.push({ code: "c3", leaf: leaf(stageOf("c3"), "r02.v1.sig.c3", "Departs from or arrives at a different airport", "requirement",
-        differs ? "pass" : allKnown ? "fail" : "unknown", differs ?? pairs.flat().filter(usable),
-        { unknown: pairs.flat().filter((c) => !usable(c)), passage: "P-260.2-SIG" }) });
+      const codeOf = (c: Cell) => {
+        const l = label(c);
+        return l !== null && IATA.test(l) ? l : null;
+      };
+      const differs = pairs.find(([a, b]) => codeOf(a) !== null && codeOf(b) !== null && codeOf(a) !== codeOf(b));
+      const allCodes = pairs.every(([a, b]) => codeOf(a) !== null && codeOf(b) !== null);
+      const notCodes = pairs.flat().filter((c) => codeOf(c) === null);
+      criteria.push(leaf(stageOf("c3"), "r02.v1.sig.c3", "Departs from or arrives at a different airport", "requirement",
+        differs ? "pass" : allCodes ? "fail" : "unknown", differs ?? pairs.flat().filter(usable),
+        { unknown: notCodes, note: notCodes.some(usable) ? "airports are compared as 3-letter IATA codes" : undefined, passage: "P-260.2-SIG" }));
       // (4) more connection points.
       const oc = count(cell(K.oConn));
       const cc = count(cell(K.cConn));
-      criteria.push({ code: "c4", leaf: leaf(stageOf("c4"), "r02.v1.sig.c4", "More connections than the original itinerary", "requirement",
+      criteria.push(leaf(stageOf("c4"), "r02.v1.sig.c4", "More connections than the original itinerary", "requirement",
         oc === null || cc === null ? "unknown" : cc > oc ? "pass" : "fail", [cell(K.oConn), cell(K.cConn)].filter(usable),
-        { unknown: [cell(K.oConn), cell(K.cConn)].filter((c) => !usable(c)), passage: "P-260.2-SIG" }) });
+        { unknown: [cell(K.oConn), cell(K.cConn)].filter((c) => !usable(c)), passage: "P-260.2-SIG" }));
       // (5) a downgrade to a lower class of service.
       const oCab = code(cell(K.oCabin));
       const cCab = code(cell(K.cCabin));
       const known = oCab !== null && cCab !== null && oCab in CABIN_RANK && cCab in CABIN_RANK;
       downgradeHolds = known && CABIN_RANK[cCab] > CABIN_RANK[oCab];
-      criteria.push({ code: "c5", leaf: leaf(stageOf("c5"), "r02.v1.sig.c5", "Downgraded to a lower class of service", "requirement",
+      downgradeKnown = known && cell(K.oCabin).known && cell(K.cCabin).known;
+      criteria.push(leaf(stageOf("c5"), "r02.v1.sig.c5", "Downgraded to a lower class of service", "requirement",
         known ? (downgradeHolds ? "pass" : "fail") : "unknown", [cell(K.oCabin), cell(K.cCabin)].filter(usable),
-        { unknown: [cell(K.oCabin), cell(K.cCabin)].filter((c) => !usable(c)), passage: "P-260.2-SIG" }) });
+        { unknown: [cell(K.oCabin), cell(K.cCabin)].filter((c) => !usable(c)), passage: "P-260.2-SIG" }));
     }
   }
-  // Disability criteria (6)/(7): raised by the passenger (260.6(b) "upon notification"), never asked (DA-A-24); a
-  // confirmed `true` is reviewed by a person (L11) and keeps the significance question open, so it never becomes
-  // not_eligible on the other criteria alone.
+  // Disability criteria (6)/(7): raised by the passenger (260.6(b) "upon notification"), never asked (DA-A-24; D234
+  // (7)); only the user's own confirmed `true` counts (spec §5 "user-confirmed only", M27 R02-09) and keeps the
+  // significance question open for a person (L11).
   const disability = cell(K.disability);
-  if (bool(disability) === true) {
+  if (disability.status === "confirmed" && bool(disability) === true) {
     flags.manualReviewReason ??= "You told Recoup a disability is involved. The two disability-specific refund grounds (a different connecting airport, or a substitute aircraft without a feature you need) are reviewed by a person (L11).";
     if (!cancelled) {
-      criteria.push({ code: "c6", leaf: leaf("significance_other", "r02.v1.sig.disability", "A disability-specific change (different connecting airport or substitute aircraft)", "requirement", "unknown", [disability], { note: "reviewed by a person (L11)", passage: "P-260.2-SIG" }) });
+      const d = leaf("significance_other", "r02.v1.sig.disability", "A disability-specific change (different connecting airport or substitute aircraft)", "requirement", "unknown", [disability], { note: "reviewed by a person (L11)", passage: "P-260.2-SIG" });
+      d.unknownFacts = [];
+      criteria.push(d);
     }
   }
-  const sigChildren: ConditionNode[] = eventCode === null ? [cancelLeaf, ...criteria.map((c) => c.leaf)] : cancelled ? [cancelLeaf] : criteria.map((c) => c.leaf);
+  const sigChildren: ConditionNode[] = eventCode === null ? [cancelLeaf] : cancelled ? [cancelLeaf] : criteria;
   const significance: ConditionNode = { op: "any", children: sigChildren };
   leaves.push(significance);
   const significanceResult = evaluateConditions(significance, lookupFrom([])).result;
   passages.push(cancelled ? "P-260.2-CANCEL" : "P-260.2-SIG");
-  if (eventCode === "operational_delay" && significanceResult === "fail") {
-    explanation.push("The delay is below the refund threshold. No federal rule pays cash for a delay; the airline's own customer-service commitments (R15) may cover meals or a hotel.");
+  if (significanceResult === "fail") {
+    // M27 R02-24: tell the user what else exists.
+    explanation.push(
+      eventCode === "operational_delay"
+        ? "The delay is below the refund threshold. No federal rule pays cash for a delay; the airline's own customer-service commitments (R15) may cover meals or a hotel."
+        : "The change is below the refund thresholds. The airline's own customer-service commitments (R15) may still help.",
+      "If a disability makes a new connecting airport or a substitute aircraft a problem for you, tell Recoup: a person reviews those grounds (260.6(b)).",
+    );
   }
 
   // --- Stage: not flown (P-260.6-A1(i)) ---
   const altKey = usable(alt) ? K.altDeparts : usable(cDep) ? K.cDep : K.altDeparts;
-  const altAt = instant(alt) ?? instant(cDep);
-  const departedLater = altAt !== null && altAt > now;
+  const departureCell = usable(alt) ? alt : cDep;
+  const departsKnownAt = knownInstant(departureCell);
+  const departsInFuture = departsKnownAt !== null && departsKnownAt > now;
+  const flownText = "You did not fly the changed or replacement flight";
+  const l4 = "You flew the downgraded flight. DOT's page says the airline must refund the fare difference (DOT-REF-6), but the regulation located for this rule does not state it (L4). A person reviews it.";
   if (flewValue !== null) {
     if (flewValue && downgradeHolds) {
-      flags.manualReviewReason ??= "You flew the downgraded flight. DOT's page says the airline must refund the fare difference (DOT-REF-6), but the regulation located for this rule does not state it (L4). A person reviews it.";
-      leaves.push(leaf("not_flown", "r02.v1.not_flown", "You did not fly the changed or replacement flight", "exclusion", "pass", [flew], { note: "flew the downgraded flight (L4)" }));
+      // L4 only from known facts; with an unconfirmed flight or cabin it is asked (D234 (1)).
+      if (flew.known && downgradeKnown) {
+        flags.manualReviewReason ??= l4;
+        leaves.push(leaf("not_flown", "r02.v1.not_flown", flownText, "exclusion", "pass", [flew], { note: "flew the downgraded flight (L4)" }));
+      } else {
+        const unconfirmed = [flew, cell(K.oCabin), cell(K.cCabin)].filter((c) => !c.known);
+        leaves.push(leaf("not_flown", "r02.v1.not_flown", flownText, "exclusion", "fail", [flew], { unconfirmed, passage: "P-260.6-A1" }));
+      }
     } else {
-      leaves.push(leaf("not_flown", "r02.v1.not_flown", "You did not fly the changed or replacement flight", "exclusion", flewValue ? "fail" : "pass", [flew], { passage: "P-260.6-A1" }));
+      leaves.push(leaf("not_flown", "r02.v1.not_flown", flownText, "exclusion", flewValue ? "fail" : "pass", [flew], { passage: "P-260.6-A1" }));
     }
-  } else if (eventCode === "cancellation" && (offerCode === "none" || offerCode === "voucher_or_credit")) {
-    leaves.push(leaf("not_flown", "r02.v1.not_flown", "You did not fly the changed or replacement flight", "exclusion", "pass", [event, offer], { note: "no replacement flight was offered" }));
-  } else if (departedLater) {
-    leaves.push(leaf("not_flown", "r02.v1.not_flown", "You did not fly the changed or replacement flight", "exclusion", "pass", [usable(alt) ? alt : cDep], { note: "the changed flight has not departed yet" }));
+  } else if (eventCode === "cancellation" && eventKnown && offer.known && (offerCode === "none" || offerCode === "voucher_or_credit")) {
+    leaves.push(leaf("not_flown", "r02.v1.not_flown", flownText, "exclusion", "pass", [event, offer], { note: "no replacement flight was offered" }));
+  } else if (departsInFuture && (responseCode === null || responseCode === "no_response" || responseCode === "accepted_rebooking")) {
+    // M27 R02-08: only while the decision is still open (or for a no-response or accepted rebooking) does a future
+    // departure answer "not flown yet"; a rejection needs the flight question answered like any decisive fact.
+    leaves.push(leaf("not_flown", "r02.v1.not_flown", flownText, "exclusion", "pass", [departureCell], { note: "the changed flight has not departed yet" }));
   } else {
-    leaves.push(leaf("not_flown", "r02.v1.not_flown", "You did not fly the changed or replacement flight", "exclusion", "unknown", [], { unknown: [flew], passage: "P-260.6-A1" }));
+    leaves.push(leaf("not_flown", "r02.v1.not_flown", flownText, "exclusion", "unknown", [], { unknown: [flew], passage: "P-260.6-A1" }));
   }
 
   // --- Stage: deemed request (P-260.6-A2) and no affirmatively accepted compensation (P-260.7) ---
-  const voucherKey = eventCode === "cancellation" || eventCode === "renumbered_only" ? K.oDep : K.cDep;
+  const voucherKey = eventCode === "cancellation" || renumbered ? K.oDep : K.cDep;
   let basis: Basis | null = null;
-  const responseLeaf = (result: Tri, used: Cell[], opts: { unknown?: Cell[]; note?: string } = {}) =>
+  let notYetDueAt: number | undefined;
+  const responseLeaf = (result: Tri, used: Cell[], opts: { unknown?: Cell[]; note?: string; unconfirmed?: Cell[] } = {}) =>
     leaf("response", "r02.v1.deemed_request", "A refund request is deemed made and no compensation was affirmatively accepted", "requirement", result, used, { ...opts, passage: "P-260.6-A2" });
   if (responseCode === "accepted_compensation") {
-    leaves.push(responseLeaf("fail", [response], { note: "a voucher, credit or other compensation was affirmatively accepted (P-260.7)" }));
+    // P-260.7 "affirmatively agrees": only the user's own confirmed answer counts (D204; M27 R02-01).
+    leaves.push(responseLeaf("fail", [response], { unconfirmed: response.status === "confirmed" ? [] : [response], note: "a voucher, credit or other compensation was affirmatively accepted (P-260.7)" }));
     passages.push("P-260.7");
   } else if (responseCode === "accepted_rebooking") {
-    if (departedLater) {
-      leaves.push(responseLeaf("fail", [response, usable(alt) ? alt : cDep], { note: "rebooking accepted (260.6(a)(1)(i))" }));
+    if (flewValue === true && downgradeHolds) {
+      // M27 R02-03: accepting and flying the downgraded seat is the typical L4 case.
+      const unconfirmed = [response, flew, cell(K.oCabin), cell(K.cCabin)].filter((c) => !c.known);
+      if (unconfirmed.length === 0) {
+        flags.manualReviewReason ??= l4;
+        leaves.push(responseLeaf("pass", [response, flew], { note: "accepted and flew the downgraded seat (L4)" }));
+      } else {
+        leaves.push(responseLeaf("fail", [response, flew], { unconfirmed }));
+      }
+    } else if (departsInFuture && response.known) {
+      leaves.push(responseLeaf("fail", [response, departureCell], { note: "rebooking accepted (260.6(a)(1)(i))" }));
     } else if (flewValue === false) {
-      flags.manualReviewReason ??= "You accepted the rebooking but did not fly it. The regulation does not address a later change of mind (L5); a person reviews it.";
-      leaves.push(responseLeaf("pass", [response, flew], { note: "accepted rebooking, not flown (L5)" }));
+      if (response.known && flew.known) {
+        flags.manualReviewReason ??= "You accepted the rebooking but did not fly it. The regulation does not address a later change of mind (L5); a person reviews it.";
+        leaves.push(responseLeaf("pass", [response, flew], { note: "accepted rebooking, not flown (L5)" }));
+      } else {
+        leaves.push(responseLeaf("unknown", [], { unknown: [response, flew].filter((c) => !c.known) }));
+        (leaves[leaves.length - 1] as ComputedCondition).unknownFacts = [response, flew].filter((c) => !c.known).map((c) => ({ fact: ref(c), reason: "candidate_unconfirmed" as const }));
+      }
     } else if (flewValue === true) {
       leaves.push(responseLeaf("fail", [response, flew]));
     } else {
-      leaves.push(responseLeaf("unknown", [response], { unknown: [flew] }));
+      leaves.push(responseLeaf("unknown", [], { unknown: [flew] }));
     }
   } else {
     basis = basisFor(responseCode, offerCode, eventCode, altKey, voucherKey);
@@ -615,7 +749,8 @@ function core(v: R02View, env: Env): Core {
     } else if (basis.kind === "rejected" || basis.kind === "cancelled_nothing_offered") {
       leaves.push(responseLeaf("pass", basis.kind === "rejected" ? [response] : [offer, event], { note: BASIS_TEXT[basis.kind] }));
     } else {
-      // A no-response request exists only once its trigger instant has passed (260.6(a)(2)(iii)).
+      // A no-response request exists only once its trigger instant has passed (260.6(a)(2)(iii)); ripeness is decided
+      // only from KNOWN cells (contract §4 "notYetDue … from KNOWN facts"; M27 R02-11).
       const triggers = basis.anchorKeys.map(cell);
       const missingTriggers = triggers.filter((c) => instant(c) === null);
       if (missingTriggers.length > 0) {
@@ -623,25 +758,30 @@ function core(v: R02View, env: Env): Core {
       } else {
         const at = Math.min(...triggers.map((c) => instant(c)!));
         if (at > now) {
-          const date = earliestLocalDate(at, home);
-          flags.notYetDue = { at: date, when: "the changed or replacement flight departs without you (or the voucher offer's deadline passes)" };
-          explanation.push(`Not yet due: with no response, the refund request counts from ${date} (260.6(a)(2)(iii)).`);
+          const unconfirmed = [response, offer, ...triggers].filter((c) => !c.known);
+          if (unconfirmed.length > 0) {
+            const l = responseLeaf("unknown", [], {});
+            l.unknownFacts = unconfirmed.map((c) => ({ fact: ref(c), reason: "candidate_unconfirmed" as const }));
+            leaves.push(l);
+          } else {
+            const date = earliestLocalDate(at, home);
+            notYetDueAt = at;
+            flags.notYetDue = { at: date, when: "the changed or replacement flight departs without you (or the voucher offer's deadline passes)" };
+            explanation.push(`Not yet due: with no response, the refund request counts from ${date} (260.6(a)(2)(iii)).`);
+            leaves.push(responseLeaf("pass", [response, offer, ...triggers], { note: BASIS_TEXT[basis.kind] }));
+          }
+        } else {
+          leaves.push(responseLeaf("pass", [response, offer, ...triggers], { note: BASIS_TEXT[basis.kind] }));
         }
-        leaves.push(responseLeaf("pass", [response, offer, ...triggers], { note: BASIS_TEXT[basis.kind] }));
       }
     }
     if (basis !== null) passages.push("P-260.6-A2");
   }
 
-  // --- Stage: path (merchant of record) and carrier ---
+  // --- Stage: path (merchant of record). The carrier's identity decides nothing in v1 (D234 (2)); it is bound. ---
   const path: "a" | "b" | null = morCode === "carrier" ? "a" : morCode === "ticket_agent" ? "b" : null;
   leaves.push(leaf("path", "r02.v1.merchant_of_record", "Who took the payment (merchant of record) is known", "requirement",
     path === null ? "unknown" : "pass", path === null ? [] : [mor], { unknown: [mor], passage: "P-260.2-MOR" }));
-  const operating = cell(K.operating);
-  const marketing = cell(K.marketing);
-  const carrierCell = [operating, marketing].find((c) => c.known) ?? [operating, marketing].find(usable);
-  leaves.push(leaf("path", "r02.v1.carrier", "The airline is known", "requirement",
-    carrierCell ? "pass" : "unknown", carrierCell ? [carrierCell] : [], { unknown: [operating], passage: "P-260.2-COVERED" }));
   if (path === "b") passages.push("P-399.80(l)");
 
   // --- Stage: anchor (R02.a: the deemed-request instant; spec §11 "anchor unknown → needs_facts") ---
@@ -652,61 +792,91 @@ function core(v: R02View, env: Env): Core {
       anchorAt !== null ? "pass" : "unknown", anchorCells.filter((c) => instant(c) !== null),
       { unknown: anchorCells.filter((c) => instant(c) === null), passage: "P-260.2-PROMPT" }));
   }
-  // Compliance-date gate (spec §16 step 1b): the deemed-request (or incident) date before 2024-10-28.
-  const gateAt = anchorAt ?? instant(oDep) ?? instant(cDep) ?? instant(cell(K.cancelNotice)) ?? instant(cell(K.responseAt));
-  if (gateAt !== null && beforeDate(gateAt, home, p.refundComplianceDate)) {
+
+  // --- Compliance-date gate (spec §16 step 1b; README rule 5; D234 (8); M27 R02-12) ---
+  // The deemed-request date when known; else the earliest known date of the trip. Known cells only.
+  const knownAnchorAt = anchorCells.length > 0 && anchorCells.every((c) => knownInstant(c) !== null) ? Math.min(...anchorCells.map((c) => knownInstant(c)!)) : null;
+  const tripInstants = [oDep, cDep, oArr, cArr, actualCell, alt, cell(K.cancelNotice), cell(K.responseAt)].map(knownInstant).filter((x): x is number => x !== null);
+  const gateAt = knownAnchorAt ?? (tripInstants.length > 0 ? Math.min(...tripInstants) : null);
+  const gateDates = gateAt !== null ? localDates(gateAt, home) : localDates(now, home);
+  const allBefore = gateDates.every((d) => d < p.refundComplianceDate);
+  const noneBefore = gateDates.every((d) => d >= p.refundComplianceDate);
+  if (allBefore) {
     flags.effectiveDateMismatch = true;
     passages.push("FR-2024-07177-COMPLIANCE");
     explanation.push(`The refund request date is before the refund rule's compliance date (${p.refundComplianceDate}); R02 v1 does not evaluate earlier events.`);
+  } else if (gateAt === null || !noneBefore) {
+    assumptions.push({
+      id: R02_GATE_ASSUMPTION_ID,
+      text: gateAt === null
+        ? `No date of the trip or of your refund request is confirmed yet, so Recoup assumes it was on or after ${p.refundComplianceDate}, when the DOT refund rule took effect.`
+        : `Depending on your time zone, the refund request fell just before or on ${p.refundComplianceDate}, when the DOT refund rule took effect; Recoup assumes it was on or after that date.`,
+      changesOutcomeIf: `the refund request was before ${p.refundComplianceDate} where you are (the rule does not apply to earlier events)`,
+    });
+    passages.push("FR-2024-07177-COMPLIANCE");
   }
 
-  // --- Stage: amount (§8) ---
+  // --- Stage: amount (§8; D234 (4), D235 (B)) ---
   const amountCells = [cell(K.fare), cell(K.taxes), cell(K.ancillary), cell(K.refunded)];
   const amounts = amountCells.map(money);
   let amount: AmountCalc | null = null;
-  let amountResult: Tri = "unknown";
   const missingAmounts = amountCells.filter((_c, i) => amounts[i] === null);
   if (missingAmounts.length === 0) {
     const [fare, taxes, ancillary, refunded] = amounts as Money[];
     const currencies = new Set(amounts.map((m) => m!.currency));
     for (const c of currencies) {
-      if (currencyExponent(c, "new_scenario") === null) flags.unsupportedReason ??= `Recoup's air checks handle USD amounts only; ${c} is not supported yet (O6).`;
+      const cellsInC = amountCells.filter((_x, i) => amounts[i]!.currency === c);
+      if (currencyExponent(c, "new_scenario") === null && cellsInC.every((x) => x.known)) {
+        flags.unsupportedReason ??= `Recoup's air checks handle USD amounts only; ${c} is not supported yet (O6).`;
+      }
     }
     if (currencies.size > 1) {
-      amountResult = "pass";
       explanation.push("The fare, taxes and fees are in different currencies; Recoup never adds different currencies, so a person works out the amount.");
     } else {
-      const due = fare.amountMinor + taxes.amountMinor + ancillary.amountMinor - refunded.amountMinor;
-      amountResult = due > 0 ? "pass" : "fail";
-      if (due <= 0) explanation.push("The airline has already refunded the fare, taxes and fees in full.");
+      const paid = fare.amountMinor + taxes.amountMinor + ancillary.amountMinor;
+      const due = paid - refunded.amountMinor;
       const partly = bool(cell(K.partlyFlown));
-      if (due > 0 && partly === true) {
+      if (!Number.isSafeInteger(paid) || !Number.isSafeInteger(due)) {
+        // M27 R02-21: never throw on an absurd amount; a person looks at it.
+        explanation.push("These amounts are too large to add safely; a person works out the amount.");
+      } else if (due <= 0) {
+        // D234 (4) / D235 (B): refunds never change the outcome; nothing is left to ask for.
+        explanation.push(due < 0
+          ? "Nothing is outstanding: the airline refunded more than you paid for the ticket (please check the amounts)."
+          : "Nothing is outstanding: the airline already refunded the fare, taxes and fees in full before this case.");
+      } else if (partly === true) {
         explanation.push("Part of this ticket was already flown. 260.6(a)(1) does not say how to split a partly used ticket (assumption A4), so a person works out the amount; the refund itself is owed.");
-      } else if (due > 0) {
-        const currency = fare.currency;
+      } else {
         amount = {
-          estimate: { amountMinor: due, currency },
+          estimate: { amountMinor: due, currency: fare.currency },
           basis: "exact_formula",
           formula: "fare + taxes + ancillary fees - already refunded",
           inputs: [
             { label: "fare", value: String(fare.amountMinor), fact: ref(amountCells[0]) },
             { label: "taxes", value: String(taxes.amountMinor), fact: ref(amountCells[1]) },
             { label: "ancillary fees", value: String(ancillary.amountMinor), fact: ref(amountCells[2]) },
-            { label: "already refunded", value: String(refunded.amountMinor), fact: ref(amountCells[3]) },
+            { label: "already refunded before the case", value: String(refunded.amountMinor), fact: ref(amountCells[3]) },
           ],
         };
         passages.push("P-260.10");
       }
     }
   }
-  leaves.push(leaf("amount", "r02.v1.amount_owed", "Fare, taxes and fees paid, less anything already refunded, leave an amount owed", "requirement",
-    amountResult, missingAmounts.length === 0 ? amountCells : [], { unknown: missingAmounts, passage: "P-260.6-A1" }));
+  leaves.push(leaf("amount", "r02.v1.amount_known", "The fare, taxes, fees and any earlier refund are known", "requirement",
+    missingAmounts.length === 0 ? "pass" : "unknown", missingAmounts.length === 0 ? amountCells : [], { unknown: missingAmounts, passage: "P-260.6-A1" }));
 
   // --- Evaluate the tree ---
   const tree: ConditionNode = { op: "all", children: leaves };
   const ev = evaluateConditions(tree, lookupFrom([]));
-  const firstStage = STAGES.find((s) => ev.decisiveMissing.some((m) => m.neededFor.includes(s)));
-  const missing = firstStage === undefined ? [] : ev.decisiveMissing.filter((m) => m.neededFor.includes(firstStage));
+  // Staged questions (§16 order). A stage whose only unknowns are "I don't know" answers does not hold back the next
+  // stage (M27 R02-23): its facts stay listed and the next stage's are added.
+  const missing: MissingFact[] = [];
+  for (const s of STAGES) {
+    const inStage = ev.decisiveMissing.filter((m) => m.neededFor.includes(s));
+    if (inStage.length === 0) continue;
+    for (const m of inStage) addMissing(missing, m);
+    if (!inStage.every((m) => m.reason === "user_unknown")) break;
+  }
 
   // --- Deadlines ---
   const deadlines: DeadlineResult[] = [];
@@ -721,7 +891,8 @@ function core(v: R02View, env: Env): Core {
       basis: "Not computable: 399.80(l) counts 7 business days (credit card) or 20 calendar days (other payments) from when the agency receives the airline's eligibility information (260.6(d)), which you cannot see (L7).",
       sourcePassageId: "P-399.80(l)",
     });
-  } else if (path === "a") {
+  } else if (path === "a" && (basis !== null || response.status === "conflicting")) {
+    // No basis (e.g. an accepted rebooking, L5) → no timer at all (M27 R02-04): its anchor would not be a request.
     let engineLookup: EngineLookup = (s, k) => v.lookup.get(s, k);
     let anchorKey = basis?.anchorKeys[0] ?? K.responseAt;
     if (basis !== null && basis.anchorKeys.length > 1 && anchorAt !== null) {
@@ -742,23 +913,21 @@ function core(v: R02View, env: Env): Core {
       const base = engineLookup;
       engineLookup = (s, k) => (s === TXN && k === anchorKey ? disputed : base(s, k));
     }
-    const computed = carrierTimers(anchorKey, p).map((spec) => computeDeadlineDetailed(spec, engineLookup, now));
-    const selected = computed.filter((d) => d.result.status !== "not_applicable");
-    const shown = selected.length > 1 ? [selected[0]] : selected;
-    for (const d of shown) {
-      const notes: string[] = [];
-      if (d.result.id === R02_CARRIER_TIMER_OTHER_ID) {
+    const timer = carrierTimer(anchorKey, p, engineLookup, home, now);
+    if (timer) {
+      const notes = [...timer.notes];
+      if (timer.result.id === R02_CARRIER_TIMER_OTHER_ID) {
         notes.push(L2_DISCLOSURE);
         passages.push("DOT-REF-3");
       }
-      for (const a of d.assumptions) notes.push(a.text);
-      deadlines.push(notes.length > 0 ? { ...d.result, basis: `${d.result.basis} ${notes.join(" ")}` } : d.result);
-      if (d.result.id === R02_CARRIER_TIMER_OTHER_ID) deadlineNotes.push(L2_DISCLOSURE);
-      for (const a of d.assumptions) deadlineNotes.push(`${a.text} (The deadline is the airline's, so this never changes your result.)`);
+      deadlines.push(timer.result.id === R02_CARRIER_TIMER_OTHER_ID ? { ...timer.result, basis: `${timer.result.basis} ${L2_DISCLOSURE}` } : timer.result);
+      deadlineNotes.push(...notes);
     }
     passages.push("P-260.2-PROMPT");
   }
 
+  // --- Loss keys: the fare, plus each recorded bag fee (D234 (17): a bag fee belongs to R04 path a; sharing its key
+  // unions any overlap with the ancillary total instead of adding it) ---
   const dims: Omit<Dimensions, "readyForApproval"> = {
     applies: ev.result,
     factsKnown: ev.result === "pass" ? "pass" : "unknown",
@@ -771,7 +940,8 @@ function core(v: R02View, env: Env): Core {
   const disqualifierIds = [...failing(leaves), ...(significanceResult === "fail" ? failing(sigChildren) : [])];
   return {
     dims, flags, conditions: ev.conditions, missing, decisiveUnresolved: ev.decisiveMissing, unconfirmed: ev.decisiveUnconfirmed,
-    amount, deadlines, path, disqualifierIds, explanation, deadlineNotes, passages,
+    assumptions, amount, deadlines, path, disqualifierIds, explanation, deadlineNotes, passages,
+    ...(notYetDueAt !== undefined ? { notYetDueAt } : {}),
   };
 }
 
@@ -781,11 +951,11 @@ function core(v: R02View, env: Env): Core {
 
 /** An amount is shown only where it can be owed (never for not_yet_due, needs_facts, not_eligible, …). */
 const AMOUNT_OUTCOMES: ReadonlySet<Outcome> = new Set<Outcome>(["eligible", "likely_eligible", "possible_contract_benefit"]);
-/** The carrier timer is shown where a refund is (or may be, after review) owed. */
+/** The carrier timer is shown where a refund is (or may be, after review) owed; review rows never carry a date. */
 const DEADLINE_OUTCOMES: ReadonlySet<Outcome> = new Set<Outcome>(["eligible", "likely_eligible", "manual_review"]);
 
 function outcomeOf(c: Core): { outcome: Outcome; amount: AmountCalc | null } {
-  const outcome = deriveOutcome({ ...c.dims, readyForApproval: "unknown" }, c.flags, []);
+  const outcome = deriveOutcome({ ...c.dims, readyForApproval: "unknown" }, c.flags, c.assumptions);
   return { outcome, amount: AMOUNT_OUTCOMES.has(outcome) ? c.amount : null };
 }
 
@@ -825,7 +995,8 @@ function nextActionFor(outcome: Outcome, c: Core, flags: Flags, missing: readonl
       return { kind: "track" };
     }
     case "needs_facts": {
-      const keys = missing.filter((m) => m.reason !== "candidate_unconfirmed" && m.reason !== "conflict_capped").map((m) => ({ subjectKey: m.subjectKey, key: m.key }));
+      // Unconfirmed values are questions too (confirm them), as R05 does (M27 R04-18 / cross-pack observation 6).
+      const keys = missing.filter((m) => m.reason !== "conflict_capped").map((m) => ({ subjectKey: m.subjectKey, key: m.key }));
       return keys.length > 0 ? { kind: "answer_questions", keys } : { kind: "none", reason: "Waiting for the facts above." };
     }
     case "manual_review":
@@ -885,7 +1056,9 @@ export function evaluateR02V1(input: EvaluationInput<R02View, R02Params>): Evalu
       const same = combos !== null && sameAnswer(tested.map((t) => t.answer));
       const list = withSameAnswer(conflicting.map(conflictFlag), same);
       const ids = new Set(conflicting.map((c) => `${c.subjectKey}\u0000${c.key}`));
-      if (same) {
+      // D234 (1): a same answer that is negative, not yet due or a review never rests on candidates → ask instead.
+      const negative = same && !AMOUNT_OUTCOMES.has(tested[0].answer.outcome);
+      if (same && !negative) {
         final = { ...tested[0].core, deadlines: base.deadlines };
         flags = { ...tested[0].core.flags, conflictingKeys: conflicting.map((c) => c.key), conflicts: list };
         missing = final.missing.filter((m) => !ids.has(`${m.subjectKey}\u0000${m.key}`));
@@ -900,9 +1073,10 @@ export function evaluateR02V1(input: EvaluationInput<R02View, R02Params>): Evalu
     }
   }
 
-  const outcome = deriveOutcome({ ...final.dims, readyForApproval: "unknown" }, flags, []);
+  const outcome = deriveOutcome({ ...final.dims, readyForApproval: "unknown" }, flags, final.assumptions);
   const amount = AMOUNT_OUTCOMES.has(outcome) ? final.amount : null;
-  const deadlines = DEADLINE_OUTCOMES.has(outcome) ? final.deadlines : [];
+  // D234 (6): a manual_review result carries no firm carrier date (only unknown/disputed rows).
+  const deadlines = !DEADLINE_OUTCOMES.has(outcome) ? [] : outcome === "manual_review" ? final.deadlines.filter((d) => d.dueAt === undefined) : final.deadlines;
   const missingFacts: MissingFact[] =
     outcome === "needs_facts" ? [...missing, ...unconfirmed]
       : outcome === "eligible" || outcome === "likely_eligible" || outcome === "possible_contract_benefit" || outcome === "not_yet_due" ? [...(outcome === "not_yet_due" ? missing : []), ...unconfirmed]
@@ -913,13 +1087,15 @@ export function evaluateR02V1(input: EvaluationInput<R02View, R02Params>): Evalu
   const lines = [
     ...extra,
     ...(outcome === "manual_review" && flags.manualReviewReason && !manualReason ? [flags.manualReviewReason] : []),
-    ...(amount ? [`Refund owed: ${formatMinor(amount.estimate.amountMinor, amount.estimate.currency)} (fare + taxes + ancillary fees − already refunded), in the original form of payment (P-260.10).`] : []),
+    ...(amount ? [`Refund owed: ${formatMinor(amount.estimate.amountMinor, amount.estimate.currency)} (fare + taxes + ancillary fees − anything refunded before this case), in the original form of payment (P-260.10).`] : []),
     ...(isApprovable(outcome) && final.path === "a" ? ["The airline must refund automatically; Recoup tracks its deadline."] : []),
     ...(isApprovable(outcome) && final.path === "b" ? ["A travel agency took the payment: it owes the refund when you ask for it (399.80(l)), not automatically."] : []),
     ...final.explanation,
-    ...(deadlines.length > 0 ? final.deadlineNotes : []),
+    ...(AMOUNT_OUTCOMES.has(outcome) ? final.assumptions.map((a) => a.text) : []),
+    ...(deadlines.some((d) => d.dueAt !== undefined) ? final.deadlineNotes : []),
   ];
   const explanation = [...new Set(lines)].slice(0, 12);
+  const bagFeeKeys = r04Bags(v).filter((b) => money(v.lookup.get(b.subjectKey, K.bagFee)) !== null).map((b) => `txn:${v.transactionId}:bag_fee:${b.lossId}`);
 
   return {
     scenarioId: "R02",
@@ -933,13 +1109,14 @@ export function evaluateR02V1(input: EvaluationInput<R02View, R02Params>): Evalu
     dimensions,
     conditions: final.conditions,
     missingFacts,
-    assumptions: [],
+    assumptions: final.assumptions,
     disqualifierIds: final.disqualifierIds,
     amount,
     deadlines,
     sourceRefs: sourceRefsFor(final.passages),
-    lossKeys: [`txn:${v.transactionId}:fare_unused`],
-    overlap: [],
+    lossKeys: [`txn:${v.transactionId}:fare_unused`, ...bagFeeKeys].slice(0, 20),
+    // M27 R02-18: R03 is the alternative channel when the ticket was paid by (known) credit card.
+    overlap: code(v.lookup.get(TXN, K.payment)) === "credit_card" && v.lookup.get(TXN, K.payment).known ? [R03_ALTERNATIVE] : [],
     nextAction,
     explanation,
     flags,
@@ -956,8 +1133,8 @@ export function r02V1BoundFacts(v: R02View): BoundFactValue[] {
 }
 
 /**
- * D208 PackAdapter (M20's `RulePack.adapter`; standalone until that type is on main, then wired as `adapter`): live
- * fact rows of one air transaction → the single R02 run (the ticket, subject `txn`). Pure.
+ * D208 PackAdapter (M20's `RulePack.adapter`): live fact rows of one air transaction → the single R02 run (the ticket,
+ * subject `txn`). Pure.
  */
 export const r02Adapter = Object.freeze({
   runs(input: AirSnapshotInput): { subjectKey: string; snapshot: R02View; lookup: FactLookup }[] {
@@ -1004,7 +1181,6 @@ export const r02AirRefundV1: RulePack<R02View, R02Params, CaseContext> = {
     { subjectPattern: TXN, key: K.altDeparts, class: "required" },
     { subjectPattern: TXN, key: K.cancelNotice, class: "required" },
     { subjectPattern: TXN, key: K.mor, class: "required" },
-    { subjectPattern: TXN, key: K.operating, class: "required" },
     { subjectPattern: TXN, key: K.fare, class: "required" },
     { subjectPattern: TXN, key: K.taxes, class: "required" },
     { subjectPattern: TXN, key: K.ancillary, class: "required" },
@@ -1012,20 +1188,28 @@ export const r02AirRefundV1: RulePack<R02View, R02Params, CaseContext> = {
   ],
   fixturesPath: "docs/rules/fixtures/R02.json",
   lateAskDeadlineIds: [],
-  overlap: [],
+  overlap: [R03_ALTERNATIVE],
   knownLimitations: [
-    "L1: a renumbered-only flight is manual_review while DOT's enforcement pause runs (to 2027-07-07); mandatory re-review by then.",
+    "L1: a renumbered-only flight is manual_review while DOT's enforcement pause runs (to 2027-07-07); after it the path is source_unverified until re-reviewed.",
     "L2: the 20-calendar-day timer is the regulation's; DOT's page also says '20 business days' (DOT-REF-3) — disclosed, not used.",
-    "L4/L5/L11: the downgrade fare difference, an accepted-but-not-flown rebooking and the disability grounds are manual_review.",
+    "L4/L5/L11: the downgrade fare difference, an accepted-but-not-flown rebooking and the disability grounds are manual_review, only from confirmed facts.",
+    "D234 (7): the disability criteria (6)/(7) are never asked — the passenger raises them (260.6(b) 'upon notification'); v1 models no connecting-airport identities or aircraft features, so they can never be decided here.",
     "L7: a ticket agent's refund deadline is not computable (it runs from information the consumer cannot see).",
-    "A1: the carrier timer counts calendar days in the consumer's home time zone; when unknown, the earliest-ending US zone (never asked, never outcome-changing).",
+    "A1 (D234 (8), D235): the carrier timer counts calendar days in the consumer's home time zone; when unknown it shows 'on or about <earliest> – <latest>' across the US zones and treats the airline as late only after the latest.",
     "A4: the fare is taken to be for the affected itinerary; a partly flown ticket has no estimate (a person splits it).",
     "A7: for a cancellation with nothing offered, the timer runs from the carrier's cancellation notice.",
+    "M27 R02-05 (spec gap, D234 (5)): v1 assumes scheduled service by a covered carrier and does not detect charters or non-covered carriers.",
+    "D234 (2)/(3): the carrier's identity, offer_type on a rejection and the payment class decide nothing about the outcome in v1; the payment class only selects the carrier timer.",
+    "D234 (4)/D235 (B): already_refunded is money refunded before the case started; it reduces the estimate (spec §8) but never the outcome. Money received on a case is a ledger credit only.",
+    "D234 (17): a checked-bag fee belongs to R04 path a, not the ancillary total; R02 shares each recorded bag fee's loss key so an overlap is never counted twice.",
+    "M27 R02-18: R12 (card trip-cancellation cover) is primary/secondary to this refund and never additive (spec §16 step 10, fixture R02-12); it is declared once R12's pack defines its remedy key — until then DA-A-4's non-additive default applies. R15 stays undeclared (per carrier plan).",
+    "Precedence (contract §4 rules 1–3): a known disqualifier (flew, accepted compensation) outranks the L1/L11/straddle reviews, and unsupported outranks staleness.",
     "Refundable tickets, charters, non-US itineraries and the 24-hour rule (14 CFR 259.5(b)(4)) are out of scope for v1 (L8).",
-    "The multi-change nuance (A3: successive changes compared with the original schedule) relies on the stored original schedule.",
     "USD amounts only (O6); amounts in different currencies are never added — a person works out the amount.",
   ],
   evaluate: evaluateR02V1,
   adapter: r02Adapter,
   nonCashAcceptance: AIR_VOUCHER_ACCEPTANCE,
+  // DA-A-25 (contract §6): the carrier as merchant of record refunds automatically → tracked, not requested.
+  caseMode: (r) => (r.nextAction.kind === "track" || r.nextAction.kind === "escalate" ? "track_automatic" : "request"),
 };

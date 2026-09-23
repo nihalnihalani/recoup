@@ -43,6 +43,7 @@ import {
   R02_V1_PARAMS,
 } from "./r02_air_refund_v1";
 import * as prod from "./registry";
+import { R03_REMEDY_KEY } from "./r03_billing_error_v1";
 import { activePack as testActivePack, resetTestRegistry, setTestActivations } from "./testRegistry";
 import { ENGINE_VERSION, type EvaluationResult, type MissingFact } from "./types";
 import { readFileSync } from "node:fs";
@@ -538,5 +539,37 @@ describe("R02 v1 pack invariants", () => {
     expect(r02AirRefundV1.lifecycle).toBe("researched");
     expect(r02AirRefundV1.fixturesPath).toBe("docs/rules/fixtures/R02.json");
     expect(new Set(R02_SOURCES.map((s) => s.sourceId))).toEqual(new Set(["ecfr-14cfr260", "usc-49-42305", "ecfr-14cfr399.80l", "federal-web-excerpts", "fr-notices"]));
+  });
+});
+
+describe("M20b wiring (E1, E4, E5) and the declared R03 alternative (M22b)", () => {
+  it("E5: every source carries the manifest's mandatoryReviewBy; from that date an older verification is stale", () => {
+    const manifest = JSON.parse(readFileSync(path.join(REPO_ROOT, "docs/rules/manifest.json"), "utf8")) as { packs: { ruleId: string; mandatoryReviewBy?: string }[] };
+    const entry = manifest.packs.find((p) => p.ruleId === r02AirRefundV1.ruleId)!;
+    expect(R02_SOURCES.every((s) => s.mandatoryReviewBy === entry.mandatoryReviewBy)).toBe(true);
+    const at = (d: string) => Object.fromEntries(R02_SOURCES.map((s) => [s.sourceId, { lastVerifiedAt: d }]));
+    const facts = with_(R02_01, {
+      consumer_response_at: C("datetime", "2027-07-01T15:20:00-04:00"), original_sched_departure_at: C("datetime", "2027-07-05T07:00:00-04:00"),
+    });
+    const now = Date.parse("2027-07-08T12:00:00-04:00");
+    expect(run(viewOf(facts), now, at("2027-07-06")).outcome).toBe("source_unverified");
+    expect(run(viewOf(facts), now, at("2027-07-07")).outcome).toBe("eligible");
+  });
+
+  it("E1: with the zone unknown the carrier timer carries the range and waits for the latest zone", () => {
+    const r = evalFacts(with_(R02_01, { consumer_response_at: C("datetime", "2026-10-01T00:30:00-04:00") }), Date.parse("2026-10-10T12:00:00-04:00"));
+    const d = carrierTimer(r)!;
+    expect([d.status, d.dueLocalDate, d.dueLocalDateRange, d.timeZone]).toEqual(["open", "2026-10-09", { earliest: "2026-10-09", latest: "2026-10-13" }, undefined]);
+    expect(r.nextAction).toEqual({ kind: "track" });
+  });
+
+  it("E4: a candidate payment class selects no timer (unknown_anchor, asked to confirm)", () => {
+    const r = evalFacts(with_(R02_01, { payment_method_class: { type: "enum", value: "credit_card", state: "extracted_candidate" } }));
+    expect(carrierTimer(r)!.status).toBe("unknown_anchor");
+    expect(carrierTimer(r)!.basis).toContain("air.payment_method_class");
+  });
+
+  it("R02-18: the R03 alternative uses R03's own remedy key", () => {
+    expect(r02AirRefundV1.overlap).toEqual([{ withScenario: "R03", withRemedyKey: R03_REMEDY_KEY, relation: "alternative" }]);
   });
 });

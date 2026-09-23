@@ -95,7 +95,8 @@ export function r02View(s: Pick<AirSnapshot, "transactionId" | "lookup">): R02Vi
 
 /**
  * The facts an approved R02 basis is bound to (rev 5 N6): identity (ticket, flight), the path (merchant of record),
- * the refund event and decision, the timer inputs and the amount inputs. 24 cells.
+ * the refund event and decision, the timer inputs, the amount inputs, and every significance input that can decide the
+ * result — airports, connections and cabins (M27 R02-16). 32 cells, exactly `MAX_BOUND_FACTS`.
  */
 export const R02_BOUND_KEYS = [
   "air.ticket_number", "air.original_flight_number", "air.itinerary_scope", "air.operating_carrier",
@@ -104,6 +105,9 @@ export const R02_BOUND_KEYS = [
   "air.fare_paid", "air.taxes_paid", "air.ancillary_fees_total", "air.already_refunded", "air.partly_flown",
   "air.original_sched_departure_at", "air.original_sched_arrival_at", "air.changed_sched_departure_at",
   "air.changed_sched_arrival_at", "air.changed_or_alternative_departs_at", "air.cancellation_notice_at",
+  "air.original_origin_airport", "air.original_destination_airport", "air.changed_origin_airport",
+  "air.changed_destination_airport", "air.original_connections", "air.changed_connections", "air.original_cabin",
+  "air.changed_cabin",
 ] as const satisfies readonly FactKey[];
 
 export function r02BoundFacts(v: R02View): BoundFactValue[] {
@@ -111,16 +115,62 @@ export function r02BoundFacts(v: R02View): BoundFactValue[] {
 }
 
 // ---------------------------------------------------------------------------
-// R04 view + bound facts
+// R04 bags, view + bound facts
 // ---------------------------------------------------------------------------
 
-/** What R04 v1 evaluates: one bag (its subject), the itinerary (`txn`), and the transaction's lines. */
+/** Keys that may sit on a bag's incident (keys_air `subject` includes "incident"). */
+export const R04_BAG_KEYS: ReadonlySet<string> = new Set(
+  (AIR_FACT_SPECS as readonly { key: string; subject: readonly string[] }[]).filter((s) => s.subject.includes("incident")).map((s) => s.key),
+);
+/**
+ * Trip-level facts among them: the same for every bag on the trip, so a bag's incident may inherit them from `txn`
+ * (M27 R04-06). Every other bag key describes ONE bag and is never inherited.
+ */
+export const R04_TRIP_LEVEL_KEYS: ReadonlySet<string> = new Set(["air.deplane_opportunity_at", "air.incident_date"]);
+/** Per-bag keys: they make a subject a bag (M27 R04-06/R04-15). */
+export const R04_PER_BAG_KEYS: ReadonlySet<string> = new Set([...R04_BAG_KEYS].filter((k) => !R04_TRIP_LEVEL_KEYS.has(k)));
+
+export interface R04Bag {
+  /** `txn` (a bag recorded on the transaction itself) or the bag's `incident:<id>`. */
+  subjectKey: string;
+  /**
+   * The bag's stable identity in loss keys (D234 (11); contract §3.3 `txn:<id>:bag_fee:<n>`): its KNOWN bag tag, else
+   * the incident id, else `txn` — never a position, so adding or removing another bag never moves it.
+   */
+  lossId: string;
+}
+
+function bagLossId(lookup: CellLookup, subjectKey: string): string {
+  const tag = lookup.get(subjectKey, "air.bag_tag_number");
+  if (tag.known && tag.value.kind === "identifier") return tag.value.value;
+  const parsed = parseSubjectKey(subjectKey);
+  return parsed?.kind === "incident" ? parsed.id : AIR_TXN_SUBJECT;
+}
+
+/**
+ * The bags of an air transaction (M27 R04-04/05/06/15): every `incident:<id>` holding a per-bag fact, plus `txn` when
+ * the transaction itself holds one (a one-bag trip recorded without an incident). An air transaction with no bag fact
+ * at all has no bags, so R04 asks nothing about bags on a flight whose bags were fine. Sorted by subject key.
+ */
+export function r04Bags(s: Pick<AirSnapshot, "lookup">): R04Bag[] {
+  const subjects = new Set<string>();
+  for (const c of s.lookup.cells()) {
+    if (!R04_PER_BAG_KEYS.has(c.key)) continue;
+    const kind = parseSubjectKey(c.subjectKey)?.kind;
+    if (kind === "incident" || kind === "transaction") subjects.add(c.subjectKey);
+  }
+  return [...subjects].sort().map((subjectKey) => ({ subjectKey, lossId: bagLossId(s.lookup, subjectKey) }));
+}
+
+/** What R04 v1 evaluates: one bag (the run's subject), every bag of the trip (path b), the itinerary and the lines. */
 export interface R04View {
   transactionId: Id<"transactions">;
-  /** `txn` or the bag's `incident:<id>`. */
+  /** The run's bag: `txn` or `incident:<id>`. */
   bagSubjectKey: string;
-  /** 1-based bag number on the transaction (loss key `txn:<id>:bag_fee:<n>`, contract §3.3). */
-  bagOrdinal: number;
+  /** Its loss-key identity (`R04Bag.lossId`). */
+  bagLossId: string;
+  /** Every bag of the trip (path b's delay test passes if ANY bag qualifies). */
+  bags: readonly R04Bag[];
   lookup: CellLookup;
   expenseLines: readonly number[];
   propertyItems: readonly number[];
@@ -128,38 +178,29 @@ export interface R04View {
 
 export function r04View(
   s: Pick<AirSnapshot, "transactionId" | "lookup" | "expenseLines" | "propertyItems">,
-  bag: { subjectKey: string; ordinal: number } = { subjectKey: AIR_TXN_SUBJECT, ordinal: 1 },
+  bagSubjectKey: string = AIR_TXN_SUBJECT,
 ): R04View {
-  const kind = parseSubjectKey(bag.subjectKey)?.kind;
-  if (kind !== "transaction" && kind !== "incident") throw new Error(`a bag lives on txn or an incident, not ${bag.subjectKey}`);
-  if (!Number.isSafeInteger(bag.ordinal) || bag.ordinal < 1) throw new Error("bag ordinal must be ≥ 1");
+  const kind = parseSubjectKey(bagSubjectKey)?.kind;
+  if (kind !== "transaction" && kind !== "incident") throw new Error(`a bag lives on txn or an incident, not ${bagSubjectKey}`);
+  const bags = r04Bags(s);
   return {
     transactionId: s.transactionId,
-    bagSubjectKey: bag.subjectKey,
-    bagOrdinal: bag.ordinal,
+    bagSubjectKey,
+    bagLossId: bagLossId(s.lookup, bagSubjectKey),
+    bags: bags.some((b) => b.subjectKey === bagSubjectKey) ? bags : [...bags, { subjectKey: bagSubjectKey, lossId: bagLossId(s.lookup, bagSubjectKey) }],
     lookup: s.lookup,
     expenseLines: s.expenseLines,
     propertyItems: s.propertyItems,
   };
 }
 
-/** Keys that describe one bag (keys_air `subject` includes "incident"): they sit on the bag's incident, or on `txn`. */
-export const R04_BAG_KEYS: ReadonlySet<string> = new Set(
-  (AIR_FACT_SPECS as readonly { key: string; subject: readonly string[] }[]).filter((s) => s.subject.includes("incident")).map((s) => s.key),
-);
-
 /**
- * The bags of an air transaction: every `incident:<id>` subject holding a bag key, in subject-key order (ordinal 1, 2,
- * …); with none, the transaction itself is the one bag. Pure and deterministic, so ordinals (and the loss keys
- * `txn:<id>:bag_fee:<n>`) are stable across evaluations.
+ * The subject a bag's fact is read from: per-bag keys only on the bag itself; trip-level keys on the bag, else on
+ * `txn` (M27 R04-06). Evaluators and bound facts use the same rule, so the cell read is the cell bound (R04-14).
  */
-export function r04BagSubjects(s: Pick<AirSnapshot, "lookup">): { subjectKey: string; ordinal: number }[] {
-  const incidents = new Set<string>();
-  for (const c of s.lookup.cells()) {
-    if (R04_BAG_KEYS.has(c.key) && parseSubjectKey(c.subjectKey)?.kind === "incident") incidents.add(c.subjectKey);
-  }
-  const keys = [...incidents].sort();
-  return keys.length === 0 ? [{ subjectKey: AIR_TXN_SUBJECT, ordinal: 1 }] : keys.map((subjectKey, i) => ({ subjectKey, ordinal: i + 1 }));
+export function bagFactSubject(lookup: CellLookup, bagSubjectKey: string, key: string): string {
+  if (bagSubjectKey === AIR_TXN_SUBJECT || !R04_TRIP_LEVEL_KEYS.has(key)) return bagSubjectKey;
+  return lookup.get(bagSubjectKey, key).status === "missing" ? AIR_TXN_SUBJECT : bagSubjectKey;
 }
 
 /** Itinerary-level keys every R04 path binds. */
@@ -168,21 +209,24 @@ const R04_A_BAG_KEYS = [
   "air.bag_tag_number", "air.bag_fee_paid", "air.deplane_opportunity_at", "air.bag_delivered_or_picked_up_at",
   "air.bag_status", "air.mbr_filed", "air.mbr_reference", "air.mbr_filed_at", "air.exemption_failed_recheck",
   "air.exemption_failed_pickup", "air.exemption_voluntary_separation", "air.exemption_documented_by_carrier",
+  "air.incident_date",
 ] as const satisfies readonly FactKey[];
 const R04_A_TXN_KEYS = ["air.longest_us_foreign_nonstop_segment_minutes", "air.operating_carrier_last_segment"] as const satisfies readonly FactKey[];
-const R04_B_BAG_KEYS = ["air.bag_tag_number", "air.deplane_opportunity_at", "air.bag_delivered_or_picked_up_at", "air.bag_status"] as const satisfies readonly FactKey[];
-const R04_BC_TXN_KEYS = ["air.large_aircraft_segment_on_ticket"] as const satisfies readonly FactKey[];
-const R04_C_BAG_KEYS = ["air.bag_tag_number", "air.bag_status", "air.incident_date"] as const satisfies readonly FactKey[];
-const R04_C_TXN_KEYS = ["air.carrier_liability_limit"] as const satisfies readonly FactKey[];
-export const R04_EXPENSE_LINE_KEYS = ["air.expense_amount", "air.expense_receipt", "air.expense_allocated_to"] as const satisfies readonly FactKey[];
+const R04_B_BAG_KEYS = [
+  "air.deplane_opportunity_at", "air.bag_delivered_or_picked_up_at", "air.bag_status", "air.mbr_filed", "air.incident_date",
+] as const satisfies readonly FactKey[];
+const R04_BC_TXN_KEYS = ["air.large_aircraft_segment_on_ticket", "air.carrier_liability_limit"] as const satisfies readonly FactKey[];
+const R04_B_TXN_KEYS = ["air.reimbursement_received"] as const satisfies readonly FactKey[];
+const R04_C_BAG_KEYS = ["air.bag_tag_number", "air.bag_status", "air.incident_date", "air.deplane_opportunity_at"] as const satisfies readonly FactKey[];
+export const R04_EXPENSE_LINE_KEYS = ["air.expense_amount", "air.expense_date", "air.expense_receipt", "air.expense_allocated_to"] as const satisfies readonly FactKey[];
 export const R04_PROPERTY_KEYS = ["air.property_item", "air.property_claimed_value", "air.property_proof"] as const satisfies readonly FactKey[];
 
-const B_BASE = R04_ITINERARY_KEYS.length + R04_B_BAG_KEYS.length + R04_BC_TXN_KEYS.length;
-const C_BASE = R04_ITINERARY_KEYS.length + R04_C_BAG_KEYS.length + R04_BC_TXN_KEYS.length + R04_C_TXN_KEYS.length;
+const B_BASE = R04_ITINERARY_KEYS.length + R04_B_BAG_KEYS.length + R04_BC_TXN_KEYS.length + R04_B_TXN_KEYS.length;
+const C_BASE = R04_ITINERARY_KEYS.length + R04_C_BAG_KEYS.length + R04_BC_TXN_KEYS.length;
 /**
- * The most expense lines (path b) / property items (path c) one evaluation binds: every line binds its three cells and
- * the whole binding stays within `MAX_BOUND_FACTS` (rev 5 N6). An engineering bound, not a legal number: a bag with
- * more lines is prepared by a person (the pack returns `manual_review`).
+ * The most expense lines (path b) / property items (path c) one evaluation binds: every line binds its cells and the
+ * whole binding stays within `MAX_BOUND_FACTS` (rev 5 N6). An engineering bound, not a legal number: a bag with more
+ * lines is prepared by a person (the pack returns `manual_review`).
  */
 export const R04_MAX_EXPENSE_LINES = Math.floor((MAX_BOUND_FACTS - B_BASE) / R04_EXPENSE_LINE_KEYS.length);
 export const R04_MAX_PROPERTY_ITEMS = Math.floor((MAX_BOUND_FACTS - C_BASE) / R04_PROPERTY_KEYS.length);
@@ -191,7 +235,7 @@ export type R04Path = "a" | "b" | "c";
 
 export function r04BoundFacts(v: R04View, path: R04Path): BoundFactValue[] {
   const refs: FactRef[] = R04_ITINERARY_KEYS.map((key) => ({ subjectKey: AIR_TXN_SUBJECT, key }));
-  const bag = (keys: readonly string[]) => keys.forEach((key) => refs.push({ subjectKey: v.bagSubjectKey, key }));
+  const bag = (keys: readonly string[]) => keys.forEach((key) => refs.push({ subjectKey: bagFactSubject(v.lookup, v.bagSubjectKey, key), key }));
   const txn = (keys: readonly string[]) => keys.forEach((key) => refs.push({ subjectKey: AIR_TXN_SUBJECT, key }));
   if (path === "a") {
     bag(R04_A_BAG_KEYS);
@@ -199,13 +243,13 @@ export function r04BoundFacts(v: R04View, path: R04Path): BoundFactValue[] {
   } else if (path === "b") {
     bag(R04_B_BAG_KEYS);
     txn(R04_BC_TXN_KEYS);
+    txn(R04_B_TXN_KEYS);
     for (const n of v.expenseLines.slice(0, R04_MAX_EXPENSE_LINES)) {
       for (const key of R04_EXPENSE_LINE_KEYS) refs.push({ subjectKey: lineSubject(n), key });
     }
   } else {
     bag(R04_C_BAG_KEYS);
     txn(R04_BC_TXN_KEYS);
-    txn(R04_C_TXN_KEYS);
     for (const n of v.propertyItems.slice(0, R04_MAX_PROPERTY_ITEMS)) {
       for (const key of R04_PROPERTY_KEYS) refs.push({ subjectKey: lineSubject(n), key });
     }

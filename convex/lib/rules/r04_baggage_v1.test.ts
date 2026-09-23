@@ -13,7 +13,7 @@
  * three `air.exemption_*` booleans; `carrier_claim_deadlines` → `air.carrier_claim_deadline`; `expense_lines[i]` →
  * subject `line:<i+1>` with `air.expense_amount`/`_date`/`_description`/`_receipt`/`_allocated_to` (a null receipt or
  * allocation is no row); `property_items[i]` → `line:<i+1>` with `air.property_item`/`_claimed_value`/`_proof`
- * (proof "none" is no row). Not mapped: `itinerary` (a description of the segments; the segment length is its own
+ * (proof "none" is no row); a receipt label ("rcpt-001") becomes the pack's evidence reference `evidence:rcpt001`. Not mapped: `itinerary` (a description of the segments; the segment length is its own
  * fact) and `reimbursements_received` (R04-12: the paid line is already recorded by its `allocated_to`, which is what
  * excludes it, spec §15.5).
  *
@@ -136,7 +136,7 @@ function rowsOf(facts: Readonly<Record<string, FixtureFact>>): CellRow[] {
         part("air.expense_amount", l.amount);
         part("air.expense_date", l.date);
         part("air.expense_description", l.description);
-        part("air.expense_receipt", l.receipt);
+        part("air.expense_receipt", l.receipt === null ? null : receiptRef(l.receipt));
         part("air.expense_allocated_to", l.allocated_to);
       });
       continue;
@@ -157,6 +157,9 @@ function rowsOf(facts: Readonly<Record<string, FixtureFact>>): CellRow[] {
   }
   return rows;
 }
+
+/** A fixture receipt label ("rcpt-001") as the pack's receipt reference (`evidence:<id>`, M27 R04-11; D235 (D)). */
+const receiptRef = (label: string) => `evidence:${label.toLowerCase().replace(/[^a-z0-9]/g, "")}`;
 
 const viewOf = (facts: Readonly<Record<string, FixtureFact>>, extra: CellRow[] = []): R04View =>
   r04View(buildAirSnapshot({ transactionId: TXN_ID, rows: [...rowsOf(facts), ...extra] }));
@@ -305,8 +308,8 @@ describe("R04 v1 code packs × docs/rules/fixtures/R04.json (unmodified, via M08
       if (typeof e.explanation === "string") {
         // R04-13 (5a): names both values and how to resolve it.
         const text = r.explanation.join(" ");
-        expect(text).toContain("2026-09-13T17:55:00.000Z"); // 10:55 -07:00 (user)
-        expect(text).toContain("2026-09-13T15:30:00.000Z"); // 08:30 -07:00 (courier scan)
+        expect(text).toContain("2026-09-13 17:55 UTC"); // 10:55 -07:00 (user), labelled UTC (M27 R04-20)
+        expect(text).toContain("2026-09-13 15:30 UTC"); // 08:30 -07:00 (courier scan)
         expect(text.toLowerCase()).toContain("upload proof");
       }
       if ((c.expected as Record<string, unknown>).dedupe !== undefined) {
@@ -423,8 +426,8 @@ describe("§10 R04 rows", () => {
     const r = evalPath("b", confirmedBag([line("E1", 3000, "rcpt-1"), line("E2", 2000, "rcpt-2")]));
     expect(r.amount?.estimate).toEqual({ amountMinor: 5000, currency: "USD" });
     expect(r.amount?.basis).toBe("documented_total");
-    expect(r.amount?.cap).toMatchObject({ amount: { amountMinor: 470_000, currency: "USD" }, sourcePassageId: "P-254.4" });
-    expect(r.amount?.cap?.note).toContain("at least $4,700 per passenger");
+    // M27 R04-08: the federal floor is never amount.cap — it is only the explanation line.
+    expect(r.amount?.cap).toBeUndefined();
     expect(r.explanation.join(" ")).toContain("Carrier liability limit: at least $4,700 per passenger (federal floor on the carrier's cap)");
   });
 
@@ -439,7 +442,7 @@ describe("§10 R04 rows", () => {
     const facts = confirmedBag([line("E1", 3000, "rcpt-1"), line("E2", 2000, "rcpt-2", "card_benefit:baggage_delay")]);
     const a = evalPath("a", facts);
     const b = evalPath("b", facts);
-    expect(a.lossKeys).toEqual([`txn:${TXN_ID}:bag_fee:1`]);
+    expect(a.lossKeys).toEqual([`txn:${TXN_ID}:bag_fee:0123456789`]); // the bag tag (D234 (11))
     expect(b.lossKeys).toEqual([`txn:${TXN_ID}:exp:1`]);
     expect(b.amount?.estimate.amountMinor).toBe(3000);
     expect(a.remedyKey).not.toBe(b.remedyKey);
@@ -536,23 +539,24 @@ describe("R04 v1 pack invariants", () => {
     }
   });
 
-  it("D208 adapters: path a runs once per bag (incident subjects, stable ordinals); b and c run once", () => {
-    const bagRows = (incident: string, fee: number): CellRow[] => rowsOf(with_(R04_01.facts as Facts, { bag_fee_paid: C("money", { amount_minor: fee, currency: "USD" }) }, ["itinerary_scope", "operating_carrier_last_segment"]))
-      .map((r) => ({ ...r, subjectKey: incident }));
+  it("D208 adapters: paths a and c run once per bag (loss keys by bag tag); b runs once per trip", () => {
+    const bagRows = (incident: string, fee: number, tag: string): CellRow[] => rowsOf(with_(R04_01.facts as Facts, {
+      bag_fee_paid: C("money", { amount_minor: fee, currency: "USD" }), bag_tag_number: C("string", tag),
+    }, ["itinerary_scope", "operating_carrier_last_segment"])).map((r) => ({ ...r, subjectKey: incident }));
     const rows = [
       ...rowsOf({ itinerary_scope: { type: "enum", value: "domestic", state: "derived" }, operating_carrier_last_segment: C("string", "XA") }),
-      ...bagRows("incident:bagtwo", 3500),
-      ...bagRows("incident:bagone", 4000),
+      ...bagRows("incident:bagtwo", 3500, "0222222222"),
+      ...bagRows("incident:bagone", 4000, "0111111111"),
     ];
     const input = { transactionId: TXN_ID, isExample: false, rows };
     const a = R04_ADAPTERS.a.runs(input);
-    expect(a.map((r) => [r.subjectKey, r.snapshot.bagOrdinal])).toEqual([["incident:bagone", 1], ["incident:bagtwo", 2]]);
+    expect(a.map((r) => [r.subjectKey, r.snapshot.bagLossId])).toEqual([["incident:bagone", "0111111111"], ["incident:bagtwo", "0222222222"]]);
     const results = a.map((r) => run("a", r.snapshot, R04_01.now, verificationFor("a", R04_01)));
     expect(results.map((r) => [r.outcome, r.amount?.estimate.amountMinor, r.lossKeys[0]])).toEqual([
-      ["eligible", 4000, `txn:${TXN_ID}:bag_fee:1`], ["eligible", 3500, `txn:${TXN_ID}:bag_fee:2`],
+      ["eligible", 4000, `txn:${TXN_ID}:bag_fee:0111111111`], ["eligible", 3500, `txn:${TXN_ID}:bag_fee:0222222222`],
     ]);
     expect(R04_ADAPTERS.b.runs(input).map((r) => r.subjectKey)).toEqual(["incident:bagone"]);
-    expect(R04_ADAPTERS.c.runs(input).map((r) => r.subjectKey)).toEqual(["incident:bagone"]);
+    expect(R04_ADAPTERS.c.runs(input).map((r) => r.subjectKey)).toEqual(["incident:bagone", "incident:bagtwo"]);
     // A single bag recorded on the transaction itself: one run on txn, identical to the direct evaluation.
     const single = R04_ADAPTERS.a.runs({ transactionId: TXN_ID, isExample: false, rows: rowsOf(R04_01.facts) });
     expect(single.map((r) => r.subjectKey)).toEqual([TXN]);

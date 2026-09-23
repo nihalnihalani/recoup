@@ -400,8 +400,8 @@ export const AIR_FACT_SPECS = [
     subject: TXN,
     value: "money",
     question: {
-      prompt: "How much did you pay in extra fees with the ticket (seats, bags and similar)? Enter 0 if none.",
-      why: "Those fees are refunded with the fare; Recoup never assumes there were none.",
+      prompt: "How much did you pay in extra fees for the cancelled or changed flight (seats and similar, not checked-bag fees)? Enter 0 if none.",
+      why: "Those fees are refunded with the fare; a checked-bag fee is refunded separately. Recoup never assumes there were none.",
     },
     evidenceHint: TICKET_DOCS,
     userAssertable: true,
@@ -412,7 +412,10 @@ export const AIR_FACT_SPECS = [
     categories: AIR,
     subject: TXN,
     value: "money",
-    question: { prompt: "How much has already been refunded? Enter 0 if nothing.", why: "Only what is still owed is requested." },
+    question: {
+      prompt: "How much had the airline already refunded before you started this case? Enter 0 if nothing.",
+      why: "Only what is still owed is requested. Money that arrives after the case starts is recorded on the case instead, so it is never subtracted twice.",
+    },
     evidenceHint: ["card_statement", "refund_notice"],
     userAssertable: true,
   },
@@ -684,6 +687,21 @@ export const AIR_FACT_SPECS = [
       why: "On domestic trips an airline need not pay for items its contract excludes.",
     },
     evidenceHint: ["policy_page"],
+    userAssertable: true,
+  },
+  {
+    // D236 (M27 ruling (13)): a reimbursement already received for this trip's baggage losses that is NOT recorded
+    // against specific expense lines (e.g. an airline's interim lump sum). R04 v1 then asks which lines it covered.
+    key: "air.reimbursement_received",
+    domain: "air",
+    categories: AIR,
+    subject: TXN,
+    value: "money",
+    question: {
+      prompt: "Has the airline, a card benefit or an insurer already paid you something for this bag that is not tied to specific receipts? How much?",
+      why: "A payment that covered some of your expenses must not be claimed again; tell Recoup which expenses it covered.",
+    },
+    evidenceHint: ["refund_notice", "card_statement"],
     userAssertable: true,
   },
   {

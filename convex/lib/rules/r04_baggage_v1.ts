@@ -8,29 +8,44 @@
  *   R04.b `delayed_bag_expenses`     — documented incidental expenses while delayed, 14 CFR 254.4 + DOT-BAG-1/2
  *   R04.c `lost_or_damaged_property` — lost/damaged property, 14 CFR 254.4 + DOT-BAG-6/7
  *
- * Path a (spec §15.2, D147(1)). Ordered stages: scope (covered flight; `non_us` → unsupported) → Mishandled Baggage
- * Report (P-260.5-B: unknown → needs_facts; confirmed "not filed" → `not_yet_due` with `reevaluate.when` "MBR filed"
- * and the user's own next action `add_evidence baggage_report`, D154) → exemptions (P-260.5-F: carrier defences; a
- * true one → not_eligible, (f)(2) only when the carrier documented it, (f)(3) not for a lost bag, 260.5(g); unknown
- * ones are an assumption, never a question) → significant delay (P-260.2-SDB/P-260.5-A: from the deplane opportunity
+ * Bags (D234 (11); M27 R04-04/05/06/15). A trip has one bag per `incident:<id>` holding a per-bag fact, plus `txn` when
+ * the transaction itself holds one; with no bag fact there are no bags and R04 asks nothing. Per-bag facts are read
+ * only on their bag; only trip-level facts (the deplane opportunity, the incident date) are inherited from `txn`. A
+ * bag's loss key is `txn:<id>:bag_fee:<tag>` (its known bag tag, else its incident id), never a position. Paths a and
+ * c run once per bag; path b runs once per trip (its expense lines are trip-level) and passes if ANY bag was delayed.
+ *
+ * Path a (spec §15.2, D147(1)). Ordered stages: compliance gate (the incident's date; unknown → capped with an
+ * assumption, README rule 5, D234 (8)) → scope (covered flight; `non_us` → unsupported) → Mishandled Baggage Report
+ * (P-260.5-B: unknown → needs_facts; confirmed "not filed" → `not_yet_due` with `reevaluate.when` "MBR filed" and the
+ * user's own next action `add_evidence baggage_report`, D154) → exemptions (P-260.5-F: carrier defences; a true one →
+ * not_eligible, (f)(2) only when the carrier documented it, (f)(3) not for a lost bag, 260.5(g); unknown ones are an
+ * assumption, conflicting ones follow D152) → significant delay (P-260.2-SDB/P-260.5-A: from the deplane opportunity
  * to delivery or pickup, > 12 h domestic, > 15 h / > 30 h international by the longest US↔foreign nonstop segment;
- * exactly the threshold is "within", A1; a declared-lost bag needs no delay) → the fee (P-260.5-E; unknown →
- * likely_eligible, a 0 fee → nothing to refund). **Path a may reach `eligible`** when every decisive fact is
- * confirmed (D147(1)); an extracted candidate caps it at likely_eligible (D147(2)). No carrier timer: 260.5 requires
- * a prompt refund but defines no day count for bag fees (L6), so the next action is `track` and never escalates by date.
+ * exactly the threshold is "within", A1; a declared-lost bag needs no delay; a bag not yet delivered is asked, never
+ * extrapolated to the clock, D234 (10)) → the fee (P-260.5-E; unknown → likely_eligible, a 0 fee → nothing to refund).
+ * **Path a may reach `eligible`** when every decisive fact is confirmed (D147(1)); an extracted candidate caps it at
+ * likely_eligible (D147(2)). No carrier timer: 260.5 requires a prompt refund but defines no day count for bag fees
+ * (L6), so the next action is `track` and never escalates by date.
  *
  * Paths b and c (spec §15.3/§15.4). Domestic only (international → unsupported, treaty regime, L8); a ticket with no
  * aircraft over 60 seats → manual_review (L3), unknown → an assumption; **always capped at likely_eligible** in v1
- * by the assumption "carrier contract of carriage not captured" (D143(4) as amended by D147(1)). b's estimate is the sum
- * of documented, unallocated expense lines (`documented_total`); an unreceipted line is excluded and its receipt is
- * asked; a line allocated to another remedy is excluded. c has no estimate (depreciation, exclusions and the carrier's
- * limit unknown); documented values are evidence, never the payout. The 14 CFR 254.4 figure is shown only as the
- * minimum limit a carrier may impose ("Carrier liability limit: at least $4,700 per passenger …"), versioned by the
- * incident date ($3,800 before 2025-01-22), never as an estimate (mission §10, D143(4)).
+ * by the assumption "carrier contract of carriage not captured" (D143(4) as amended by D147(1)).
+ *   b — delayed (D234 (9)): a bag still missing or declared lost, a confirmed delivery later than path a's significant-
+ *       delay threshold, or a confirmed Mishandled Baggage Report (not for a damaged or pilfered bag, which is path c).
+ *       A carousel pickup alone is not a delay; a confirmed "no report" with a short span → not_eligible. The estimate
+ *       is the sum of documented, unallocated expense lines dated from the deplane day through the delivery day
+ *       (`documented_total`, spec A2): a receipt is an evidence reference, an allocation names a remedy, a line equal to
+ *       a bag fee is set aside for confirmation, and a reimbursement not tied to lines adds an assumption (D234 (13)).
+ *   c — no estimate (depreciation, exclusions and the carrier's limit unknown); documented values are evidence only.
+ * The 14 CFR 254.4 figure is shown only in the explanation as the minimum limit a carrier may impose ("Carrier
+ * liability limit: at least $4,700 per passenger …"), versioned by the incident date ($3,800 before 2025-01-22). It is
+ * never an estimate and never `amount.cap`; only a captured carrier limit is a cap (M27 R04-08).
  *
+ * Unconfirmed values (D234 (1)): a negative, not-yet-due or review verdict never rests on an extracted candidate — it
+ * is asked (`candidate_unconfirmed`); two conflicting candidates that give the same negative answer are asked too.
  * Questions (DA-A-24): only decisive unknowns, and only those of the first unresolved stage. Facts that cannot change
- * the outcome but the user can still add (receipts, proof of items, the airline's contract terms, the fee) are listed
- * as assumption-class missing facts on likely results.
+ * the outcome but the user can still add (receipts, dates, proof, the airline's contract terms, the fee) are listed as
+ * assumption-class missing facts on likely results.
  *
  * Status. `lifecycle: "researched"`; the lead's activation entry and the manifest decide the real status.
  */
@@ -38,9 +53,10 @@ import { currencyExponent, formatMinor, parseDecimalToMinor } from "../money";
 import { alternatives, knownCell, withOverride, type Cell, type CellLookup as FactLookup } from "../facts/resolve";
 import {
   AIR_TXN_SUBJECT,
+  bagFactSubject,
   buildAirSnapshot,
   lineSubject,
-  r04BagSubjects,
+  r04Bags,
   r04BoundFacts,
   r04View,
   R04_MAX_EXPENSE_LINES,
@@ -72,6 +88,7 @@ import {
   type FactValue,
   type Flags,
   type MissingFact,
+  type MissingReason,
   type NextAction,
   type Outcome,
   type OverlapDecl,
@@ -195,6 +212,11 @@ export const R04_SOURCES: Readonly<Record<R04Path, readonly RuleSourceMeta[]>> =
 // Keys and readers
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// Keys and readers
+// ---------------------------------------------------------------------------
+
 const TXN = AIR_TXN_SUBJECT;
 const HOUR_MS = 3_600_000;
 const MINUTE_MS = 60_000;
@@ -206,6 +228,7 @@ const K = {
   carrierLimit: "air.carrier_liability_limit",
   carrierDeadline: "air.carrier_claim_deadline",
   carrierExclusions: "air.carrier_exclusions",
+  reimbursement: "air.reimbursement_received",
   fee: "air.bag_fee_paid",
   deplane: "air.deplane_opportunity_at",
   delivered: "air.bag_delivered_or_picked_up_at",
@@ -219,12 +242,24 @@ const K = {
   exDocumented: "air.exemption_documented_by_carrier",
   incidentDate: "air.incident_date",
   expAmount: "air.expense_amount",
+  expDate: "air.expense_date",
   expReceipt: "air.expense_receipt",
   expAllocated: "air.expense_allocated_to",
   propItem: "air.property_item",
   propValue: "air.property_claimed_value",
   propProof: "air.property_proof",
 } as const;
+
+/**
+ * A receipt is a reference to stored evidence, `evidence:<id>` (M27 R04-11; D235 (D)): typed text such as "none" or
+ * "lost it" is not a receipt. (The key stays `text`; intake writes the reference when a receipt is attached.)
+ */
+export const R04_RECEIPT_REF = /^evidence:[a-z0-9]{1,64}$/;
+/**
+ * An allocation excludes a line only when it names a remedy, `<kind>:<detail>` — e.g. `card_benefit:baggage_delay`,
+ * `insurer:…`, `R04.a:bag_fee` (M27 R04-12; D235 (D)). "no" or "none" is an answer, not an allocation.
+ */
+export const R04_ALLOCATION_REF = /^[a-z][a-z0-9_.]*:[a-z0-9_.-]+/i;
 
 type Money = { amountMinor: number; currency: string };
 const valueOf = (c: Cell): FactValue | null => (c.status === "candidate" || c.known ? c.value : null);
@@ -263,7 +298,8 @@ const ref = (c: Cell): FactRef => ({ subjectKey: c.subjectKey, key: c.key });
 function show(v: FactValue): string {
   switch (v.kind) {
     case "money": return formatMinor(v.amountMinor, v.currency);
-    case "instant": return new Date(v.epochMs).toISOString();
+    // M27 R04-20: an instant is labelled UTC (the destination's zone is not known to the pack).
+    case "instant": return `${new Date(v.epochMs).toISOString().slice(0, 16).replace("T", " ")} UTC`;
     case "code": return v.code;
     case "bool": return v.value ? "yes" : "no";
     case "count": return String(v.n);
@@ -276,7 +312,7 @@ function show(v: FactValue): string {
   }
 }
 function hm(ms: number): string {
-  const total = Math.round(Math.abs(ms) / MINUTE_MS);
+  const total = Math.floor(Math.abs(ms) / MINUTE_MS);
   return `${Math.floor(total / 60)}h${String(total % 60).padStart(2, "0")}m`;
 }
 /** "$4,700" for a whole-dollar USD amount (display of the federal figure only). */
@@ -297,27 +333,38 @@ function usDates(epochMs: number): string[] {
 // Shared pieces
 // ---------------------------------------------------------------------------
 
-const STAGES = ["scope", "mbr", "exemption", "delay", "status", "fee"] as const;
+const STAGES = ["gate", "scope", "mbr", "exemption", "delay", "status", "fee"] as const;
 type Stage = (typeof STAGES)[number];
 
+/**
+ * A computed condition. D234 (1): a `fail` that rests on an extracted candidate is never a fail — it is `unknown` and
+ * asks that candidate (`candidate_unconfirmed`).
+ */
 function leaf(
   stage: Stage, id: string, label: string, kind: ConditionKind, result: Tri, used: readonly Cell[],
   opts: { unknown?: readonly Cell[]; note?: string; passage?: string } = {},
 ): ComputedCondition {
-  const unknown = result === "unknown" ? (opts.unknown ?? []) : [];
+  let res = result;
+  let unknownFacts: { fact: FactRef; reason: MissingReason }[] = (opts.unknown ?? []).map((c) => ({ fact: ref(c), reason: unresolvedReason(c) }));
+  const guarded = res === "fail" ? used.filter((c) => c.status === "candidate") : [];
+  if (guarded.length > 0) {
+    res = "unknown";
+    unknownFacts = guarded.map((c) => ({ fact: ref(c), reason: "candidate_unconfirmed" as const }));
+  }
+  const guardedIds = new Set(guarded.map((c) => `${c.subjectKey}\u0000${c.key}`));
   const facts: FactRef[] = [];
   const seen = new Set<string>();
-  for (const c of [...used, ...unknown]) {
+  for (const c of [...used, ...(opts.unknown ?? [])]) {
     const id2 = `${c.subjectKey}\u0000${c.key}`;
     if (!seen.has(id2)) {
       seen.add(id2);
       facts.push(ref(c));
     }
   }
-  const candidateFacts = used.filter((c) => c.status === "candidate").map(ref);
+  const candidateFacts = used.filter((c) => c.status === "candidate" && !guardedIds.has(`${c.subjectKey}\u0000${c.key}`)).map(ref);
   return {
-    op: "computed", id, label, kind, result, facts,
-    ...(result === "unknown" ? { unknownFacts: unknown.map((c) => ({ fact: ref(c), reason: unresolvedReason(c) })) } : {}),
+    op: "computed", id, label, kind, result: res, facts,
+    ...(res === "unknown" ? { unknownFacts } : {}),
     ...(candidateFacts.length > 0 ? { candidateFacts } : {}),
     neededFor: [stage],
     ...(opts.note !== undefined ? { note: opts.note } : {}),
@@ -345,6 +392,8 @@ const NO_EXEMPTION_ASSUMPTION: Assumption = {
   text: "The airline has not recorded one of the three reasons it may refuse the bag-fee refund (customs recheck, bag left uncollected, travelling without the bag by agreement).",
   changesOutcomeIf: "the airline documents one of those reasons for this bag",
 };
+export const R04_GATE_ASSUMPTION_ID = "r04.a.after_compliance_date";
+export const R04_REIMBURSEMENT_ASSUMPTION_ID = "r04.v1.unallocated_reimbursement";
 
 interface Core {
   dims: Omit<Dimensions, "readyForApproval">;
@@ -355,7 +404,7 @@ interface Core {
   /** Every decisive unresolved fact (conflicts are candidate-tested only when decisive). */
   decisiveUnresolved: MissingFact[];
   unconfirmed: MissingFact[];
-  /** Assumption-class facts the user may still add (receipts, proof, the carrier's contract terms, the fee). */
+  /** Assumption-class facts the user may still add (receipts, dates, proof, the carrier's contract terms, the fee). */
   optional: MissingFact[];
   /** Conflicting cells outside the condition tree that change the amount (expense lines). */
   amountConflicts: Cell[];
@@ -383,9 +432,11 @@ function finishTree(leaves: ConditionNode[], flags: Flags, rest: Rest, extraUnco
   const missing = first === undefined ? [] : ev.decisiveMissing.filter((m) => m.neededFor.includes(first));
   const unconfirmed = [...ev.decisiveUnconfirmed];
   for (const u of extraUnconfirmed) addMissing(unconfirmed, u);
-  const disqualifierIds = leaves
-    .filter((l): l is ComputedCondition => l.op === "computed" && l.result === "fail" && l.kind !== "timing")
-    .map((l) => l.id);
+  const failing = (n: ConditionNode): ComputedCondition[] =>
+    n.op === "computed" ? (n.result === "fail" && n.kind !== "timing" ? [n] : [])
+      : n.op === "any" ? (evaluateConditions(n, lookupFrom([])).result === "fail" ? n.children.flatMap(failing) : [])
+        : n.op === "all" ? n.children.flatMap(failing) : [];
+  const disqualifierIds = leaves.flatMap(failing).map((l) => l.id);
   return {
     ...rest,
     dims: {
@@ -404,22 +455,51 @@ function finishTree(leaves: ConditionNode[], flags: Flags, rest: Rest, extraUnco
   };
 }
 
+/** Reads a bag fact at the subject `bagFactSubject` names (per-bag facts on the bag only; trip-level facts inherited). */
+function bagReader(v: R04View, bagSubjectKey: string): (key: string) => Cell {
+  return (key) => v.lookup.get(bagFactSubject(v.lookup, bagSubjectKey, key), key);
+}
+
+/** The significant-delay threshold(s) for the trip (P-260.2-SDB), with the cells that decide it. */
+function thresholds(v: R04View, p: R04Params): { hours: number[]; used: Cell[]; unknown: Cell[] } {
+  const scope = v.lookup.get(TXN, K.scope);
+  const segment = v.lookup.get(TXN, K.segment);
+  const scopeCode = code(scope);
+  if (scopeCode === "domestic") return { hours: [p.domesticDelayHours], used: [scope], unknown: [] };
+  if (scopeCode === "international" || scopeCode === "non_us") {
+    const seg = minutes(segment);
+    if (seg !== null) return { hours: [seg <= p.longSegmentMinutes ? p.internationalShortDelayHours : p.internationalLongDelayHours], used: [scope, segment], unknown: [] };
+    return { hours: [p.internationalShortDelayHours, p.internationalLongDelayHours], used: [scope], unknown: [segment] };
+  }
+  return { hours: [p.domesticDelayHours, p.internationalShortDelayHours, p.internationalLongDelayHours], used: [], unknown: [scope] };
+}
+
+/** "Not delivered … within N hours": exactly N:00 elapsed is within (A1), so late means strictly more. */
+function lateVerdict(spanMs: number, hours: readonly number[]): Tri {
+  const verdicts = hours.map((h) => spanMs > h * HOUR_MS);
+  return verdicts.every((x) => x) ? "pass" : verdicts.every((x) => !x) ? "fail" : "unknown";
+}
+
 /** The 254.4 floor for the incident, and the display line (a limit, never an estimate). */
-function liabilityDisplay(v: R04View, p: R04Params, bag: (key: string) => Cell): { floor: Money | null; line: string; passages: string[] } {
+function liabilityDisplay(v: R04View, p: R04Params, bag: (key: string) => Cell): { floor: Money | null; carrierCap: Money | null; line: string; passages: string[] } {
   const dated = p.liabilityFloors.filter((f) => f.effectiveFrom !== null).sort((a, b) => (a.effectiveFrom! < b.effectiveFrom! ? 1 : -1));
   const before = p.liabilityFloors.find((f) => f.effectiveFrom === null)!;
   const floorOn = (date: string): R04LiabilityFloor => dated.find((f) => date >= f.effectiveFrom!) ?? before;
-  const incident = localDate(bag(K.incidentDate));
-  const deplane = instant(bag(K.deplane));
-  // A3: the incident date is the local date at the final-destination airport; unknown zone → every US zone must agree.
+  const incidentCell = bag(K.incidentDate);
+  const incident = incidentCell.known ? localDate(incidentCell) : null;
+  const deplaneCell = bag(K.deplane);
+  const deplane = deplaneCell.known ? instant(deplaneCell) : null;
+  // A3: the incident date is the local date at the final-destination airport; unknown zone → every US zone.
   const dates = incident !== null ? [incident] : deplane !== null ? usDates(deplane) : [];
   const chosen = [...new Set(dates.map((d) => floorOn(d)))];
   const carrier = money(v.lookup.get(TXN, K.carrierLimit));
+  const carrierKnown = v.lookup.get(TXN, K.carrierLimit).known;
   const passages = ["P-254.4", "FR-2024-23588"];
   if (chosen.length !== 1) {
     const current = dated[0];
     return {
       floor: null,
+      carrierCap: null,
       line: `Carrier liability limit: at least ${dollars(before)} or ${dollars(current)} per passenger depending on the incident date (the federal floor changed on ${current.effectiveFrom}); add the date you arrived without the bag. It is a limit, never a payout.`,
       passages,
     };
@@ -429,23 +509,26 @@ function liabilityDisplay(v: R04View, p: R04Params, bag: (key: string) => Cell):
   let line = f.effectiveFrom === null
     ? `Carrier liability limit: at least ${dollars(floor)} per passenger (federal floor in force before ${dated[dated.length - 1].effectiveFrom})`
     : `Carrier liability limit: at least ${dollars(floor)} per passenger (federal floor on the carrier's cap)`;
-  if (carrier !== null && carrier.currency === floor.currency && carrier.amountMinor >= floor.amountMinor) {
+  let carrierCap: Money | null = null;
+  if (carrier !== null && carrierKnown && carrier.currency === floor.currency && carrier.amountMinor >= floor.amountMinor) {
+    carrierCap = carrier;
     line = `Carrier liability limit: ${dollars(carrier)} per passenger (the airline's stated limit; the federal floor is ${dollars(floor)})`;
   }
-  const d = dates[0];
-  if (f.effectiveFrom !== null && d >= f.effectiveFrom && d < p.liabilityEnforcementFrom) {
+  // M27 R04-07: the enforcement note shows when ANY plausible local date falls in the delay window.
+  if (f.effectiveFrom !== null && dates.some((d) => d >= f.effectiveFrom! && d < p.liabilityEnforcementFrom)) {
     line += `; DOT delayed enforcement of this figure to ${p.liabilityEnforcementFrom} (FR-2025-02814), its legal effective date is unchanged`;
     passages.push("FR-2025-02814");
   }
-  return { floor, line: `${line}. Actual reimbursement depends on documented losses.`, passages };
+  return { floor, carrierCap, line: `${line}. Actual reimbursement depends on documented losses.`, passages };
 }
 
 // ---------------------------------------------------------------------------
 // Path a — bag-fee refund (14 CFR 260.5)
 // ---------------------------------------------------------------------------
 
-function coreA(v: R04View, env: Env, bag: (key: string) => Cell): Core {
+function coreA(v: R04View, env: Env): Core {
   const { p, now } = env;
+  const bag = bagReader(v, v.bagSubjectKey);
   const flags: Flags = emptyFlags();
   if (env.stale) flags.sourceStale = true;
   const explanation: string[] = [];
@@ -454,35 +537,80 @@ function coreA(v: R04View, env: Env, bag: (key: string) => Cell): Core {
   const optionalFacts: MissingFact[] = [];
   const leaves: ConditionNode[] = [];
 
-  // Scope: a covered flight (part 260).
+  // Compliance gate (spec §15 step 1b; README rule 5; D234 (8); M27 R04-07). The incident's date comes from a KNOWN
+  // incident date, else a KNOWN deplane instant; report and delivery dates may only prove "before", never "after".
+  const incidentCell = bag(K.incidentDate);
+  const deplane = bag(K.deplane);
+  const delivered = bag(K.delivered);
+  const mbrAt = bag(K.mbrAt);
+  const incidentDay = incidentCell.known ? localDate(incidentCell) : null;
+  const deplaneAt = deplane.known ? instant(deplane) : null;
+  const gateDates = incidentDay !== null ? [incidentDay] : deplaneAt !== null ? usDates(deplaneAt) : null;
+  const laterProof = [mbrAt, delivered].filter((c) => c.known && instant(c) !== null).map((c) => usDates(instant(c)!));
+  let gateBefore = false;
+  let gateAssumed = false;
+  if (gateDates !== null) {
+    gateBefore = gateDates.every((d) => d < p.bagFeeComplianceDate);
+    gateAssumed = !gateBefore && !gateDates.every((d) => d >= p.bagFeeComplianceDate);
+  } else if (laterProof.some((ds) => ds.every((d) => d < p.bagFeeComplianceDate)) || usDates(now).every((d) => d < p.bagFeeComplianceDate)) {
+    gateBefore = true;
+  } else {
+    gateAssumed = true;
+    optionalFacts.push(optional(incidentCell, "compliance date"));
+  }
+  if (gateBefore) {
+    flags.effectiveDateMismatch = true;
+    passages.push("FR-2024-07177-COMPLIANCE");
+    explanation.push(`The bag-fee refund conditions were met before the rule's compliance date (${p.bagFeeComplianceDate}); R04 v1 does not evaluate earlier events.`);
+  } else if (gateAssumed) {
+    assumptions.push({
+      id: R04_GATE_ASSUMPTION_ID,
+      text: `Recoup assumes the bag was mishandled on or after ${p.bagFeeComplianceDate}, when the bag-fee refund rule took effect (the date is ${gateDates === null ? "not confirmed yet" : "on that boundary depending on your time zone"}).`,
+      changesOutcomeIf: `the bag was mishandled before ${p.bagFeeComplianceDate} (the rule does not apply to earlier events)`,
+    });
+    passages.push("FR-2024-07177-COMPLIANCE");
+  }
+  // The gate's own leaf lists a candidate date as unconfirmed (it is the date the gate would use once confirmed).
+  const gateCandidate = [incidentCell, deplane].find((c) => c.status === "candidate");
+  leaves.push(leaf("gate", "r04.a.compliance_date", "The bag was mishandled on or after the rule's compliance date", "timing", "pass",
+    gateCandidate && gateDates === null ? [gateCandidate] : [], { passage: "FR-2024-07177-COMPLIANCE" }));
+
+  // Scope: a covered flight (part 260). `unsupported` only from a KNOWN scope.
   const scope = v.lookup.get(TXN, K.scope);
   const scopeCode = code(scope);
-  if (scopeCode === "non_us") flags.unsupportedReason = "Not a covered flight: no point in the United States (14 CFR 260.2).";
+  if (scopeCode === "non_us" && scope.known) flags.unsupportedReason = "Not a covered flight: no point in the United States (14 CFR 260.2).";
   leaves.push(leaf("scope", "r04.a.covered_flight", "A covered flight: to, from or within the United States", "applicability",
     scopeCode === null ? "unknown" : scopeCode === "non_us" ? "fail" : "pass", scopeCode === null ? [] : [scope], { unknown: [scope], passage: "P-260.2-SDB" }));
 
   // Mishandled Baggage Report (P-260.5-B): unknown → ask; confirmed "not filed" → not yet due (D147(6), D154).
   const mbr = bag(K.mbrFiled);
   const mbrValue = bool(mbr);
-  const mbrAt = bag(K.mbrAt);
   const mbrRef = bag(K.mbrRef);
   const mbrText = "A Mishandled Baggage Report was filed with the airline";
-  if (mbrValue === true) {
+  if (mbr.status === "conflicting") {
+    // M27 R04-16: a conflict is settled by D152, never by a reference that happens to exist.
+    leaves.push(leaf("mbr", "r04.a.mbr_filed", mbrText, "requirement", "unknown", [], { unknown: [mbr], passage: "P-260.5-B" }));
+  } else if (mbrValue === true) {
     leaves.push(leaf("mbr", "r04.a.mbr_filed", mbrText, "requirement", "pass", [mbr], { passage: "P-260.5-B" }));
   } else if (mbrValue === false && mbr.known) {
     flags.notYetDue = { when: "MBR filed", userAction: { kind: "add_evidence", docTypes: ["baggage_report"] } };
     leaves.push(leaf("mbr", "r04.a.mbr_filed", mbrText, "requirement", "pass", [mbr], { note: "not filed yet: the refund is owed once the report is filed", passage: "P-260.5-B" }));
     explanation.push("File a Mishandled Baggage Report with the airline, then add it here: the bag-fee refund is owed only after that report is filed (260.5(b)).");
-  } else if (mbrValue === null && (usable(mbrAt) || usable(mbrRef))) {
+  } else if (mbrValue === false) {
+    // An unconfirmed "not filed" is asked (not_yet_due only from KNOWN facts).
+    const l = leaf("mbr", "r04.a.mbr_filed", mbrText, "requirement", "unknown", [], { passage: "P-260.5-B" });
+    l.unknownFacts = [{ fact: ref(mbr), reason: "candidate_unconfirmed" }];
+    leaves.push(l);
+  } else if (usable(mbrAt) || usable(mbrRef)) {
     // A report date or reference is evidence that the report exists.
     const basis = [mbrAt, mbrRef].find((c) => c.known) ?? (usable(mbrAt) ? mbrAt : mbrRef);
     leaves.push(leaf("mbr", "r04.a.mbr_filed", mbrText, "requirement", "pass", [basis], { note: "a report date or reference shows it was filed", passage: "P-260.5-B" }));
   } else {
-    // Missing, "I don't know", conflicting, or an unconfirmed "not filed" (not_yet_due only from KNOWN facts): ask.
     leaves.push(leaf("mbr", "r04.a.mbr_filed", mbrText, "requirement", "unknown", [], { unknown: [mbr], passage: "P-260.5-B" }));
   }
 
-  // Exemptions (P-260.5-F): carrier defences; unknown ones are assumed absent (an assumption, never a question).
+  // Exemptions (P-260.5-F): carrier defences; unknown ones are assumed absent (an assumption, never a question);
+  // conflicting ones follow D152 (M27 R04-16); a candidate `true` is asked, never failed on (R04-02).
   const status = bag(K.status);
   const statusCode = code(status);
   const recheck = bag(K.exRecheck);
@@ -490,10 +618,18 @@ function coreA(v: R04View, env: Env, bag: (key: string) => Cell): Core {
   const voluntary = bag(K.exVoluntary);
   const documented = bag(K.exDocumented);
   const exText = "No refund exemption applies (260.5(f))";
-  if (bool(recheck) === true) {
+  const conflictingEx = [recheck, pickup, voluntary, documented].filter((c) => c.status === "conflicting");
+  if (conflictingEx.length > 0) {
+    leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "unknown", [], { unknown: conflictingEx, passage: "P-260.5-F" }));
+  } else if (bool(recheck) === true) {
     leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "fail", [recheck], { note: "the bag was not rechecked at the first US entry point (260.5(f)(1))", passage: "P-260.5-F" }));
   } else if (bool(voluntary) === true && statusCode !== "declared_lost") {
-    leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "fail", [voluntary, ...(usable(status) ? [status] : [])], { note: "you agreed to travel without the bag (260.5(f)(3)); this does not apply to a lost bag (260.5(g))", passage: "P-260.5-F" }));
+    // M27 R04-09: (f)(3) does not cover a lost bag (260.5(g)), so an unknown status is asked unless a delivery is known.
+    if (statusCode === null && instant(delivered) === null) {
+      leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "unknown", [voluntary], { unknown: [status], note: "travelling without the bag by agreement does not remove the refund for a lost bag", passage: "P-260.5-F" }));
+    } else {
+      leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "fail", [voluntary, ...(usable(status) ? [status] : []), ...(usable(delivered) ? [delivered] : [])], { note: "you agreed to travel without the bag (260.5(f)(3)); this does not apply to a lost bag (260.5(g))", passage: "P-260.5-F" }));
+    }
   } else if (bool(pickup) === true && bool(documented) === true) {
     leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "fail", [pickup, documented], { note: "the airline documented that the bag was left uncollected (260.5(f)(2))", passage: "P-260.5-F" }));
   } else if (bool(pickup) === true && bool(documented) === null) {
@@ -507,40 +643,27 @@ function coreA(v: R04View, env: Env, bag: (key: string) => Cell): Core {
     leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "pass", facts, { note: unknownAny ? "assumed: the airline has recorded no exemption" : "no exemption applies", passage: "P-260.5-F" }));
   }
 
-  // Significant delay (P-260.2-SDB, P-260.5-A) or a lost bag.
-  const deplane = bag(K.deplane);
-  const delivered = bag(K.delivered);
-  const segment = v.lookup.get(TXN, K.segment);
+  // Significant delay (P-260.2-SDB, P-260.5-A) or a lost bag. A bag not yet delivered is asked — never extrapolated to
+  // the clock (D234 (10); M27 R04-01).
   const sigText = "The bag was lost, or significantly delayed";
-  const threshold = (): { hours: number[]; used: Cell[]; unknown: Cell[] } => {
-    if (scopeCode === "domestic") return { hours: [p.domesticDelayHours], used: [scope], unknown: [] };
-    if (scopeCode === "international" || scopeCode === "non_us") {
-      const seg = minutes(segment);
-      if (seg !== null) return { hours: [seg <= p.longSegmentMinutes ? p.internationalShortDelayHours : p.internationalLongDelayHours], used: [scope, segment], unknown: [] };
-      return { hours: [p.internationalShortDelayHours, p.internationalLongDelayHours], used: [scope], unknown: [segment] };
-    }
-    return { hours: [p.domesticDelayHours, p.internationalShortDelayHours, p.internationalLongDelayHours], used: [], unknown: [scope] };
-  };
   if (statusCode === "declared_lost") {
     leaves.push(leaf("delay", "r04.a.lost_or_delayed", sigText, "requirement", "pass", [status], { note: "declared lost: no delay calculation is needed", passage: "P-260.5-D" }));
   } else {
     const a = instant(deplane);
     const b = instant(delivered);
-    const t = threshold();
-    // "Not delivered … within N hours": exactly N:00 elapsed is within (A1), so significant means strictly more.
-    const decide = (spanMs: number, basis: Cell[], state: "delivered" | "still missing") => {
-      const verdicts = t.hours.map((h) => spanMs > h * HOUR_MS);
-      const agreed = verdicts.every((x) => x === verdicts[0]);
-      const note = `${state} ${hm(spanMs)} after the chance to deplane; more than ${t.hours.join(" / ")} h is significant (A1: exactly the limit is within it)`;
-      leaves.push(agreed
-        ? leaf("delay", "r04.a.lost_or_delayed", sigText, "requirement", verdicts[0] ? "pass" : "fail", [...basis, ...t.used], { note, passage: "P-260.2-SDB" })
-        : leaf("delay", "r04.a.lost_or_delayed", sigText, "requirement", "unknown", [...basis, ...t.used], { unknown: t.unknown, note, passage: "P-260.2-SDB" }));
-      explanation.push(`The bag was ${state} ${hm(spanMs)} after you could leave the plane (significant: more than ${t.hours.join(" or ")} hours).`);
-    };
-    if (a !== null && b !== null) {
-      decide(b - a, [deplane, delivered], "delivered");
-    } else if (a !== null && statusCode === "delayed_undelivered" && now - a > Math.max(...t.hours) * HOUR_MS) {
-      decide(now - a, [deplane, status], "still missing");
+    const t = thresholds(v, p);
+    if (a !== null && b !== null && b >= a) {
+      const verdict = lateVerdict(b - a, t.hours);
+      const within = verdict === "fail";
+      const note = `delivered ${hm(b - a)} after the chance to deplane; ${within ? "within" : "over"} the ${t.hours.join(" / ")}-hour limit (exactly the limit is within it, A1)`;
+      leaves.push(verdict === "unknown"
+        ? leaf("delay", "r04.a.lost_or_delayed", sigText, "requirement", "unknown", [deplane, delivered, ...t.used], { unknown: t.unknown, note, passage: "P-260.2-SDB" })
+        : leaf("delay", "r04.a.lost_or_delayed", sigText, "requirement", verdict, [deplane, delivered, ...t.used], { note, passage: "P-260.2-SDB" }));
+      explanation.push(`The bag was delivered ${hm(b - a)} after you could leave the plane: ${within ? "within" : "more than"} ${t.hours.join(" or ")} hours.`);
+    } else if (a !== null && b !== null) {
+      // M27 R04-19: a delivery before the deplane opportunity is a data error → asked, never not_eligible.
+      leaves.push(leaf("delay", "r04.a.lost_or_delayed", sigText, "requirement", "unknown", [], { unknown: [delivered], note: "the delivery time is before the deplane time; check both", passage: "P-260.5-A" }));
+      (leaves[leaves.length - 1] as ComputedCondition).unknownFacts = [{ fact: ref(delivered), reason: "missing" }];
     } else {
       leaves.push(leaf("delay", "r04.a.lost_or_delayed", sigText, "requirement", "unknown", [], { unknown: [deplane, delivered].filter((c) => !usable(c)), passage: "P-260.5-A" }));
     }
@@ -554,8 +677,8 @@ function coreA(v: R04View, env: Env, bag: (key: string) => Cell): Core {
     optionalFacts.push(optional(fee, "amount"));
     leaves.push(leaf("fee", "r04.a.fee_paid", "A fee was paid to check this bag", "requirement", fee.status === "conflicting" ? "unknown" : "pass", [], { unknown: [fee], note: "fee not known yet" }));
   } else {
-    if (currencyExponent(feeMoney.currency, "new_scenario") === null) flags.unsupportedReason ??= `Recoup's air checks handle USD amounts only; ${feeMoney.currency} is not supported yet (O6).`;
-    leaves.push(leaf("fee", "r04.a.fee_paid", "A fee was paid to check this bag", "requirement", feeMoney.amountMinor > 0 ? "pass" : "fail", [fee], { passage: "P-260.5-E" }));
+    if (currencyExponent(feeMoney.currency, "new_scenario") === null && fee.known) flags.unsupportedReason ??= `Recoup's air checks handle USD amounts only; ${feeMoney.currency} is not supported yet (O6).`;
+    leaves.push(leaf("fee", "r04.a.fee_paid", "A fee was paid to check this bag", "requirement", feeMoney.amountMinor > 0 ? "pass" : "fail", [fee], { note: feeMoney.amountMinor > 0 ? undefined : "no fee was paid for this bag", passage: "P-260.5-E" }));
     if (feeMoney.amountMinor > 0) {
       amount = {
         estimate: feeMoney,
@@ -569,25 +692,13 @@ function coreA(v: R04View, env: Env, bag: (key: string) => Cell): Core {
     }
   }
 
-  // Compliance-date gate (spec §15 step 1b): the incident (or the refund conditions) before 2024-10-28.
-  const incidentAt = instant(deplane) ?? instant(mbrAt) ?? instant(delivered);
-  const incidentDay = localDate(bag(K.incidentDate));
-  const before = incidentAt !== null
-    ? usDates(incidentAt).every((d) => d < p.bagFeeComplianceDate)
-    : incidentDay !== null && incidentDay < p.bagFeeComplianceDate;
-  if (before) {
-    flags.effectiveDateMismatch = true;
-    passages.push("FR-2024-07177-COMPLIANCE");
-    explanation.push(`The bag-fee refund conditions were met before the rule's compliance date (${p.bagFeeComplianceDate}); R04 v1 does not evaluate earlier events.`);
-  }
-
   const airline = text(v.lookup.get(TXN, K.operatingLast));
   explanation.push(`260.5 requires a prompt, automatic refund once the report is filed but defines no day count for bag fees, so Recoup computes no date (L6). If it does not arrive, ask the airline${airline ? ` (${airline})` : ""}, even when a travel agency charged the fee (DOT-REF-8).`);
   passages.push("DOT-REF-8");
 
   return finishTree(leaves, flags, {
     optional: optionalFacts, amountConflicts: [], assumptions, amount,
-    lossKeys: [`txn:${v.transactionId}:bag_fee:${v.bagOrdinal}`], explanation, passages,
+    lossKeys: [`txn:${v.transactionId}:bag_fee:${v.bagLossId}`], explanation, passages,
   });
 }
 
@@ -598,7 +709,7 @@ function coreA(v: R04View, env: Env, bag: (key: string) => Cell): Core {
 function liabilityCommon(v: R04View, path: "b" | "c", flags: Flags, leaves: ConditionNode[], assumptions: Assumption[], optionalFacts: MissingFact[]): void {
   const scope = v.lookup.get(TXN, K.scope);
   const scopeCode = code(scope);
-  if (scopeCode === "international" || scopeCode === "non_us") {
+  if ((scopeCode === "international" || scopeCode === "non_us") && scope.known) {
     flags.unsupportedReason = "International baggage claims fall under the Montreal Convention (about 1,519 SDR per passenger, DOT-BAG-4), not 14 CFR 254; R04 v1 does not evaluate them (L8).";
   }
   leaves.push(leaf("scope", `r04.${path}.domestic`, "A domestic (US interstate or intrastate) itinerary (254.2)", "applicability",
@@ -606,8 +717,15 @@ function liabilityCommon(v: R04View, path: "b" | "c", flags: Flags, leaves: Cond
 
   const large = v.lookup.get(TXN, K.largeAircraft);
   const largeValue = bool(large);
-  if (largeValue === false) {
+  if (large.status === "conflicting") {
+    // M27 R04-16: a conflict is D152's, not an assumption.
+    leaves.push(leaf("scope", `r04.${path}.large_aircraft`, "A flight on the ticket uses an aircraft with more than 60 seats (254.3/254.4)", "applicability", "unknown", [], { unknown: [large], passage: "P-254.3" }));
+  } else if (largeValue === false && large.known) {
     flags.manualReviewReason ??= "No flight on the ticket used a plane with more than 60 seats, so the 14 CFR 254.4 floor on the airline's limit does not apply (254.3, L3). A person reviews it.";
+  } else if (largeValue === false) {
+    const l = leaf("scope", `r04.${path}.large_aircraft`, "A flight on the ticket uses an aircraft with more than 60 seats (254.3/254.4)", "applicability", "unknown", [], { passage: "P-254.3" });
+    l.unknownFacts = [{ fact: ref(large), reason: "candidate_unconfirmed" }];
+    leaves.push(l);
   } else if (largeValue === true) {
     leaves.push(leaf("scope", `r04.${path}.large_aircraft`, "A flight on the ticket uses an aircraft with more than 60 seats (254.3/254.4)", "applicability", "pass", [large], { passage: "P-254.3" }));
   } else {
@@ -618,8 +736,79 @@ function liabilityCommon(v: R04View, path: "b" | "c", flags: Flags, leaves: Cond
   if (!usable(deadline)) optionalFacts.push(optional(deadline, "timeliness"));
 }
 
-function coreB(v: R04View, env: Env, bag: (key: string) => Cell): Core {
+/**
+ * One bag's path-b delay test (D234 (9)): still missing / declared lost; a confirmed delivery later than path a's
+ * significant-delay threshold (D235 (D)); or a confirmed Mishandled Baggage Report (not for a damaged or pilfered bag,
+ * which is path c). A carousel pickup alone is not a delay; a confirmed "no report" with a short span fails.
+ */
+function bagDelayedLeaf(v: R04View, p: R04Params, bagSubjectKey: string): ComputedCondition {
+  const bag = bagReader(v, bagSubjectKey);
+  const status = bag(K.status);
+  const statusCode = code(status);
+  const deplane = bag(K.deplane);
+  const delivered = bag(K.delivered);
+  const mbr = bag(K.mbrFiled);
+  const mbrValue = bool(mbr);
+  const id = `r04.b.delayed${bagSubjectKey === TXN ? "" : `.${bagSubjectKey}`}`;
+  const text = "The bag did not arrive with you";
+  const damaged = statusCode === "damaged" || statusCode === "pilfered";
+  if (statusCode === "delayed_undelivered" || statusCode === "declared_lost") {
+    return leaf("delay", id, text, "requirement", "pass", [status], { note: "the bag did not arrive" });
+  }
+  const mbrPasses = mbrValue === true && !damaged;
+  const a = instant(deplane);
+  const b = instant(delivered);
+  if (a !== null && b !== null) {
+    const span = b - a;
+    if (span < 0) {
+      const l = leaf("delay", id, text, "requirement", "unknown", [], { note: "the delivery time is before the deplane time; check both" });
+      l.unknownFacts = [{ fact: ref(delivered), reason: "missing" }];
+      return l;
+    }
+    if (span === 0) return leaf("delay", id, text, "requirement", "fail", [deplane, delivered], { note: "delivered at the deplane time: no delay" });
+    const t = thresholds(v, p);
+    const late = lateVerdict(span, t.hours);
+    const note = `delivered ${hm(span)} after the chance to deplane`;
+    if (late === "pass") return leaf("delay", id, text, "requirement", "pass", [deplane, delivered, ...t.used], { note: `${note}: a late delivery (over ${t.hours.join(" / ")} h)` });
+    if (mbrPasses) return leaf("delay", id, text, "requirement", "pass", [mbr], { note: `${note}, with a Mishandled Baggage Report` });
+    if (late === "fail") {
+      if (damaged) return leaf("delay", id, text, "requirement", "fail", [status, deplane, delivered, ...t.used], { note: `${note}: a damaged or pilfered bag delivered on time is a property claim (path c)` });
+      if (mbrValue === false) return leaf("delay", id, text, "requirement", "fail", [mbr, deplane, delivered, ...t.used], { note: `${note}, and no Mishandled Baggage Report: a normal pickup is not a delay` });
+      return leaf("delay", id, text, "requirement", "unknown", [], { unknown: [mbr], note: `${note}: did the bag arrive on your flight? A Mishandled Baggage Report records that it did not` });
+    }
+    return leaf("delay", id, text, "requirement", "unknown", [], { unknown: [...t.unknown, mbr].filter((c) => !usable(c)), note });
+  }
+  if (mbrPasses) return leaf("delay", id, text, "requirement", "pass", [mbr], { note: "a Mishandled Baggage Report was filed" });
+  return leaf("delay", id, text, "requirement", "unknown", [], { unknown: [deplane, delivered, mbr].filter((c) => !usable(c)) });
+}
+
+/** The trip's A2 window for expense lines: from the deplane day through the latest delivery day (open while undelivered). */
+function expenseWindow(v: R04View): { from: string | null; to: string | null } {
+  const bags = v.bags.length > 0 ? v.bags.map((b) => b.subjectKey) : [v.bagSubjectKey];
+  let from: string | null = null;
+  let to: string | null = null;
+  let open = false;
+  for (const s of bags) {
+    const bag = bagReader(v, s);
+    const a = instant(bag(K.deplane));
+    const statusCode = code(bag(K.status));
+    const b = instant(bag(K.delivered));
+    if (a !== null) {
+      const d = usDates(a).sort()[0];
+      if (from === null || d < from) from = d;
+    }
+    if (statusCode === "delayed_undelivered" || statusCode === "declared_lost" || b === null) open = true;
+    else {
+      const d = usDates(b).sort().reverse()[0];
+      if (to === null || d > to) to = d;
+    }
+  }
+  return { from, to: open ? null : to };
+}
+
+function coreB(v: R04View, env: Env): Core {
   const { p } = env;
+  const bag = bagReader(v, v.bagSubjectKey);
   const flags: Flags = emptyFlags();
   if (env.stale) flags.sourceStale = true;
   const explanation: string[] = [];
@@ -629,41 +818,35 @@ function coreB(v: R04View, env: Env, bag: (key: string) => Cell): Core {
   const leaves: ConditionNode[] = [];
   liabilityCommon(v, "b", flags, leaves, assumptions, optionalFacts);
 
-  // The bag was delayed: not there at deplaning (still missing, lost, or delivered after the deplane opportunity).
-  const status = bag(K.status);
-  const statusCode = code(status);
-  const deplane = bag(K.deplane);
-  const delivered = bag(K.delivered);
-  const delayText = "The bag did not arrive with you";
-  if (statusCode === "delayed_undelivered" || statusCode === "declared_lost") {
-    leaves.push(leaf("delay", "r04.b.delayed", delayText, "requirement", "pass", [status]));
-  } else if (instant(deplane) !== null && instant(delivered) !== null) {
-    const span = instant(delivered)! - instant(deplane)!;
-    leaves.push(leaf("delay", "r04.b.delayed", delayText, "requirement", span > 0 ? "pass" : "fail", [deplane, delivered], { note: `delivered ${hm(span)} after the chance to deplane` }));
-  } else {
-    leaves.push(leaf("delay", "r04.b.delayed", delayText, "requirement", "unknown", [], { unknown: [deplane, delivered].filter((c) => !usable(c)) }));
-  }
+  // Delayed: ANY bag of the trip qualifies (M27 R04-04; the expense lines are trip-level).
+  const bags = v.bags.length > 0 ? v.bags.map((b) => b.subjectKey) : [v.bagSubjectKey];
+  leaves.push({ op: "any", children: bags.map((s) => bagDelayedLeaf(v, p, s)) });
 
-  // Expense lines: documented (receipt), unallocated lines count; the others are excluded and shown.
+  // Expense lines: documented (an evidence receipt), in the A2 window, unallocated, not the bag fee.
   const extraUnconfirmed: MissingFact[] = [];
   const amountConflicts: Cell[] = [];
   const included: { n: number; money: Money; cells: Cell[] }[] = [];
   const excluded: string[] = [];
   if (v.expenseLines.length > R04_MAX_EXPENSE_LINES) {
-    flags.manualReviewReason ??= `More than ${R04_MAX_EXPENSE_LINES} expense lines on one bag: a person prepares this claim.`;
+    flags.manualReviewReason ??= `More than ${R04_MAX_EXPENSE_LINES} expense lines on one trip: a person prepares this claim.`;
   }
+  const window = expenseWindow(v);
+  const bagFees = bags.map((s) => money(bagReader(v, s)(K.fee))).filter((m): m is Money => m !== null && m.amountMinor > 0);
   for (const n of v.expenseLines.slice(0, R04_MAX_EXPENSE_LINES)) {
     const s = lineSubject(n);
     const amountCell = v.lookup.get(s, K.expAmount);
+    const dateCell = v.lookup.get(s, K.expDate);
     const receipt = v.lookup.get(s, K.expReceipt);
     const allocated = v.lookup.get(s, K.expAllocated);
-    const conflicts = [amountCell, receipt, allocated].filter((c) => c.status === "conflicting");
+    const conflicts = [amountCell, dateCell, receipt, allocated].filter((c) => c.status === "conflicting");
     if (conflicts.length > 0) {
       amountConflicts.push(...conflicts);
       continue;
     }
+    // M27 R04-12: only a KNOWN allocation that names a remedy excludes the line.
     const allocatedTo = text(allocated);
-    if (allocatedTo !== null) {
+    const namesRemedy = allocatedTo !== null && R04_ALLOCATION_REF.test(allocatedTo);
+    if (namesRemedy && allocated.known) {
       excluded.push(`line ${n} (already allocated to ${allocatedTo})`);
       continue;
     }
@@ -673,18 +856,50 @@ function coreB(v: R04View, env: Env, bag: (key: string) => Cell): Core {
       excluded.push(`line ${n} (no amount)`);
       continue;
     }
-    if (currencyExponent(m.currency, "new_scenario") === null) flags.unsupportedReason ??= `Recoup's air checks handle USD amounts only; ${m.currency} is not supported yet (O6).`;
-    if (text(receipt) === null) {
-      optionalFacts.push(optional(receipt, "amount"));
-      excluded.push(`line ${n} (${formatMinor(m.amountMinor, m.currency)}, no receipt)`);
+    if (currencyExponent(m.currency, "new_scenario") === null) {
+      // M27 R04-22: one non-USD line is set aside, never the whole path.
+      excluded.push(`line ${n} (${m.currency}: Recoup handles USD amounts only for now)`);
       continue;
     }
-    for (const c of [amountCell, receipt]) {
+    const receiptRef = text(receipt);
+    if (receiptRef === null || !R04_RECEIPT_REF.test(receiptRef)) {
+      // M27 R04-11: only an attached receipt (an evidence reference) documents a line.
+      optionalFacts.push({ ...optional(receipt, "amount"), reason: "missing" });
+      excluded.push(`line ${n} (${formatMinor(m.amountMinor, m.currency)}, no receipt attached)`);
+      continue;
+    }
+    // M27 R04-10 (spec A2): a line counts only if dated from the deplane day through the delivery day.
+    const date = localDate(dateCell);
+    if (date === null) {
+      optionalFacts.push(optional(dateCell, "amount"));
+      excluded.push(`line ${n} (${formatMinor(m.amountMinor, m.currency)}, no date)`);
+      continue;
+    }
+    if ((window.from !== null && date < window.from) || (window.to !== null && date > window.to)) {
+      excluded.push(`line ${n} (${formatMinor(m.amountMinor, m.currency)}, dated ${date}, outside the delay from ${window.from ?? "?"} to ${window.to ?? "delivery"})`);
+      continue;
+    }
+    // M27 R04-13 / D234 (17): a line equal to a bag fee is set aside until the user says it is not the bag fee.
+    if (bagFees.some((f) => f.currency === m.currency && f.amountMinor === m.amountMinor) && !(allocated.known && allocatedTo !== null && !namesRemedy)) {
+      optionalFacts.push(optional(allocated, "bag fee"));
+      excluded.push(`line ${n} (${formatMinor(m.amountMinor, m.currency)} equals the checked-bag fee, which is refunded separately; confirm it is a different expense)`);
+      continue;
+    }
+    for (const c of [amountCell, dateCell, receipt, ...(namesRemedy ? [allocated] : [])]) {
       if (c.status === "candidate") extraUnconfirmed.push({ subjectKey: c.subjectKey, key: c.key, reason: "candidate_unconfirmed", class: "required", neededFor: ["amount"] });
     }
-    included.push({ n, money: m, cells: [amountCell, receipt] });
+    included.push({ n, money: m, cells: [amountCell, dateCell, receipt] });
   }
-  // The 254.4 floor is shown only where part 254 applies (never on an international, treaty-governed itinerary).
+  // D234 (13): a reimbursement not tied to lines caps the result with an assumption and asks which lines it covered.
+  const reimbursement = money(v.lookup.get(TXN, K.reimbursement));
+  if (reimbursement !== null && reimbursement.amountMinor > 0) {
+    assumptions.push({
+      id: R04_REIMBURSEMENT_ASSUMPTION_ID,
+      text: `You received ${formatMinor(reimbursement.amountMinor, reimbursement.currency)} that is not tied to specific expenses; Recoup assumes it covered none of the lines below until you say which it covered.`,
+      changesOutcomeIf: "that payment covered some of these expenses (they are not claimed twice)",
+    });
+    for (const l of included) optionalFacts.push(optional(v.lookup.get(lineSubject(l.n), K.expAllocated), "reimbursement"));
+  }
   const display = flags.unsupportedReason ? null : liabilityDisplay(v, p, bag);
   passages.push(...(display?.passages ?? []));
   let amount: AmountCalc | null = null;
@@ -701,8 +916,12 @@ function coreB(v: R04View, env: Env, bag: (key: string) => Cell): Core {
         ...(included.length > 10 ? [{ label: `${included.length - 10} more lines`, value: String(included.slice(10).reduce((a, l) => a + l.money.amountMinor, 0)) }] : []),
         ...(excluded.length > 0 ? [{ label: "excluded", value: excluded.join("; ").slice(0, 300) }] : []),
       ].slice(0, 12),
-      ...(display?.floor ? { cap: { amount: display.floor, sourcePassageId: "P-254.4", note: display.line } } : {}),
+      // M27 R04-08: only the airline's own captured limit is a cap; the federal floor is never one.
+      ...(display?.carrierCap && display.carrierCap.currency === currency ? { cap: { amount: display.carrierCap, sourcePassageId: "P-254.4", note: display.line } } : {}),
     };
+    if (display?.carrierCap && display.carrierCap.currency === currency && total > display.carrierCap.amountMinor) {
+      explanation.push(`The documented total is above the airline's stated liability limit (${dollars(display.carrierCap)}); the airline may pay no more than its limit.`);
+    }
   } else if (currencies.size > 1) {
     explanation.push("The receipts are in different currencies; Recoup never adds different currencies, so a person works out the total.");
   }
@@ -717,8 +936,9 @@ function coreB(v: R04View, env: Env, bag: (key: string) => Cell): Core {
   }, extraUnconfirmed);
 }
 
-function coreC(v: R04View, env: Env, bag: (key: string) => Cell): Core {
+function coreC(v: R04View, env: Env): Core {
   const { p } = env;
+  const bag = bagReader(v, v.bagSubjectKey);
   const flags: Flags = emptyFlags();
   if (env.stale) flags.sourceStale = true;
   const explanation: string[] = [];
@@ -737,7 +957,7 @@ function coreC(v: R04View, env: Env, bag: (key: string) => Cell): Core {
   } else if (statusCode === "delivered") {
     leaves.push(leaf("status", "r04.c.lost_or_damaged", statusText, "requirement", "fail", [status], { note: "delivered, with no loss or damage recorded" }));
   } else {
-    leaves.push(leaf("status", "r04.c.lost_or_damaged", statusText, "requirement", "unknown", [], { unknown: [status] }));
+    leaves.push(leaf("status", "r04.c.lost_or_damaged", statusText, "requirement", "unknown", [], { unknown: [status], note: statusCode === "delayed_undelivered" ? "still missing: has the airline declared it lost yet?" : undefined }));
   }
 
   for (const key of [K.carrierLimit, K.carrierExclusions] as const) {
@@ -764,16 +984,12 @@ function coreC(v: R04View, env: Env, bag: (key: string) => Cell): Core {
 
   return finishTree(leaves, flags, {
     optional: optionalFacts, amountConflicts: [], assumptions, amount: null,
-    lossKeys: [`txn:${v.transactionId}:property:${v.bagOrdinal}`], explanation, passages,
+    lossKeys: [`txn:${v.transactionId}:property:${v.bagLossId}`], explanation, passages,
   });
 }
 
 function core(v: R04View, env: Env): Core {
-  const bag = (key: string): Cell => {
-    const c = v.lookup.get(v.bagSubjectKey, key);
-    return c.status === "missing" && v.bagSubjectKey !== TXN ? v.lookup.get(TXN, key) : c;
-  };
-  return env.path === "a" ? coreA(v, env, bag) : env.path === "b" ? coreB(v, env, bag) : coreC(v, env, bag);
+  return env.path === "a" ? coreA(v, env) : env.path === "b" ? coreB(v, env) : coreC(v, env);
 }
 
 // ---------------------------------------------------------------------------
@@ -817,7 +1033,8 @@ function nextActionFor(path: R04Path, outcome: Outcome, c: Core, flags: Flags, m
       // a: automatic after the MBR (track_automatic, DA-A-25); b/c: a claim with the airline under its contract.
       return path === "a" ? { kind: "track" } : c.nextActionHint ?? { kind: "open_case" };
     case "needs_facts": {
-      const keys = missing.filter((m) => m.reason !== "candidate_unconfirmed" && m.reason !== "conflict_capped").map((m) => ({ subjectKey: m.subjectKey, key: m.key }));
+      // M27 R04-18: an unconfirmed value is a question too (confirm it).
+      const keys = missing.filter((m) => m.reason !== "conflict_capped").map((m) => ({ subjectKey: m.subjectKey, key: m.key }));
       return keys.length > 0 ? { kind: "answer_questions", keys } : { kind: "none", reason: "Waiting for the facts above." };
     }
     case "manual_review":
@@ -834,8 +1051,11 @@ function nextActionFor(path: R04Path, outcome: Outcome, c: Core, flags: Flags, m
           ? "This happened before the bag-fee refund rule's compliance date; Recoup v1 does not evaluate it."
           : "The DOT baggage rule text has not been re-verified recently; Recoup checks it again before giving a result.",
       };
-    default:
-      return { kind: "none", reason: c.explanation.find((x) => x.startsWith("The bag")) ?? "Nothing is owed under this path on these facts." };
+    default: {
+      // M27 R04-19: the reason is the condition that decided it.
+      const deciding = c.conditions.find((x) => x.result === "fail" && x.kind !== "timing");
+      return { kind: "none", reason: deciding ? `${deciding.label}: no${deciding.note ? ` — ${deciding.note}` : ""}.` : "Nothing is owed under this path on these facts." };
+    }
   }
 }
 
@@ -901,7 +1121,9 @@ export function evaluateR04V1(path: R04Path, input: EvaluationInput<R04View, R04
       const same = combos !== null && sameAnswer(tested.map((t) => t.answer));
       const list = withSameAnswer(conflicting.map(conflictFlag), same);
       const ids = new Set(conflicting.map((c) => `${c.subjectKey}\u0000${c.key}`));
-      if (same) {
+      // D234 (1): a same answer that is negative, not yet due or a review never rests on candidates → ask instead.
+      const negative = same && !AMOUNT_OUTCOMES.has(tested[0].answer.outcome);
+      if (same && !negative) {
         final = tested[0].core;
         flags = { ...final.flags, conflictingKeys: conflicting.map((c) => c.key), conflicts: list };
         missing = final.missing.filter((m) => !ids.has(`${m.subjectKey}\u0000${m.key}`));
@@ -977,6 +1199,7 @@ const REQUIREMENTS_A = [
   { subjectPattern: TXN, key: K.segment, class: "required" as const },
   { subjectPattern: "*", key: K.exDocumented, class: "required" as const },
   { subjectPattern: "*", key: K.fee, class: "assumption" as const, assumptionText: "the bag fee paid (unknown → likely eligible, spec §15.2.5)" },
+  { subjectPattern: "*", key: K.incidentDate, class: "assumption" as const, assumptionText: "the bag was mishandled on or after the rule's compliance date" },
   { subjectPattern: "*", key: K.exRecheck, class: "assumption" as const, assumptionText: "no exemption applies unless the airline recorded one" },
   { subjectPattern: "*", key: K.exPickup, class: "assumption" as const, assumptionText: "no exemption applies unless the airline recorded one" },
   { subjectPattern: "*", key: K.exVoluntary, class: "assumption" as const, assumptionText: "no exemption applies unless the airline recorded one" },
@@ -986,12 +1209,14 @@ const REQUIREMENTS_BC = [
   { subjectPattern: "*", key: K.status, class: "required" as const },
   { subjectPattern: "*", key: K.deplane, class: "required" as const },
   { subjectPattern: "*", key: K.delivered, class: "required" as const },
+  { subjectPattern: "*", key: K.mbrFiled, class: "required" as const },
   { subjectPattern: TXN, key: K.largeAircraft, class: "assumption" as const, assumptionText: "a flight on the ticket uses an aircraft with more than 60 seats" },
   { subjectPattern: TXN, key: K.carrierDeadline, class: "assumption" as const, assumptionText: "the airline's claim deadline (not captured in v1)" },
 ];
 
 const LIMITS_COMMON = [
-  "Paths a, b and c are separate opportunities; the bag fee is never an expense line (spec §1, §15.5).",
+  "Paths a, b and c are separate opportunities; the bag fee is never an expense line (spec §1, §15.5); R02 shares each bag fee's loss key so a fee inside R02's ancillary total is never counted twice (D234 (17)).",
+  "Bags (D234 (11)): one per incident holding a per-bag fact, plus txn; loss keys use the bag tag, else the incident id; only the deplane time and incident date are inherited from txn.",
   "USD amounts only (O6); amounts in different currencies are never added.",
 ];
 
@@ -1018,40 +1243,43 @@ function makePack(path: R04Path): RulePack<R04View, R04Params, CaseContext> {
     lateAskDeadlineIds: [],
     overlap: OVERLAP[path],
     adapter: R04_ADAPTERS[path],
+    // DA-A-25 (contract §6): the bag-fee refund is automatic after the report → tracked; b/c are claims.
+    caseMode: () => (a ? "track_automatic" : "request"),
     knownLimitations: a
       ? [
           ...LIMITS_COMMON,
           "L6: 260.5 requires a prompt refund but no day count for bag fees; no carrier timer is computed.",
           "A1: delivery at exactly the threshold is 'within' it (not significant).",
+          "D234 (10): a bag not yet delivered is asked for its delivery time or the airline's lost declaration; the delay is never extrapolated to the clock (a v2 spec item).",
           "260.5(c)/(d) multi-carrier notification is not modelled; the MBR with the last operating carrier is taken as sufficient.",
           "L9: DOT-REF-8 (request from the airline) and 260.5(d) (automatic) are both preserved: the refund is tracked, the airline is named.",
+          "D234 (12), pending a spec erratum: the (f)(1)/(f)(2) exemptions are applied to a declared-lost bag as the approved spec states.",
         ]
       : [
           ...LIMITS_COMMON,
-          "D143(4)/D147(1): capped at likely_eligible while no carrier contract of carriage is captured; carrier claim deadlines are not captured (L4).",
-          "L1: the 254.4 figure is the minimum carrier limit, never a payout; versioned by incident date (A3), with the 2026 biennial review pending (L5).",
+          "D143(4)/D147(1): capped at likely_eligible while no carrier contract of carriage is captured; carrier claim deadlines are an assumption, not an outcome (D234 (19)).",
+          "L1: the 254.4 figure is the minimum carrier limit, never a payout or a cap; versioned by incident date (A3), with the 2026 biennial review pending (L5). Only a captured carrier limit is shown as a cap.",
           "L3: a ticket with no aircraft over 60 seats is manual_review.",
           "L8: international itineraries are unsupported (Montreal/Warsaw).",
           path === "b"
-            ? "Only documented (receipted), unallocated expense lines count; reasonableness is the airline's call (L2). Expense lines are per transaction, not per bag, in v1."
-            : "No estimate: depreciation, exclusions and the carrier's limit decide the payout; documented values are evidence only.",
+            ? "Path b (D234 (9)): delayed = still missing or lost, a delivery later than path a's significant-delay threshold, or a filed MBR (not for damaged bags); only receipted (evidence), dated (spec A2) and unallocated lines count; reasonableness is the airline's call (L2). Lines are trip-level, so path b runs once per trip. A reimbursement not tied to lines is an assumption until allocated (D234 (13))."
+            : "No estimate: depreciation, exclusions and the carrier's limit decide the payout; documented values are evidence only. The remedy may be a repair (non-cash) rather than money (M27 R04-21).",
         ],
     evaluate: (input) => evaluateR04V1(path, input),
   };
 }
 
 /**
- * D208 PackAdapters (M20's `RulePack.adapter`; standalone until that type is on main, then wired as `adapter`): live
- * fact rows of one air transaction → runs. Path a: one run per bag (subject = the bag's incident, or `txn`), so each
- * bag's fee is its own opportunity and loss key. Paths b and c: one run for the first bag — the expense lines and the
- * per-passenger limit are transaction-level in v1, so a second run would count the same lines twice. Pure.
+ * D208 PackAdapters (M20's `RulePack.adapter`): live fact rows of one air transaction → runs. No bag fact → no run
+ * (M27 R04-15). Paths a and c: one run per bag (subject = the bag's incident, or `txn`). Path b: one run per trip, on
+ * the first bag, testing every bag's delay (its expense lines are trip-level). Pure.
  */
 function r04Adapter(path: R04Path) {
   return Object.freeze({
     runs(input: AirSnapshotInput): { subjectKey: string; snapshot: R04View; lookup: FactLookup }[] {
       const s = buildAirSnapshot(input);
-      const bags = r04BagSubjects(s);
-      return (path === "a" ? bags : bags.slice(0, 1)).map((bag) => ({ subjectKey: bag.subjectKey, snapshot: r04View(s, bag), lookup: s.lookup }));
+      const bags = r04Bags(s);
+      return (path === "b" ? bags.slice(0, 1) : bags).map((bag) => ({ subjectKey: bag.subjectKey, snapshot: r04View(s, bag.subjectKey), lookup: s.lookup }));
     },
   });
 }
