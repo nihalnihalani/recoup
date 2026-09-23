@@ -18,8 +18,8 @@
         "convex/lib/rules/outcome.ts",
         "convex/lib/deadlines/engine.ts"
       ],
-      "engineClosureSha256": "76893d8ec8af531cf97a56fceeff95fce68e725e55dc1a924c964b35e36cb248",
-      "engineClosureDecision": "D193",
+      "engineClosureSha256": "c5f4917eab0219986b64f6e0f8cd686f0ffee4f0095d072cab10e6427a01173e",
+      "engineClosureDecision": "D204",
       "reviewer": "opus-rules-reviewer",
       "reviewedAt": "2026-09-23",
       "reviews": {
@@ -209,6 +209,7 @@
       "scenarioId": "R02",
       "version": 1,
       "lifecycle": "researched",
+      "packFile": "convex/lib/rules/r02_air_refund_v1.ts",
       "spec": "docs/rules/R02-airline-refund.md",
       "fixtures": "docs/rules/fixtures/R02.json",
       "sources": [
@@ -258,6 +259,7 @@
       "scenarioId": "R04",
       "version": 1,
       "lifecycle": "researched",
+      "packFile": "convex/lib/rules/r04_baggage_v1.ts",
       "spec": "docs/rules/R04-baggage.md",
       "fixtures": "docs/rules/fixtures/R04.json",
       "sources": [
@@ -279,6 +281,7 @@
       "scenarioId": "R05",
       "version": 1,
       "lifecycle": "researched",
+      "packFile": "convex/lib/rules/r05_late_order_v1.ts",
       "spec": "docs/rules/R05-mail-internet-order.md",
       "fixtures": "docs/rules/fixtures/R05.json",
       "sources": [
