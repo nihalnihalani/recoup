@@ -417,6 +417,23 @@ describe("DA-A-35: intake's purchase has its transaction", () => {
 });
 
 describe("needsAttention shows a held refund so the user can confirm it (D194)", () => {
+  it("DA-B-18: a held refund carries who actually sent it, not only the merchant the email names", async () => {
+    const t = setup();
+    const { as } = await account(t);
+    await returnedPurchase(t, as);
+    // A spoofed body that names Nordstrom, sent from somewhere else entirely.
+    const row = await deliver(t, { from: "\"Nordstrom Refunds\" <refunds@lookalike-store.example>", text: "Refund issued." }, "spoof-1");
+    await t.mutation(internal.intake.applyExtraction, {
+      processedEventId: row._id,
+      parsed: refundParsed([{ itemName: "wool scarf", amount: 500, currency: "usd", state: "posted" }]),
+    });
+    const held = (await as.query(api.intake.needsAttention, {})).find((r) => r._id === row._id)!;
+    expect(held.pendingRefund?.merchant).toBe("Nordstrom");
+    expect(held.pendingRefund?.sender).toEqual({ address: "refunds@lookalike-store.example", display: "\"Nordstrom Refunds\" <refunds@lookalike-store.example>" });
+    expect(held.pendingRefund?.receivedAt).toBe(row._creationTime);
+  });
+
+
   it("a held refund row says so and carries its amounts in minor units — never the payload", async () => {
     const t = setup();
     const { as } = await account(t);
@@ -436,7 +453,12 @@ describe("needsAttention shows a held refund so the user can confirm it (D194)",
     const rows = await as.query(api.intake.needsAttention, {});
     const held = rows.find((r) => r._id === row._id)!;
     expect(held.refundAwaitingConfirmation).toBe(true);
-    expect(held.pendingRefund).toEqual({ merchant: "Nordstrom", credits: [{ itemName: "wool scarf", amountMinor: 50_000, currency: "USD" }] });
+    expect(held.pendingRefund).toEqual({
+      merchant: "Nordstrom",
+      credits: [{ itemName: "wool scarf", amountMinor: 50_000, currency: "USD" }],
+      sender: { address: "store@nordstrom.com", display: "store@nordstrom.com" },
+      receivedAt: row._creationTime,
+    });
     expect(held).not.toHaveProperty("payload");
     const plain = rows.find((r) => r._id === other._id)!;
     expect(plain.refundAwaitingConfirmation).toBe(false);

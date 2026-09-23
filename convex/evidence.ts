@@ -24,7 +24,7 @@ import { internalMutation, internalQuery, mutation, query, type MutationCtx, typ
 import type { Doc, Id } from "./_generated/dataModel";
 import { evidenceDocType, extractionStatus as extractionStatusValidator } from "./schema";
 import { isTombstoned } from "./lib/accountState";
-import { ownedEvidence, requireUserId } from "./lib/access";
+import { assertSameTransaction, ownedEvidence, ownedTransaction, requireUserId } from "./lib/access";
 import { rateLimiter } from "./lib/rateLimits";
 import { tryConsumeBudget, tryConsumeGlobalBudget, utcDay } from "./lib/budget";
 import { isFlagOn } from "./lib/flags";
@@ -629,6 +629,84 @@ export const get = query({
   },
 });
 
+/** `listForTransaction` returns at most this many rows (newest first) and says when there were more. */
+export const EVIDENCE_LIST_LIMIT = 100;
+/** `listRecent` accepts a `limit` from 1 to this. */
+export const RECENT_UPLOADS_MAX = 20;
+
+const CONTENT_CLEARED = "This document's content was cleared. Upload it again.";
+
+/**
+ * E-M24 (D220): the evidence on one of the caller's transactions, newest recorded first, at most
+ * `EVIDENCE_LIST_LIMIT` rows plus `truncated`. A foreign or missing transaction → the identical "Transaction not
+ * found" (the owner check runs before any evidence is read).
+ */
+export const listForTransaction = query({
+  args: { transactionId: v.id("transactions") },
+  returns: v.object({ evidence: v.array(evidenceView), truncated: v.boolean() }),
+  handler: async (ctx, { transactionId }) => {
+    const userId = await requireUserId(ctx);
+    await ownedTransaction(ctx, transactionId, userId);
+    const page = await ctx.db
+      .query("evidence")
+      .withIndex("by_transaction", (q) => q.eq("transactionId", transactionId))
+      .order("desc")
+      .take(EVIDENCE_LIST_LIMIT + 1);
+    // Rows are linked only to their owner's transactions; the filter keeps that true even if a row were ever wrong.
+    const own = page.filter((row) => row.userId === userId);
+    return { evidence: own.slice(0, EVIDENCE_LIST_LIMIT).map(view), truncated: page.length > EVIDENCE_LIST_LIMIT };
+  },
+});
+
+/**
+ * E-M24 (D220): link one of the caller's unattached documents to one of the caller's transactions. The same pair
+ * again is a no-op (`changed: false`). Evidence already on ANOTHER transaction is refused, never moved: facts cite
+ * evidence of their own transaction only (DA-A-29), and moving it would leave those citations pointing across
+ * transactions. A document whose content was cleared cannot be newly attached. Foreign or missing ids → the identical
+ * "Evidence not found" / "Transaction not found", before anything is written. This is the only way to attach an
+ * existing document; the upload route takes no transaction.
+ */
+export const attachToTransaction = mutation({
+  args: { evidenceId: v.id("evidence"), transactionId: v.id("transactions") },
+  returns: v.object({ changed: v.boolean() }),
+  handler: async (ctx, { evidenceId, transactionId }) => {
+    const userId = await requireUserId(ctx);
+    const row = await ownedEvidence(ctx, evidenceId, userId);
+    await ownedTransaction(ctx, transactionId, userId);
+    let link: "same" | "unlinked";
+    try {
+      link = assertSameTransaction(transactionId, row, { allowUnlinked: true, label: "Evidence" });
+    } catch {
+      throw new ConvexError("This document is already attached to another transaction.");
+    }
+    if (link === "same") return { changed: false };
+    if (row.retention !== "active") throw new ConvexError(CONTENT_CLEARED);
+    await ctx.db.patch(row._id, { transactionId });
+    return { changed: true };
+  },
+});
+
+/**
+ * E-M24 (D220): the caller's own most recent uploads (kind `upload`), newest first. `limit` must be a whole number
+ * from 1 to `RECENT_UPLOADS_MAX`.
+ */
+export const listRecent = query({
+  args: { limit: v.number() },
+  returns: v.array(evidenceView),
+  handler: async (ctx, { limit }) => {
+    const userId = await requireUserId(ctx);
+    if (!Number.isInteger(limit) || limit < 1 || limit > RECENT_UPLOADS_MAX) {
+      throw new ConvexError(`limit must be a whole number from 1 to ${RECENT_UPLOADS_MAX}`);
+    }
+    const rows = await ctx.db
+      .query("evidence")
+      .withIndex("by_user_and_kind_and_received_at", (q) => q.eq("userId", userId).eq("kind", "upload"))
+      .order("desc")
+      .take(limit);
+    return rows.map(view);
+  },
+});
+
 /**
  * DA-A-8: the user says what a document is. Any type other than `unknown`/`other` is a declaration
  * (`docTypeDeclaredBy: "user"`); `unknown`/`other` puts the row back to `awaiting_doc_type`. The extraction status is
@@ -642,7 +720,7 @@ export const declareDocType = mutation({
   handler: async (ctx, { evidenceId, docType }) => {
     const userId = await requireUserId(ctx);
     const row = await ownedEvidence(ctx, evidenceId, userId);
-    if (row.retention !== "active") throw new ConvexError("This document's content was cleared. Upload it again.");
+    if (row.retention !== "active") throw new ConvexError(CONTENT_CLEARED);
     const declared = !UNDECLARED.has(docType);
     const patch: Partial<Doc<"evidence">> = declared
       ? { docType, docTypeDeclaredBy: "user" }

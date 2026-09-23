@@ -734,7 +734,9 @@ export default defineSchema({
     .index("by_storage", ["storageId"])
     .index("by_extraction_status_and_extraction_started_at", ["extractionStatus", "extractionStartedAt"])
     /** DA-A-7 retention sweep. */
-    .index("by_retention_and_received_at", ["retention", "receivedAt"]),
+    .index("by_retention_and_received_at", ["retention", "receivedAt"])
+    /** E-M24 (D220): a user's most recent uploads (`evidence.listRecent`). */
+    .index("by_user_and_kind_and_received_at", ["userId", "kind", "receivedAt"]),
 
   /**
    * The stable identity of "remedy × loss × transaction" (§2.1, §2.8). `dedupeKey` is

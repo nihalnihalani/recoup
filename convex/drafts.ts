@@ -538,7 +538,6 @@ async function liveLink(
 /** Values the server gave the writer (or bound): the only emails, links and amounts a claim email may state. */
 type Allowances = { emails: Set<string>; urls: Set<string>; hosts: Set<string>; amountsMinor: Set<number> };
 
-const MAX_FINDINGS = 10;
 const EMAIL_IN_TEXT = /[^\s@<>()[\]"',;:]+@[^\s@<>()[\]"',;:]+\.[A-Za-z]{2,}/g;
 const URL_IN_TEXT = /\b(?:https?:\/\/|www\.)[^\s<>()"']+/gi;
 const PHONE_IN_TEXT = /(?:\+\d{1,3}[\s.-]?)?\(?\b\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b/g;
@@ -599,12 +598,18 @@ function amountTokenMinor(token: string): number | null {
  * in the body that the server did not supply — the recipient, the store's confirmed contact, the user's own
  * addresses, the item and policy links (or the store's own site), and the claim's own amounts — is listed. A
  * non-empty list blocks approval until the user edits the text or acknowledges it (`acknowledgeUnverifiedContent`).
- * Pure; the body is already capped at 1,200 characters, so the patterns never see unbounded input.
+ * EVERY distinct finding is listed (DA-B-19): the acknowledgment's `findingsHash` covers the whole list, so it can
+ * never cover a finding the user was not shown. The list stays small because the body is capped at 1,200 characters,
+ * which is also why the patterns never see unbounded input. Pure.
  */
 export function unverifiedContent(body: string, allowed: Allowances): string[] {
   const findings: string[] = [];
+  const seen = new Set<string>();
   const add = (f: string) => {
-    if (findings.length < MAX_FINDINGS && !findings.includes(f)) findings.push(f);
+    if (!seen.has(f)) {
+      seen.add(f);
+      findings.push(f);
+    }
   };
   const hostAllowed = (host: string) => [...allowed.hosts].some((h) => host === h || host.endsWith(`.${h}`));
   // 1. Links with a scheme or "www.".

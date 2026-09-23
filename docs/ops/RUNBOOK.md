@@ -483,3 +483,24 @@ then the same three gates run by hand, in the same order, with their output
 read before the push. Never deploy a tree whose `check-rule-packs` or test
 run is red, even to dev: an active rule pack's behaviour depends on the
 engine modules it imports, and only the gates catch a silent change.
+
+### Re-install after every dependency change
+
+Run `npm ci` in **every** checkout and worktree after a commit that changes
+`package.json` or `package-lock.json`, and before you run any gate or deploy
+from that checkout. For example, M23 added `pdfjs-dist@6.3.289`, pinned
+exactly, with `@napi-rs/canvas` as its optional dependency. Two things go
+wrong if you skip it:
+
+- A stale `node_modules` can fail the gates. More dangerously, it can pass
+  them against different code than the lockfile describes.
+- Convex bundles `"use node"` code from the local `node_modules`, so a deploy
+  from a stale checkout ships whatever happens to be installed.
+
+`npm ci` also re-runs `postinstall`, which re-applies the AgentMail patch
+(`patch-package --error-on-fail`). Confirm it with `npm run verify:patch`.
+
+A worktree that symlinks `node_modules` from the main checkout shares that
+checkout's install. After re-installing in one of them, check that the other
+still resolves the pinned versions, for example with
+`npm ls pdfjs-dist`.

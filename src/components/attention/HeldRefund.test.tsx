@@ -12,7 +12,12 @@ import { fireEvent, render, screen, waitFor } from "../../test/dom";
 import { HeldRefund, type ConfirmRefundResult, type HeldRefundSummary } from "./HeldRefund";
 
 const EVENT = "pe1" as Id<"processedEvents">;
-const refund: HeldRefundSummary = { merchant: "Northwind", credits: [{ itemName: "Kettle", amountMinor: 2_500, currency: "USD" }] };
+const refund: HeldRefundSummary = {
+  merchant: "Northwind",
+  credits: [{ itemName: "Kettle", amountMinor: 2_500, currency: "USD" }],
+  sender: { address: "refunds@northwind.example", display: "Northwind <refunds@northwind.example>" },
+  receivedAt: Date.UTC(2026, 8, 23, 9),
+};
 
 let resolveConfirm: (value: ConfirmRefundResult) => void = () => {};
 const onConfirm = vi.fn(

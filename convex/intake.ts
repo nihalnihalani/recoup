@@ -1348,8 +1348,18 @@ const attentionRow = v.object({
    */
   pendingRefund: v.optional(
     v.object({
+      /** The merchant name AS WRITTEN IN THE EMAIL: attacker-controllable, never proof of who sent it. */
       merchant: v.union(v.string(), v.null()),
       credits: v.array(v.object({ itemName: v.union(v.string(), v.null()), amountMinor: v.number(), currency: v.string() })),
+      /**
+       * DA-B-18: who the message actually came from — the From address the mail provider delivered it with (card
+       * numbers masked), so the user can judge it before tapping. `address` is the bare address when one can be read
+       * out of `display` (`senderAddress`, lowercased), else null. Not authenticated (`senderAuth` is "unavailable").
+       * Null for a paste.
+       */
+      sender: v.union(v.object({ address: v.union(v.string(), v.null()), display: v.string() }), v.null()),
+      /** When Recoup received the message. */
+      receivedAt: v.number(),
     }),
   ),
 });
@@ -1357,8 +1367,16 @@ const attentionRow = v.object({
 /** Credits shown per held refund; an email listing more is still confirmed in full by the tap. */
 const MAX_PENDING_CREDITS_SHOWN = 20;
 
+/** DA-B-18: the delivered From value of an inbound message, or null when there is none (a paste). */
+function senderView(from: unknown): { address: string | null; display: string } | null {
+  if (typeof from !== "string") return null;
+  const display = cleanLine(from).slice(0, MAX_FROM_CHARS);
+  if (display === "") return null;
+  return { address: senderAddress(display), display };
+}
+
 /** The display projection of a held refund (D194), or undefined when the row holds none or it no longer parses. */
-function pendingRefundView(payload: unknown) {
+function pendingRefundView(payload: unknown, receivedAt: number) {
   const held = (payload as { pendingRefund?: unknown } | undefined)?.pendingRefund;
   if (held === undefined) return undefined;
   const parsed = RefundCandidate.safeParse(held);
@@ -1375,7 +1393,12 @@ function pendingRefundView(payload: unknown) {
     }
     credits.push({ itemName: credit.itemName === null ? null : cleanLine(credit.itemName).slice(0, 200), amountMinor, currency });
   }
-  return { merchant: parsed.data.merchant === null ? null : cleanLine(parsed.data.merchant).slice(0, 120), credits };
+  return {
+    merchant: parsed.data.merchant === null ? null : cleanLine(parsed.data.merchant).slice(0, 120),
+    credits,
+    sender: senderView((payload as { from?: unknown }).from),
+    receivedAt,
+  };
 }
 
 /**
@@ -1401,7 +1424,7 @@ export const needsAttention = query({
       .flat()
       .sort((a, b) => b._creationTime - a._creationTime)
       .map(({ payload, processingStartedAt: _startedAt, lastError, errorSummary, ...row }) => {
-        const pendingRefund = row.status === "needs_review" && row.route === "intake" ? pendingRefundView(payload) : undefined;
+        const pendingRefund = row.status === "needs_review" && row.route === "intake" ? pendingRefundView(payload, row._creationTime) : undefined;
         return {
         ...row,
         refundAwaitingConfirmation: pendingRefund !== undefined,

@@ -50,6 +50,7 @@ const NEW_TABLES: Record<string, string[]> = {
     "by_storage",
     "by_extraction_status_and_extraction_started_at",
     "by_retention_and_received_at",
+    "by_user_and_kind_and_received_at",
   ],
   opportunities: [
     "by_user_and_dedupe_key",

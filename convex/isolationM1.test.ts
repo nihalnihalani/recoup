@@ -133,6 +133,8 @@ type World = {
   draftId: Id<"drafts">;
   sentDraftId: Id<"drafts">;
   evidenceId: Id<"evidence">;
+  /** B's own unattached upload (E-M24: B tries to attach it to A's transaction). */
+  bEvidenceId: Id<"evidence">;
   pendingRefundEventId: Id<"processedEvents">;
   missing: Record<"purchases" | "transactions" | "opportunities" | "claims" | "drafts" | "evidence" | "processedEvents", string>;
   pdf: Uint8Array<ArrayBuffer>;
@@ -211,6 +213,9 @@ async function buildWorld(t: T): Promise<World> {
   const up = await upload(a.as, pdf);
   expect(up.status).toBe(200);
   const evidenceId = ((await up.json()) as { evidenceId: Id<"evidence"> }).evidenceId;
+  const bUp = await upload(b.as, pdfBytes("other-b"));
+  expect(bUp.status).toBe(200);
+  const bEvidenceId = ((await bUp.json()) as { evidenceId: Id<"evidence"> }).evidenceId;
 
   // Missing ids: real rows of A's, deleted, so the id is well-formed and names nothing.
   const missing = await t.run(async (ctx) => {
@@ -244,7 +249,7 @@ async function buildWorld(t: T): Promise<World> {
     };
   });
 
-  return { a, b, purchaseId, itemIds, transactionId, opportunityId, claimId, draftId, sentDraftId, evidenceId, pendingRefundEventId, missing, pdf };
+  return { a, b, purchaseId, itemIds, transactionId, opportunityId, claimId, draftId, sentDraftId, evidenceId, bEvidenceId, pendingRefundEventId, missing, pdf };
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +305,16 @@ const PROBES: Probe[] = [
   { fn: "evidence.get", table: "evidence", ownerId: (w) => w.evidenceId, call: (as, id) => as.query(api.evidence.get, { evidenceId: id as Id<"evidence"> }) },
   { fn: "evidence.declareDocType", table: "evidence", ownerId: (w) => w.evidenceId, call: (as, id) => as.mutation(api.evidence.declareDocType, { evidenceId: id as Id<"evidence">, docType: "card_statement" }) },
   { fn: "evidence.setPinned", table: "evidence", ownerId: (w) => w.evidenceId, call: (as, id) => as.mutation(api.evidence.setPinned, { evidenceId: id as Id<"evidence">, pinned: true }) },
+  // E-M24 (D220)
+  { fn: "evidence.listForTransaction", table: "transactions", ownerId: (w) => w.transactionId, call: (as, id) => as.query(api.evidence.listForTransaction, { transactionId: id as Id<"transactions"> }) },
+  {
+    fn: "evidence.attachToTransaction(evidenceId)", table: "evidence", ownerId: (w) => w.evidenceId,
+    call: (as, id, w) => as.mutation(api.evidence.attachToTransaction, { evidenceId: id as Id<"evidence">, transactionId: w.missing.transactions as Id<"transactions"> }),
+  },
+  {
+    fn: "evidence.attachToTransaction(transactionId)", table: "transactions", ownerId: (w) => w.transactionId,
+    call: (as, id, w) => as.mutation(api.evidence.attachToTransaction, { evidenceId: w.bEvidenceId, transactionId: id as Id<"transactions"> }),
+  },
   { fn: "opportunities.openCase", table: "opportunities", ownerId: (w) => w.opportunityId, call: (as, id) => as.mutation(api.opportunities.openCase, { opportunityId: id as Id<"opportunities"> }) },
   { fn: "opportunities.dismiss", table: "opportunities", ownerId: (w) => w.opportunityId, call: (as, id) => as.mutation(api.opportunities.dismiss, { opportunityId: id as Id<"opportunities"> }) },
   { fn: "opportunities.get", table: "opportunities", ownerId: (w) => w.opportunityId, call: (as, id) => as.query(api.opportunities.get, { opportunityId: id as Id<"opportunities"> }) },
@@ -326,7 +341,7 @@ const PROBES: Probe[] = [
 ];
 
 /** Public functions that take no id: covered by the list/summary cases and the HTTP cases below. */
-const NO_ID_CASES = ["transactions.list", "transactions.createManual", "recovery.summary", "http:POST /evidence/upload", "http:GET /evidence/file"];
+const NO_ID_CASES = ["transactions.list", "transactions.createManual", "recovery.summary", "evidence.listRecent", "http:POST /evidence/upload", "http:GET /evidence/file"];
 
 // ---------------------------------------------------------------------------
 
@@ -349,6 +364,7 @@ describe("isolation: foreign id ≡ missing id for every new id-taking public fu
     expect((await w.a.as.query(api.transactions.get, { transactionId: w.transactionId }))._id).toBe(w.transactionId);
     expect((await w.a.as.query(api.opportunities.get, { opportunityId: w.opportunityId })).opportunity._id).toBe(w.opportunityId);
     expect((await w.a.as.query(api.evidence.get, { evidenceId: w.evidenceId }))).toBeDefined();
+    expect((await w.a.as.query(api.evidence.listForTransaction, { transactionId: w.transactionId })).truncated).toBe(false);
     expect(await w.a.as.query(api.facts.list, { transactionId: w.transactionId })).toBeInstanceOf(Array);
     const prepared = await w.a.as.mutation(api.drafts.prepareSend, draftSend(w.draftId));
     expect(prepared).toBeDefined();
@@ -391,6 +407,18 @@ describe("isolation: list-shaped queries never show another user's rows or money
     const aRead = await w.a.as.query(api.transactions.get, { transactionId: id }).catch((e: Error) => e.message);
     const aMissing = await w.a.as.query(api.transactions.get, { transactionId: w.missing.transactions as Id<"transactions"> }).catch((e: Error) => e.message);
     expect(aRead).toBe(aMissing);
+  });
+
+  it("evidence.listRecent for B lists only B's upload, and B cannot attach it to A's transaction (E-M24)", async () => {
+    const t = setup();
+    const w = await buildWorld(t);
+    const bRecent = await w.b.as.query(api.evidence.listRecent, { limit: 20 });
+    expect(bRecent.map((e) => e._id)).toEqual([w.bEvidenceId]);
+    expect(JSON.stringify(bRecent)).not.toContain(w.evidenceId);
+    expect((await w.a.as.query(api.evidence.listRecent, { limit: 20 })).map((e) => e._id)).toEqual([w.evidenceId]);
+    await expect(w.b.as.mutation(api.evidence.attachToTransaction, { evidenceId: w.bEvidenceId, transactionId: w.transactionId })).rejects.toThrow(/Transaction not found/);
+    expect((await t.run(async (ctx) => await ctx.db.get(w.bEvidenceId)))!.transactionId).toBeUndefined();
+    expect((await w.a.as.query(api.evidence.listForTransaction, { transactionId: w.transactionId })).evidence).toEqual([]);
   });
 
   it("intake.needsAttention for B does not list A's held refund email", async () => {

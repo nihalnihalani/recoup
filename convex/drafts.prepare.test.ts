@@ -556,3 +556,34 @@ describe("DA-B-11: the content acknowledgment is bound to the findings (findings
     expect(await prepare(a.as, draftId, { body: edited, ...ack })).toMatchObject({ ok: false, code: "unverified_content" });
   });
 });
+
+// ===========================================================================
+// DA-B-19 (D223): the content check never stops listing silently
+// ===========================================================================
+
+describe("DA-B-19: every finding is listed, so an acknowledgment never covers one the user did not see", () => {
+  const links = Array.from({ length: 11 }, (_, i) => `https://p${i}.evil.example/x`);
+  const allowed = { emails: new Set([CONTACT]), urls: new Set<string>(), hosts: new Set([DOMAIN]), amountsMinor: new Set([2_500]) };
+
+  it("11 unknown links → all 11 findings (the old cap stopped at 10)", () => {
+    expect(unverifiedContent(`Visit ${links.join(" ")} today.`, allowed)).toEqual(links.map((l) => `link ${l}`));
+  });
+
+  it("a repeated finding is still listed once", () => {
+    expect(unverifiedContent(`${links[0]} and again ${links[0]}`, allowed)).toEqual([`link ${links[0]}`]);
+  });
+
+  it("prepareSend returns all 11 findings, and acknowledging that hash is what approves", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const w = await world(t, a.userId);
+    await link(t, w.purchaseId);
+    const body = `${BODY} ${links.join(" ")}`;
+    const draftId = await draftFor(t, a.userId, w.claimId, body);
+    const blocked = await prepare(a.as, draftId, { body });
+    if (blocked.ok || blocked.code !== "unverified_content") throw new Error("expected unverified_content");
+    expect(blocked.findings).toEqual(links.map((l) => `link ${l}`));
+    const ok = await prepare(a.as, draftId, { body, acknowledgeUnverifiedContent: true, acknowledgedFindingsHash: blocked.findingsHash });
+    expect(ok.ok).toBe(true);
+  });
+});
