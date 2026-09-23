@@ -82,11 +82,17 @@ export function decidingRule(d: Dimensions, f: Flags, assumptions: readonly Assu
 // Candidate testing (rule 5, D152/D154/D158)
 // ---------------------------------------------------------------------------
 
-/** "Same answer" = same outcome AND same amount (identical estimate amountMinor + currency, or both null). */
+/**
+ * "Same answer" = same outcome AND same amount (identical estimate amountMinor + currency, or both null), and that
+ * outcome is approvable (E3, D243: a negative verdict never stands on unconfirmed candidates).
+ */
 export function sameAnswer(
   answers: readonly { outcome: Outcome; amount: Pick<AmountCalc, "estimate"> | null }[],
 ): boolean {
   if (answers.length === 0) return true;
+  // E3 (D243): only an APPROVABLE shared answer may stand on unconfirmed candidates (5c, capped). A shared negative
+  // answer is not "the same answer" — the case goes to 5b and the user says which value is right.
+  if (answers.some((a) => !isApprovable(a.outcome))) return false;
   const key = (a: (typeof answers)[number]) =>
     `${a.outcome}|${a.amount === null ? "null" : `${a.amount.estimate.amountMinor} ${a.amount.estimate.currency}`}`;
   const first = key(answers[0]);

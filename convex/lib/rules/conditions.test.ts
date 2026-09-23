@@ -69,6 +69,19 @@ describe("evaluateConditions", () => {
     expect(evaluateConditions(anyTree, lookupFrom([c("a", "candidate", yes), c("b", "confirmed", yes)])).decisiveUnconfirmed).toEqual([]);
   });
 
+  it("E3 (D243): a fail that rests only on a candidate is unknown (candidate_unconfirmed); a fail on confirmed facts stays", () => {
+    const tree: ConditionNode = { op: "all", children: [leaf("a"), leaf("b")] };
+    const r = evaluateConditions(tree, lookupFrom([c("a", "candidate", no), c("b", "confirmed", yes)]));
+    expect(r.result).toBe("unknown");
+    expect(r.decisiveUnconfirmed.map((m) => [m.key, m.reason])).toEqual([["a", "candidate_unconfirmed"]]);
+    // A confirmed fail decides regardless of a candidate elsewhere.
+    expect(evaluateConditions(tree, lookupFrom([c("a", "candidate", yes), c("b", "confirmed", no)])).result).toBe("fail");
+    // Under `not`, a candidate pass that makes the tree fail is caught the same way.
+    const notTree: ConditionNode = { op: "not", child: leaf("a") };
+    expect(evaluateConditions(notTree, lookupFrom([c("a", "candidate", yes)])).result).toBe("unknown");
+    expect(evaluateConditions(notTree, lookupFrom([c("a", "confirmed", yes)])).result).toBe("fail");
+  });
+
   it("an assumption-class leaf that cannot be read is assumed (DA-A-2): the tree passes, nothing is missing", () => {
     const tree: ConditionNode = { op: "all", children: [leaf("a"), leaf("policy_ok", { class: "assumption" })] };
     const r = evaluateConditions(tree, lookupFrom([c("a", "confirmed", yes)]));

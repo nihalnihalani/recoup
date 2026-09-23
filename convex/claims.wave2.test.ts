@@ -127,6 +127,53 @@ describe("D206(3): R01 engine epoch — only a behavioural re-pin invalidates an
   });
 });
 
+describe("D243: R01's real epoch bump (1 → 2) invalidates a prepared approval exactly once", () => {
+  pinClockEach(NOW);
+  const DOMAIN = "acme.example";
+  const CONTACT = "help@acme.example";
+  const BODY = "Hello, the Jacket I bought is now listed lower. Could you refund the $25.00 difference? Thank you.";
+
+  it("prepared under e1 → the shipped ENGINE_EPOCHS (e2) → one material bump, one note, prepareSend refuses; no second bump", async () => {
+    const actual = await vi.importActual<typeof import("./lib/rules/engineEpochs")>("./lib/rules/engineEpochs");
+    const shipped = actual.ENGINE_EPOCHS.find((e) => e.ruleId === R01_V1_RULE_ID && e.version === 1)!;
+    expect(shipped.engineEpoch).toBe(2);
+    const t = setup();
+    setTestActivations([{ ruleId: R01_V1_RULE_ID, version: 1, status: "active", decision: "TEST" }]);
+    EPOCHS.push({ ...shipped, engineEpoch: 1 }); // the state before D243
+    const { userId, as } = await signedIn(t);
+    const w = await t.run(async (ctx) => {
+      await ctx.db.insert("profiles", { userId, inboxId: "inbox_1", inboxEmail: "me@agentmail.to" });
+      const purchaseId = await ctx.db.insert("purchases", { userId, merchant: "Acme", merchantDomain: DOMAIN, purchasedAt: NOW - 2 * DAY, currency: "USD", status: "active" });
+      const itemId = await ctx.db.insert("items", { purchaseId, userId, name: "Jacket", unitCents: 12_000, qty: 1, productUrl: `https://${DOMAIN}/p`, returned: false });
+      const priceCheckId = await ctx.db.insert("priceChecks", { itemId, userId, observedCents: 9_500, currency: "USD", confidence: 0.92, variantMatch: "exact", observedAt: NOW - 60_000, sourceUrl: `https://${DOMAIN}/p` });
+      const policyId = await ctx.db.insert("policies", {
+        userId, merchantDomain: DOMAIN, kind: "price_adjustment", windowDays: 14, channel: "email", contactEmail: CONTACT,
+        passage: "We adjust the price within 14 days.", sourceUrl: `https://${DOMAIN}/policy`, retrievedAt: NOW - 2 * DAY, confidence: 0.9, confirmedByUser: true,
+      });
+      await ensurePurchaseTransaction(ctx, purchaseId);
+      const claimId = await ctx.db.insert("claims", {
+        purchaseId, itemId, userId, type: "price_adjustment", expectedCents: 2_500, status: "detected", token: "EP2AB1", version: 1,
+        windowEndsAt: NOW + 12 * DAY, policyId, openedFromPriceCheckId: priceCheckId,
+      });
+      await evaluatePurchase(ctx, purchaseId, "user_request", NOW);
+      return { purchaseId, claimId };
+    });
+    const draftId = (await t.mutation(internal.drafts.insert, { claimId: w.claimId, userId, to: CONTACT, subject: "Price adjustment", body: BODY }))!;
+    const prepare = () => as.mutation(api.drafts.prepareSend, { draftId, to: CONTACT, subject: "Price adjustment", body: BODY });
+    expect((await prepare()).ok).toBe(true);
+
+    EPOCHS[0] = { ...shipped }; // D243 ships: epoch 2
+    for (let i = 0; i < 3; i++) await t.run(async (ctx) => { await evaluatePurchase(ctx, w.purchaseId, "rule_version", NOW); });
+    const claim = (await t.run((ctx) => ctx.db.get(w.claimId)))!;
+    expect(claim.version).toBe(2); // exactly once
+    const notes = await t.run((ctx) => ctx.db.query("claimNotes").withIndex("by_claim", (q) => q.eq("claimId", w.claimId)).collect());
+    expect(notes.filter((n) => /evaluation engine changed/.test(n.text))).toHaveLength(1);
+    const evals = await t.run((ctx) => ctx.db.query("evaluations").collect());
+    expect(evals.some((e) => e.engineVersion === `${R01_V1_RULE_ID}@v1/e2`)).toBe(true);
+    expect(await prepare()).toMatchObject({ ok: false });
+  });
+});
+
 describe("DA-B-16 / DA-B-17 (D223): a gift card that came back instead of cash", () => {
   pinClockEach(NOW);
 

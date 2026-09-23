@@ -174,7 +174,9 @@ describe("candidate testing helpers (D154/D158: same outcome AND same amount)", 
     expect(sameAnswer([{ outcome: "likely_eligible", amount: amt(5000) }, { outcome: "likely_eligible", amount: amt(5000) }])).toBe(true);
     expect(sameAnswer([{ outcome: "likely_eligible", amount: amt(5000) }, { outcome: "likely_eligible", amount: amt(4000) }])).toBe(false);
     expect(sameAnswer([{ outcome: "likely_eligible", amount: amt(5000) }, { outcome: "likely_eligible", amount: amt(5000, "GBP") }])).toBe(false);
-    expect(sameAnswer([{ outcome: "not_eligible", amount: null }, { outcome: "not_eligible", amount: null }])).toBe(true);
+    // E3 (D243): a shared NEGATIVE answer never stands on candidates (5b instead of 5c).
+    expect(sameAnswer([{ outcome: "not_eligible", amount: null }, { outcome: "not_eligible", amount: null }])).toBe(false);
+    expect(sameAnswer([{ outcome: "deadline_passed", amount: amt(5000) }, { outcome: "deadline_passed", amount: amt(5000) }])).toBe(false);
     expect(sameAnswer([{ outcome: "not_eligible", amount: null }, { outcome: "likely_eligible", amount: null }])).toBe(false);
   });
 

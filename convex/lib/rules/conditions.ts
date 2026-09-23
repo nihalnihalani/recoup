@@ -139,7 +139,14 @@ export function evaluateConditions(tree: ConditionNode, cells: CellLookup): Cond
   const all = leaves(tree);
   const states = new Map<ConditionLeaf, LeafState>();
   for (const leaf of all) states.set(leaf, leafState(leaf, cells));
-  const result = evalNode(tree, (l) => states.get(l)!.result);
+  let result = evalNode(tree, (l) => states.get(l)!.result);
+  // E3 (D234(1), D243): a negative result never rests on an unconfirmed candidate. When treating every
+  // candidate-resting leaf as unknown would no longer give "fail", the answer is "unknown" — the candidates are then
+  // decisive and listed as `candidate_unconfirmed`, so the user confirms them before any "not eligible".
+  if (result === "fail" && all.some((l) => states.get(l)!.candidates.length > 0)) {
+    const withoutCandidates = evalNode(tree, (l) => (states.get(l)!.candidates.length > 0 ? "unknown" : states.get(l)!.result));
+    if (withoutCandidates !== "fail") result = "unknown";
+  }
 
   const decisiveMissing: MissingFact[] = [];
   const decisiveUnconfirmed: MissingFact[] = [];
