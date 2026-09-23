@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { setup, signedIn } from "./test.setup";
+import { setup, signedIn, fakeSchedulerTimersEach } from "./test.setup";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 /**
  * T02 boundary tests (P08): every public query/mutation/action that takes an

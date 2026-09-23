@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
-import { setup, signedIn } from "./test.setup";
+import { setup, signedIn, fakeSchedulerTimersEach } from "./test.setup";
 import { inboxTransport } from "./account";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -308,6 +311,7 @@ describe("T18.5 addendum (F-AUD-2): ensureInbox provisioning is single-flight", 
   });
 
   it("a fresh (<10min) placeholder is NOT reclaimed: a second caller waits for it and gets the same address, still exactly 1 POST", async () => {
+    vi.useRealTimers(); // D247: waitForProvisioning polls on real timers; this test schedules no Convex job
     const t = setup();
     const { userId, as } = await signedIn(t);
     await t.run((ctx) => ctx.db.insert("profiles", { userId, provisioningAt: Date.now() - 60_000 }));

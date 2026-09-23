@@ -86,6 +86,34 @@ export const CLOCK_AND_TIMERS: NonNullable<Parameters<typeof vi.useFakeTimers>[0
 ];
 
 /**
+ * The timers convex-test's scheduler uses, and nothing else: `Date` and `performance` stay real (D247, KX3). A file
+ * that schedules work (`ctx.scheduler.runAfter` / `runAt`) and does not pin the clock fakes these, so a scheduled job
+ * never runs in the background on a real timer; the test flushes it when it wants it
+ * (`t.finishAllScheduledFunctions(vi.runAllTimers)`, or `vi.advanceTimersByTime` + `finishInProgressScheduledFunctions`).
+ */
+export const SCHEDULER_TIMERS: NonNullable<Parameters<typeof vi.useFakeTimers>[0]>["toFake"] = [
+  "setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate",
+];
+
+/** The setTimeout in place when this module loaded (before any test fakes timers). */
+const setTimeoutAtLoad = globalThis.setTimeout;
+
+/** Waits `ms` of REAL wall-clock time, even while the timers are faked (a test that needs `Date.now()` to move). */
+export function sleepReal(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeoutAtLoad(resolve, ms));
+}
+
+/** `SCHEDULER_TIMERS` faked around every test of the calling file (or `describe` block); a test may still re-fake. */
+export function fakeSchedulerTimersEach(): void {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: SCHEDULER_TIMERS });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+}
+
+/**
  * Pins the wall clock at `at` (`Date.now()`, `new Date()`), the D138/M04 pattern, and fakes the timers with it
  * (KX3, D233). Returns the restore function.
  *

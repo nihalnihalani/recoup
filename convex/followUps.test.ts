@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { setup, signedIn } from "./test.setup";
+import { setup, signedIn, fakeSchedulerTimersEach } from "./test.setup";
 import { cancelPending, scheduleReminder } from "./followUps";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 async function seedClaim(
   t: ReturnType<typeof setup>,

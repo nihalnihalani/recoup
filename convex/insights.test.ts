@@ -3,9 +3,12 @@ import { describe, it, expect, vi } from "vitest";
 import { convexTest } from "convex-test";
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { setup, signedIn } from "./test.setup";
+import { setup, signedIn, fakeSchedulerTimersEach } from "./test.setup";
 import schema from "./schema";
 import { STALE_PRICE_MS } from "./limits";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 /**
  * A second, isolated harness with strict transaction limits enforced (the

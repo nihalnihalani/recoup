@@ -20,12 +20,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { setup, signedIn } from "./test.setup";
+import { setup, signedIn, fakeSchedulerTimersEach } from "./test.setup";
 import { claimDrop, applyDropOutcome, DROP_SUBJECT } from "./notify";
 import { BACKOFF_MS } from "./drafts";
 import { MAIL_RECONCILE_STALL_MS } from "./limits";
 import { agentmail } from "./mail";
 import { suppressAddress, tokenFor } from "./alerts";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 type T = ReturnType<typeof setup>;
 

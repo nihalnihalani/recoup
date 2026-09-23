@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { api, internal } from "./_generated/api";
-import { setup, signedIn } from "./test.setup";
+import { setup, signedIn, fakeSchedulerTimersEach } from "./test.setup";
 import { openClaim } from "./claims";
 import { scheduleReminder } from "./followUps";
 import type { Id } from "./_generated/dataModel";
@@ -519,6 +519,9 @@ describe("provisional ledger kinds and existing readers (D156)", () => {
 import { ConvexError } from "convex/values";
 import { applyEvent } from "./claims";
 import { MAX_USER_AMOUNT_MINOR } from "./limits";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 describe("M10 provisional credits (DA-A-16, D148 N5)", () => {
   const recordProvisional = (as: any, claimId: Id<"claims">, amountMinor: number, idempotencyKey: string, currency = "USD") =>

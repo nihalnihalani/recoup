@@ -2,11 +2,14 @@ import { ConvexError } from "convex/values";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { setup, signedIn } from "./test.setup";
+import { setup, signedIn, fakeSchedulerTimersEach } from "./test.setup";
 import { researchPolicy, fetchBothImpl } from "./policies";
 import { verifyPassage } from "./lib/passage";
 import { inboxTransport } from "./account";
 import type { ResearchDeps } from "./policies";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 const DAY = 86_400_000;
 

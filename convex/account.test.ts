@@ -98,12 +98,22 @@ type T = ReturnType<typeof setup>;
 let SAMPLE_OUTBOUND_ID: string;
 beforeAll(async () => {
   const seedT = setup();
+  // D247 (KX3): `enqueueSend`'s mutation itself schedules the real send pipeline, whose workpool component
+  // self-reschedules its own periodic status report INDEFINITELY once a job exists (see the docstring above) --
+  // this `beforeAll` runs before any test's `beforeEach` fakes timers, so without this, that first scheduling call
+  // lands on a REAL timer and the report keeps firing on real timers for the rest of the process, contaminating
+  // whichever test's `it()` happens to be running when a tick lands (the KX3 guard, widened for D247, now catches
+  // exactly this). Faking timers around JUST this call routes the scheduling into vitest's fake clock instead;
+  // switching back to real timers immediately after abandons it unflushed, so it never actually runs -- fine here,
+  // since only the id's FORMAT is needed (per the docstring), never delivery.
+  vi.useFakeTimers();
   SAMPLE_OUTBOUND_ID = await seedT.mutation(components.agentmail.lib.enqueueSend, {
     config: { retryAttempts: 1, initialBackoffMs: 10 },
     inboxId: "inbox-seed-sample",
     kind: "send" as const,
     payload: { to: "sample@example.com", subject: "sample", text: "sample" },
   });
+  vi.useRealTimers();
 });
 
 async function seedFullAccount(t: T, userId: Id<"users">, email: string) {

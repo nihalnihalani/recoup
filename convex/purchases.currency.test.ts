@@ -2,8 +2,11 @@
 import { describe, it, expect } from "vitest";
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { setup, signedIn } from "./test.setup";
+import { setup, signedIn, fakeSchedulerTimersEach } from "./test.setup";
 import { openClaim } from "./claims";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 // purchases.confirm gains `currency` (contract §7, DA-A-33): validated; a CHANGE is refused once any claim exists on
 // the purchase; an explicit currency is recorded as a `retail.currency` user_confirmed fact. purchases.test.ts is

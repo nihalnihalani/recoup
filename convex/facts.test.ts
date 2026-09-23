@@ -2,11 +2,14 @@
 import { describe, it, expect } from "vitest";
 import { api } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { setup, signedIn } from "./test.setup";
+import { setup, signedIn, fakeSchedulerTimersEach, sleepReal } from "./test.setup";
 import { putFact, readCellRows, type PutFactInput } from "./lib/facts/write";
 import { MAX_LIVE_FACTS_PER_TRANSACTION } from "./limits";
 import { FACT_SPECS, type FactSpec, type FactValue } from "./lib/facts/catalog";
 import { legacyRetailRows } from "./lib/facts/legacyRetail";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 type T = ReturnType<typeof setup>;
 
@@ -278,7 +281,7 @@ describe("putFact — supersede rules and the live count", () => {
     const obs = { transactionId: r.transactionId, subjectKey: r.item, key: "retail.observed_price", state: "observed" as const, source: { kind: "price_check" as const, priceCheckId: pc } };
     const a = await put(t, r.userId, { ...obs, value: usd(7000) });
     const before = (await t.run((ctx) => ctx.db.get(a.factId)))!.lastObservedAt!;
-    await new Promise((res) => setTimeout(res, 5));
+    await sleepReal(5); // real wall-clock time (the timers are faked, D247)
     const b = await put(t, r.userId, { ...obs, value: usd(7000) });
     expect(b).toEqual({ factId: a.factId, outcome: "patched" });
     expect((await t.run((ctx) => ctx.db.get(a.factId)))!.lastObservedAt!).toBeGreaterThan(before);

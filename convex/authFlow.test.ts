@@ -14,7 +14,7 @@ import { exportPKCS8, generateKeyPair } from "jose";
 import { isRateLimitError } from "@convex-dev/rate-limiter";
 import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
-import { setup } from "./test.setup";
+import { setup, fakeSchedulerTimersEach } from "./test.setup";
 import { authMailTransport } from "./lib/authMail";
 import { rateLimiter } from "./lib/rateLimits";
 import {
@@ -23,6 +23,9 @@ import {
   TOO_MANY_ATTEMPTS_MESSAGE,
   WRONG_CREDENTIALS_MESSAGE,
 } from "./auth";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 const PASSWORD = "correct-horse-battery";
 

@@ -10,11 +10,14 @@ vi.mock("../rules/registry", async () => await import("../rules/testRegistry"));
 
 import { api } from "../../_generated/api";
 import { resetTestRegistry, setTestActivations } from "../rules/testRegistry";
-import { setup, signedIn } from "../../test.setup";
+import { setup, signedIn, fakeSchedulerTimersEach } from "../../test.setup";
 import { US_ZONES } from "../deadlines/usZones";
 import { getFactSpec, type FactSpec } from "./catalog";
 import { ISO_3166_ALPHA2, ORDER_FACT_SPECS, US_TIME_ZONE_IDS } from "./keys_order";
 import { validateFactValue } from "./values";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 describe("keys_order (catalogue)", () => {
   it("every order key is a transaction-level retail_order fact in the order domain", () => {

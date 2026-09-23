@@ -2,10 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { setup, signedIn } from "./test.setup";
+import { setup, signedIn, fakeSchedulerTimersEach } from "./test.setup";
 import { applySendOutcome, BACKOFF_MS, subjectWithToken } from "./drafts";
 import { agentmail } from "./mail";
 import { DAILY_BUDGETS, MAX_SENDS_PER_CLAIM } from "./limits";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 /**
  * Drafts, the approved send and the D13 reconcile job. Nothing here talks to

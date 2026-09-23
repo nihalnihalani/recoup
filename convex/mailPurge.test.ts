@@ -1,6 +1,9 @@
 import { describe, expect, test } from "vitest";
 import { components, internal } from "./_generated/api";
-import { setup } from "./test.setup";
+import { setup, fakeSchedulerTimersEach } from "./test.setup";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 /**
  * T18.4 (D115 6b-5): regression tests for the AgentMail component's

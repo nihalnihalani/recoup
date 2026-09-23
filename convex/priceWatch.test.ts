@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { setup, signedIn } from "./test.setup";
+import { setup, signedIn, fakeSchedulerTimersEach, sleepReal } from "./test.setup";
 import { fetchBothImpl } from "./policies";
 import { activePack } from "./lib/rules/registry";
 import { CONFIRM_BEFORE_CHECK, MIN_PLAUSIBLE_FRACTION, implausiblyCheap } from "./priceWatch";
@@ -14,6 +14,9 @@ import {
   WATCH_CHECK_INTERVAL_MS,
   WATCH_SWEEP_BUMP_MS,
 } from "./limits";
+
+// D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
+fakeSchedulerTimersEach();
 
 /**
  * Price watch (T09). These tests exercise `eligibleItems`, `recordCheck` and
@@ -436,7 +439,7 @@ describe("priceWatch.eligibleItems", () => {
     const { userId } = await signedIn(t);
     const { itemId } = await world(t, userId, { purchasedAt: Date.now() - 20 * DAY });
     // The original 14-day window is closed; a newer 60-day snapshot reopens it.
-    await new Promise((r) => setTimeout(r, 3));
+    await sleepReal(3); // real wall-clock time (the timers are faked, D247)
     await t.run((ctx) =>
       ctx.db.insert("policies", {
         userId,
@@ -1218,6 +1221,7 @@ describe("T24c (D109): checkItem's scrape-failure line is structured and redacte
   it("logs one price_check_failed JSON line via logEvent, never a raw provider body, on a scrape failure", async () => {
     // Same technique policies.test.ts uses for researchPolicy's own scrape-failure path: no real
     // network, only the Firecrawl component's own real (short) retry/backoff timers elapse for real.
+    vi.useRealTimers(); // D247: the component's backoff needs real timers; this test schedules no Convex job
     vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
     const t = setup();
     const { userId } = await signedIn(t);
