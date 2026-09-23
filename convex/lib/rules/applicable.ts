@@ -5,6 +5,7 @@
  */
 import type { Activation } from "./activation";
 import { r01PriceAdjustmentV1 } from "./r01_price_adjustment_v1";
+import { r02AirRefundV1 } from "./r02_air_refund_v1";
 import type { AnyRulePack, ScenarioId, TransactionCategory } from "./types";
 
 /**
@@ -12,7 +13,10 @@ import type { AnyRulePack, ScenarioId, TransactionCategory } from "./types";
  * only packs that `activation.ts` marks active are returned by the production registry. Old versions stay here so
  * historical evaluations remain explainable (contract §8 (d)).
  */
-export const IMPLEMENTED_PACKS: readonly AnyRulePack[] = Object.freeze([r01PriceAdjustmentV1]);
+export const IMPLEMENTED_PACKS: readonly AnyRulePack[] = Object.freeze([
+  r01PriceAdjustmentV1,
+  r02AirRefundV1,
+]);
 
 /**
  * The scenarios a transaction of each category could involve — the rows of its "Paths not checked / source not

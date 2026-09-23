@@ -6,15 +6,16 @@ import { AIR_FACT_SPECS } from "./keys_air";
 import { CARD_FACT_SPECS } from "./keys_card";
 
 describe("lib/facts/catalog (closed catalogue, contract §2.5)", () => {
-  it("merges every domain file, and the wave-2 files are empty stubs", () => {
+  it("merges every domain file (air keys arrive with M22; the other wave-2 files stay stubs until their lanes)", () => {
     expect(ORDER_FACT_SPECS).toEqual([]);
-    expect(AIR_FACT_SPECS).toEqual([]);
+    expect(AIR_FACT_SPECS.length).toBeGreaterThan(0);
+    expect(AIR_FACT_SPECS.every((s) => s.domain === "air" && s.key.startsWith("air."))).toBe(true);
     expect(CARD_FACT_SPECS).toEqual([]);
-    expect(FACT_SPECS).toHaveLength(RETAIL_FACT_SPECS.length);
+    expect(FACT_SPECS).toHaveLength(RETAIL_FACT_SPECS.length + ORDER_FACT_SPECS.length + AIR_FACT_SPECS.length + CARD_FACT_SPECS.length);
   });
 
   it("holds exactly the retail keys R01 v1 and the legacy adapter use", () => {
-    expect(FACT_SPECS.map((s) => s.key).sort()).toEqual([
+    expect(FACT_SPECS.filter((s) => s.domain === "retail").map((s) => s.key).sort()).toEqual([
       "retail.currency",
       "retail.item_name",
       "retail.merchant",

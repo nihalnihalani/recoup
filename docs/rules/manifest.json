@@ -18,8 +18,8 @@
         "convex/lib/rules/outcome.ts",
         "convex/lib/deadlines/engine.ts"
       ],
-      "engineClosureSha256": "76893d8ec8af531cf97a56fceeff95fce68e725e55dc1a924c964b35e36cb248",
-      "engineClosureDecision": "D193",
+      "engineClosureSha256": "f37d6e2bc0a3ab978d9d129aa596d393ab40eb338d509fed626df11ceb23cccc",
+      "engineClosureDecision": "D204",
       "reviewer": "opus-rules-reviewer",
       "reviewedAt": "2026-09-23",
       "reviews": {
@@ -209,6 +209,7 @@
       "scenarioId": "R02",
       "version": 1,
       "lifecycle": "researched",
+      "packFile": "convex/lib/rules/r02_air_refund_v1.ts",
       "spec": "docs/rules/R02-airline-refund.md",
       "fixtures": "docs/rules/fixtures/R02.json",
       "sources": [
