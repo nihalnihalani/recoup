@@ -151,9 +151,11 @@ look like real regressions, not evidence of a new defect.
   `/playwright-report/`, `/blob-report/`, `/playwright/.cache/`).
 - CI (`.github/workflows/ci.yml`'s `e2e` job): runs only when the
   `E2E_CONVEX_URL`/`E2E_DEPLOY_KEY` repo secrets are configured (not yet
-  provisioned). Without them the job raises a `::warning::` annotation and a
-  step-summary line saying Playwright did not run, rather than passing
-  silently. When it runs, it uploads `playwright-report/` as a build
+  provisioned). Without them the `e2e: secrets configured?` job raises a
+  `::warning title=e2e skipped: secrets not configured::` annotation and a
+  step-summary line, and the `e2e` job itself shows as **skipped**, never as a
+  green job that ran nothing (KC1; kept by
+  `convex/testing/ciWorkflow.static.test.ts`). When it runs, it uploads `playwright-report/` as a build
   artifact. The dedicated deployment needs `E2E_SEED_ENABLED=true`,
   placeholder provider keys and the commit's functions already deployed; the
   job does not deploy.

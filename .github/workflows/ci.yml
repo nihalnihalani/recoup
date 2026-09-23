@@ -199,39 +199,50 @@ jobs:
   # deployments. That deployment needs E2E_SEED_ENABLED=true and this
   # commit's functions deployed. This job does NOT deploy functions.
   # Secret values are never echoed.
-  e2e:
-    name: e2e
-    needs: checks
+  # KC1 (D237, M25): without the E2E secrets the browser suite cannot run, and CI must SAY so instead of reporting a
+  # green `e2e`. This job only checks whether the secrets exist (never their values) and publishes a warning annotation
+  # plus a run-summary line; the `e2e` job below then shows as SKIPPED (not success) through its job-level `if:`.
+  # (A job-level `if:` cannot read `secrets`, hence the separate job.) `convex/testing/ciWorkflow.static.test.ts`
+  # keeps this shape: no per-step secret checks inside `e2e`, and the skip stays visible.
+  e2e-secrets:
+    name: "e2e: secrets configured?"
     runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.check.outputs.present }}
     steps:
-      - uses: actions/checkout@v5
-
       - name: check for e2e secrets
-        id: e2e_secrets
+        id: check
         run: |
           if [ -n "$HAS_URL" ] && [ -n "$HAS_KEY" ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "### e2e: secrets configured, the Playwright suite runs in the e2e job" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::warning title=e2e skipped::E2E_CONVEX_URL / E2E_DEPLOY_KEY are not configured; the Playwright suite did NOT run (docs/ops/RELEASE.md §4)."
-            echo "### e2e: SKIPPED, Playwright did not run (E2E_CONVEX_URL / E2E_DEPLOY_KEY secrets not configured)" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=e2e skipped: secrets not configured::E2E_CONVEX_URL / E2E_DEPLOY_KEY are not configured, so the e2e job is SKIPPED and the Playwright suite did NOT run (docs/ops/RELEASE.md §4). Browser evidence is QA's local run against the dev deployment."
+            echo "### e2e: SKIPPED (secrets not configured). Playwright did not run; E2E_CONVEX_URL / E2E_DEPLOY_KEY are missing" >> "$GITHUB_STEP_SUMMARY"
           fi
         env:
           HAS_URL: ${{ secrets.E2E_CONVEX_URL }}
           HAS_KEY: ${{ secrets.E2E_DEPLOY_KEY }}
 
+  e2e:
+    name: e2e
+    needs: [checks, e2e-secrets]
+    # Skipped (shown grey, conclusion "skipped") when the secrets are missing: never a silent success (KC1).
+    if: needs.e2e-secrets.outputs.present == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
       - uses: actions/setup-node@v5
-        if: steps.e2e_secrets.outputs.present == 'true'
         with:
           node-version-file: ".nvmrc"
           cache: "npm"
 
       - name: npm ci
-        if: steps.e2e_secrets.outputs.present == 'true'
         run: npm ci
 
       - name: install Playwright browsers
-        if: steps.e2e_secrets.outputs.present == 'true'
         run: npx playwright install --with-deps chromium
 
       # e2e/fixtures.ts uses E2E_DEPLOY_KEY as the Convex CLI's
@@ -240,7 +251,6 @@ jobs:
       # an already running app. E2E_ALLOW_UNKNOWN_DEPLOYMENT acknowledges
       # that the CI deployment is not the local default.
       - name: run Playwright suite
-        if: steps.e2e_secrets.outputs.present == 'true'
         run: npx playwright test
         env:
           E2E_CONVEX_URL: ${{ secrets.E2E_CONVEX_URL }}
@@ -249,7 +259,7 @@ jobs:
           E2E_ALLOW_UNKNOWN_DEPLOYMENT: "true"
 
       - name: upload playwright report
-        if: always() && steps.e2e_secrets.outputs.present == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report

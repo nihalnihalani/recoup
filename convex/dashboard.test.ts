@@ -106,15 +106,12 @@ function HOUR(n: number): number {
   return n * 3_600_000;
 }
 
-// Faking only `Date` (not setTimeout/timers): convex-test's own internals
-// depend on real timer refs (readBudget.test.ts's file header documents
-// this), and this file's `measure()` helper drives a nested `ctx.runQuery`
-// inside `t.run` the same way readBudget.test.ts's own `measure()` does --
-// fully-faked timers silently starve that nested call (observed: it
-// returns with documentsRead/bytesRead/databaseQueries all 0, having never
-// actually run the query) without this narrower fake.
+// The clock and the timers, not `performance` (`CLOCK_AND_TIMERS`, KX3/D233): with only `Date` faked, `markBought`'s
+// runAfter(0) job fired on a real timer in the background. This file's `measure()` drives a nested `ctx.runQuery`
+// inside `t.run`; on convex-test 0.0.59 its measurements are non-zero with timers faked (checked in M25; an older
+// convex-test starved it, which is why this used to fake only `Date`).
 beforeEach(() => {
-  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate"] }); // = test.setup CLOCK_AND_TIMERS
   vi.setSystemTime(T0);
 });
 afterEach(() => vi.useRealTimers());

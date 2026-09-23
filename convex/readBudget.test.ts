@@ -148,16 +148,14 @@ const HOUR = 3_600_000;
 const DAY = 86_400_000;
 /**
  * Every measured function reads `Date.now()` directly (tracking.overview,
- * watches.sweep, priceWatch.eligibleItems). Faking only `Date` (not
- * `setTimeout`/timers, which convex-test's own internals depend on real
- * refs of, per its `realSetTimeout` comment) keeps fixture timestamps
- * deterministic across whatever real day this suite runs on, without
- * touching `performance.now()`, which the `ms` measurements below need to
- * stay real.
+ * watches.sweep, priceWatch.eligibleItems). Faking the clock and the timers (`CLOCK_AND_TIMERS`, KX3/D233: with only
+ * `Date` faked, the jobs these fixtures schedule fired on real timers in the background) keeps fixture timestamps
+ * deterministic across whatever real day this suite runs on, without touching `performance.now()`, which the `ms`
+ * measurements below need to stay real. The nested measurements are non-zero with timers faked (checked in M25).
  */
 const NOW = Date.UTC(2026, 8, 21, 12);
 beforeAll(() => {
-  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate"] }); // = test.setup CLOCK_AND_TIMERS
   vi.setSystemTime(NOW);
 });
 afterAll(() => vi.useRealTimers());

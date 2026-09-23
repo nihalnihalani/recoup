@@ -20,6 +20,6 @@ export default defineConfig({
     include: ["convex/**/*.test.ts", "src/**/*.test.ts", "src/**/*.test.tsx"],
     // D205: DOM test files run with the default locale pinned to en-US (src/test/domLocale.setup.ts, a no-op in
     // the edge-runtime server tests, which stay unpinned for the `localeshift` CI job).
-    setupFiles: [...(clockShiftDays ? ["./convex/testing/clockShift.setup.ts"] : []), "./src/test/domLocale.setup.ts"],
+    setupFiles: [...(clockShiftDays ? ["./convex/testing/clockShift.setup.ts"] : []), "./src/test/domLocale.setup.ts", "./convex/testing/kx3Guard.setup.ts"],
   },
 });

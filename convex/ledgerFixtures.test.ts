@@ -26,8 +26,8 @@
  *
  * The last block is C4 (contract rev 5 §3.4 I3): an INDEPENDENT property sweep over the generator the contract names
  * (every claim status × delivery state × promised ≶ net × provisional 0/>0 × a linked opportunity or not), plus the
- * M12e refused tile and the D195/D196 split of the excess (neutral `extraCredited`, red `possibleDoubleCredit`). Its
- * oracle is written from §3.4 and D195/D196 only, not from M12's generator or helpers. Its rows are inserted directly,
+ * M12e refused tile and the D195/D196/D222 split of the excess (neutral `extraCredited`, red `possibleDoubleCredit`). Its
+ * oracle is written from §3.4 and D195/D196/D222 only, not from M12's generator or helpers. Its rows are inserted directly,
  * because most combinations (a promise on a detected claim, a refusal after a credit) have no single public path.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -732,6 +732,8 @@ function c4Cases(): C4Case[] {
     { id: "d222:lead-example", alt: null, claims: [{ ...base, status: "confirmed", expected: 2_500, credit: 2_700 }, { ...base, status: "confirmed", expected: 12_000, credit: 12_000 }] },
     { id: "d222:above-ask-capped", alt: null, claims: [{ ...base, status: "confirmed", expected: 10_000, credit: 13_000 }, { ...base, status: "sent", expected: 12_000, credit: 1_000 }] },
     { id: "d222:net-after-debit", alt: null, claims: [{ ...base, status: "confirmed", expected: 2_500, credit: 4_000, debit: 1_000 }, { ...base, status: "confirmed", expected: 12_000, credit: 12_000 }] },
+    { id: "d222:second-below-its-ask", alt: null, claims: [{ ...base, status: "confirmed", expected: 2_500, credit: 2_700 }, { ...base, status: "confirmed", expected: 12_000, credit: 10_000 }] },
+    { id: "d222:no-excess", alt: null, claims: [{ ...base, status: "confirmed", expected: 2_500, credit: 2_700 }, { ...base, status: "confirmed", expected: 12_000, credit: 9_000 }] },
     { id: "d222:both-above-ask", alt: null, claims: [{ ...base, status: "confirmed", expected: 2_500, credit: 3_000 }, { ...base, status: "confirmed", expected: 4_000, credit: 4_600 }] },
   );
   // D222, generated: two credited claims on one loss, each credited below, at or above its own ask.
@@ -903,6 +905,9 @@ describe("C4. every status × delivery × promised ≶ net × provisional × ref
     expect(oracles.some((o) => o.extra > 0 && o.red > 0)).toBe(true);
     const lead = c4Oracle(cases.find((c) => c.id === "d222:lead-example")!);
     expect({ extra: lead.extra, red: lead.red, recovered: lead.recovered }).toEqual({ extra: 200, red: 2_500, recovered: 12_000 });
+    const byId = (id: string) => c4Oracle(cases.find((c) => c.id === id)!);
+    expect({ extra: byId("d222:second-below-its-ask").extra, red: byId("d222:second-below-its-ask").red }).toEqual({ extra: 200, red: 500 });
+    expect({ extra: byId("d222:no-excess").extra, red: byId("d222:no-excess").red }).toEqual({ extra: 0, red: 0 });
     const capped = c4Oracle(cases.find((c) => c.id === "d222:above-ask-capped")!);
     expect({ extra: capped.extra, red: capped.red }).toEqual({ extra: 2_000, red: 0 }); // 3,000 above its ask, capped at the 2,000 excess
   });

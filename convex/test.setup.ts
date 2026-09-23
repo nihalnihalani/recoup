@@ -80,9 +80,14 @@ export async function twoUsers(
   return { owner, other };
 }
 
+/** What `pinClock` fakes: the clock and the timers convex-test's scheduler uses, never `performance` (KX3). */
+export const CLOCK_AND_TIMERS: NonNullable<Parameters<typeof vi.useFakeTimers>[0]>["toFake"] = [
+  "Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate",
+];
+
 /**
- * Pins the wall clock at `at` by faking ONLY `Date` (`Date.now()`,
- * `new Date()`), the D138/M04 pattern. Returns the restore function.
+ * Pins the wall clock at `at` (`Date.now()`, `new Date()`), the D138/M04 pattern, and fakes the timers with it
+ * (KX3, D233). Returns the restore function.
  *
  * Use it whenever a test passes a FIXED time to code that compares it with
  * the server clock. Every public query taking `now` validates it with
@@ -90,12 +95,13 @@ export async function twoUsers(
  * without a pin passes on the day it was written and fails the next day
  * (D138). `convex/testing/clockPins.test.ts` fails on any such unpinned call.
  *
- * Why only `Date`: fully faked timers starve convex-test's nested
- * `ctx.runQuery`/`runMutation` inside `t.run` (the read-budget tests measure
- * exactly that), and scheduled functions then only run through
- * `t.finishAllScheduledFunctions(vi.runAllTimers)`. Tests that drive the
- * scheduler should keep calling `vi.useFakeTimers()` + `vi.setSystemTime()`
- * themselves.
+ * Why the timers too (M25, KX3): with only `Date` faked, convex-test fires a `runAfter(0)` job on a REAL timer in the
+ * background, where it can join the test's own mutation and fail intermittently ("Write outside of transaction",
+ * D233). With the timers faked, scheduled work runs only when the test flushes it
+ * (`t.finishAllScheduledFunctions(vi.runAllTimers)`). `performance` stays real, so measured `ms` stay real. (The M08
+ * worry that faked timers starve a nested `ctx.runQuery` inside `t.run` no longer holds on convex-test 0.0.59: the
+ * read-budget measurements are non-zero with timers faked.) `convex/testing/kx3Guard.setup.ts` fails any test that
+ * fakes or mocks only `Date` while the code under test schedules short-delay work.
  *
  * The pinned clock is frozen: it moves only with `vi.setSystemTime(later)` or
  * `vi.advanceTimersByTime(ms)`. convex-test stamps `_creationTime` from this
@@ -103,7 +109,7 @@ export async function twoUsers(
  * rows is clamped (QA-15).
  */
 export function pinClock(at: number | Date): () => void {
-  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.useFakeTimers({ toFake: CLOCK_AND_TIMERS });
   vi.setSystemTime(at);
   return () => {
     vi.useRealTimers();

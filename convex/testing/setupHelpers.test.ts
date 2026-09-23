@@ -35,13 +35,16 @@ describe("twoUsers", () => {
 describe("pinClock", () => {
   afterEach(() => vi.useRealTimers());
 
-  it("pins Date.now() and new Date() only; timers stay real; restore returns to the real clock", () => {
+  it("pins Date.now() and new Date(), fakes the timers (KX3) but not performance; restore returns to the real clock and timers", () => {
     const realSetTimeout = globalThis.setTimeout;
+    const realPerformanceNow = performance.now;
     const restore = pinClock(FIXED);
     expect(Date.now()).toBe(FIXED);
     expect(new Date().getTime()).toBe(FIXED);
-    expect(globalThis.setTimeout).toBe(realSetTimeout);
+    expect(globalThis.setTimeout).not.toBe(realSetTimeout); // scheduled work runs only when a test flushes it
+    expect(performance.now).toBe(realPerformanceNow);
     restore();
+    expect(globalThis.setTimeout).toBe(realSetTimeout);
     expect(Math.abs(Date.now() - FIXED)).toBeGreaterThan(DAY); // the suite does not run on 2026-09-20
   });
 
