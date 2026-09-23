@@ -1330,6 +1330,188 @@
         ],
         "reasoning": "Shipment is placement with the carrier; a confirmed statement contradicting the carrier's scan needs review."
       }
+    },
+    {
+      "id": "R05-14",
+      "title": "Cancellation under the seller's delay option, sent before the seller shipped within the applicable time (M27 erratum E-R05-1, D234(18))",
+      "categories": [
+        "manual_review",
+        "negative",
+        "missing_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-10T12:00:00-04:00",
+      "facts_from": "R05-01",
+      "facts_override": {
+        "shipped_at": {
+          "type": "datetime",
+          "value": "2026-09-03T15:00:00-04:00",
+          "state": "user_confirmed",
+          "evidence": "carrier acceptance scan"
+        },
+        "delay_notices": {
+          "type": "array",
+          "state": "user_confirmed",
+          "value": [
+            {
+              "received_at": "2026-09-01T12:00:00-04:00",
+              "revised_ship_date": "2026-09-20",
+              "cancel_means_offered": "link",
+              "text": "We can't ship your order until September 20. If you don't want to wait, you can cancel and receive a prompt refund using the link below. If we don't hear from you before we ship, we'll assume you agree to the delay.",
+              "offers_cancel_and_refund": true
+            }
+          ]
+        },
+        "delay_notice_offers_cancel_and_refund": {
+          "type": "boolean",
+          "value": true,
+          "state": "user_confirmed"
+        },
+        "buyer_response": {
+          "type": "enum",
+          "value": "cancelled",
+          "state": "user_confirmed",
+          "evidence": "order-portal cancellation confirmation"
+        },
+        "buyer_response_at": {
+          "type": "datetime",
+          "value": "2026-09-02T10:00:00-04:00",
+          "state": "user_confirmed",
+          "note": "when the buyer sent the cancellation, not when the seller received it"
+        }
+      },
+      "expected": {
+        "outcome": "manual_review",
+        "missing_facts": [],
+        "amount": null,
+        "deadline": null,
+        "reason": "The applicable time ended on 2026-09-04. The seller's delay notice (received 2026-09-01, revised date 2026-09-20) offered cancellation and a prompt refund; the buyer cancelled under it on 2026-09-02, and the carrier took the order on 2026-09-03. 435.2(c)(1) requires the seller to deem the order cancelled and refund when it receives the cancellation before shipment. Recoup knows when the cancellation was sent, not when the seller received it, and the Rule's text does not say what follows when a cancelled order ships anyway.",
+        "forbidden_outputs": [
+          "not_eligible because the seller shipped within the applicable time"
+        ]
+      },
+      "justification": {
+        "passages": [
+          "P-435.2(c)",
+          "P-435.2(b)(1)",
+          "P-435.2(b)(1)(ii)",
+          "P-435.1(e)",
+          "D234(18)"
+        ],
+        "reasoning": "Spec §16 step 4 exception: a cancellation received before shipment under an option; receipt is not recorded, so a person reviews it (compare R05-03b)."
+      },
+      "variants": [
+        {
+          "id": "R05-14b",
+          "change": {
+            "buyer_response_at": {
+              "type": "datetime",
+              "value": null,
+              "state": "missing"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [
+              "buyer_response_at"
+            ],
+            "amount": null,
+            "deadline": null,
+            "note": "Whether the cancellation was sent before or after the carrier took the order decides between manual_review and not_eligible."
+          },
+          "justification": {
+            "passages": [
+              "P-435.2(c)",
+              "D234(18)"
+            ],
+            "reasoning": "Missing is not false: the cancellation time is decisive here."
+          }
+        },
+        {
+          "id": "R05-14c",
+          "change": {
+            "buyer_response_at": {
+              "type": "datetime",
+              "value": "2026-09-03T18:00:00-04:00",
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "note": "The cancellation was sent three hours after the carrier took the order, so the seller cannot have received it 'prior to the time of shipment'; the shipment within the applicable time meets the Rule (spec §16 step 4)."
+          },
+          "justification": {
+            "passages": [
+              "P-435.2(c)",
+              "P-435.2(b)(1)(ii)",
+              "P-435.1(e)"
+            ],
+            "reasoning": "A cancellation counts only when the seller receives it before shipment."
+          }
+        },
+        {
+          "id": "R05-14d",
+          "change": {
+            "delay_notices": {
+              "type": "array",
+              "state": "user_confirmed",
+              "value": []
+            },
+            "delay_notice_offers_cancel_and_refund": {
+              "type": "boolean",
+              "value": null,
+              "state": "missing"
+            }
+          },
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "note": "No delay-option notice, so the buyer's cancellation was not made 'pursuant to any option, renewed option or continuing option' and 435.2(c)(1) is not engaged; the seller shipped within the applicable time (spec §16 step 4)."
+          },
+          "justification": {
+            "passages": [
+              "P-435.2(c)",
+              "P-435.2(a)(1)"
+            ],
+            "reasoning": "(c)(1) covers cancellations under an option only."
+          }
+        },
+        {
+          "id": "R05-14e",
+          "change": {
+            "buyer_response_at": {
+              "type": "datetime",
+              "value": "2026-09-03T15:00:00-04:00",
+              "state": "user_confirmed",
+              "note": "sent at the same instant as the carrier acceptance scan (shipped_at)"
+            }
+          },
+          "expected": {
+            "outcome": "manual_review",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "note": "Boundary: the cancellation's send time equals the time the carrier took the order. With equal timestamps the order of the two events cannot be known (lead ruling D253(4)), so step 4 cannot find that the cancellation came after shipment, and not_eligible would rest on an order the facts do not establish. As in R05-14, Recoup has the buyer's send time, not the seller's receipt time, so a person reviews it; no refund-by date is computed (spec §16 step 4).",
+            "forbidden_outputs": [
+              "not_eligible because the cancellation time equals the shipment time"
+            ]
+          },
+          "justification": {
+            "passages": [
+              "P-435.2(c)",
+              "P-435.2(b)(1)(ii)",
+              "P-435.1(e)",
+              "D253(4)"
+            ],
+            "reasoning": "(c)(1) turns on the seller receiving the cancellation 'prior to the time of shipment'. Lead ruling D253(4): with buyer_response_at = shipped_at the order cannot be known → manual_review, not not_eligible (this replaces the round-1 reading that a send time equal to the shipment time rules receipt before shipment out)."
+          }
+        }
+      ]
     }
   ]
 }

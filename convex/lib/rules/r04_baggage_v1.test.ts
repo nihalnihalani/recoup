@@ -248,8 +248,8 @@ describe("R04 v1 code packs × docs/rules/fixtures/R04.json (unmodified, via M08
   it("loads the file (hash-checked) with every case runnable; every result names a path", () => {
     expect(FILE.ruleId).toBe(r04BagFeeRefundV1.ruleId);
     expect(FILE.ruleVersion).toBe(r04BagFeeRefundV1.version);
-    expect(FILE.cases.length).toBe(26); // 13 cases: 8 with a top-level expected + 18 variants
-    expect(RUNS.length).toBe(28); // R04-05 and R04-08 each run two paths
+    expect(FILE.cases.length).toBe(40); // 26 approved + R04-14/14b–f, R04-15/15b–g, R04-16 (M27 errata E-R04-1/E-R04-2/V2-1, D253)
+    expect(RUNS.length).toBe(42); // R04-05 and R04-08 each run two paths
     for (const c of FILE.cases) {
       if (c.source && "refresh_window_days" in c.source) {
         for (const p of ["a", "b", "c"] as const) for (const s of R04_SOURCES[p]) expect(s.refreshWindowDays).toBe(c.source.refresh_window_days);

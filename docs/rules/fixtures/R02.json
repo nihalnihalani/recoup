@@ -38,6 +38,12 @@
       "mission_domain_fixture": null,
       "clock": "2026-10-02T12:00:00-04:00",
       "facts": {
+        "service_type": {
+          "type": "enum",
+          "value": "scheduled",
+          "state": "user_confirmed",
+          "note": "D253(3): recorded so this case's expected outcome is preserved; an unknown service type caps the result at likely eligible (R02-15)"
+        },
         "itinerary_scope": {
           "type": "enum",
           "value": "domestic",
@@ -328,6 +334,12 @@
       "mission_domain_fixture": null,
       "clock": "2026-11-03T12:00:00-05:00",
       "facts": {
+        "service_type": {
+          "type": "enum",
+          "value": "scheduled",
+          "state": "user_confirmed",
+          "note": "D253(3): recorded so this case's expected outcome is preserved; an unknown service type caps the result at likely eligible (R02-15)"
+        },
         "itinerary_scope": {
           "type": "enum",
           "value": "domestic",
@@ -771,6 +783,12 @@
         {
           "id": "R02-05b",
           "change": {
+            "service_type": {
+              "type": "enum",
+              "value": "scheduled",
+              "state": "user_confirmed",
+              "note": "D253(3): recorded so this case's expected outcome is preserved; an unknown service type caps the result at likely eligible (R02-15)"
+            },
             "changed_sched_arrival_at": {
               "type": "datetime",
               "value": "2026-09-20T21:20:00-04:00",
@@ -941,6 +959,12 @@
       "mission_domain_fixture": null,
       "clock": "2026-10-02T12:00:00-04:00",
       "facts": {
+        "service_type": {
+          "type": "enum",
+          "value": "scheduled",
+          "state": "user_confirmed",
+          "note": "D253(3): recorded so this case's expected outcome is preserved; an unknown service type caps the result at likely eligible (R02-15)"
+        },
         "itinerary_scope": {
           "type": "enum",
           "value": "international",
@@ -1318,6 +1342,12 @@
       "mission_domain_fixture": null,
       "clock": "2026-10-16T12:00:00-04:00",
       "facts": {
+        "service_type": {
+          "type": "enum",
+          "value": "scheduled",
+          "state": "user_confirmed",
+          "note": "D253(3): recorded so this case's expected outcome is preserved; an unknown service type caps the result at likely eligible (R02-15)"
+        },
         "itinerary_scope": {
           "type": "enum",
           "value": "domestic",
@@ -1696,6 +1726,344 @@
           "D154 condition 4"
         ],
         "reasoning": "Acceptance of rebooking is disqualifying; a confirmed statement contradicting the carrier's own record needs review."
+      }
+    },
+    {
+      "id": "R02-14",
+      "title": "Public charter flight on R02-01's facts: not a covered flight (M27 erratum E-R02-1, D234(5))",
+      "categories": [
+        "unsupported_product"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-10-02T12:00:00-04:00",
+      "facts_from": "R02-01",
+      "facts_override": {
+        "service_type": {
+          "type": "enum",
+          "value": "public_charter",
+          "state": "user_confirmed",
+          "evidence": "booking confirmation: public charter operator disclosure"
+        }
+      },
+      "expected": {
+        "outcome": "unsupported",
+        "missing_facts": [],
+        "amount": null,
+        "deadline": null,
+        "note": "A charter is not 'a scheduled flight', so it is not a covered flight under part 260 (spec §16 step 2, L13). 'Unsupported' is not 'not eligible': other rules may give a refund, but R02 v1 does not evaluate them."
+      },
+      "justification": {
+        "passages": [
+          "P-260.2-COVERED",
+          "P-260.2-CARRIER",
+          "P-260.6-A1",
+          "P-254.2",
+          "D234(5)"
+        ],
+        "reasoning": "A covered flight is 'a scheduled flight operated or marketed by a covered carrier'; a covered carrier is one 'conducting scheduled passenger service'; 260.6(a)(1) protects a consumer 'on a scheduled flight'. DOT's regulations name 'charter or scheduled passenger service' as separate kinds of service (254.2)."
+      },
+      "variants": [
+        {
+          "id": "R02-14b",
+          "change": {
+            "service_type": {
+              "type": "enum",
+              "value": "other_non_scheduled",
+              "state": "user_confirmed",
+              "evidence": "on-demand air-taxi booking"
+            }
+          },
+          "expected": {
+            "outcome": "unsupported",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null
+          },
+          "justification": {
+            "passages": [
+              "P-260.2-COVERED",
+              "P-260.2-CARRIER"
+            ],
+            "reasoning": "Any known non-scheduled service is outside the covered-flight definition."
+          }
+        },
+        {
+          "id": "R02-14c",
+          "change": {
+            "service_type": {
+              "type": "enum",
+              "value": "scheduled",
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "eligible",
+            "path": "R02.a",
+            "missing_facts": [],
+            "amount": {
+              "refund_due": {
+                "amount_minor": 44880,
+                "currency": "USD"
+              },
+              "cap": null,
+              "formula": "fare + taxes + ancillary fees - already refunded"
+            },
+            "deadline": {
+              "kind": "carrier_refund_issuance",
+              "date": "2026-10-13",
+              "semantics": "as R02-01",
+              "anchor": "consumer_response_at (deemed request under 260.6(a)(2)(ii))"
+            },
+            "note": "A confirmed scheduled flight by a covered carrier: the result equals R02-01, which since lead ruling D253(3) records the same confirmed service type. With the service type unknown the result is capped (R02-15)."
+          },
+          "justification": {
+            "passages": [
+              "P-260.2-COVERED",
+              "P-260.6-A2"
+            ],
+            "reasoning": "The covered-flight condition holds; the rest is R02-01."
+          }
+        },
+        {
+          "id": "R02-14d",
+          "change": {
+            "service_type": {
+              "type": "enum",
+              "value": "public_charter",
+              "state": "extracted_candidate",
+              "evidence": "booking email mentions 'charter'"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [],
+            "unconfirmed_decisive_facts": [
+              "service_type"
+            ],
+            "amount": null,
+            "deadline": null,
+            "note": "An unconfirmed extraction never gives 'unsupported' (D234(1)): the user is asked whether the flight was a charter."
+          },
+          "justification": {
+            "passages": [
+              "D234(1)",
+              "P-260.2-COVERED"
+            ],
+            "reasoning": "A negative or out-of-scope verdict never rests on an unconfirmed candidate; the candidate is listed as candidate_unconfirmed."
+          }
+        }
+      ]
+    },
+    {
+      "id": "R02-15",
+      "title": "Service type unknown on R02-01's otherwise-eligible facts: capped at likely eligible with the labelled assumption (lead ruling D253(3))",
+      "categories": [
+        "missing_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-10-02T12:00:00-04:00",
+      "facts_from": "R02-01",
+      "facts_override": {
+        "service_type": {
+          "type": "enum",
+          "value": null,
+          "state": "missing"
+        }
+      },
+      "expected": {
+        "outcome": "likely_eligible_missing_evidence",
+        "missing_facts": [
+          "service_type"
+        ],
+        "assumptions": [
+          "assumes a regularly scheduled flight"
+        ],
+        "amount": {
+          "refund_due": {
+            "amount_minor": 44880,
+            "currency": "USD"
+          },
+          "cap": null,
+          "formula": "fare + taxes + ancillary fees - already refunded"
+        },
+        "deadline": {
+          "kind": "carrier_refund_issuance",
+          "date": "2026-10-13",
+          "semantics": "as R02-01; the service type is not the carrier timer's anchor, selector or zone (D234)",
+          "anchor": "consumer_response_at (deemed request under 260.6(a)(2)(ii))"
+        },
+        "question": "Was this a regularly scheduled flight, or a charter or other non-scheduled flight?",
+        "note": "R02-01's facts with the service type unknown. Confirmed 'scheduled', the result is R02-01's (eligible); unknown, the covered-flight condition is not resolved toward eligible (D234(8)): the result is capped with the labelled assumption. The service type is asked because it is the only thing between likely and eligible (spec §16 step 8)."
+      },
+      "justification": {
+        "passages": [
+          "P-260.2-COVERED",
+          "P-260.6-A1",
+          "README lifecycle rule 5",
+          "D234(8)",
+          "D253(3)"
+        ],
+        "reasoning": "A covered flight is 'a scheduled flight operated or marketed by a covered carrier' (260.2), and 260.6(a)(1) protects a consumer 'on a scheduled flight'. With the service type unknown that condition is unknown. Lead ruling D253(3), no exception to README rule 5 ('unknown → capped at likely eligible with an explicit assumption'): capped at likely_eligible with the assumption 'assumes a regularly scheduled flight', and the question asked because every other decisive fact is R02-01's confirmed value."
+      },
+      "variants": [
+        {
+          "id": "R02-15b",
+          "change": {
+            "service_type": {
+              "type": "enum",
+              "value": "unknown",
+              "state": "user_confirmed",
+              "note": "the user answered that they do not know"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [
+              "service_type"
+            ],
+            "assumptions": [
+              "assumes a regularly scheduled flight"
+            ],
+            "amount": {
+              "refund_due": {
+                "amount_minor": 44880,
+                "currency": "USD"
+              },
+              "cap": null,
+              "formula": "fare + taxes + ancillary fees - already refunded"
+            },
+            "deadline": {
+              "kind": "carrier_refund_issuance",
+              "date": "2026-10-13",
+              "semantics": "as R02-01",
+              "anchor": "consumer_response_at (deemed request under 260.6(a)(2)(ii))"
+            },
+            "note": "The enum value 'unknown' is treated like a missing value: it is not a known non-scheduled value, so it gives the cap, not 'unsupported' (spec §5, §16 steps 2 and 8)."
+          },
+          "justification": {
+            "passages": [
+              "D253(3)",
+              "P-260.2-COVERED"
+            ],
+            "reasoning": "D253(3) speaks of an unknown service type; only a known non-scheduled value gives unsupported."
+          }
+        },
+        {
+          "id": "R02-15c",
+          "change": {
+            "fare_paid": {
+              "type": "money",
+              "value": {
+                "amount_minor": 38000,
+                "currency": "USD"
+              },
+              "state": "extracted_candidate"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "unconfirmed_decisive_facts": [
+              "fare_paid"
+            ],
+            "assumptions": [
+              "assumes a regularly scheduled flight"
+            ],
+            "amount": {
+              "refund_due": {
+                "amount_minor": 44880,
+                "currency": "USD"
+              }
+            },
+            "deadline": {
+              "kind": "carrier_refund_issuance",
+              "date": "2026-10-13",
+              "semantics": "as R02-01",
+              "anchor": "consumer_response_at (deemed request under 260.6(a)(2)(ii))"
+            },
+            "note": "Two things stand between likely and eligible (the unconfirmed fare and the unknown service type), so the service type is not asked yet; the assumption is still shown. Once the fare is confirmed, the case is R02-15 and the service type is asked (spec §16 step 8)."
+          },
+          "justification": {
+            "passages": [
+              "D253(3)",
+              "D147(2)"
+            ],
+            "reasoning": "D253(3): the service-type question is asked when it is the only thing between likely and eligible; here the unconfirmed fare also is."
+          }
+        },
+        {
+          "id": "R02-15d",
+          "change": {
+            "service_type": {
+              "type": "enum",
+              "value": "scheduled",
+              "state": "extracted_candidate",
+              "evidence": "extracted from the e-ticket receipt"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [],
+            "unconfirmed_decisive_facts": [
+              "service_type"
+            ],
+            "amount": {
+              "refund_due": {
+                "amount_minor": 44880,
+                "currency": "USD"
+              }
+            },
+            "deadline": {
+              "kind": "carrier_refund_issuance",
+              "date": "2026-10-13",
+              "semantics": "as R02-01",
+              "anchor": "consumer_response_at (deemed request under 260.6(a)(2)(ii))"
+            },
+            "note": "An extracted 'scheduled' is not confirmed. service_type is on the spec §16 step 8 decisive list, so README cross-pack rule 1 (D147(2)) caps the outcome and asks for the confirmation, as for any other decisive fact (compare R02-01d)."
+          },
+          "justification": {
+            "passages": [
+              "D147(2)",
+              "D253(3)"
+            ],
+            "reasoning": "Cross-pack rule 1: eligible requires every decisive fact to be confirmed; an extracted candidate caps the outcome at likely_eligible and the missing item is the confirmation."
+          }
+        }
+      ]
+    },
+    {
+      "id": "R02-16",
+      "title": "Known public charter on R02-04's facts (consumer's decision still unknown): unsupported before any eligibility question (lead ruling D253(3))",
+      "categories": [
+        "unsupported_product"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-10-22T09:00:00-04:00",
+      "facts_from": "R02-04",
+      "facts_override": {
+        "service_type": {
+          "type": "enum",
+          "value": "public_charter",
+          "state": "user_confirmed",
+          "evidence": "booking confirmation: public charter operator disclosure"
+        }
+      },
+      "expected": {
+        "outcome": "unsupported",
+        "missing_facts": [],
+        "amount": null,
+        "deadline": null,
+        "note": "A known non-scheduled service decides applicability at spec §16 step 2, before the decision questions of steps 5–7, so the consumer's response is not asked (compare R02-04 → needs_facts [consumer_response]). 'Unsupported' is not 'not eligible': R02 v1 does not evaluate a charter."
+      },
+      "justification": {
+        "passages": [
+          "P-260.2-COVERED",
+          "P-260.2-CARRIER",
+          "P-260.6-A1",
+          "P-254.2",
+          "D253(3)"
+        ],
+        "reasoning": "A covered flight is 'a scheduled flight'; a covered carrier is one 'conducting scheduled passenger service'; 254.2 names 'charter or scheduled passenger service' separately. D253(3): a known non-scheduled value → unsupported."
       }
     }
   ]

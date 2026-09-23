@@ -111,6 +111,8 @@ const FIXTURE_KEYS: Record<string, (value: unknown) => KV[]> = {
   },
   delay_notice_offers_cancel_and_refund: (v) => [["order.delay_notice_offers_cancel", bool(v)]],
   buyer_response: (v) => [["order.buyer_response", code(v)]],
+  // M27 erratum E-R05-1 (R05-14 family): the buyer's cancellation send time.
+  buyer_response_at: (v) => [["order.buyer_response_at", instant(v as string)]],
   amount_tendered: (v) => [["retail.order_total", money(v)]],
   ship_to_timezone: (v) => [["order.ship_to_time_zone", code(v)]],
 };
@@ -129,7 +131,7 @@ const FIXTURE_NAME: Record<string, string> = {
   "order.delay_notice_received": "delay_notices", "order.delay_notice_received_at": "delay_notices",
   "order.delay_revised_ship_kind": "delay_notices", "order.delay_revised_ship_date": "delay_notices",
   "order.delay_notice_offers_cancel": "delay_notice_offers_cancel_and_refund", "order.buyer_response": "buyer_response",
-  "order.buyer_response_at": "buyer_response", "retail.order_total": "amount_tendered", "order.ship_to_time_zone": "ship_to_timezone",
+  "order.buyer_response_at": "buyer_response_at", "retail.order_total": "amount_tendered", "order.ship_to_time_zone": "ship_to_timezone",
 };
 
 const ROW_STATE: Record<string, ResolveRow["state"]> = {
@@ -222,7 +224,7 @@ describe("R05 v1 code pack × docs/rules/fixtures/R05.json (unmodified, via M08'
   it("loads the file (hash-checked) with every case runnable, and the harness reads the calendar-zone convention", () => {
     expect(FILE.ruleId).toBe(r05LateOrderV1.ruleId);
     expect(FILE.ruleVersion).toBe(r05LateOrderV1.version);
-    expect(FILE.cases.length).toBe(24);
+    expect(FILE.cases.length).toBe(29); // 24 approved + R05-14/14b–e (erratum E-R05-1; R05-14e per D253(4))
     const raw = JSON.parse(readFileSync(path.join(REPO_ROOT, "docs/rules/fixtures/R05.json"), "utf8")) as { conventions: { calendar_zone: string } };
     expect(raw.conventions.calendar_zone).toContain("America/New_York");
   });

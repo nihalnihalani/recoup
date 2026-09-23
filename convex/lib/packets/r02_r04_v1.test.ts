@@ -29,6 +29,7 @@ const row = (subjectKey: string, key: string, value: FactValue, state: ResolveRo
   ({ subjectKey, key, row: { state, value, at: 1, source: { kind: "user" } } });
 
 const R02_ROWS: CellRow[] = [
+  row("txn", "air.service_type", code("scheduled")), // D253(3): unknown → capped with A8
   row("txn", "air.itinerary_scope", code("domestic"), "derived"),
   row("txn", "air.operating_carrier", { kind: "text", text: "XA" }),
   row("txn", "air.merchant_of_record", code("carrier")),
@@ -155,6 +156,25 @@ describe("R02 v1 packet templates", () => {
     expect(draft.body.startsWith("Refund request:")).toBe(true);
     expect(draft.body).toContain("The refund is due by October 14, 2026.");
     expect(draft.body).not.toContain("complaint");
+  });
+
+  it("M27 R3-04 / D253(3): no overdue letter while coverage rests on A8 (service type unknown); the plain request is fine", () => {
+    for (const service of [null, row("txn", "air.service_type", code("unknown")), row("txn", "air.service_type", code("scheduled"), "extracted_candidate")]) {
+      const rows = [...R02_ROWS.filter((x) => x.key !== "air.service_type"), ...(service ? [service] : [])];
+      const overdue = r02(rows);
+      expect(overdue.outcome).toBe("likely_eligible");
+      expect(overdue.nextAction.kind).toBe("escalate");
+      let error: unknown;
+      try {
+        r02V1Letter.compose(ctxOf(overdue, 44880), factReader(overdue.boundFacts));
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(PacketRenderError);
+      expect((error as PacketRenderError).key).toBe("air.service_type");
+      const early = r02(rows, Date.parse("2026-10-02T12:00:00-04:00"));
+      expect(check(ctxOf(early, 44880)).body.startsWith("Refund request:")).toBe(true);
+    }
   });
 
   it("an unconfirmed ticket number or merchant of record is never stated: rendering stops with a confirm-first error", () => {

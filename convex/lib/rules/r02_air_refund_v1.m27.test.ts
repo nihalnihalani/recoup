@@ -2,8 +2,9 @@
  * M27 review findings for R02 v1 (docs/reviews/2026-09-23-pack-review-R02-R05.md, R02 section) and the lead's rulings
  * D234/D235: one describe per finding, named by its id, each asserting the reviewer's "Regression test" row. Each
  * fails on the reviewed revision `3d5cb7f` and passes after M22b (the few that pin a ruling rather than a fix say so).
- * Facts are built directly as resolution rows; only exports that existed at `3d5cb7f` are used, so the same file runs
- * against both revisions.
+ * Facts are built directly as resolution rows; only exports that existed at `3d5cb7f` are used. (Verified at M22b,
+ * 31d3970. Since M22c the base fact sets also carry a confirmed `air.service_type = scheduled`, D253(3), a key that did
+ * not exist at `3d5cb7f`, so the file no longer re-runs against that revision.)
  */
 import { describe, expect, it } from "vitest";
 import type { Id } from "../../_generated/dataModel";
@@ -25,8 +26,9 @@ const txt = (t: string): FactValue => ({ kind: "text", text: t });
 const n = (x: number): FactValue => ({ kind: "count", n: x });
 const unknown: FactValue = { kind: "user_unknown" };
 
-/** R02-01's confirmed facts (cancellation, rejected on 2026-10-01, credit card, USD 448.80). */
+/** R02-01's confirmed facts (scheduled cancellation, rejected on 2026-10-01, credit card, USD 448.80). */
 const R02_01: Record<string, F> = {
+  service_type: [code("scheduled")], // D253(3): an unknown service type caps the result (R02-15)
   itinerary_scope: [code("domestic"), "derived"], operating_carrier: [txt("XA")], marketing_carrier: [txt("XA")],
   merchant_of_record: [code("carrier")], ticket_refundability: [code("nonrefundable")], event_type: [code("cancellation")],
   original_sched_departure_at: [at("2026-10-05T07:00:00-04:00")], offer_type: [code("rebooking")], consumer_response: [code("rejected")],
@@ -35,6 +37,7 @@ const R02_01: Record<string, F> = {
 };
 /** R02-02a's confirmed facts (domestic schedule change, every criterion confirmed equal) with the arrival to vary. */
 const R02_02: Record<string, F> = {
+  service_type: [code("scheduled")], // D253(3)
   itinerary_scope: [code("domestic"), "derived"], merchant_of_record: [code("carrier")], ticket_refundability: [code("nonrefundable")],
   event_type: [code("schedule_change")], original_sched_departure_at: [at("2026-11-10T10:00:00-05:00")],
   original_sched_arrival_at: [at("2026-11-10T14:00:00-05:00")], changed_sched_departure_at: [at("2026-11-10T10:00:00-05:00")],

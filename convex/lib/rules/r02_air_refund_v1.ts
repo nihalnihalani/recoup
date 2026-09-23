@@ -107,6 +107,14 @@ export const R02_CARRIER_TIMER_OTHER_ID = "r02.v1.carrier_refund.other";
 export const R02_AGENT_TIMER_ID = "r02.v1.agent_refund";
 /** The compliance-gate assumption (README rule 5; D234 (8)). */
 export const R02_GATE_ASSUMPTION_ID = "r02.v1.after_compliance_date";
+/** A8 (lead ruling D253(3); spec §16 step 8, L13): an unknown service type caps the result, never rules it out. */
+export const R02_SCHEDULED_ASSUMPTION_ID = "r02.v1.scheduled_flight";
+const SCHEDULED_ASSUMPTION: Assumption = Object.freeze({
+  id: R02_SCHEDULED_ASSUMPTION_ID,
+  text: "Recoup assumes a regularly scheduled flight: the refund rule covers scheduled flights, and the service type is not confirmed yet (A8).",
+  changesOutcomeIf: "the flight was a charter or other non-scheduled flight (then R02 does not apply)",
+});
+const NON_SCHEDULED = ["public_charter", "other_non_scheduled"] as const;
 
 // ---------------------------------------------------------------------------
 // Parameters — every number/date below cites the passage it comes from (README "From spec to evaluator")
@@ -154,6 +162,7 @@ export const R02_PARAM_PASSAGES: Readonly<Record<keyof R02Params, readonly strin
 });
 
 const ECFR_260 = "https://www.ecfr.gov/current/title-14/chapter-II/subchapter-A/part-260";
+const ECFR_254 = "https://www.ecfr.gov/current/title-14/chapter-II/subchapter-A/part-254";
 const USC_42305 = "https://www.govinfo.gov/content/pkg/USCODE-2024-title49/html/USCODE-2024-title49-subtitleVII-partA-subpartii-chap423-sec42305.htm";
 const ECFR_399 = "https://www.ecfr.gov/current/title-14/chapter-II/subchapter-F/part-399/subpart-G/section-399.80";
 const DOT_REFUNDS = "https://www.transportation.gov/individuals/aviation-consumer-protection/refunds";
@@ -175,6 +184,7 @@ const src = (sourceId: string, passageId: string, url: string, effective: string
 /** Captured sources (manifest `sources`, spec §14). Every one has the 30-day refresh window (spec header). */
 export const R02_SOURCES: readonly RuleSourceMeta[] = Object.freeze([
   src("ecfr-14cfr260", "P-260.2-COVERED", ECFR_260, "2024-06-25"),
+  src("ecfr-14cfr260", "P-260.2-CARRIER", ECFR_260, "2024-06-25"),
   src("ecfr-14cfr260", "P-260.2-CANCEL", ECFR_260, "2024-06-25"),
   src("ecfr-14cfr260", "P-260.2-SIG", ECFR_260, "2024-06-25"),
   src("ecfr-14cfr260", "P-260.2-MOR", ECFR_260, "2024-06-25"),
@@ -190,6 +200,8 @@ export const R02_SOURCES: readonly RuleSourceMeta[] = Object.freeze([
   src("federal-web-excerpts", "DOT-REF-3", DOT_REFUNDS, "unknown"),
   src("federal-web-excerpts", "FR-2024-07177-COMPLIANCE", FR_2024_07177, "2024-06-25"),
   src("fr-notices", "FR-2026-13675-DATES", FR_2026_13675, "2026-07-07"),
+  // Erratum E-R02-1 (S7): 254.2 names "charter or scheduled passenger service" separately.
+  src("ecfr-14cfr254", "P-254.2", ECFR_254, "2025-01-22"),
 ]);
 
 // ---------------------------------------------------------------------------
@@ -202,6 +214,7 @@ const K = {
   scope: "air.itinerary_scope",
   operating: "air.operating_carrier",
   marketing: "air.marketing_carrier",
+  service: "air.service_type",
   mor: "air.merchant_of_record",
   refundability: "air.ticket_refundability",
   event: "air.event_type",
@@ -534,7 +547,23 @@ function core(v: R02View, env: Env): Core {
   }
   leaves.push(leaf("scope", "r02.v1.covered_flight", "A covered flight: to, from or within the United States", "applicability",
     scopeCode === null ? "unknown" : scopeCode === "non_us" ? "fail" : "pass", scopeCode === null ? [] : [scope],
-    { unknown: [scope], passage: "P-260.2-COVERED", note: "v1 assumes scheduled service by a covered carrier; charters are not detected (M27 R02-05, spec gap)" }));
+    { unknown: [scope], passage: "P-260.2-COVERED" }));
+  // Scheduled service (errata E-R02-1/E-R02-3; D253(3)). A KNOWN charter or other non-scheduled flight → unsupported
+  // here, before the decision questions (R02-16); a candidate one is asked (D234 (1), R02-14d); an unknown service type
+  // passes this leaf and caps the result with A8 at the end (R02-15, never resolved toward eligible).
+  const service = cell(K.service);
+  const serviceCode = code(service);
+  const nonScheduled = serviceCode !== null && (NON_SCHEDULED as readonly string[]).includes(serviceCode);
+  if (nonScheduled && service.known) {
+    flags.unsupportedReason ??= "Not a covered flight: a charter or other non-scheduled flight is not \"a scheduled flight\" under 14 CFR 260.2 (P-260.2-COVERED, P-254.2). Other rules may apply; R02 v1 does not evaluate them.";
+  }
+  leaves.push(service.status === "conflicting"
+    ? leaf("scope", "r02.v1.scheduled_service", "A regularly scheduled flight (not a charter)", "applicability", "unknown", [], { unknown: [service], passage: "P-260.2-CARRIER" })
+    : serviceCode === "scheduled"
+      ? leaf("scope", "r02.v1.scheduled_service", "A regularly scheduled flight (not a charter)", "applicability", "pass", [service], { passage: "P-260.2-CARRIER" })
+      : nonScheduled
+        ? leaf("scope", "r02.v1.scheduled_service", "A regularly scheduled flight (not a charter)", "applicability", "fail", [service], { passage: "P-260.2-CARRIER" })
+        : leaf("scope", "r02.v1.scheduled_service", "A regularly scheduled flight (not a charter)", "applicability", "pass", [], { note: "not confirmed: assumed (A8)", passage: "P-260.2-CARRIER" }));
   const refundCode = code(refundability);
   if (refundCode === "refundable" && refundability.known) {
     flags.unsupportedReason ??= "A fully refundable ticket has its own refund terms; R02 v1 covers nonrefundable tickets only.";
@@ -1073,7 +1102,17 @@ export function evaluateR02V1(input: EvaluationInput<R02View, R02Params>): Evalu
     }
   }
 
-  const outcome = deriveOutcome({ ...final.dims, readyForApproval: "unknown" }, flags, final.assumptions);
+  // D253(3) / A8: an unknown service type is a ceiling — it caps a result that would otherwise be approvable, and is
+  // asked only when it is the ONLY thing between likely and eligible (R02-15/15b; not yet in R02-15c). A candidate
+  // `scheduled` is an unconfirmed decisive fact instead (R02-15d); a known non-scheduled value was unsupported above.
+  const serviceCell = v.lookup.get(TXN, K.service);
+  const serviceUnknown = serviceCell.status === "missing" || serviceCell.status === "user_unknown" || (serviceCell.known && code(serviceCell) === "unknown");
+  const uncapped = deriveOutcome({ ...final.dims, readyForApproval: "unknown" }, flags, final.assumptions);
+  const assumptions = serviceUnknown && AMOUNT_OUTCOMES.has(uncapped) ? [...final.assumptions, SCHEDULED_ASSUMPTION] : final.assumptions;
+  if (serviceUnknown && uncapped === "eligible") {
+    addMissing(unconfirmed, { subjectKey: TXN, key: K.service, reason: serviceCell.status === "missing" ? "missing" : "user_unknown", class: "assumption", neededFor: ["scope"] });
+  }
+  const outcome = deriveOutcome({ ...final.dims, readyForApproval: "unknown" }, flags, assumptions);
   const amount = AMOUNT_OUTCOMES.has(outcome) ? final.amount : null;
   // D234 (6): a manual_review result carries no firm carrier date (only unknown/disputed rows).
   const deadlines = !DEADLINE_OUTCOMES.has(outcome) ? [] : outcome === "manual_review" ? final.deadlines.filter((d) => d.dueAt === undefined) : final.deadlines;
@@ -1091,7 +1130,7 @@ export function evaluateR02V1(input: EvaluationInput<R02View, R02Params>): Evalu
     ...(isApprovable(outcome) && final.path === "a" ? ["The airline must refund automatically; Recoup tracks its deadline."] : []),
     ...(isApprovable(outcome) && final.path === "b" ? ["A travel agency took the payment: it owes the refund when you ask for it (399.80(l)), not automatically."] : []),
     ...final.explanation,
-    ...(AMOUNT_OUTCOMES.has(outcome) ? final.assumptions.map((a) => a.text) : []),
+    ...(AMOUNT_OUTCOMES.has(outcome) ? assumptions.map((a) => a.text) : []),
     ...(deadlines.some((d) => d.dueAt !== undefined) ? final.deadlineNotes : []),
   ];
   const explanation = [...new Set(lines)].slice(0, 12);
@@ -1109,7 +1148,7 @@ export function evaluateR02V1(input: EvaluationInput<R02View, R02Params>): Evalu
     dimensions,
     conditions: final.conditions,
     missingFacts,
-    assumptions: final.assumptions,
+    assumptions,
     disqualifierIds: final.disqualifierIds,
     amount,
     deadlines,
@@ -1198,7 +1237,7 @@ export const r02AirRefundV1: RulePack<R02View, R02Params, CaseContext> = {
     "A1 (D234 (8), D235): the carrier timer counts calendar days in the consumer's home time zone; when unknown it shows 'on or about <earliest> – <latest>' across the US zones and treats the airline as late only after the latest.",
     "A4: the fare is taken to be for the affected itinerary; a partly flown ticket has no estimate (a person splits it).",
     "A7: for a cancellation with nothing offered, the timer runs from the carrier's cancellation notice.",
-    "M27 R02-05 (spec gap, D234 (5)): v1 assumes scheduled service by a covered carrier and does not detect charters or non-covered carriers.",
+    "L13 (errata E-R02-1/E-R02-3, D253(3)): a known charter or other non-scheduled flight is unsupported; an unknown service type caps the result with A8 ('assumes a regularly scheduled flight') and is asked only when it is the one thing between likely and eligible; an extracted one is confirmed first. The covered-carrier half is inferred from scope + service type (ERR-R1-08).",
     "D234 (2)/(3): the carrier's identity, offer_type on a rejection and the payment class decide nothing about the outcome in v1; the payment class only selects the carrier timer.",
     "D234 (4)/D235 (B): already_refunded is money refunded before the case started; it reduces the estimate (spec §8) but never the outcome. Money received on a case is a ledger credit only.",
     "D234 (17): a checked-bag fee belongs to R04 path a, not the ancillary total; R02 shares each recorded bag fee's loss key so an overlap is never counted twice.",

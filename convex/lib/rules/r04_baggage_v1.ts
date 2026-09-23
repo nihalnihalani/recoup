@@ -394,6 +394,8 @@ const NO_EXEMPTION_ASSUMPTION: Assumption = {
 };
 export const R04_GATE_ASSUMPTION_ID = "r04.a.after_compliance_date";
 export const R04_REIMBURSEMENT_ASSUMPTION_ID = "r04.v1.unallocated_reimbursement";
+/** Path a's re-evaluation trigger for a still-undelivered bag with an exemption (spec §15 step 2.3; D253(2)). */
+export const R04_AWAIT_BAG = "bag delivered or declared lost";
 
 interface Core {
   dims: Omit<Dimensions, "readyForApproval">;
@@ -619,19 +621,51 @@ function coreA(v: R04View, env: Env): Core {
   const documented = bag(K.exDocumented);
   const exText = "No refund exemption applies (260.5(f))";
   const conflictingEx = [recheck, pickup, voluntary, documented].filter((c) => c.status === "conflicting");
+  const f1 = bool(recheck) === true;
+  const f2 = bool(pickup) === true && bool(documented) === true;
+  const f3 = bool(voluntary) === true && statusCode !== "declared_lost"; // (f)(3) never reaches a lost bag (260.5(g))
   if (conflictingEx.length > 0) {
     leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "unknown", [], { unknown: conflictingEx, passage: "P-260.5-F" }));
-  } else if (bool(recheck) === true) {
-    leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "fail", [recheck], { note: "the bag was not rechecked at the first US entry point (260.5(f)(1))", passage: "P-260.5-F" }));
-  } else if (bool(voluntary) === true && statusCode !== "declared_lost") {
-    // M27 R04-09: (f)(3) does not cover a lost bag (260.5(g)), so an unknown status is asked unless a delivery is known.
-    if (statusCode === null && instant(delivered) === null) {
-      leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "unknown", [voluntary], { unknown: [status], note: "travelling without the bag by agreement does not remove the refund for a lost bag", passage: "P-260.5-F" }));
+  } else if (f1 || f2 || f3) {
+    // Spec §15 step 2.3 (errata E-R04-2, ERR-R1-01; D253(2)): the bag's state decides what an exemption does.
+    const exCells = f1 ? [recheck] : f2 ? [pickup, documented] : [voluntary];
+    const which = f1
+      ? "the bag was not rechecked at the first US entry point (260.5(f)(1))"
+      : f2 ? "the airline documented that the bag was left uncollected (260.5(f)(2))" : "you agreed to travel without the bag (260.5(f)(3))";
+    const deliveredAt = instant(delivered);
+    const unconfirmedOf = (cells: readonly Cell[]) => cells.filter((c) => !c.known);
+    const asking = (cells: readonly Cell[], note: string) => {
+      const l = leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "unknown", [], { note, passage: "P-260.5-F" });
+      l.unknownFacts = cells.map((c) => ({ fact: ref(c), reason: c.status === "candidate" ? "candidate_unconfirmed" as const : unresolvedReason(c) }));
+      return l;
+    };
+    if (deliveredAt !== null || statusCode === "delivered" || statusCode === "damaged" || statusCode === "pilfered") {
+      // A delivered bag: the exemption applies (R04-07). A fail on a candidate is asked (leaf guard, D234 (1)).
+      leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "fail",
+        [...exCells, ...(deliveredAt !== null ? [delivered] : [status])], { note: which, passage: "P-260.5-F" }));
+    } else if (statusCode === "declared_lost") {
+      // (f)(1)/(f)(2) and a lost bag: the captured text does not settle it (L11) → a person reviews it (R04-15/15b).
+      const open = unconfirmedOf([...exCells, status]);
+      if (open.length > 0) {
+        leaves.push(asking(open, "confirm these first: whether the exemption reaches a lost bag is a review"));
+      } else {
+        flags.manualReviewReason ??= `The airline declared the bag lost, and ${which}. 260.5(f) exempts "the fee for a significantly delayed bag" where "the delay resulted from" the passenger's action. Part 260 names lost and significantly delayed bags separately, but its definition of a significantly delayed bag ("not delivered ... within 12 hours") also fits a lost bag, so the captured text does not settle whether the exemption reaches a lost bag (L11). A person reviews it.`;
+        leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "pass", [...exCells, status], { note: "a lost bag: whether the exemption reaches it is a review (L11)", passage: "P-260.5-F" }));
+      }
+    } else if (statusCode === "delayed_undelivered") {
+      // Still undelivered: a delivery makes the exemption apply, a loss declaration keeps the refund (260.5(g)) or is a
+      // review (L11) — not yet due (R04-15e/f). An extracted status is asked (R04-15g).
+      const open = unconfirmedOf([...exCells, status]);
+      if (open.length > 0) {
+        leaves.push(asking(open, "confirm the bag's status: still undelivered, delivered or declared lost decide this"));
+      } else {
+        flags.notYetDue ??= { when: R04_AWAIT_BAG };
+        leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "unknown", [...exCells, status], { note: `${which}; the bag is still undelivered, so this waits for its delivery or a loss declaration`, passage: "P-260.5-F" }));
+      }
     } else {
-      leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "fail", [voluntary, ...(usable(status) ? [status] : []), ...(usable(delivered) ? [delivered] : [])], { note: "you agreed to travel without the bag (260.5(f)(3)); this does not apply to a lost bag (260.5(g))", passage: "P-260.5-F" }));
+      // Status unknown and no delivery time: the status decides (the delivery time is not asked; R04-15d, R04-09).
+      leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "unknown", exCells, { unknown: [status], note: `${which}; whether it applies depends on whether the bag was delivered, is still missing or was declared lost`, passage: "P-260.5-F" }));
     }
-  } else if (bool(pickup) === true && bool(documented) === true) {
-    leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "fail", [pickup, documented], { note: "the airline documented that the bag was left uncollected (260.5(f)(2))", passage: "P-260.5-F" }));
   } else if (bool(pickup) === true && bool(documented) === null) {
     leaves.push(leaf("exemption", "r04.a.no_exemption", exText, "exclusion", "unknown", [pickup], { unknown: [documented], passage: "P-260.5-F" }));
   } else {
@@ -664,6 +698,9 @@ function coreA(v: R04View, env: Env): Core {
       // M27 R04-19: a delivery before the deplane opportunity is a data error → asked, never not_eligible.
       leaves.push(leaf("delay", "r04.a.lost_or_delayed", sigText, "requirement", "unknown", [], { unknown: [delivered], note: "the delivery time is before the deplane time; check both", passage: "P-260.5-A" }));
       (leaves[leaves.length - 1] as ComputedCondition).unknownFacts = [{ fact: ref(delivered), reason: "missing" }];
+    } else if (flags.notYetDue?.when === R04_AWAIT_BAG) {
+      // Waiting for the bag's delivery or a loss declaration (above): the delivery time is not asked meanwhile.
+      leaves.push(leaf("delay", "r04.a.lost_or_delayed", sigText, "requirement", "unknown", [], { note: "the bag is still undelivered", passage: "P-260.5-A" }));
     } else {
       leaves.push(leaf("delay", "r04.a.lost_or_delayed", sigText, "requirement", "unknown", [], { unknown: [deplane, delivered].filter((c) => !usable(c)), passage: "P-260.5-A" }));
     }
@@ -737,9 +774,10 @@ function liabilityCommon(v: R04View, path: "b" | "c", flags: Flags, leaves: Cond
 }
 
 /**
- * One bag's path-b delay test (D234 (9)): still missing / declared lost; a confirmed delivery later than path a's
- * significant-delay threshold (D235 (D)); or a confirmed Mishandled Baggage Report (not for a damaged or pilfered bag,
- * which is path c). A carousel pickup alone is not a delay; a confirmed "no report" with a short span fails.
+ * One bag's path-b delay test (D234 (9); D253(1); spec §15 step 3): still missing / declared lost; a confirmed delivery
+ * later than 12 h (A5; path a's threshold, D235 (D)); or a confirmed Mishandled Baggage Report on a bag whose status
+ * says it is undamaged (a damaged or pilfered bag is path c; an unknown status is asked, R04-14f). A carousel pickup
+ * alone is not a delay; a confirmed "no report" with a short span fails.
  */
 function bagDelayedLeaf(v: R04View, p: R04Params, bagSubjectKey: string): ComputedCondition {
   const bag = bagReader(v, bagSubjectKey);
@@ -755,7 +793,9 @@ function bagDelayedLeaf(v: R04View, p: R04Params, bagSubjectKey: string): Comput
   if (statusCode === "delayed_undelivered" || statusCode === "declared_lost") {
     return leaf("delay", id, text, "requirement", "pass", [status], { note: "the bag did not arrive" });
   }
-  const mbrPasses = mbrValue === true && !damaged;
+  // D253(1): a confirmed report meets the condition on an UNDAMAGED bag — the status must say so (R04-14e/14f).
+  const mbrPasses = mbrValue === true && statusCode !== null && !damaged;
+  const mbrOnUnknownStatus = mbrValue === true && statusCode === null;
   const a = instant(deplane);
   const b = instant(delivered);
   if (a !== null && b !== null) {
@@ -770,16 +810,17 @@ function bagDelayedLeaf(v: R04View, p: R04Params, bagSubjectKey: string): Comput
     const late = lateVerdict(span, t.hours);
     const note = `delivered ${hm(span)} after the chance to deplane`;
     if (late === "pass") return leaf("delay", id, text, "requirement", "pass", [deplane, delivered, ...t.used], { note: `${note}: a late delivery (over ${t.hours.join(" / ")} h)` });
-    if (mbrPasses) return leaf("delay", id, text, "requirement", "pass", [mbr], { note: `${note}, with a Mishandled Baggage Report` });
+    if (mbrPasses) return leaf("delay", id, text, "requirement", "pass", [mbr, status], { note: `${note}, with a Mishandled Baggage Report` });
     if (late === "fail") {
       if (damaged) return leaf("delay", id, text, "requirement", "fail", [status, deplane, delivered, ...t.used], { note: `${note}: a damaged or pilfered bag delivered on time is a property claim (path c)` });
       if (mbrValue === false) return leaf("delay", id, text, "requirement", "fail", [mbr, deplane, delivered, ...t.used], { note: `${note}, and no Mishandled Baggage Report: a normal pickup is not a delay` });
+      if (mbrOnUnknownStatus) return leaf("delay", id, text, "requirement", "unknown", [mbr], { unknown: [status], note: `${note}, with a report: was the bag damaged (a property claim, path c) or just delayed?` });
       return leaf("delay", id, text, "requirement", "unknown", [], { unknown: [mbr], note: `${note}: did the bag arrive on your flight? A Mishandled Baggage Report records that it did not` });
     }
-    return leaf("delay", id, text, "requirement", "unknown", [], { unknown: [...t.unknown, mbr].filter((c) => !usable(c)), note });
+    return leaf("delay", id, text, "requirement", "unknown", [], { unknown: [...t.unknown, mbrOnUnknownStatus ? status : mbr].filter((c) => !usable(c)), note });
   }
-  if (mbrPasses) return leaf("delay", id, text, "requirement", "pass", [mbr], { note: "a Mishandled Baggage Report was filed" });
-  return leaf("delay", id, text, "requirement", "unknown", [], { unknown: [deplane, delivered, mbr].filter((c) => !usable(c)) });
+  if (mbrPasses) return leaf("delay", id, text, "requirement", "pass", [mbr, status], { note: "a Mishandled Baggage Report was filed" });
+  return leaf("delay", id, text, "requirement", "unknown", [], { unknown: [deplane, delivered, mbrOnUnknownStatus ? status : mbr].filter((c) => !usable(c)) });
 }
 
 /** The trip's A2 window for expense lines: from the deplane day through the latest delivery day (open while undelivered). */
@@ -1253,7 +1294,8 @@ function makePack(path: R04Path): RulePack<R04View, R04Params, CaseContext> {
           "D234 (10): a bag not yet delivered is asked for its delivery time or the airline's lost declaration; the delay is never extrapolated to the clock (a v2 spec item).",
           "260.5(c)/(d) multi-carrier notification is not modelled; the MBR with the last operating carrier is taken as sufficient.",
           "L9: DOT-REF-8 (request from the airline) and 260.5(d) (automatic) are both preserved: the refund is tracked, the airline is named.",
-          "D234 (12), pending a spec erratum: the (f)(1)/(f)(2) exemptions are applied to a declared-lost bag as the approved spec states.",
+          "L11 (erratum E-R04-2, D253(2)): with an (f)(1) or documented (f)(2) exemption, a declared-lost bag is a manual review (the captured text does not settle whether the exemption reaches a lost bag); a bag confirmed still undelivered is not yet due (re-evaluated when it is delivered or declared lost); a delivered bag is not eligible. (f)(3) never reaches a lost bag (260.5(g)).",
+          "L13 (errata ERR-R1-07): path a has no service-type input yet, so a bag on a charter or other non-scheduled flight is evaluated as if the flight were scheduled (a follow-up spec item).",
         ]
       : [
           ...LIMITS_COMMON,
@@ -1262,7 +1304,7 @@ function makePack(path: R04Path): RulePack<R04View, R04Params, CaseContext> {
           "L3: a ticket with no aircraft over 60 seats is manual_review.",
           "L8: international itineraries are unsupported (Montreal/Warsaw).",
           path === "b"
-            ? "Path b (D234 (9)): delayed = still missing or lost, a delivery later than path a's significant-delay threshold, or a filed MBR (not for damaged bags); only receipted (evidence), dated (spec A2) and unallocated lines count; reasonableness is the airline's call (L2). Lines are trip-level, so path b runs once per trip. A reimbursement not tied to lines is an assumption until allocated (D234 (13))."
+            ? "Path b (D234 (9), D253(1), A5/L12): delayed = still missing or lost, a confirmed delivery later than 12 hours, or a confirmed MBR on a bag whose status says it is undamaged (damaged or pilfered → path c); only receipted (evidence), dated (spec A2) and unallocated lines count; reasonableness is the airline's call (L2). Lines are trip-level, so path b runs once per trip. A reimbursement not tied to lines is an assumption until allocated (D234 (13))."
             : "No estimate: depreciation, exclusions and the carrier's limit decide the payout; documented values are evidence only. The remedy may be a repair (non-cash) rather than money (M27 R04-21).",
         ],
     evaluate: (input) => evaluateR04V1(path, input),

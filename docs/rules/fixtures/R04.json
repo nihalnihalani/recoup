@@ -1499,6 +1499,620 @@
         ],
         "reasoning": "Confirmed vs observed → manual review."
       }
+    },
+    {
+      "id": "R04-14",
+      "title": "Path b: a carousel pickup 20 minutes after deplaning is not on its own a delayed bag (M27 erratum E-R04-1, D234(9))",
+      "path": "R04.b",
+      "categories": [
+        "negative",
+        "missing_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-23T12:00:00-07:00",
+      "facts": {
+        "itinerary_scope": {
+          "type": "enum",
+          "value": "domestic",
+          "state": "derived"
+        },
+        "large_aircraft_segment_on_ticket": {
+          "type": "boolean",
+          "value": true,
+          "state": "user_confirmed"
+        },
+        "deplane_opportunity_at": {
+          "type": "datetime",
+          "value": "2026-09-12T21:40:00-07:00",
+          "state": "user_confirmed"
+        },
+        "bag_delivered_or_picked_up_at": {
+          "type": "datetime",
+          "value": "2026-09-12T22:00:00-07:00",
+          "state": "user_confirmed",
+          "note": "picked up from the carousel"
+        },
+        "bag_status": {
+          "type": "enum",
+          "value": "delivered",
+          "state": "user_confirmed"
+        },
+        "mbr_filed": {
+          "type": "boolean",
+          "value": null,
+          "state": "missing"
+        },
+        "expense_lines": {
+          "type": "array",
+          "state": "user_confirmed",
+          "value": [
+            {
+              "id": "E1",
+              "date": "2026-09-12",
+              "description": "toiletries",
+              "amount": {
+                "amount_minor": 2500,
+                "currency": "USD"
+              },
+              "receipt": "rcpt-401",
+              "allocated_to": null
+            }
+          ]
+        },
+        "carrier_liability_limit": {
+          "type": "money",
+          "value": null,
+          "state": "missing"
+        },
+        "carrier_claim_deadlines": {
+          "type": "object",
+          "value": null,
+          "state": "missing"
+        }
+      },
+      "expected": {
+        "outcome": "needs_facts",
+        "missing_facts": [
+          "mbr_filed"
+        ],
+        "amount": null,
+        "deadline": null,
+        "note": "Every pickup ends after the deplane opportunity, so a 20-minute span is not on its own a delay (spec §15 step 3.2). A confirmed Mishandled Baggage Report would meet the delay condition; a confirmed 'no report' gives not_eligible (R04-14b).",
+        "forbidden_outputs": [
+          "an estimate of 2,500 from a 20-minute carousel pickup",
+          "treating any pickup after the deplane opportunity as a delayed bag"
+        ]
+      },
+      "justification": {
+        "passages": [
+          "P-254.4",
+          "DOT-BAG-8",
+          "D234(9)"
+        ],
+        "reasoning": "Part 254 speaks of 'delay in delivery' and sets no threshold (spec L12); the lead's ruling requires a confirmed mishandled-baggage report or a confirmed late delivery, and a carousel pickup alone is not a delay."
+      },
+      "variants": [
+        {
+          "id": "R04-14b",
+          "change": {
+            "mbr_filed": {
+              "type": "boolean",
+              "value": false,
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "note": "Confirmed no report and a 20-minute pickup: no delay on path b (D234(9); spec §15 step 3.4)."
+          },
+          "justification": {
+            "passages": [
+              "D234(9)",
+              "P-254.4"
+            ],
+            "reasoning": "Neither a confirmed report nor a confirmed late delivery."
+          }
+        },
+        {
+          "id": "R04-14c",
+          "change": {
+            "bag_status": {
+              "type": "enum",
+              "value": "damaged",
+              "state": "user_confirmed",
+              "evidence": "damage report filed at the baggage office"
+            },
+            "bag_delivered_or_picked_up_at": {
+              "type": "datetime",
+              "value": "2026-09-12T22:05:00-07:00",
+              "state": "user_confirmed",
+              "note": "picked up from the carousel, damaged"
+            },
+            "mbr_filed": {
+              "type": "boolean",
+              "value": true,
+              "state": "user_confirmed"
+            },
+            "mbr_reference": {
+              "type": "string",
+              "value": "SEAXA67890",
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "not_eligible",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "note": "The report records damage to a bag that arrived with the passenger (25 minutes). The damage is claimed on path c, not as a delay on path b (D234(9); spec §15 step 3.3)."
+          },
+          "justification": {
+            "passages": [
+              "D234(9)",
+              "P-254.4"
+            ],
+            "reasoning": "An MBR is also filed for damaged or pilfered bags, so with a short span it does not show a delay."
+          }
+        },
+        {
+          "id": "R04-14d",
+          "change": {
+            "bag_delivered_or_picked_up_at": {
+              "type": "datetime",
+              "value": "2026-09-14T09:40:00-07:00",
+              "state": "user_confirmed"
+            },
+            "mbr_filed": {
+              "type": "boolean",
+              "value": false,
+              "state": "user_confirmed"
+            }
+          },
+          "delay": "36h00m",
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [
+              "carrier_claim_deadlines"
+            ],
+            "amount": {
+              "estimate": {
+                "amount_minor": 2500,
+                "currency": "USD"
+              },
+              "cap_display": "Carrier liability limit: at least $4,700 per passenger (federal floor on the carrier's cap)"
+            },
+            "deadline": null,
+            "note": "A confirmed delivery 36 hours after the deplane opportunity is a confirmed late delivery (spec §15 step 3.1(ii), assumption A5), which meets the delay condition without a report. Path b stays capped (no carrier contract captured)."
+          },
+          "justification": {
+            "passages": [
+              "D234(9)",
+              "P-254.4",
+              "DOT-BAG-1"
+            ],
+            "reasoning": "The lead's ruling accepts a confirmed late delivery in place of a report; only documented, unallocated lines are estimated."
+          }
+        },
+        {
+          "id": "R04-14e",
+          "change": {
+            "mbr_filed": {
+              "type": "boolean",
+              "value": true,
+              "state": "user_confirmed",
+              "evidence": "MBR reference SEAXA24680"
+            }
+          },
+          "expected": {
+            "outcome": "likely_eligible_missing_evidence",
+            "missing_facts": [
+              "carrier_claim_deadlines"
+            ],
+            "amount": {
+              "estimate": {
+                "amount_minor": 2500,
+                "currency": "USD"
+              },
+              "cap_display": "Carrier liability limit: at least $4,700 per passenger (federal floor on the carrier's cap)"
+            },
+            "deadline": null,
+            "note": "Under the literal words of D234(9), a confirmed mishandled-baggage report meets the path-b delay condition (spec §15 step 3.1(i)); only a damaged or pilfered bag with a short span is carved out (step 3.3, R04-14c). Here the status is a confirmed 'delivered', so the 20-minute span does not defeat the condition. The lead has not yet confirmed this reading (errata review item, ERR-R1-03); if the lead rules otherwise, this variant and step 3.1 change together before the errata are committed. Path b stays capped (no carrier contract captured)."
+          },
+          "justification": {
+            "passages": [
+              "D234(9)",
+              "P-254.4",
+              "DOT-BAG-1"
+            ],
+            "reasoning": "The lead's ruling accepts a confirmed report as meeting the delay condition; only documented, unallocated lines are estimated."
+          }
+        },
+        {
+          "id": "R04-14f",
+          "change": {
+            "mbr_filed": {
+              "type": "boolean",
+              "value": true,
+              "state": "user_confirmed",
+              "evidence": "MBR reference SEAXA24680"
+            },
+            "bag_status": {
+              "type": "enum",
+              "value": null,
+              "state": "missing"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [
+              "bag_status"
+            ],
+            "amount": null,
+            "deadline": null,
+            "note": "With a confirmed report and a 20-minute pickup, the bag's status decides path b: 'delivered' meets the delay condition (R04-14e); 'damaged' or 'pilfered' gives not_eligible, because the report may record damage rather than a delay (spec §15 step 3.3, R04-14c). This is the spec §15 step 3.5 example, on the same reading of D234(9) as R04-14e."
+          },
+          "justification": {
+            "passages": [
+              "D234(9)",
+              "P-254.4"
+            ],
+            "reasoning": "Missing is not false: under step 3.3 the status can still meet or defeat the delay condition."
+          }
+        }
+      ]
+    },
+    {
+      "id": "R04-15",
+      "title": "Path a: declared-lost bag with a 260.5(f)(1) recheck exemption fact (M27 erratum E-R04-2, D234(12))",
+      "path": "R04.a",
+      "categories": [
+        "exclusion",
+        "manual_review"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-23T12:00:00-07:00",
+      "facts_from": "R04-07",
+      "facts_override": {
+        "bag_status": {
+          "type": "enum",
+          "value": "declared_lost",
+          "state": "user_confirmed",
+          "evidence": "carrier email 2026-09-21 'your bag has been declared lost'"
+        },
+        "bag_delivered_or_picked_up_at": {
+          "type": "datetime",
+          "value": null,
+          "state": "missing"
+        }
+      },
+      "expected": {
+        "outcome": "manual_review",
+        "missing_facts": [],
+        "amount": null,
+        "deadline": null,
+        "reason": "The airline declared the bag lost. 260.5(f) exempts 'the fee for a significantly delayed bag' where 'the delay resulted from' the passenger's failure to recheck it. Part 260 names lost and significantly delayed bags separately, but its definition of a significantly delayed bag ('not delivered ... within 12 hours') also fits a lost bag. The captured text does not settle whether the exemption reaches a lost bag (spec L11).",
+        "forbidden_outputs": [
+          "not_eligible from the (f)(1) exemption for a declared-lost bag",
+          "eligible that sets the (f)(1) exemption aside"
+        ]
+      },
+      "justification": {
+        "passages": [
+          "P-260.5-F",
+          "P-260.5-INTRO",
+          "P-260.5-B",
+          "P-260.5-G",
+          "P-260.2-SDB",
+          "D234(12)"
+        ],
+        "reasoning": "Two readings of the captured text are open (spec L11); a person reviews the case rather than Recoup resolving the point either way."
+      },
+      "variants": [
+        {
+          "id": "R04-15b",
+          "change": {
+            "itinerary_scope": {
+              "type": "enum",
+              "value": "domestic",
+              "state": "user_confirmed"
+            },
+            "itinerary": {
+              "type": "object",
+              "value": {
+                "segments": [
+                  "DEN-SEA"
+                ]
+              },
+              "state": "user_confirmed"
+            },
+            "exemption_facts": {
+              "type": "object",
+              "value": {
+                "failed_recheck_at_first_us_entry": false,
+                "failed_pickup_on_time_bag": true,
+                "voluntary_separation_agreed": false
+              },
+              "state": "user_confirmed"
+            },
+            "exemption_documented_by_carrier": {
+              "type": "boolean",
+              "value": true,
+              "state": "user_confirmed",
+              "evidence": "carrier letter: bag not collected at the ticketed destination"
+            }
+          },
+          "expected": {
+            "outcome": "manual_review",
+            "missing_facts": [],
+            "amount": null,
+            "deadline": null,
+            "reason": "The (f)(2) pickup exemption is documented by the carrier, but the bag was declared lost; whether (f)(2) reaches a lost bag is not settled by the captured text (spec L11)."
+          },
+          "justification": {
+            "passages": [
+              "P-260.5-F",
+              "P-260.5-INTRO",
+              "D234(12)"
+            ],
+            "reasoning": "Same open question as R04-15, for (f)(2)."
+          }
+        },
+        {
+          "id": "R04-15c",
+          "change": {
+            "itinerary_scope": {
+              "type": "enum",
+              "value": "domestic",
+              "state": "user_confirmed"
+            },
+            "itinerary": {
+              "type": "object",
+              "value": {
+                "segments": [
+                  "DEN-SEA"
+                ]
+              },
+              "state": "user_confirmed"
+            },
+            "exemption_facts": {
+              "type": "object",
+              "value": {
+                "failed_recheck_at_first_us_entry": false,
+                "failed_pickup_on_time_bag": false,
+                "voluntary_separation_agreed": true
+              },
+              "state": "user_confirmed"
+            }
+          },
+          "expected": {
+            "outcome": "eligible",
+            "missing_facts": [],
+            "amount": {
+              "refund_at_least": {
+                "amount_minor": 7500,
+                "currency": "USD"
+              }
+            },
+            "note": "Control, unchanged from the approved §6: the voluntary-separation exemption does not reach a lost bag, because 260.5(g) forbids requiring a waiver of 'the right to a refund of bag fees if the bag is lost'."
+          },
+          "justification": {
+            "passages": [
+              "P-260.5-G",
+              "P-260.5-INTRO",
+              "P-260.5-B"
+            ],
+            "reasoning": "Declared lost + MBR + fee paid; (f)(3) does not apply to a lost bag."
+          }
+        },
+        {
+          "id": "R04-15d",
+          "change": {
+            "bag_status": {
+              "type": "enum",
+              "value": null,
+              "state": "missing"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [
+              "bag_status"
+            ],
+            "amount": null,
+            "deadline": null,
+            "note": "With the (f)(1) exemption confirmed and no delivery time, the bag's status decides the result: delivered → not_eligible; still undelivered → not_yet_due (R04-15f); declared lost → manual_review. The delivery time itself is not asked (spec §15 step 2.3)."
+          },
+          "justification": {
+            "passages": [
+              "P-260.5-F",
+              "D234(12)"
+            ],
+            "reasoning": "Missing is not false; only bag_status can change the outcome here."
+          }
+        },
+        {
+          "id": "R04-15e",
+          "change": {
+            "itinerary_scope": {
+              "type": "enum",
+              "value": "domestic",
+              "state": "user_confirmed"
+            },
+            "itinerary": {
+              "type": "object",
+              "value": {
+                "segments": [
+                  "DEN-SEA"
+                ]
+              },
+              "state": "user_confirmed"
+            },
+            "exemption_facts": {
+              "type": "object",
+              "value": {
+                "failed_recheck_at_first_us_entry": false,
+                "failed_pickup_on_time_bag": false,
+                "voluntary_separation_agreed": true
+              },
+              "state": "user_confirmed"
+            },
+            "bag_status": {
+              "type": "enum",
+              "value": "delayed_undelivered",
+              "state": "user_confirmed",
+              "evidence": "carrier message 2026-09-22: the bag has not been located yet"
+            }
+          },
+          "expected": {
+            "outcome": "not_yet_due",
+            "missing_facts": [],
+            "reevaluate_when": "bag delivered or declared lost",
+            "amount": null,
+            "deadline": null,
+            "note": "The passenger agreed to travel without the bag (260.5(f)(3)), and the bag is confirmed still undelivered with no delivery time. A delivery would make the exemption apply (not_eligible); a loss declaration would keep 'the right to a refund of bag fees if the bag is lost' (260.5(g)) and give the R04-15c refund. Neither has happened, so path a is not yet due (README cross-pack rule 4). The awaited event is not the user's own action, so the next action is a wait (spec §15 step 2.3).",
+            "forbidden_outputs": [
+              "not_eligible while the bag is still undelivered",
+              "eligible from the still-undelivered status extrapolated to the evaluation clock"
+            ]
+          },
+          "justification": {
+            "passages": [
+              "P-260.5-F",
+              "P-260.5-G",
+              "D147(6)",
+              "D234(12)"
+            ],
+            "reasoning": "The outcome depends on whether the bag is delivered or declared lost; a path that is not ripe is not_yet_due, never not_eligible."
+          }
+        },
+        {
+          "id": "R04-15f",
+          "change": {
+            "bag_status": {
+              "type": "enum",
+              "value": "delayed_undelivered",
+              "state": "user_confirmed",
+              "evidence": "carrier message 2026-09-22: the bag has not been located yet"
+            }
+          },
+          "expected": {
+            "outcome": "not_yet_due",
+            "missing_facts": [],
+            "reevaluate_when": "bag delivered or declared lost",
+            "amount": null,
+            "deadline": null,
+            "note": "The passenger did not recheck the bag at the first US entry point (260.5(f)(1)), and the bag is confirmed still undelivered with no delivery time. A delivery gives not_eligible (R04-07); a loss declaration gives manual_review (R04-15, spec L11). Until one happens, path a is not yet due (spec §15 step 2.3).",
+            "forbidden_outputs": [
+              "not_eligible while the bag is still undelivered"
+            ]
+          },
+          "justification": {
+            "passages": [
+              "P-260.5-F",
+              "D147(6)",
+              "D234(12)"
+            ],
+            "reasoning": "Same as R04-15e, for the (f)(1) exemption."
+          }
+        },
+        {
+          "id": "R04-15g",
+          "change": {
+            "itinerary_scope": {
+              "type": "enum",
+              "value": "domestic",
+              "state": "user_confirmed"
+            },
+            "itinerary": {
+              "type": "object",
+              "value": {
+                "segments": [
+                  "DEN-SEA"
+                ]
+              },
+              "state": "user_confirmed"
+            },
+            "exemption_facts": {
+              "type": "object",
+              "value": {
+                "failed_recheck_at_first_us_entry": false,
+                "failed_pickup_on_time_bag": false,
+                "voluntary_separation_agreed": true
+              },
+              "state": "user_confirmed"
+            },
+            "bag_status": {
+              "type": "enum",
+              "value": "delayed_undelivered",
+              "state": "extracted_candidate",
+              "evidence": "carrier email text 'your bag is still delayed' (not confirmed)"
+            }
+          },
+          "expected": {
+            "outcome": "needs_facts",
+            "missing_facts": [],
+            "unconfirmed_decisive_facts": [
+              "bag_status"
+            ],
+            "amount": null,
+            "deadline": null,
+            "note": "An extracted 'still undelivered' status is not decisive (D234(1)): a not-yet-due verdict never rests on an unconfirmed candidate. The status decides between not_eligible (delivered), not_yet_due (still undelivered) and a refund (declared lost; R04-15c), so the user is asked to confirm it (spec §15 step 2.3)."
+          },
+          "justification": {
+            "passages": [
+              "D234(1)",
+              "P-260.5-G"
+            ],
+            "reasoning": "The candidate is listed as candidate_unconfirmed and asked."
+          }
+        }
+      ]
+    },
+    {
+      "id": "R04-16",
+      "title": "Path a: bag confirmed still undelivered 14 hours after deplaning, with no delivery time (v1 does not extrapolate; V2-1, D234(10))",
+      "path": "R04.a",
+      "categories": [
+        "missing_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-13T11:40:00-07:00",
+      "facts_from": "R04-01",
+      "facts_override": {
+        "bag_status": {
+          "type": "enum",
+          "value": "delayed_undelivered",
+          "state": "user_confirmed"
+        },
+        "bag_delivered_or_picked_up_at": {
+          "type": "datetime",
+          "value": null,
+          "state": "missing"
+        }
+      },
+      "expected": {
+        "outcome": "needs_facts",
+        "missing_facts": [
+          "bag_delivered_or_picked_up_at"
+        ],
+        "amount": null,
+        "deadline": null,
+        "note": "The clock is 14 hours after the deplane opportunity, but a status value carries no as-of time, so v1 does not treat 'still undelivered' as a delivery time past the 12-hour threshold (spec §15 step 2.4; v2 item V2-1).",
+        "forbidden_outputs": [
+          "eligible from a 'still missing' status extrapolated to the evaluation clock"
+        ]
+      },
+      "justification": {
+        "passages": [
+          "P-260.2-SDB",
+          "P-260.5-A",
+          "D234(10)"
+        ],
+        "reasoning": "§15 step 2.4: missing either instant and the bag not yet declared lost → needs_facts."
+      }
     }
   ]
 }

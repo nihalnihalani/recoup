@@ -8,7 +8,8 @@
  *                  unconfirmed merchant of record stops rendering ("confirm it first").
  *     agent_refund_request  R02.b — a ticket agent took the payment: it refunds on request (14 CFR 399.80(l)).
  *     carrier_request       R02.a — the airline refunds automatically; the letter asks for it, and once the airline's
- *                           deadline has passed in every US time zone it says so (DA-A-5 overdue → escalate).
+ *                           deadline has passed in every US time zone it says so (DA-A-5 overdue → escalate) — only
+ *                           on a confirmed scheduled flight, never on assumption A8 (M27 R3-04, D253(3)).
  *
  * The recipient is never guessed: the airline's or agency's refund channel is not captured in the pack, so the user
  * enters it. A deadline date is the LATEST local due date when the time zone is unknown (M20b E1), so the letter
@@ -19,7 +20,7 @@
 import { localParts, US_ZONES } from "../deadlines/usZones";
 import type { DeadlineResult } from "../rules/types";
 import { R02_CARRIER_TIMER_CREDIT_ID, R02_CARRIER_TIMER_OTHER_ID, R02_REMEDY_KEY, R02_V1_RULE_ID, R02_V1_VERSION } from "../rules/r02_air_refund_v1";
-import { fill, formatLocalDate, formatMoney, type FactReader, type ManualChannel, type PacketContext, type PacketDraft, type PacketTemplate } from "./common";
+import { fill, formatLocalDate, formatMoney, PacketRenderError, type FactReader, type ManualChannel, type PacketContext, type PacketDraft, type PacketTemplate } from "./common";
 
 const TXN = "txn";
 const CHANNELS: readonly ManualChannel[] = Object.freeze(["web_form", "portal", "chat", "postal_mail"]);
@@ -135,6 +136,9 @@ export const r02CarrierRequest: PacketTemplate = Object.freeze({
   compose(context: PacketContext, facts: FactReader): PacketDraft {
     const timer = carrierTimer(context.deadlines);
     const overdue = timer?.overdue === true;
+    // M27 R3-04 / D253(3): the overdue letter (lateness + a DOT complaint) never rests on assumption A8 — it needs a
+    // confirmed scheduled flight; otherwise rendering stops with "confirm air.service_type first".
+    if (overdue && facts.text(TXN, "air.service_type") !== "scheduled") throw new PacketRenderError(TXN, "air.service_type", "not_known");
     const due = timer === null
       ? "I have not received the refund."
       : overdue

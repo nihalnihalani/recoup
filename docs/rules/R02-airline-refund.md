@@ -17,7 +17,7 @@
 | Researcher | opus-rules-researcher (M02) |
 | Reviewer | — (unassigned) |
 
-Captured sources: `sources/ecfr-14cfr260.txt`, `sources/usc-49-42305.txt`, `sources/ecfr-14cfr399.80l-excerpt.txt`, `sources/federal-web-pages-excerpts.md` (DOT-REF-*, FR-2026-13675-*).
+Captured sources: `sources/ecfr-14cfr260.txt`, `sources/usc-49-42305.txt`, `sources/ecfr-14cfr399.80l-excerpt.txt`, `sources/federal-web-pages-excerpts.md` (DOT-REF-*, FR-2026-13675-*), and `sources/ecfr-14cfr254.txt` (P-254.2 only, for the charter/scheduled distinction; added by erratum E-R02-1, §19).
 
 ---
 
@@ -39,7 +39,7 @@ Explicitly **not** this rule (separate rules, never merged — mission §10):
 
 ## 2. Applicability conditions (all must hold)
 
-1. Flight is a **covered flight** (260.2): scheduled; operated or marketed by a covered carrier; to, from, or within the US (brief stopovers without a break in journey allowed).
+1. Flight is a **covered flight** (260.2): scheduled; operated or marketed by a covered carrier; to, from, or within the US (brief stopovers without a break in journey allowed). A flight whose `service_type` is **known** to be a charter or other non-scheduled service is not a covered flight → `unsupported` (P-260.2-COVERED "a scheduled flight"; P-260.2-CARRIER "conducting scheduled passenger service"; P-260.6-A1 "on a scheduled flight"; §16 step 2). A missing or `unknown` `service_type` leaves this condition unknown. It is never resolved toward eligible: the result is capped at `likely_eligible_missing_evidence` with the labelled assumption "assumes a regularly scheduled flight" (A8), per README lifecycle rule 5 and **lead ruling D253(3)** (§16 step 8, L13). (Errata E-R02-1, E-R02-3.)
 2. Consumer holds a **nonrefundable** ticket (260.6(a)(1)). A fully refundable ticket has a separate, simpler refund basis (DOT-REF page "Fully refundable ticket") — out of scope for v1 → `unsupported`.
 3. A **cancelled flight** or **significantly delayed or changed flight** occurred (definitions in §4).
 4. Refund path by **merchant of record** (the entity shown on the card/bank statement, 260.2):
@@ -76,6 +76,7 @@ A carrier notice or observed operation showing cancellation or a significant cha
 |---|---|---|---|---|
 | `itinerary_scope` | enum | `domestic` \| `international` \| `non_us` | derived from origin/destination airport countries on the ticket/itinerary | applicability, thresholds |
 | `operating_carrier`, `marketing_carrier` | string | IATA code | ticket / e-ticket receipt | covered flight |
+| `service_type` | enum | `scheduled` \| `public_charter` \| `other_non_scheduled` \| `unknown` | booking confirmation / e-ticket / operator disclosure; user | applicability (covered flight, §2.1; §16 steps 2 and 8). Known `public_charter` / `other_non_scheduled` → `unsupported`. Missing or `unknown` → capped at `likely_eligible_missing_evidence` with assumption A8, and asked only when it is the only thing between likely and eligible (lead ruling D253(3); L13). Errata E-R02-1, E-R02-3 |
 | `merchant_of_record` | enum | `carrier` \| `ticket_agent` \| `unknown` | card/bank statement descriptor (definition in 260.2) — not the booking website; for cash/check purchases with no statement, the receipt's issuer (assumption A5) | path selection |
 | `ticket_refundability` | enum | `nonrefundable` \| `refundable` \| `unknown` | fare rules on receipt | applicability |
 | `event_type` | enum | `cancellation` \| `schedule_change` \| `operational_delay` \| `downgrade` \| `airport_change` \| `added_connection` \| `renumbered_only` | carrier notice; operations data | trigger |
@@ -85,7 +86,7 @@ A carrier notice or observed operation showing cancellation or a significant cha
 | `original_airports`, `changed_airports` | object | IATA codes | confirmation vs notice | significance (3) |
 | `original_connections`, `changed_connections` | integer | count | confirmation vs notice | significance (4) |
 | `original_cabin`, `changed_cabin` | enum | `first` \| `business` \| `premium_economy` \| `economy` | confirmation vs notice / boarding pass | significance (5) |
-| `passenger_disability_relevant` | boolean | – | user-confirmed only (sensitive; ask only if (6)/(7) could matter) | significance (6)(7), 260.6(b) |
+| `passenger_disability_relevant` | boolean | – | user-confirmed only (sensitive). **Never asked**: the passenger raises it (260.6(b); L14, erratum E-R02-2) | significance (6)(7), 260.6(b) |
 | `offer_type` | enum | `none` \| `rebooking` \| `voucher_or_credit` \| `both` | carrier notice | deemed-request path |
 | `consumer_response` | enum | `rejected` \| `accepted_rebooking` \| `accepted_compensation` \| `no_response` \| `unknown` | carrier correspondence + **user confirmation** | eligibility |
 | `consumer_response_at` | datetime | instant | carrier correspondence timestamp | refund-due anchor |
@@ -103,7 +104,7 @@ A carrier notice or observed operation showing cancellation or a significant cha
 - Consumer flew the changed or alternative flight (P-260.6-A1, DOT-REF-4).
 - Consumer **affirmatively** accepted voucher/credit/other compensation offered under 260.6(c) (P-260.6-A1(ii), P-260.7).
 - Change does not meet any §4 significance criterion and no cancellation occurred (e.g., 1-hour delay).
-- Non-covered flight (no US point, or non-scheduled/charter) → `unsupported`, not `not_eligible`.
+- Non-covered flight (no US point, or a known `service_type` of `public_charter` or `other_non_scheduled`) → `unsupported`, not `not_eligible` (§16 step 2; L13). An unknown service type is not an exclusion: it caps the result (§16 step 8).
 - Refundable ticket → `unsupported` in v1.
 - Renumbered-only flight with no significant change → `manual_review` (§15 L1).
 
@@ -168,6 +169,15 @@ These are **carrier payment deadlines** (used for status tracking and escalation
 **P-260.2-COVERED** — 14 CFR 260.2
 > Covered flight means a scheduled flight operated or marketed by a covered carrier to, from, or within the United States, including itineraries with brief and incidental stopover(s) at a foreign point without a break in journey.
 
+**P-260.2-CARRIER** — 14 CFR 260.2 (added by erratum E-R02-1)
+> Covered carrier means an air carrier or a foreign air carrier operating to, from, or within the United States, conducting scheduled passenger service.
+
+**P-260.2-AIRCARRIER** — 14 CFR 260.2 (added in errata review round 1; L13)
+> Air carrier means a citizen of the United States undertaking by any means, directly or indirectly, to provide air transportation.
+
+**P-260.2-FOREIGN** — 14 CFR 260.2 (added in errata review round 1; L13)
+> Foreign air carrier means a person, not a citizen of the United States, undertaking by any means, directly or indirectly, to provide foreign air transportation.
+
 **P-260.2-MOR** — 14 CFR 260.2
 > Merchant of record means the entity (carrier or ticket agent) responsible for processing payments by consumers for airfare or ancillary services or products (including the transport of checked bags), as shown in the consumer's financial charge statements, such as debit or credit card charge statements.
 
@@ -212,6 +222,9 @@ These are **carrier payment deadlines** (used for status tracking and escalation
 >
 > (B) A voucher, credit, or other form of compensation by the date on which the cancelled flight was scheduled to depart or the date that the significantly delayed or changed flight departs.
 
+**P-260.6-B** — 14 CFR 260.6(b) (opening; added by erratum E-R02-2)
+> (b) Individuals with a disability. A carrier that is the merchant of record must provide a full and prompt refund to an individual with a disability upon notification by the individual with a disability that he/she does not want to continue travel because of the significant changes described in paragraphs (b)(1) through (3) of this section.
+
 **P-260.7** — 14 CFR 260.7
 > A covered carrier must not deem a consumer to have accepted an offer for travel credits, vouchers, or other compensation in lieu of a refund under § 260.6(c) unless the consumer affirmatively agrees to the alternative form of compensation.
 
@@ -233,6 +246,9 @@ These are **carrier payment deadlines** (used for status tracking and escalation
 **P-399.80(l)** — 14 CFR 399.80(l) (ticket agents; excerpt)
 > A prompt refund is one that is made within 7 business days of the ticket agent receiving information from a carrier as specified in 14 CFR 260.6(d), as required by 12 CFR part 1026 for credit card purchases, and within 20 calendar days of refund becoming due for cash, check, debit card, or other forms of purchases.
 
+**P-254.2** — 14 CFR 254.2 (`sources/ecfr-14cfr254.txt`; cited here only because it names charter service separately from scheduled passenger service; part 254 itself is R04's liability rule; added by erratum E-R02-1)
+> This part applies to any air carrier that provides charter or scheduled passenger service in interstate or intrastate air transportation.
+
 DOT consumer-page passages DOT-REF-1…9 and FR notices FR-2026-13675-* are in `sources/federal-web-pages-excerpts.md`.
 
 ## 14. Source register
@@ -245,6 +261,7 @@ DOT consumer-page passages DOT-REF-1…9 and FR notices FR-2026-13675-* are in `
 | S4 | https://www.transportation.gov/individuals/aviation-consumer-protection/refunds | agency guidance | 2026-09-23 (browser) | page "Last updated: Friday, November 7, 2025" | no raw hash (403 to non-browser clients) |
 | S5 | https://www.federalregister.gov/documents/2026/07/07/2026-13675/airline-refunds-and-other-consumer-protections | enforcement discretion | 2026-09-23 | 2026-07-07 → 2027-07-07 | SHA-256 in excerpts file |
 | S6 | https://www.federalregister.gov/documents/2025/11/17/2025-20042 | ANPRM withdrawal (no cash delay compensation) | 2026-09-23 | 2025-11-17 | SHA-256 in excerpts file |
+| S7 | https://www.ecfr.gov/current/title-14/chapter-II/subchapter-A/part-254 (fetched via versioner API point-in-time 2026-09-18) | regulation (P-254.2 only: charter vs scheduled service) | 2026-09-23 | eCFR as of 2026-09-18 | SHA-256 in `sources/ecfr-14cfr254.txt` |
 
 ## 15. Known limitations and source conflicts
 
@@ -255,23 +272,32 @@ DOT consumer-page passages DOT-REF-1…9 and FR notices FR-2026-13675-* are in `
 - **L5 — "Accepted rebooking but did not fly."** Not addressed by the regulation → `manual_review`.
 - **L6 — Business-day / time-zone boundary.** Regulation does not say which time zone defines the anchor date (assumption A1).
 - **L7 — Ticket-agent anchor** (R02.b) depends on carrier→agent communication the consumer cannot observe → deadline displayed as "not computable".
-- **L8 — Refundable tickets, charters, non-US itineraries, and 24-hour cancellation (14 CFR 259.5(b)(4))** are out of scope for v1.
+- **L8 — Refundable tickets, charters, non-US itineraries, and 24-hour cancellation (14 CFR 259.5(b)(4))** are out of scope for v1. A charter or other non-scheduled flight is `unsupported` only when its `service_type` is known; an unknown service type caps a positive result with assumption A8 (§16 steps 2 and 8, L13).
 - **L10 — DOT-REF-8 vs 260.4(a)/260.5(d).** DOT's page says ancillary and bag fees charged by a ticket agent "must" be requested from the airline; the regulation makes the operating carrier's refund **automatic**. Both preserved: the regulation governs the duty (automatic); DOT-REF-8 tells the consumer whom to contact if the refund does not arrive.
-- **L11 — Disability path (260.6(b)).** Triggered "upon notification by the individual with a disability" and extends to companions on the same reservation. Not modelled in v1 → `manual_review` when `passenger_disability_relevant = true`.
+- **L11 — Disability path (260.6(b)).** Triggered "upon notification by the individual with a disability" (P-260.6-B) and extends to companions on the same reservation. Not modelled in v1 → `manual_review` when a **user_confirmed** `passenger_disability_relevant = true`; a candidate or observed value is ignored (§5 "user-confirmed only"). The fact is never asked (L14).
 - **L12 — ANPRM withdrawal** is captured verbatim (FR-2025-20042 DATES).
 - **L9 — Pending change risk.** Refund III may change "cancelled flight". The statutory arrival thresholds (P-42305-D) are a floor. Early-departure, airport-change, connection and downgrade criteria are regulatory only and could change.
+- **L13 — Service type: a charter is detected only when known; an unknown service type caps the result (errata E-R02-1 and E-R02-3; D234(5), lead ruling D253(3)).** A covered flight is "a scheduled flight operated or marketed by a covered carrier" (P-260.2-COVERED); a covered carrier is one "conducting scheduled passenger service" (P-260.2-CARRIER); 260.6(a)(1) protects a consumer "on a scheduled flight" (P-260.6-A1); and DOT's regulations name "charter or scheduled passenger service" as separate kinds of service (P-254.2). v1 reads `service_type` as follows:
+  - Known `public_charter` or `other_non_scheduled` → `unsupported` (§16 step 2; R02-14, R02-14b, R02-16).
+  - `scheduled`, confirmed → the service-type half of the covered-flight condition holds (R02-01, R02-14c).
+  - Missing or `unknown` → the condition is unknown and is never resolved toward eligible. The result is capped at `likely_eligible_missing_evidence` with the labelled assumption "assumes a regularly scheduled flight" (A8), and the service type is asked only when it is the only thing between likely and eligible (§16 step 8; R02-15, R02-15b, R02-15c). This is README lifecycle rule 5 ("unknown → capped at likely eligible with an explicit assumption", by reference to R01 §1.4). D234(8) sends a compliance/applicability gate whose zone is unknown to the same rule ("capped with a labelled assumption, never resolved toward eligible"), and **lead ruling D253(3)** applies it to the service type: there is no exception to README rule 5 for R02. The assumption caps the result through contract §4 rule 8.
+  - A candidate non-scheduled value is never decisive (D234(1)): it is asked (`needs_facts`, R02-14d). A candidate `scheduled` is an unconfirmed decisive fact (README cross-pack rule 1): capped, and the confirmation is asked (R02-15d).
+  - The limitation that remains: v1 detects a charter only when the user or a document says so. A user who does not know the service type gets a capped result, never an `eligible` one. The pack's knownLimitations and its covered-flight condition must say this.
+  No separate covered-carrier input is needed. This is an **inference**, labelled as such (errata review round 1, ERR-R1-08). A carrier that operates a scheduled flight to, from or within the US is "operating to, from, or within the United States, conducting scheduled passenger service" (P-260.2-CARRIER). The remaining condition, that the operator is "an air carrier or a foreign air carrier", is inferred from the two 260.2 definitions, which divide operators by citizenship: an air carrier is "a citizen of the United States undertaking by any means, directly or indirectly, to provide air transportation" (P-260.2-AIRCARRIER), and a foreign air carrier is "a person, not a citizen of the United States, undertaking by any means, directly or indirectly, to provide foreign air transportation" (P-260.2-FOREIGN). v1 infers that the operator of such a flight is one or the other, so `itinerary_scope` and `service_type` together decide both halves of P-260.2-COVERED. No captured passage states this: the captured text does not define "air transportation" or "foreign air transportation", and by their words neither definition names a non-citizen that provides air transportation only within the United States. v1 does not model that case.
+- **L14 — Disability criteria are never asked (erratum E-R02-2, D234(7); M27 ruling (b)).** Criteria (6)/(7) of P-260.2-SIG and 260.6(b) depend on the passenger's disability and needs. 260.6(b) applies "upon notification by the individual with a disability" (P-260.6-B), and `passenger_disability_relevant` is a sensitive, user-confirmed-only fact (§5). v1 therefore **never asks** it: the passenger raises it. v1 also models no connecting-airport identities or aircraft accessibility features, so (6)/(7) cannot be decided from other facts. Consequence: a passenger whose only ground is (6), (7) or 260.6(b), and who has not told Recoup, gets the result for criteria (1)–(5). When that result is `not_eligible` because no criterion is met, the explanation says that disability-related grounds exist and can be raised, and points to R15 (the reviewer's condition 2 on ruling (b)).
 
 ## 16. Evaluation outline (deterministic; for the backend evaluator)
 
 1. No current source record, or source state ≠ `verified_current` (last verification older than the refresh window, or a newer FR document on part 260/399 not yet reviewed) → **`source_unverified`**.
 1b. **Temporal gate:** the deemed-request (or incident) date is before the refund-provision compliance date **2024-10-28** → **`source_unverified`** ("rule compliance date"; v1 does not evaluate earlier events).
-2. `itinerary_scope = non_us` or carrier not covered → **`unsupported`**. `ticket_refundability = refundable` → **`unsupported`** (v1).
+2. `itinerary_scope = non_us`, or carrier/flight not covered → **`unsupported`**. "Not covered" means a **known** `service_type` other than `scheduled` (`public_charter`, `other_non_scheduled`): not "a scheduled flight" (P-260.2-COVERED, P-260.6-A1) by a carrier "conducting scheduled passenger service" (P-260.2-CARRIER); charter service is named apart from scheduled service in P-254.2. This step comes before the eligibility questions of steps 5–7, so a known non-scheduled value gives `unsupported` even when those facts are still missing (R02-16). A candidate non-scheduled `service_type` is not decisive: → **`needs_facts`** with `service_type` listed as `candidate_unconfirmed` (D234(1)). A missing or `unknown` `service_type` does not stop the evaluation here; step 8 caps the result (lead ruling D253(3), L13). `ticket_refundability = refundable` → **`unsupported`** (v1). (Errata E-R02-1, E-R02-3; fixtures R02-14, R02-14b–d, R02-16.)
 3. `event_type = operational_delay`: evaluate criterion (2) with the carrier's **revised scheduled** arrival. Below the threshold → **`not_eligible`** (link R15 as a possible carrier commitment; never a cash-compensation card). At or above → continue like a schedule change. Revised schedule and `actual_arrival_at` on opposite sides of the threshold → **`manual_review`**.
 4. `event_type = renumbered_only` → **`manual_review`** (L1).
 5. Compute significance from scheduled instants and the other criteria. Any required time missing → **`needs_facts`**. Conflicting candidate values that straddle a threshold → **`needs_facts`** (ask to confirm). No criterion met and not cancelled → **`not_eligible`**.
 6. `flew_changed_or_alternative = true` → **`not_eligible`**. `consumer_response = accepted_compensation` (affirmative) → **`not_eligible`**. `accepted_rebooking` and did not fly → **`manual_review`**.
 7. `consumer_response ∈ {unknown}` and the changed/alternative flight has not departed → **`needs_facts`** (ask: did you accept, reject, or not respond?). Response unknown and the changed flight **has already departed** without the consumer → **`needs_facts`** (ask whether a voucher or credit was affirmatively accepted; if not, (iii)(A) makes the refund due).
-8. Deemed-request event established → **`eligible`** only if every **decisive fact** is `user_confirmed` or derived from confirmed facts (D147(2)); otherwise **`likely_eligible_missing_evidence`**. Decisive facts: `itinerary_scope` (and the airports it derives from), `operating_carrier`/`marketing_carrier`, `merchant_of_record`, `ticket_refundability`, `event_type`, the schedule instants used for significance, `offer_type`, `consumer_response` (+ `consumer_response_at` for the timer), `flew_changed_or_alternative`, `payment_method_class` (timer), and the amount inputs `fare_paid`/`taxes_paid`/`ancillary_fees_paid`/`already_refunded` (an itinerary with no ancillary fees records `ancillary_fees_paid: []` as confirmed — missing is not zero). A conflicting decisive fact follows D152/D154: candidates with different outcomes or amounts → `needs_facts`; same outcome and amount → capped `likely_eligible`; a confirmed value contradicting an observed or confirmed value → `manual_review`.
+8. Deemed-request event established → **`eligible`** only if every **decisive fact** is `user_confirmed` or derived from confirmed facts (D147(2)); otherwise **`likely_eligible_missing_evidence`**. Decisive facts: `itinerary_scope` (and the airports it derives from), `operating_carrier`/`marketing_carrier`, `merchant_of_record`, `ticket_refundability`, `event_type`, the schedule instants used for significance, `offer_type`, `consumer_response` (+ `consumer_response_at` for the timer), `flew_changed_or_alternative`, `payment_method_class` (timer), and the amount inputs `fare_paid`/`taxes_paid`/`ancillary_fees_paid`/`already_refunded` (an itinerary with no ancillary fees records `ancillary_fees_paid: []` as confirmed — missing is not zero), plus `service_type` (erratum E-R02-3; handled as set out below). A conflicting decisive fact follows D152/D154: candidates with different outcomes or amounts → `needs_facts`; same outcome and amount → capped `likely_eligible`; a confirmed value contradicting an observed or confirmed value → `manual_review`.
+   **Service type (lead ruling D253(3); README lifecycle rule 5; L13).** `eligible` also requires `service_type = scheduled`, confirmed as above. A missing or `unknown` value caps the outcome at **`likely_eligible_missing_evidence`** with the labelled assumption "assumes a regularly scheduled flight" (A8). `service_type` is asked (listed in `missing_facts`) only when it is the only thing between likely and eligible, that is, when the result would be `eligible` with `service_type = scheduled` confirmed (R02-15, R02-15b). When anything else also keeps the result below `eligible` (a missing or unconfirmed decisive fact), the assumption is still carried but the question waits (R02-15c). An `extracted_candidate` `scheduled` is an unconfirmed decisive fact under README cross-pack rule 1: capped, with `service_type` listed as `candidate_unconfirmed` (R02-15d). The amount and the carrier timer are computed as for any capped result (step 9): the service type is not the timer's anchor, selector or zone (D234 principle for counterparty timers), so the fixtures show R02-01's due date. *Reading of D253(3), labelled as such:* a cap is a ceiling, so an outcome below `likely_eligible_missing_evidence` from steps 1–7 is not changed by an unknown service type, and the service type is not asked for it. The approved cases without a service type (R02-03, R02-04, R02-05, R02-05c, R02-07, R02-08, R02-10) keep their expected values under this reading. R02-07b stays `likely_eligible_missing_evidence` with `missing_facts []`, because its unconfirmed arrival time also stands between likely and eligible.
 9. Compute the refund amount (§8) and the carrier payment deadline (§11).
 10. Overlaps: attach relationships to R12 (card trip-cancellation: alternative/secondary — not additive), R15 (carrier commitment: may be complementary for expenses actually incurred before the consumer abandoned the trip, e.g. a stranded-overnight hotel; evaluate per carrier plan, never assume additive or exclusive), R03 (payment dispute: fallback channel for the same money, alternative).
 11. Idempotency: the opportunity key = (owner, rule id, rule version, ticket number, affected flight segment). Re-evaluation with an identical fact snapshot returns the same result and **reuses** the existing opportunity; no second claim.
@@ -293,3 +319,21 @@ DOT consumer-page passages DOT-REF-1…9 and FR notices FR-2026-13675-* are in `
 - A5: For cash/check purchases with no card statement, the receipt's issuer is the merchant of record.
 - A6: A timestamped email/app/chat rejection is sufficient evidence of rejection (§10).
 - A7: For 260.6(a)(2)(i) (cancelled, nothing offered) the anchor is the carrier's cancellation-notice instant (§11).
+- A8: "assumes a regularly scheduled flight". This is a **result assumption**, shown on a result whose `service_type` is missing or `unknown`. It caps that result at `likely_eligible_missing_evidence` (§2.1, §16 step 8, L13). The wording is the lead's (ruling D253(3)). Unlike A1–A7, it is not a spec-level reading. It is lifted only when the service type is confirmed as `scheduled`; a known non-scheduled value gives `unsupported` instead.
+
+## 19. Errata (M27 code-pack review, lead rulings D234 and D253; 2026-09-23)
+
+These edits are made while the pack is still `researched` (README lifecycle rule 1). Engineering research, not legal certification. They need an independent re-check before R02 activation (D234(5)). Summary: `docs/rules/review-items/2026-09-23-M27-errata.md`.
+
+- **E-R02-1 — Charter / covered-carrier gap (D234(5); review finding R02-05).** §16 step 2 said "carrier not covered → `unsupported`", but §5 had no input for it. Added the optional applicability fact `service_type` (§5), the passages P-260.2-CARRIER and P-254.2 (§13, source S7), the `unsupported` rule for a known non-scheduled value (§2.1, §6, §16 step 2), and limitation L13 (a missing or `unknown` value has no effect; a candidate is asked; *the "no effect" part is superseded by E-R02-3*). Fixtures: R02-14 (public charter → `unsupported`), R02-14b (other non-scheduled → `unsupported`), R02-14c (confirmed scheduled → unchanged from R02-01), R02-14d (candidate charter → `needs_facts`).
+- **E-R02-2 — Disability criteria never asked (D234(7); M27 ruling (b)).** §5 said "ask only if (6)/(7) could matter"; the ruling is that they are never asked. Added P-260.6-B (§13), limitation L14, and the user-confirmed-only trigger in L11. No fixture change.
+- **Errata review round 1 (2026-09-23).** ERR-R1-08: L13's "no separate covered-carrier input" sentence is now labelled an inference and cites the newly quoted 260.2 definitions P-260.2-AIRCARRIER and P-260.2-FOREIGN (§13). ERR-R1-04: no spec change in round 1; the lead was asked to record that a missing or `unknown` `service_type` is an explicit exception to D234(8)'s unknown-gate convention (review item). The lead ruled the other way (D253(3); E-R02-3). No fixture change.
+- **E-R02-3 — Unknown service type caps the result (lead ruling D253(3), round 3; 2026-09-23).** D253(3): "no exception to README rule 5". An unknown `air.service_type` caps the result at likely_eligible with the labelled assumption "assumes a regularly scheduled flight", and the question is asked when it is the only thing between likely and eligible. A known non-scheduled value → `unsupported`. Changes:
+  - §2.1 and the §5 row now state the cap.
+  - §6 says an unknown service type is not an exclusion.
+  - §16 step 2 no longer says "no effect"; it adds that the step precedes steps 5–7.
+  - §16 step 8 puts `service_type` on the decisive list, with the cap, the question rule, the candidate rule, and the labelled ceiling reading.
+  - L8 and L13 are rewritten; the "no effect" / exception framing is removed.
+  - New assumption A8.
+  - Fixtures: the approved `eligible` expectations of R02-01 (and so R02-01b, R02-01c and R02-12, which reuse its facts), R02-02b/c, R02-05b, R02-06 and R02-09b are preserved by adding `service_type = scheduled` (`user_confirmed`) to their facts. It is added to R02-01, R02-02, R02-06 and R02-09 as a case fact, and to R02-05b's `change`. No expected value changed; R02-14c's descriptive `note` was updated. New cases: R02-15 (unknown → `likely_eligible_missing_evidence`, asked, assumption A8), R02-15b (`unknown` answered → the same), R02-15c (unknown plus an unconfirmed fare → capped, not asked yet), R02-15d (candidate `scheduled` → capped, confirmation asked), R02-16 (known public charter with the decision still unknown → `unsupported`, nothing asked).
+  - The reviewer re-checks this erratum (D253(3)).

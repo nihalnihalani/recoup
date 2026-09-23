@@ -94,13 +94,15 @@ export function r02View(s: Pick<AirSnapshot, "transactionId" | "lookup">): R02Vi
 }
 
 /**
- * The facts an approved R02 basis is bound to (rev 5 N6): identity (ticket, flight), the path (merchant of record),
- * the refund event and decision, the timer inputs, the amount inputs, and every significance input that can decide the
- * result — airports, connections and cabins (M27 R02-16). 32 cells, exactly `MAX_BOUND_FACTS`.
+ * The facts an approved R02 basis is bound to (rev 5 N6): identity (ticket, flight), the covered-flight inputs (scope,
+ * service type — D253(3); the overdue letter states lateness only on a confirmed scheduled flight), the path (merchant
+ * of record), the refund event and decision, the timer inputs, the amount inputs, and every significance input that can
+ * decide the result — airports, connections and cabins (M27 R02-16). 32 cells, exactly `MAX_BOUND_FACTS`. The
+ * marketing carrier decides nothing in v1 (D234 (2)) and is not bound.
  */
 export const R02_BOUND_KEYS = [
   "air.ticket_number", "air.original_flight_number", "air.itinerary_scope", "air.operating_carrier",
-  "air.marketing_carrier", "air.merchant_of_record", "air.ticket_refundability", "air.event_type", "air.offer_type",
+  "air.service_type", "air.merchant_of_record", "air.ticket_refundability", "air.event_type", "air.offer_type",
   "air.consumer_response", "air.consumer_response_at", "air.flew_changed_or_alternative", "air.payment_method_class",
   "air.fare_paid", "air.taxes_paid", "air.ancillary_fees_total", "air.already_refunded", "air.partly_flown",
   "air.original_sched_departure_at", "air.original_sched_arrival_at", "air.changed_sched_departure_at",

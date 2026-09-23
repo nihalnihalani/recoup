@@ -176,6 +176,7 @@ describe("D221: an air.total_paid fact changes no R02/R04 outcome", () => {
   const total = row("air.total_paid", usd(99_999));
   // R02-01's confirmed facts (cancellation, rejected, credit card) and R04-01's (domestic bag 13h15m late, MBR filed).
   const R02_ROWS: CellRow[] = [
+    row("air.service_type", code("scheduled")), // D253(3): an unknown service type caps R02 at likely_eligible
     row("air.itinerary_scope", code("domestic"), "derived"), row("air.operating_carrier", { kind: "text", text: "XA" }),
     row("air.merchant_of_record", code("carrier")), row("air.ticket_refundability", code("nonrefundable")), row("air.event_type", code("cancellation")),
     row("air.original_sched_departure_at", at("2026-10-05T07:00:00-04:00")), row("air.offer_type", code("rebooking")),

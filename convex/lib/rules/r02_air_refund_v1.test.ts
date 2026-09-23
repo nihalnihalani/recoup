@@ -39,6 +39,7 @@ import {
   R02_CARRIER_TIMER_CREDIT_ID,
   R02_CARRIER_TIMER_OTHER_ID,
   R02_PARAM_PASSAGES,
+  R02_SCHEDULED_ASSUMPTION_ID,
   R02_SOURCES,
   R02_V1_PARAMS,
 } from "./r02_air_refund_v1";
@@ -65,6 +66,7 @@ const DIRECT = [
   "original_connections", "changed_connections", "original_cabin", "changed_cabin", "passenger_disability_relevant",
   "offer_type", "consumer_response", "consumer_response_at", "flew_changed_or_alternative",
   "changed_or_alternative_departs_at", "payment_method_class", "fare_paid", "taxes_paid", "already_refunded",
+  "service_type",
 ] as const;
 const KEY_OF: Record<string, string> = {
   ...Object.fromEntries(DIRECT.map((n) => [n, `air.${n}`])),
@@ -92,6 +94,8 @@ function toValue(key: string, raw: unknown, facts: Readonly<Record<string, Fixtu
     if (currencies.size > 1) throw new Error("mixed-currency ancillary list");
     return { kind: "money", amountMinor: list.reduce((a, m) => a + m.amount_minor, 0), currency };
   }
+  // D253(3): the enum value "unknown" is the user's "I don't know" (R02-15b).
+  if (key === "air.service_type" && raw === "unknown") return { kind: "user_unknown" };
   if (key === "air.partly_flown") {
     return { kind: "bool", value: Object.values(raw as Record<string, string>).some((leg) => /^flown\b/.test(leg)) };
   }
@@ -170,6 +174,11 @@ const CAPPED = new Set(["candidate_unconfirmed", "conflict_capped"]);
 const namesOf = (list: MissingFact[], cls: Set<string>) => list.filter((m) => cls.has(m.reason)).map((m) => NAME_OF[m.key] ?? m.key).sort();
 const carrierTimer = (r: EvaluationResult) => r.deadlines.find((d) => d.id === R02_CARRIER_TIMER_CREDIT_ID || d.id === R02_CARRIER_TIMER_OTHER_ID);
 
+/** Fixture assumption wording → the pack's assumption id. */
+const ASSUMPTION_IDS: Record<string, string> = {
+  "assumes a regularly scheduled flight": R02_SCHEDULED_ASSUMPTION_ID, // A8, D253(3)
+};
+
 /** forbidden_outputs, case by case (each is a thing the evaluator must NOT produce). */
 const FORBIDDEN: Record<string, (r: EvaluationResult) => void> = {
   "R02-05": (r) => {
@@ -188,7 +197,7 @@ describe("R02 v1 code pack × docs/rules/fixtures/R02.json (unmodified, via M08'
   it("loads the file (hash-checked) with every case runnable, and the pack's refresh window matches the fixtures'", () => {
     expect(FILE.ruleId).toBe(r02AirRefundV1.ruleId);
     expect(FILE.ruleVersion).toBe(r02AirRefundV1.version);
-    expect(FILE.cases.length).toBe(25); // 13 cases: 5 with a top-level expected + 20 variants
+    expect(FILE.cases.length).toBe(34); // 25 approved + R02-14/14b–d (E-R02-1) + R02-15/15b–d and R02-16 (E-R02-3, D253(3))
     for (const c of FILE.cases) {
       if (c.source && "refresh_window_days" in c.source) {
         for (const s of R02_SOURCES) expect(s.refreshWindowDays).toBe(c.source.refresh_window_days);
@@ -260,6 +269,17 @@ describe("R02 v1 code pack × docs/rules/fixtures/R02.json (unmodified, via M08'
       if (e.overlap !== undefined) {
         // R12 is never additive: undeclared → `alternative` at case opening (D145); the pack declares nothing additive.
         expect(r.overlap.filter((o) => o.withScenario === "R12" && (o.relation === "complementary" || o.relation === "coordinated"))).toEqual([]);
+      }
+      for (const text of (e.assumptions as string[] | undefined) ?? []) {
+        expect(ASSUMPTION_IDS[text], `unmapped fixture assumption: ${text}`).toBeDefined();
+        expect(r.assumptions.map((a) => a.id)).toContain(ASSUMPTION_IDS[text]);
+      }
+      // D253(3) reading 3: a candidate "scheduled" is an unconfirmed decisive fact, not A8 (R02-15d); a confirmed one never A8.
+      const service = c.facts.service_type as FixtureFact | undefined;
+      if (service && service.value === "scheduled") expect(r.assumptions.map((a) => a.id)).not.toContain(R02_SCHEDULED_ASSUMPTION_ID);
+      // The fixture's question is the catalogue's prompt for the one key asked (R02-15).
+      if (typeof e.question === "string" && e.missing_facts !== undefined && (e.missing_facts as string[]).length === 1 && (e.missing_facts as string[])[0] === "service_type") {
+        expect(getFactSpec("air.service_type")?.question.prompt).toBe(e.question);
       }
       FORBIDDEN[c.id]?.(r);
       if (r.outcome === "not_yet_due") expect(r.reevaluate).toBeDefined();
@@ -538,7 +558,10 @@ describe("R02 v1 pack invariants", () => {
   it("the pack declares itself researched and cites only captured sources", () => {
     expect(r02AirRefundV1.lifecycle).toBe("researched");
     expect(r02AirRefundV1.fixturesPath).toBe("docs/rules/fixtures/R02.json");
-    expect(new Set(R02_SOURCES.map((s) => s.sourceId))).toEqual(new Set(["ecfr-14cfr260", "usc-49-42305", "ecfr-14cfr399.80l", "federal-web-excerpts", "fr-notices"]));
+    const manifest = JSON.parse(readFileSync(path.join(REPO_ROOT, "docs/rules/manifest.json"), "utf8")) as { packs: { ruleId: string; sources: string[] }[] };
+    const listed = manifest.packs.find((p) => p.ruleId === r02AirRefundV1.ruleId)!.sources;
+    expect(new Set(R02_SOURCES.map((s) => s.sourceId))).toEqual(new Set(["ecfr-14cfr260", "usc-49-42305", "ecfr-14cfr399.80l", "federal-web-excerpts", "fr-notices", "ecfr-14cfr254"]));
+    expect(new Set(listed)).toEqual(new Set(R02_SOURCES.map((s) => s.sourceId))); // D253: the manifest lists ecfr-14cfr254 (P-254.2)
   });
 });
 
@@ -571,5 +594,22 @@ describe("M20b wiring (E1, E4, E5) and the declared R03 alternative (M22b)", () 
 
   it("R02-18: the R03 alternative uses R03's own remedy key", () => {
     expect(r02AirRefundV1.overlap).toEqual([{ withScenario: "R03", withRemedyKey: R03_REMEDY_KEY, relation: "alternative" }]);
+  });
+});
+
+describe("D253(3) / A8: an unknown service type is a ceiling, never a question below it", () => {
+  it("a result below likely is unchanged: no A8 and no service-type question (spec §16 step 8, reading 1)", () => {
+    const r = evalFacts(with_(R02_01, {}, ["service_type", "consumer_response"]));
+    expect(r.outcome).toBe("needs_facts");
+    expect(r.missingFacts.map((m) => m.key)).not.toContain("air.service_type");
+    expect(r.assumptions.map((a) => a.id)).not.toContain(R02_SCHEDULED_ASSUMPTION_ID);
+  });
+
+  it("capped: A8 is shown in the explanation, the amount and the carrier date are R02-01's (reading 4)", () => {
+    const r = evalFacts(with_(R02_01, {}, ["service_type"]));
+    expect([r.outcome, r.amount?.estimate.amountMinor, carrierTimer(r)?.dueLocalDate]).toEqual(["likely_eligible", 44_880, "2026-10-13"]);
+    expect(r.missingFacts).toEqual([{ subjectKey: TXN, key: "air.service_type", reason: "missing", class: "assumption", neededFor: ["scope"] }]);
+    expect(r.explanation.join(" ")).toContain("assumes a regularly scheduled flight");
+    expect(r.boundFacts.some((b) => b.key === "air.service_type")).toBe(true);
   });
 });

@@ -56,6 +56,22 @@ export const AIR_FACT_SPECS = [
     userAssertable: true,
   },
   {
+    // D253(3)/D263: a covered flight is "a scheduled flight" (14 CFR 260.2). "unknown" records the user's "I don't know"
+    // and is treated like a missing value (the result is capped with an assumption, never ruled out).
+    key: "air.service_type",
+    domain: "air",
+    categories: AIR,
+    subject: TXN,
+    value: "code",
+    codes: ["scheduled", "public_charter", "other_non_scheduled", "unknown"],
+    question: {
+      prompt: "Was this a regularly scheduled flight, or a charter or other non-scheduled flight?",
+      why: "The airline refund rule covers scheduled flights; a charter has different rules.",
+    },
+    evidenceHint: TICKET_DOCS,
+    userAssertable: true,
+  },
+  {
     key: "air.operating_carrier",
     domain: "air",
     categories: AIR,

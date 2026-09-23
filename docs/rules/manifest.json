@@ -18,8 +18,8 @@
         "convex/lib/rules/outcome.ts",
         "convex/lib/deadlines/engine.ts"
       ],
-      "engineClosureSha256": "9300454a1999b07d7e623aed13dd5cc37e088429920216d4e17493355f6889e6",
-      "engineClosureDecision": "D236",
+      "engineClosureSha256": "46dc8004dbd3bf86698dc2d2bb743af7006d9ae2702ccf3bbff671b5a5579254",
+      "engineClosureDecision": "D263",
       "engineEpoch": 2,
       "reviewer": "opus-rules-reviewer",
       "reviewedAt": "2026-09-23",
@@ -217,6 +217,7 @@
         "ecfr-14cfr260",
         "usc-49-42305",
         "ecfr-14cfr399.80l",
+        "ecfr-14cfr254",
         "federal-web-excerpts",
         "fr-notices"
       ],
@@ -492,9 +493,9 @@
   "fixtures": {
     "docs/rules/fixtures/R01.json": "d24531e2e7a7fd32146816d96b6edb2060592003bcb4b0be2c9daa6decc1218c",
     "docs/rules/fixtures/R01v2.json": "b446e0365c60511cfe704bb32bfcec4665c444c7729c914f3b82c282698d11dd",
-    "docs/rules/fixtures/R02.json": "b3bc2e71828d748db70210daf2370c1a5ec6be98b44e5d440d79aed9f7f5455f",
+    "docs/rules/fixtures/R02.json": "b463aa8e319e655ff337a27e57c6851978d87be2f22a2d1f4f8a22c3c44232b2",
     "docs/rules/fixtures/R03.json": "313ef7cd4e7880eeab489d668d56b866f37ffaaee4b69637714df14db75cb751",
-    "docs/rules/fixtures/R04.json": "f367a8df4ee2a809ab36f40d8e7dc6543749b608ffaa30b102ee9697d4fa6db6",
-    "docs/rules/fixtures/R05.json": "137c8f22853397684c6f688d93f00f57fb579a54a4c6d7c36e6171299023893c"
+    "docs/rules/fixtures/R04.json": "7ac0a0942cdbfb9ee01733540077e35e1f6d39f47fa9645bb1cc84ce058d9c32",
+    "docs/rules/fixtures/R05.json": "213decb165150a9135adceb7b330e8f7e3e3558ca32e174220d6adde1c23cf37"
   }
 }
