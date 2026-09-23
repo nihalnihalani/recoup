@@ -40,6 +40,12 @@
       "mission_domain_fixture": null,
       "clock": "2026-09-23T12:00:00-07:00",
       "facts": {
+        "service_type": {
+          "type": "enum",
+          "value": "scheduled",
+          "state": "user_confirmed",
+          "note": "D271 (extends D253(3)/D262 to path a): recorded so this case's expected outcome is preserved; an unknown service type caps the result at likely eligible (R04-17)"
+        },
         "itinerary_scope": {
           "type": "enum",
           "value": "domestic",
@@ -583,6 +589,12 @@
       "mission_domain_fixture": "baggage-fee path separate from property/expense claims",
       "clock": "2026-09-23T12:00:00-07:00",
       "facts": {
+        "service_type": {
+          "type": "enum",
+          "value": "scheduled",
+          "state": "user_confirmed",
+          "note": "D271 (extends D253(3)/D262 to path a): recorded so this case's expected outcome is preserved"
+        },
         "itinerary_scope": {
           "type": "enum",
           "value": "domestic",
@@ -862,6 +874,12 @@
       "mission_domain_fixture": null,
       "clock": "2026-09-23T12:00:00-07:00",
       "facts": {
+        "service_type": {
+          "type": "enum",
+          "value": "scheduled",
+          "state": "user_confirmed",
+          "note": "D271 (extends D253(3)/D262 to path a): recorded so this case's expected outcome is preserved"
+        },
         "itinerary_scope": {
           "type": "enum",
           "value": "international",
@@ -994,6 +1012,12 @@
       "mission_domain_fixture": null,
       "clock": "2026-09-23T12:00:00-07:00",
       "facts": {
+        "service_type": {
+          "type": "enum",
+          "value": "scheduled",
+          "state": "user_confirmed",
+          "note": "D271 (extends D253(3)/D262 to path a): recorded so this case's expected outcome is preserved"
+        },
         "itinerary_scope": {
           "type": "enum",
           "value": "international",
@@ -2112,6 +2136,83 @@
           "D234(10)"
         ],
         "reasoning": "§15 step 2.4: missing either instant and the bag not yet declared lost → needs_facts."
+      }
+    },
+    {
+      "id": "R04-17",
+      "title": "Service type unknown on R04-01's otherwise-eligible facts: capped at likely eligible with the labelled assumption (D271, extends D253(3)/D262 to path a)",
+      "path": "R04.a",
+      "categories": [
+        "missing_fact"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-23T12:00:00-07:00",
+      "facts_from": "R04-01",
+      "facts_override": {
+        "service_type": {
+          "type": "enum",
+          "value": null,
+          "state": "missing"
+        }
+      },
+      "expected": {
+        "outcome": "likely_eligible_missing_evidence",
+        "missing_facts": [
+          "service_type"
+        ],
+        "assumptions": [
+          "assumes a regularly scheduled flight"
+        ],
+        "amount": {
+          "refund_at_least": {
+            "amount_minor": 4000,
+            "currency": "USD"
+          }
+        },
+        "note": "R04-01's facts with the service type unknown. D270(3)/D271 extend R02's A8 (D253(3)/D262) to path a: an unknown service type never resolves toward eligible — capped at likely_eligible with the labelled assumption, asked because it is the only thing between likely and eligible (mirrors R02-15). D270(4): the next action stays track, never escalate — path a has no carrier timer at all (L6, 260.5 sets no day count for bag fees), so this is unaffected either way; see the pack's own m27c regression test for the explicit nextAction assertion."
+      },
+      "justification": {
+        "passages": [
+          "P-260.2-SDB",
+          "D253(3)",
+          "D270(3)",
+          "D271"
+        ],
+        "reasoning": "14 CFR 260.5's bag-fee refund duty runs with 260.2's covered-flight definition ('a scheduled flight'). With the service type unknown that condition is unknown. D270(3)/D271: no exception to README rule 5 for path a either — capped at likely_eligible with the assumption 'assumes a regularly scheduled flight', mirroring R02-15."
+      }
+    },
+    {
+      "id": "R04-18",
+      "title": "Known public charter on R04-01's facts: unsupported before the MBR/exemption/delay questions (D271, extends D253(3) to path a)",
+      "path": "R04.a",
+      "categories": [
+        "unsupported_product"
+      ],
+      "mission_domain_fixture": null,
+      "clock": "2026-09-23T12:00:00-07:00",
+      "facts_from": "R04-01",
+      "facts_override": {
+        "service_type": {
+          "type": "enum",
+          "value": "public_charter",
+          "state": "user_confirmed",
+          "evidence": "booking confirmation: public charter operator disclosure"
+        }
+      },
+      "expected": {
+        "outcome": "unsupported",
+        "missing_facts": [],
+        "amount": null,
+        "note": "A known non-scheduled service decides applicability before the MBR, exemption and delay questions, same as R02-16. 'Unsupported' is not 'not eligible': R04 v1 does not evaluate a charter's bag fee."
+      },
+      "justification": {
+        "passages": [
+          "P-260.2-SDB",
+          "D253(3)",
+          "D270(3)",
+          "D271"
+        ],
+        "reasoning": "14 CFR 260.5's duty runs with 260.2's covered-flight definition ('a scheduled flight'); 254.2 names 'charter or scheduled passenger service' separately. D270(3)/D271: a known non-scheduled value → unsupported, mirroring R02-16."
       }
     }
   ]

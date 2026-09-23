@@ -60,6 +60,7 @@ function r02(rows: CellRow[], now = NOW): EvaluationResult {
 }
 
 const R04_ROWS: CellRow[] = [
+  row("txn", "air.service_type", code("scheduled")), // D270(3)/D271: unknown caps path a with A8, same as R02
   row("txn", "air.itinerary_scope", code("domestic"), "derived"),
   row("txn", "air.large_aircraft_segment_on_ticket", { kind: "bool", value: true }),
   row("txn", "air.bag_tag_number", { kind: "identifier", scheme: "bag_tag", value: "0123456789" }),
@@ -159,11 +160,19 @@ describe("R02 v1 packet templates", () => {
   });
 
   it("M27 R3-04 / D253(3): no overdue letter while coverage rests on A8 (service type unknown); the plain request is fine", () => {
-    for (const service of [null, row("txn", "air.service_type", code("unknown")), row("txn", "air.service_type", code("scheduled"), "extracted_candidate")]) {
+    // D270(4)/R-4: while A8 itself caps the result (missing / user_unknown / a readable "unknown" code), the card
+    // never escalates — it asks to confirm the service type instead. A candidate "scheduled" is a DIFFERENT, ordinary
+    // candidate cap (A8/SCHEDULED_ASSUMPTION is never added for it, N-R02-2's own probe), so it still escalates; only
+    // the letter is gated for it too (facts.text throws on an unconfirmed value regardless of the code).
+    for (const [service, nextAction] of [
+      [null, { kind: "answer_questions", keys: [{ subjectKey: "txn", key: "air.service_type" }] }],
+      [row("txn", "air.service_type", code("unknown")), { kind: "answer_questions", keys: [{ subjectKey: "txn", key: "air.service_type" }] }],
+      [row("txn", "air.service_type", code("scheduled"), "extracted_candidate"), { kind: "escalate", reason: expect.any(String) }],
+    ] as const) {
       const rows = [...R02_ROWS.filter((x) => x.key !== "air.service_type"), ...(service ? [service] : [])];
       const overdue = r02(rows);
       expect(overdue.outcome).toBe("likely_eligible");
-      expect(overdue.nextAction.kind).toBe("escalate");
+      expect(overdue.nextAction).toEqual(nextAction);
       let error: unknown;
       try {
         r02V1Letter.compose(ctxOf(overdue, 44880), factReader(overdue.boundFacts));
@@ -222,8 +231,9 @@ describe("R04 v1 packet templates", () => {
     const rows = [
       row("txn", "air.itinerary_scope", code("domestic"), "derived"),
       row("txn", "air.incident_date", { kind: "local_date", date: "2026-09-12" }),
-      ...R04_ROWS.filter((x) => x.subjectKey === "txn" && x.key.startsWith("air.") && !["air.itinerary_scope", "air.large_aircraft_segment_on_ticket"].includes(x.key))
+      ...R04_ROWS.filter((x) => x.subjectKey === "txn" && x.key.startsWith("air.") && !["air.itinerary_scope", "air.large_aircraft_segment_on_ticket", "air.service_type"].includes(x.key))
         .map((x) => ({ ...x, subjectKey: "incident:bag1" })),
+      row("txn", "air.service_type", code("scheduled")), // D270(3)/D271: a trip-level fact, same as itinerary_scope
     ];
     const r = r04("a", rows, "incident:bag1");
     expect(r.outcome).toBe("eligible");
@@ -254,15 +264,18 @@ describe("R04 v1 packet templates", () => {
       row("txn", "air.bag_status", code("declared_lost")),
       row("line:1", "air.property_item", { kind: "text", text: "laptop" }),
       row("line:1", "air.property_claimed_value", usd(240000)),
-      row("line:1", "air.property_proof", { kind: "text", text: "receipt 2024-11" }),
+      // L-T1: only an attached-evidence reference earns "(proof attached)"; typed text does not (line:2 below).
+      row("line:1", "air.property_proof", { kind: "text", text: "evidence:receipt202411" }),
       row("line:2", "air.property_item", { kind: "text", text: "suitcase" }),
       row("line:2", "air.property_claimed_value", usd(50000)),
+      row("line:2", "air.property_proof", { kind: "text", text: "none" }),
     ];
     const r = r04("c", rows);
     expect(r.outcome).toBe("likely_eligible");
     const draft = check(ctxOf(r, 290000));
     expect(draft.body).toContain("- laptop, value USD 2,400.00 (proof attached)");
     expect(draft.body).toContain("- suitcase, value USD 500.00");
+    expect(draft.body).not.toContain("suitcase, value USD 500.00 (proof attached)");
     expect(draft.body).toMatchSnapshot();
   });
 });

@@ -281,13 +281,13 @@ describe("R02-14 (low, ruling D234 (2)): offer_type decides nothing on a rejecti
   });
 });
 
-describe("R02-15 (low, D234 (17)): a recorded bag fee shares R04 path a's loss key", () => {
-  it("R02's loss keys include the bag fee's key, so an overlap unions instead of adding", () => {
+describe("R02-15 (low, D270(1) supersedes D234 (17)): a recorded bag fee is NOT one of R02's loss keys", () => {
+  it("R02's loss keys never include a bag-fee key, so R04 path a shares no key with R02 (fixes N-X-1)", () => {
     const r = run(R02_01, NOW_01, [
       { subjectKey: "txn", key: "air.bag_fee_paid", row: { state: "user_confirmed", value: usd(4_000), at: 1, source: { kind: "user" } } },
       { subjectKey: "txn", key: "air.bag_tag_number", row: { state: "user_confirmed", value: { kind: "identifier", scheme: "bag_tag", value: "0123456789" }, at: 1, source: { kind: "user" } } },
     ]);
-    expect(r.lossKeys).toEqual([`txn:${TXN_ID}:fare_unused`, `txn:${TXN_ID}:bag_fee:0123456789`]);
+    expect(r.lossKeys).toEqual([`txn:${TXN_ID}:fare_unused`]);
     expect(getFactSpec("air.ancillary_fees_total")?.question.prompt).toContain("not checked-bag fees");
   });
 });

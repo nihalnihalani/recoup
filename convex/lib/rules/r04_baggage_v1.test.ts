@@ -39,6 +39,7 @@ import { buildAirSnapshot, r04View, type CellRow, type R04Path, type R04View } f
 import { resultHash } from "./outcome";
 import {
   evaluateR04V1,
+  R04_A_SCHEDULED_ASSUMPTION_ID,
   R04_ADAPTERS,
   R04_PARAM_PASSAGES,
   R04_SOURCES,
@@ -62,6 +63,7 @@ const PACK = { a: r04BagFeeRefundV1, b: r04DelayedBagExpensesV1, c: r04PropertyL
 // ---------------------------------------------------------------------------
 
 const DIRECT = [
+  "service_type", // D270(3)/D271
   "itinerary_scope", "longest_us_foreign_nonstop_segment_minutes", "operating_carrier_last_segment", "bag_fee_merchant_of_record",
   "bag_fee_paid", "bag_tag_number", "deplane_opportunity_at", "bag_delivered_or_picked_up_at", "bag_status", "mbr_filed",
   "mbr_reference", "mbr_filed_at", "exemption_documented_by_carrier", "large_aircraft_segment_on_ticket", "incident_date",
@@ -199,6 +201,7 @@ const namesOf = (r: EvaluationResult, cls: Set<string>, facts: Readonly<Record<s
 /** Fixture assumption wording → the pack's assumption id. */
 const ASSUMPTION_IDS: Record<string, string> = {
   "a segment on the ticket uses an aircraft with more than 60 seats (254.4 floor applies)": "r04.large_aircraft",
+  "assumes a regularly scheduled flight": R04_A_SCHEDULED_ASSUMPTION_ID, // A8, D270(3)/D271
 };
 
 /** forbidden_outputs, case by case (each is a thing the evaluator must NOT produce). */
@@ -248,8 +251,8 @@ describe("R04 v1 code packs × docs/rules/fixtures/R04.json (unmodified, via M08
   it("loads the file (hash-checked) with every case runnable; every result names a path", () => {
     expect(FILE.ruleId).toBe(r04BagFeeRefundV1.ruleId);
     expect(FILE.ruleVersion).toBe(r04BagFeeRefundV1.version);
-    expect(FILE.cases.length).toBe(40); // 26 approved + R04-14/14b–f, R04-15/15b–g, R04-16 (M27 errata E-R04-1/E-R04-2/V2-1, D253)
-    expect(RUNS.length).toBe(42); // R04-05 and R04-08 each run two paths
+    expect(FILE.cases.length).toBe(42); // 26 approved + R04-14/14b–f, R04-15/15b–g, R04-16 (M27 errata E-R04-1/E-R04-2/V2-1, D253) + R04-17/18 (D271)
+    expect(RUNS.length).toBe(44); // R04-05 and R04-08 each run two paths
     for (const c of FILE.cases) {
       if (c.source && "refresh_window_days" in c.source) {
         for (const p of ["a", "b", "c"] as const) for (const s of R04_SOURCES[p]) expect(s.refreshWindowDays).toBe(c.source.refresh_window_days);
@@ -442,7 +445,7 @@ describe("§10 R04 rows", () => {
     const facts = confirmedBag([line("E1", 3000, "rcpt-1"), line("E2", 2000, "rcpt-2", "card_benefit:baggage_delay")]);
     const a = evalPath("a", facts);
     const b = evalPath("b", facts);
-    expect(a.lossKeys).toEqual([`txn:${TXN_ID}:bag_fee:0123456789`]); // the bag tag (D234 (11))
+    expect(a.lossKeys).toEqual([`txn:${TXN_ID}:bag_fee:txn`]); // the bag's subject, permanent (D270(2)); the tag is display only
     expect(b.lossKeys).toEqual([`txn:${TXN_ID}:exp:1`]);
     expect(b.amount?.estimate.amountMinor).toBe(3000);
     expect(a.remedyKey).not.toBe(b.remedyKey);
@@ -539,21 +542,23 @@ describe("R04 v1 pack invariants", () => {
     }
   });
 
-  it("D208 adapters: paths a and c run once per bag (loss keys by bag tag); b runs once per trip", () => {
+  it("D208 adapters: paths a and c run once per bag (loss keys by incident id, permanent — D270(2)); b runs once per trip", () => {
     const bagRows = (incident: string, fee: number, tag: string): CellRow[] => rowsOf(with_(R04_01.facts as Facts, {
       bag_fee_paid: C("money", { amount_minor: fee, currency: "USD" }), bag_tag_number: C("string", tag),
-    }, ["itinerary_scope", "operating_carrier_last_segment"])).map((r) => ({ ...r, subjectKey: incident }));
+    }, ["itinerary_scope", "operating_carrier_last_segment", "service_type"])).map((r) => ({ ...r, subjectKey: incident }));
     const rows = [
-      ...rowsOf({ itinerary_scope: { type: "enum", value: "domestic", state: "derived" }, operating_carrier_last_segment: C("string", "XA") }),
+      // D270(3)/D271: service_type is a trip-level (txn) fact, same as itinerary_scope/operating_carrier_last_segment.
+      ...rowsOf({ itinerary_scope: { type: "enum", value: "domestic", state: "derived" }, operating_carrier_last_segment: C("string", "XA"), service_type: C("enum", "scheduled") }),
       ...bagRows("incident:bagtwo", 3500, "0222222222"),
       ...bagRows("incident:bagone", 4000, "0111111111"),
     ];
     const input = { transactionId: TXN_ID, isExample: false, rows };
     const a = R04_ADAPTERS.a.runs(input);
-    expect(a.map((r) => [r.subjectKey, r.snapshot.bagLossId])).toEqual([["incident:bagone", "0111111111"], ["incident:bagtwo", "0222222222"]]);
+    // D270(2): the bag tag is a fact for display only; the loss identity is the incident id, permanent.
+    expect(a.map((r) => [r.subjectKey, r.snapshot.bagLossId])).toEqual([["incident:bagone", "bagone"], ["incident:bagtwo", "bagtwo"]]);
     const results = a.map((r) => run("a", r.snapshot, R04_01.now, verificationFor("a", R04_01)));
     expect(results.map((r) => [r.outcome, r.amount?.estimate.amountMinor, r.lossKeys[0]])).toEqual([
-      ["eligible", 4000, `txn:${TXN_ID}:bag_fee:0111111111`], ["eligible", 3500, `txn:${TXN_ID}:bag_fee:0222222222`],
+      ["eligible", 4000, `txn:${TXN_ID}:bag_fee:bagone`], ["eligible", 3500, `txn:${TXN_ID}:bag_fee:bagtwo`],
     ]);
     expect(R04_ADAPTERS.b.runs(input).map((r) => r.subjectKey)).toEqual(["incident:bagone"]);
     expect(R04_ADAPTERS.c.runs(input).map((r) => r.subjectKey)).toEqual(["incident:bagone", "incident:bagtwo"]);

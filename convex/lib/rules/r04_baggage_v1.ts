@@ -59,6 +59,7 @@ import {
   r04Bags,
   r04BoundFacts,
   r04View,
+  R04_EXPENSE_LINE_KEYS,
   R04_MAX_EXPENSE_LINES,
   R04_MAX_PROPERTY_ITEMS,
   type AirSnapshotInput,
@@ -222,6 +223,7 @@ const HOUR_MS = 3_600_000;
 const MINUTE_MS = 60_000;
 const K = {
   scope: "air.itinerary_scope",
+  service: "air.service_type",
   segment: "air.longest_us_foreign_nonstop_segment_minutes",
   operatingLast: "air.operating_carrier_last_segment",
   largeAircraft: "air.large_aircraft_segment_on_ticket",
@@ -260,6 +262,8 @@ export const R04_RECEIPT_REF = /^evidence:[a-z0-9]{1,64}$/;
  * `insurer:…`, `R04.a:bag_fee` (M27 R04-12; D235 (D)). "no" or "none" is an answer, not an allocation.
  */
 export const R04_ALLOCATION_REF = /^[a-z][a-z0-9_.]*:[a-z0-9_.-]+/i;
+/** D270(3): D253(3) extends to path a — a known non-scheduled service type is unsupported there too. */
+const NON_SCHEDULED = ["public_charter", "other_non_scheduled"] as const;
 
 type Money = { amountMinor: number; currency: string };
 const valueOf = (c: Cell): FactValue | null => (c.status === "candidate" || c.known ? c.value : null);
@@ -396,6 +400,18 @@ export const R04_GATE_ASSUMPTION_ID = "r04.a.after_compliance_date";
 export const R04_REIMBURSEMENT_ASSUMPTION_ID = "r04.v1.unallocated_reimbursement";
 /** Path a's re-evaluation trigger for a still-undelivered bag with an exemption (spec §15 step 2.3; D253(2)). */
 export const R04_AWAIT_BAG = "bag delivered or declared lost";
+/**
+ * D270(3)/D271: D253(3) extends to path a — an unknown service type caps the result, never rules it out (A8-style),
+ * the same as R02's SCHEDULED_ASSUMPTION. D271 added the fixture erratum (a confirmed `air.service_type = scheduled`
+ * fact on the 9 previously-affected `eligible` cases in `docs/rules/fixtures/R04.json`), so this is wired into
+ * `evaluateR04V1` below.
+ */
+export const R04_A_SCHEDULED_ASSUMPTION_ID = "r04.a.scheduled_flight";
+export const R04_A_SCHEDULED_ASSUMPTION: Assumption = Object.freeze({
+  id: R04_A_SCHEDULED_ASSUMPTION_ID,
+  text: "Recoup assumes a regularly scheduled flight: the checked-bag fee refund covers scheduled flights, and the service type is not confirmed yet.",
+  changesOutcomeIf: "the flight was a charter or other non-scheduled flight (then R04 path a does not apply)",
+});
 
 interface Core {
   dims: Omit<Dimensions, "readyForApproval">;
@@ -583,6 +599,23 @@ function coreA(v: R04View, env: Env): Core {
   if (scopeCode === "non_us" && scope.known) flags.unsupportedReason = "Not a covered flight: no point in the United States (14 CFR 260.2).";
   leaves.push(leaf("scope", "r04.a.covered_flight", "A covered flight: to, from or within the United States", "applicability",
     scopeCode === null ? "unknown" : scopeCode === "non_us" ? "fail" : "pass", scopeCode === null ? [] : [scope], { unknown: [scope], passage: "P-260.2-SDB" }));
+
+  // Scheduled service (D270(3), extending D253(3) to path a; L13/R-3 closed). A KNOWN charter or other non-scheduled
+  // flight → unsupported here (R04-16-style); a candidate one is asked (D234 (1)); an unknown service type passes
+  // this leaf and caps the result with an A8-style assumption below (never resolved toward eligible).
+  const service = v.lookup.get(TXN, K.service);
+  const serviceCode = code(service);
+  const nonScheduled = serviceCode !== null && (NON_SCHEDULED as readonly string[]).includes(serviceCode);
+  if (nonScheduled && service.known) {
+    flags.unsupportedReason ??= "Not a covered flight: a charter or other non-scheduled flight is not \"a scheduled flight\" under 14 CFR 260.2 (P-260.2-SDB). Other rules may apply; R04 v1 does not evaluate them.";
+  }
+  leaves.push(service.status === "conflicting"
+    ? leaf("scope", "r04.a.scheduled_service", "A regularly scheduled flight (not a charter)", "applicability", "unknown", [], { unknown: [service], passage: "P-260.2-SDB" })
+    : serviceCode === "scheduled"
+      ? leaf("scope", "r04.a.scheduled_service", "A regularly scheduled flight (not a charter)", "applicability", "pass", [service], { passage: "P-260.2-SDB" })
+      : nonScheduled
+        ? leaf("scope", "r04.a.scheduled_service", "A regularly scheduled flight (not a charter)", "applicability", "fail", [service], { passage: "P-260.2-SDB" })
+        : leaf("scope", "r04.a.scheduled_service", "A regularly scheduled flight (not a charter)", "applicability", "pass", [], { note: "not confirmed: assumed", passage: "P-260.2-SDB" }));
 
   // Mishandled Baggage Report (P-260.5-B): unknown → ask; confirmed "not filed" → not yet due (D147(6), D154).
   const mbr = bag(K.mbrFiled);
@@ -823,32 +856,47 @@ function bagDelayedLeaf(v: R04View, p: R04Params, bagSubjectKey: string): Comput
   return leaf("delay", id, text, "requirement", "unknown", [], { unknown: [deplane, delivered, mbrOnUnknownStatus ? status : mbr].filter((c) => !usable(c)) });
 }
 
-/** The trip's A2 window for expense lines: from the deplane day through the latest delivery day (open while undelivered). */
-function expenseWindow(v: R04View): { from: string | null; to: string | null } {
+/**
+ * The trip's A2 window for expense lines (D270(6), fixes N-R04-2): from the flight (deplane) day through the delivery
+ * day, or through today's LATEST US local date while any bag is still undelivered/lost — never unbounded, so a line
+ * dated well after the clock is excluded even before the bag is resolved. `from === null` means the flight date is
+ * not known yet: the caller excludes every line rather than admit one it cannot place in the window. `unconfirmed`
+ * (F1, R04 re-check batch 3) names the deplane/delivered cell that actually set the winning bound, when that cell is
+ * itself a candidate or conflicting — a bound decided by an unresolved cell must not silently decide, on its own,
+ * whether any line counts (D234 (1); the D247 openCase gate must see it too).
+ */
+function expenseWindow(v: R04View, now: number): { from: string | null; to: string | null; unconfirmed: Cell[] } {
   const bags = v.bags.length > 0 ? v.bags.map((b) => b.subjectKey) : [v.bagSubjectKey];
   let from: string | null = null;
+  let fromCell: Cell | null = null;
   let to: string | null = null;
+  let toCell: Cell | null = null;
   let open = false;
   for (const s of bags) {
     const bag = bagReader(v, s);
-    const a = instant(bag(K.deplane));
+    const deplaneCell = bag(K.deplane);
+    const deliveredCell = bag(K.delivered);
+    const a = instant(deplaneCell);
     const statusCode = code(bag(K.status));
-    const b = instant(bag(K.delivered));
+    const b = instant(deliveredCell);
     if (a !== null) {
       const d = usDates(a).sort()[0];
-      if (from === null || d < from) from = d;
+      if (from === null || d < from) { from = d; fromCell = deplaneCell; }
     }
     if (statusCode === "delayed_undelivered" || statusCode === "declared_lost" || b === null) open = true;
     else {
       const d = usDates(b).sort().reverse()[0];
-      if (to === null || d > to) to = d;
+      if (to === null || d > to) { to = d; toCell = deliveredCell; }
     }
   }
-  return { from, to: open ? null : to };
+  const unconfirmed = [fromCell, toCell].filter((c): c is Cell => c !== null && !c.known);
+  if (!open) return { from, to, unconfirmed };
+  const nowUpper = usDates(now).sort().reverse()[0];
+  return { from, to: to !== null && to > nowUpper ? to : nowUpper, unconfirmed };
 }
 
 function coreB(v: R04View, env: Env): Core {
-  const { p } = env;
+  const { p, now } = env;
   const bag = bagReader(v, v.bagSubjectKey);
   const flags: Flags = emptyFlags();
   if (env.stale) flags.sourceStale = true;
@@ -869,9 +917,19 @@ function coreB(v: R04View, env: Env): Core {
   const included: { n: number; money: Money; cells: Cell[] }[] = [];
   const excluded: string[] = [];
   if (v.expenseLines.length > R04_MAX_EXPENSE_LINES) {
-    flags.manualReviewReason ??= `More than ${R04_MAX_EXPENSE_LINES} expense lines on one trip: a person prepares this claim.`;
+    // D270(8): the 32 bound-fact budget does not stretch to the spec's 8 lines (9 base facts + 8 × 4 line facts = 41);
+    // it holds 5. A person prepares the rest.
+    flags.manualReviewReason ??= `More than ${R04_MAX_EXPENSE_LINES} expense lines on one trip — Recoup's per-case fact budget covers only ${R04_MAX_EXPENSE_LINES}: a person prepares this claim, itemizing the rest manually.`;
   }
-  const window = expenseWindow(v);
+  const window = expenseWindow(v, now);
+  if (window.from === null && v.expenseLines.length > 0) {
+    // N-R04-2/D270(6): the lower bound (the flight date) is not known yet — exclude every line rather than admit one
+    // that cannot be placed in the window, and list the deplane time as an assumption-class fact.
+    optionalFacts.push(optional(bag(K.deplane), "amount"));
+  }
+  // F1 (re-check batch 3, D234 (1)/D247): a candidate deplane/delivered cell that set the window's bound must not
+  // alone decide whether any line counts — list it so the leaf guard caps the result and the openCase gate sees it.
+  for (const c of window.unconfirmed) extraUnconfirmed.push({ subjectKey: c.subjectKey, key: c.key, reason: "candidate_unconfirmed", class: "required", neededFor: ["amount"] });
   const bagFees = bags.map((s) => money(bagReader(v, s)(K.fee))).filter((m): m is Money => m !== null && m.amountMinor > 0);
   for (const n of v.expenseLines.slice(0, R04_MAX_EXPENSE_LINES)) {
     const s = lineSubject(n);
@@ -909,15 +967,19 @@ function coreB(v: R04View, env: Env): Core {
       excluded.push(`line ${n} (${formatMinor(m.amountMinor, m.currency)}, no receipt attached)`);
       continue;
     }
-    // M27 R04-10 (spec A2): a line counts only if dated from the deplane day through the delivery day.
+    // M27 R04-10 / D270(6) (spec A2): a line counts only if dated from the flight (deplane) day through the delivery
+    // day, or through today while the bag is still undelivered/lost — never unbounded on either side. An unknown
+    // flight date excludes every line (it cannot be placed in the window) rather than admitting one by default.
     const date = localDate(dateCell);
     if (date === null) {
       optionalFacts.push(optional(dateCell, "amount"));
       excluded.push(`line ${n} (${formatMinor(m.amountMinor, m.currency)}, no date)`);
       continue;
     }
-    if ((window.from !== null && date < window.from) || (window.to !== null && date > window.to)) {
-      excluded.push(`line ${n} (${formatMinor(m.amountMinor, m.currency)}, dated ${date}, outside the delay from ${window.from ?? "?"} to ${window.to ?? "delivery"})`);
+    if (window.from === null || date < window.from || (window.to !== null && date > window.to)) {
+      excluded.push(`line ${n} (${formatMinor(m.amountMinor, m.currency)}, dated ${date}, ${
+        window.from === null ? "the flight date is not known yet" : `outside the delay from ${window.from} to ${window.to ?? "delivery"}`
+      })`);
       continue;
     }
     // M27 R04-13 / D234 (17): a line equal to a bag fee is set aside until the user says it is not the bag fee.
@@ -970,10 +1032,17 @@ function coreB(v: R04View, env: Env): Core {
   if (display) explanation.push(display.line);
   explanation.push("Reimbursement is for reasonable, verifiable and actual expenses (DOT-BAG-1); the airline may not impose an arbitrary daily cap (DOT-BAG-2). Recoup counts only documented amounts.");
 
+  // F2 (re-check batch 3): when every line was excluded only because the flight date (deplane) is unknown, the next
+  // action asks for the deplane time — never "add a receipt" when every receipt is already attached.
+  const nextActionHint: NextAction | undefined = included.length === 0
+    ? window.from === null
+      ? { kind: "answer_questions", keys: [{ subjectKey: bagFactSubject(v.lookup, v.bagSubjectKey, K.deplane), key: K.deplane }] }
+      : { kind: "add_evidence", docTypes: ["expense_receipt"] }
+    : undefined;
   return finishTree(leaves, flags, {
     optional: optionalFacts, amountConflicts, assumptions, amount,
     lossKeys: included.map((l) => `txn:${v.transactionId}:exp:${l.n}`), explanation, passages,
-    ...(included.length === 0 ? { nextActionHint: { kind: "add_evidence", docTypes: ["expense_receipt"] } as NextAction } : {}),
+    ...(nextActionHint ? { nextActionHint } : {}),
   }, extraUnconfirmed);
 }
 
@@ -1179,7 +1248,30 @@ export function evaluateR04V1(path: R04Path, input: EvaluationInput<R04View, R04
     }
   }
 
-  const outcome = deriveOutcome({ ...final.dims, readyForApproval: "unknown" }, flags, final.assumptions);
+  // D270(3)/D271: D253(3) extends to path a — an unknown service type caps an otherwise-approvable result (never
+  // rules it out), asked only when it is the ONLY thing between likely and eligible (mirrors R02's A8; closes L13/
+  // R-3). D271 resolved the STOP this pass first reported: docs/rules/fixtures/R04.json's 9 path-a `eligible` cases
+  // (R04-01, R04-01c, R04-02c, R04-05, R04-07b, R04-08, R04-08c, R04-11, R04-15c) now carry a confirmed
+  // `air.service_type = scheduled` fact (the D253(3)/D262 pattern), so the cap never fires for them.
+  let assumptions = final.assumptions;
+  if (path === "a") {
+    const serviceCell = v.lookup.get(TXN, K.service);
+    const serviceCode = code(serviceCell);
+    const serviceNonScheduled = serviceCode !== null && (NON_SCHEDULED as readonly string[]).includes(serviceCode);
+    const serviceUnknown = serviceCell.status !== "conflicting" && serviceCode !== "scheduled" && !serviceNonScheduled;
+    const uncapped = deriveOutcome({ ...final.dims, readyForApproval: "unknown" }, flags, final.assumptions);
+    if (serviceUnknown && AMOUNT_OUTCOMES.has(uncapped)) {
+      assumptions = [...assumptions, R04_A_SCHEDULED_ASSUMPTION];
+      if (uncapped === "eligible") {
+        addMissing(unconfirmed, {
+          subjectKey: TXN, key: K.service,
+          reason: serviceCell.status === "missing" ? "missing" : serviceCell.status === "candidate" ? "candidate_unconfirmed" : "user_unknown",
+          class: "assumption", neededFor: ["scope"],
+        });
+      }
+    }
+  }
+  const outcome = deriveOutcome({ ...final.dims, readyForApproval: "unknown" }, flags, assumptions);
   const amount = AMOUNT_OUTCOMES.has(outcome) ? final.amount : null;
   const optionalRows = final.optional.filter((o) => !missing.some((m) => m.subjectKey === o.subjectKey && m.key === o.key));
   const missingFacts: MissingFact[] =
@@ -1195,7 +1287,7 @@ export function evaluateR04V1(path: R04Path, input: EvaluationInput<R04View, R04
     ...(amount && path === "a" ? [`Bag-fee refund: at least ${formatMinor(amount.estimate.amountMinor, amount.estimate.currency)}, in the original form of payment (260.5(e), 260.10).`] : []),
     ...(amount && path === "b" ? [`Estimated reimbursement: ${formatMinor(amount.estimate.amountMinor, amount.estimate.currency)} (documented receipts only; the airline decides what is reasonable).`] : []),
     ...final.explanation,
-    ...(AMOUNT_OUTCOMES.has(outcome) ? final.assumptions.map((a) => a.text) : []),
+    ...(AMOUNT_OUTCOMES.has(outcome) ? assumptions.map((a) => a.text) : []),
   ];
 
   return {
@@ -1210,7 +1302,7 @@ export function evaluateR04V1(path: R04Path, input: EvaluationInput<R04View, R04
     dimensions,
     conditions: final.conditions,
     missingFacts,
-    assumptions: final.assumptions,
+    assumptions,
     disqualifierIds: final.disqualifierIds,
     amount,
     deadlines: [],
@@ -1256,8 +1348,8 @@ const REQUIREMENTS_BC = [
 ];
 
 const LIMITS_COMMON = [
-  "Paths a, b and c are separate opportunities; the bag fee is never an expense line (spec §1, §15.5); R02 shares each bag fee's loss key so a fee inside R02's ancillary total is never counted twice (D234 (17)).",
-  "Bags (D234 (11)): one per incident holding a per-bag fact, plus txn; loss keys use the bag tag, else the incident id; only the deplane time and incident date are inherited from txn.",
+  "Paths a, b and c are separate opportunities; the bag fee is never an expense line (spec §1, §15.5). D270(1): R02 excludes checked-bag fees entirely and shares no loss key with R04, so a fee refunded here and a fare refunded there are additive, never counted twice.",
+  "Bags (D270(2), revises D234 (11)): one per incident holding a per-bag fact, plus txn; a bag's loss identity is its incident id (or txn), permanent — the bag tag is a fact, shown for display only, never part of the key. Only the deplane time and incident date are inherited from txn.",
   "USD amounts only (O6); amounts in different currencies are never added.",
 ];
 
@@ -1295,7 +1387,7 @@ function makePack(path: R04Path): RulePack<R04View, R04Params, CaseContext> {
           "260.5(c)/(d) multi-carrier notification is not modelled; the MBR with the last operating carrier is taken as sufficient.",
           "L9: DOT-REF-8 (request from the airline) and 260.5(d) (automatic) are both preserved: the refund is tracked, the airline is named.",
           "L11 (erratum E-R04-2, D253(2)): with an (f)(1) or documented (f)(2) exemption, a declared-lost bag is a manual review (the captured text does not settle whether the exemption reaches a lost bag); a bag confirmed still undelivered is not yet due (re-evaluated when it is delivered or declared lost); a delivered bag is not eligible. (f)(3) never reaches a lost bag (260.5(g)).",
-          "L13 (errata ERR-R1-07): path a has no service-type input yet, so a bag on a charter or other non-scheduled flight is evaluated as if the flight were scheduled (a follow-up spec item).",
+          "L13 (D270(3)/D271, closes R-3): a confirmed charter or other non-scheduled flight is unsupported (14 CFR 260.2); an extracted candidate service type is asked, never decides; an unknown service type caps the result with an assumption and is asked only when it is the one thing between likely and eligible (mirrors R02's A8; D271 added the fixture erratum for the 9 path-a `eligible` cases in docs/rules/fixtures/R04.json).",
         ]
       : [
           ...LIMITS_COMMON,
@@ -1304,8 +1396,11 @@ function makePack(path: R04Path): RulePack<R04View, R04Params, CaseContext> {
           "L3: a ticket with no aircraft over 60 seats is manual_review.",
           "L8: international itineraries are unsupported (Montreal/Warsaw).",
           path === "b"
-            ? "Path b (D234 (9), D253(1), A5/L12): delayed = still missing or lost, a confirmed delivery later than 12 hours, or a confirmed MBR on a bag whose status says it is undamaged (damaged or pilfered → path c); only receipted (evidence), dated (spec A2) and unallocated lines count; reasonableness is the airline's call (L2). Lines are trip-level, so path b runs once per trip. A reimbursement not tied to lines is an assumption until allocated (D234 (13))."
+            ? "Path b (D234 (9), D253(1), A5/L12): delayed = still missing or lost, a confirmed delivery later than 12 hours, or a confirmed MBR on a bag whose status says it is undamaged (damaged or pilfered → path c); only receipted (evidence), dated (D270(6), spec A2, [flight date, delivery time or now]) and unallocated lines count; reasonableness is the airline's call (L2). Lines are trip-level, so path b runs once per trip. A reimbursement not tied to lines is an assumption until allocated (D234 (13))."
             : "No estimate: depreciation, exclusions and the carrier's limit decide the payout; documented values are evidence only. The remedy may be a repair (non-cash) rather than money (M27 R04-21).",
+          ...(path === "b"
+            ? [`D270(8): the 32 bound-fact budget (9 base facts + ${R04_EXPENSE_LINE_KEYS.length} facts per line) does not stretch to the spec's 8 documented expense lines; it holds ${R04_MAX_EXPENSE_LINES}. A trip with more lines is prepared by a person, who itemizes the rest manually.`]
+            : []),
         ],
     evaluate: (input) => evaluateR04V1(path, input),
   };

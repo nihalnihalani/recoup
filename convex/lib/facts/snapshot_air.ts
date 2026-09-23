@@ -136,15 +136,15 @@ export interface R04Bag {
   /** `txn` (a bag recorded on the transaction itself) or the bag's `incident:<id>`. */
   subjectKey: string;
   /**
-   * The bag's stable identity in loss keys (D234 (11); contract §3.3 `txn:<id>:bag_fee:<n>`): its KNOWN bag tag, else
-   * the incident id, else `txn` — never a position, so adding or removing another bag never moves it.
+   * The bag's stable identity in loss keys (D270(2), revises D234 (11); contract §3.3 `txn:<id>:bag_fee:<n>`): the
+   * incident id, else `txn` — permanent, and never a position, so adding or removing another bag never moves it. The
+   * bag tag is a fact for display only; it is never part of the key (N-R04-1: a bag's identity must not move once its
+   * tag becomes known, or a paid, closed R04a opportunity reopens under a new key while the claim keeps the old one).
    */
   lossId: string;
 }
 
-function bagLossId(lookup: CellLookup, subjectKey: string): string {
-  const tag = lookup.get(subjectKey, "air.bag_tag_number");
-  if (tag.known && tag.value.kind === "identifier") return tag.value.value;
+function bagLossId(subjectKey: string): string {
   const parsed = parseSubjectKey(subjectKey);
   return parsed?.kind === "incident" ? parsed.id : AIR_TXN_SUBJECT;
 }
@@ -161,7 +161,7 @@ export function r04Bags(s: Pick<AirSnapshot, "lookup">): R04Bag[] {
     const kind = parseSubjectKey(c.subjectKey)?.kind;
     if (kind === "incident" || kind === "transaction") subjects.add(c.subjectKey);
   }
-  return [...subjects].sort().map((subjectKey) => ({ subjectKey, lossId: bagLossId(s.lookup, subjectKey) }));
+  return [...subjects].sort().map((subjectKey) => ({ subjectKey, lossId: bagLossId(subjectKey) }));
 }
 
 /** What R04 v1 evaluates: one bag (the run's subject), every bag of the trip (path b), the itinerary and the lines. */
@@ -188,8 +188,8 @@ export function r04View(
   return {
     transactionId: s.transactionId,
     bagSubjectKey,
-    bagLossId: bagLossId(s.lookup, bagSubjectKey),
-    bags: bags.some((b) => b.subjectKey === bagSubjectKey) ? bags : [...bags, { subjectKey: bagSubjectKey, lossId: bagLossId(s.lookup, bagSubjectKey) }],
+    bagLossId: bagLossId(bagSubjectKey),
+    bags: bags.some((b) => b.subjectKey === bagSubjectKey) ? bags : [...bags, { subjectKey: bagSubjectKey, lossId: bagLossId(bagSubjectKey) }],
     lookup: s.lookup,
     expenseLines: s.expenseLines,
     propertyItems: s.propertyItems,
@@ -213,7 +213,8 @@ const R04_A_BAG_KEYS = [
   "air.exemption_failed_pickup", "air.exemption_voluntary_separation", "air.exemption_documented_by_carrier",
   "air.incident_date",
 ] as const satisfies readonly FactKey[];
-const R04_A_TXN_KEYS = ["air.longest_us_foreign_nonstop_segment_minutes", "air.operating_carrier_last_segment"] as const satisfies readonly FactKey[];
+/** D270(3): D253(3) extends to path a, so its own service-type applicability check binds `air.service_type` too. */
+const R04_A_TXN_KEYS = ["air.longest_us_foreign_nonstop_segment_minutes", "air.operating_carrier_last_segment", "air.service_type"] as const satisfies readonly FactKey[];
 const R04_B_BAG_KEYS = [
   "air.deplane_opportunity_at", "air.bag_delivered_or_picked_up_at", "air.bag_status", "air.mbr_filed", "air.incident_date",
 ] as const satisfies readonly FactKey[];

@@ -60,15 +60,23 @@ function usDate(facts: FactReader, key: string): string | null {
   }
 }
 
-/** "On October 1, 2026, I rejected …" / "I did not respond …" — from the bound decision (never a guess). */
+/**
+ * "On October 1, 2026, I rejected …" / "I did not respond …" — from the bound decision (never a guess). L-T3: the
+ * "did not travel" clause is read from the bound `air.flew_changed_or_alternative` (never stated unconditionally,
+ * which could contradict the facts), and the wording is chosen by `offer_type` — "rejected the alternative" is never
+ * said when no alternative was offered (offer_type = none).
+ */
 function decisionText(facts: FactReader): string {
   const response = facts.has(TXN, "air.consumer_response") ? facts.text(TXN, "air.consumer_response") : null;
   const offer = facts.has(TXN, "air.offer_type") ? facts.text(TXN, "air.offer_type") : null;
-  if (response === "rejected") {
+  const flewValue = facts.has(TXN, "air.flew_changed_or_alternative") ? facts.value(TXN, "air.flew_changed_or_alternative") : null;
+  const flew = flewValue?.kind === "bool" ? flewValue.value : null;
+  const notTravelled = flew === false ? ", and I did not travel on a replacement flight" : "";
+  if (response === "rejected" && offer !== "none") {
     const on = usDate(facts, "air.consumer_response_at");
-    return `${on ? `On ${formatLocalDate(on)}, I` : "I"} rejected the alternative the airline offered, and I did not travel on a replacement flight.`;
+    return `${on ? `On ${formatLocalDate(on)}, I` : "I"} rejected the alternative the airline offered${notTravelled}.`;
   }
-  if (response === "no_response") return "I did not accept the alternative the airline offered, and I did not travel on it.";
+  if (response === "no_response" && offer !== "none") return `I did not accept the alternative the airline offered${notTravelled}.`;
   if (offer === "none") return "No alternative flight or compensation was offered to me.";
   return "I did not accept any alternative or compensation.";
 }

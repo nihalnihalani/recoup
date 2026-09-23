@@ -185,7 +185,10 @@ export const r04PropertyClaim: PacketTemplate = Object.freeze({
       const s = lineSubject(n);
       if (!facts.has(s, "air.property_item")) continue;
       const value = facts.has(s, "air.property_claimed_value") ? `, value ${formatMoney(facts.money(s, "air.property_claimed_value"))}` : "";
-      const proof = facts.has(s, "air.property_proof") ? " (proof attached)" : "";
+      // L-T1: typed text ("none", "lost it") is not a receipt (M27 R04-11's rule applies here too) — only an
+      // attached-evidence reference earns "(proof attached)".
+      const proofText = facts.has(s, "air.property_proof") ? facts.text(s, "air.property_proof") : null;
+      const proof = proofText !== null && R04_RECEIPT_REF.test(proofText) ? " (proof attached)" : "";
       items.push(`- ${facts.text(s, "air.property_item")}${value}${proof}`);
     }
     const body = fill(

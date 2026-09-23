@@ -22,7 +22,13 @@ export function selectTemplate(
   opts: { remedyKey?: string; templateId?: string } = {},
 ): PacketTemplate | null {
   const mine = templates.filter((t) => t.ruleId === ruleId && t.version === version);
-  if (opts.templateId !== undefined) return mine.find((t) => t.templateId === opts.templateId) ?? null;
+  if (opts.templateId !== undefined) {
+    const named = mine.find((t) => t.templateId === opts.templateId) ?? null;
+    // L-T2: a caller-supplied templateId must not bypass the per-remedy selection (D249) — a template whose OWN
+    // remedyKey differs from the requested one is refused, never rendered under the wrong remedy.
+    if (named !== null && named.remedyKey !== undefined && opts.remedyKey !== undefined && named.remedyKey !== opts.remedyKey) return null;
+    return named;
+  }
   if (opts.remedyKey !== undefined) {
     const forRemedy = mine.filter((t) => t.remedyKey === opts.remedyKey);
     if (forRemedy.length === 1) return forRemedy[0];

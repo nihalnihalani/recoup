@@ -185,6 +185,7 @@ describe("D221: an air.total_paid fact changes no R02/R04 outcome", () => {
     row("air.taxes_paid", usd(4_380)), row("air.ancillary_fees_total", usd(2_500)), row("air.already_refunded", usd(0)),
   ];
   const R04_ROWS: CellRow[] = [
+    row("air.service_type", code("scheduled")), // D270(3)/D271: an unknown service type caps path a at likely_eligible
     row("air.itinerary_scope", code("domestic"), "derived"), row("air.bag_fee_paid", usd(4_000)), row("air.large_aircraft_segment_on_ticket", { kind: "bool", value: true }),
     row("air.deplane_opportunity_at", at("2026-09-12T21:40:00-07:00")), row("air.bag_delivered_or_picked_up_at", at("2026-09-13T10:55:00-07:00")),
     row("air.mbr_filed", { kind: "bool", value: true }), row("air.exemption_failed_recheck", no()), row("air.exemption_failed_pickup", no()),

@@ -32,6 +32,7 @@ const CLOCK = Date.parse("2026-09-23T12:00:00-07:00");
 
 /** R04-01 (path a): delivered 13h15m after deplaning, MBR filed, fee USD 40.00, no exemption, all confirmed. */
 const A: Facts = {
+  service_type: [code("scheduled")], // D270(3)/D271: recorded so this case's expected outcome is preserved (A8)
   itinerary_scope: [code("domestic"), "derived"], operating_carrier_last_segment: [txt("XA")], bag_fee_merchant_of_record: [code("carrier")],
   bag_tag_number: [tag("0123456789")], bag_fee_paid: [usd(4_000)], deplane_opportunity_at: [at("2026-09-12T21:40:00-07:00")],
   bag_delivered_or_picked_up_at: [at("2026-09-13T10:55:00-07:00")], bag_status: [code("delivered"), "derived"], mbr_filed: [yes(true)],
