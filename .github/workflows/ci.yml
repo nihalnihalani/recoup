@@ -151,11 +151,20 @@ jobs:
           node-version-file: ".nvmrc"
           cache: "npm"
 
+      # The runner image ships without the de_DE locale, so until it is generated bash warns "setlocale: LC_ALL:
+      # cannot change locale" in every step (this one included). Node's ICU reads LANG/LC_ALL itself and does not
+      # need it, but generating it makes the libc locale real too and silences the warning in the later steps.
+      - name: generate the de_DE.UTF-8 locale
+        run: sudo locale-gen de_DE.UTF-8
+
       - name: npm ci
         run: npm ci
 
+      # Fails the job rather than letting it pass silently in en-US: both the libc locale and Node's default Intl
+      # locale must be German.
       - name: assert the German locale is in effect
         run: |
+          locale -a | grep -qi '^de_DE\.utf-\?8$' || { echo "de_DE.UTF-8 is not installed"; exit 1; }
           node -e 'const l = new Intl.NumberFormat().resolvedOptions().locale; console.log("default locale", l, new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(1234.5)); if (!l.startsWith("de")) { console.error("LC_ALL was not applied"); process.exit(1); }'
 
       - name: test:ci under de_DE

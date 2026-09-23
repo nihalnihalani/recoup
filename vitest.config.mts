@@ -18,6 +18,8 @@ export default defineConfig({
     environment: "edge-runtime",
     server: { deps: { inline: ["convex-test"] } },
     include: ["convex/**/*.test.ts", "src/**/*.test.ts", "src/**/*.test.tsx"],
-    setupFiles: clockShiftDays ? ["./convex/testing/clockShift.setup.ts"] : [],
+    // D205: DOM test files run with the default locale pinned to en-US (src/test/domLocale.setup.ts, a no-op in
+    // the edge-runtime server tests, which stay unpinned for the `localeshift` CI job).
+    setupFiles: [...(clockShiftDays ? ["./convex/testing/clockShift.setup.ts"] : []), "./src/test/domLocale.setup.ts"],
   },
 });
