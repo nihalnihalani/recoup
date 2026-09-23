@@ -246,6 +246,16 @@ export function resetUser(email: string): { deleted: boolean } {
   return runConvex<{ deleted: boolean }>("testing:resetUser", { email });
 }
 
+/**
+ * P10-OW-12: the deployment's provider mode ("stub" | "live"), never a secret value. `e2e/global-setup.ts` calls
+ * this once before any spec runs and fails the whole Playwright run if the target deployment is not in stub
+ * mode -- the dev deployment now carries real Firecrawl/OpenAI/ShopSavvy/AgentMail keys, so a run that is not
+ * honouring `RECOUP_PROVIDER_MODE=stub` must never be allowed to start.
+ */
+export function providerMode(): { mode: "stub" | "live" } {
+  return runConvex<{ mode: "stub" | "live" }>("testing:providerMode", {});
+}
+
 // M16 (D202): the R01 browser flow. Each seeder stands in for ONE provider the dev deployment only has a placeholder
 // key for (D83) and writes through the real app path; the user's own steps stay in the browser.
 

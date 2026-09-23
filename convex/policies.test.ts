@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn, fakeSchedulerTimersEach } from "./test.setup";
-import { researchPolicy, fetchBothImpl } from "./policies";
+import { researchPolicy, fetchBothImpl, searchDep } from "./policies";
 import { verifyPassage } from "./lib/passage";
 import { inboxTransport } from "./account";
 import type { ResearchDeps } from "./policies";
@@ -816,5 +816,35 @@ describe("T18.6 (D129 B-1): insertSnapshot itself is gated at the write -- D124 
     console.log("[T18.6 B-1] researchPolicy result for a mid-research deletion:", result);
     expect(result).toBeNull();
     expect(await t.run((ctx) => ctx.db.query("policies").withIndex("by_user_domain_kind", (q) => q.eq("userId", userId).eq("merchantDomain", "acme-refresh-race.example")).collect())).toHaveLength(0);
+  });
+});
+
+describe("P10-OW-12: RECOUP_PROVIDER_MODE=stub", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("searchDep (defaultDeps.search, the real Firecrawl-search call site) throws a stub error instead of ever reaching Firecrawl", async () => {
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    // QA2-3: stub mode now refuses without a positive dev/E2E signal; supply the dev host.
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+    await expect(searchDep({} as never, "acme.example price adjustment policy")).rejects.toThrow(/RECOUP_PROVIDER_MODE=stub/);
+  });
+
+  it("researchPolicy (default deps -- the real searchDep) records the same confidence-0 \"no policy\" snapshot a genuine Firecrawl failure already gets, never a fabricated policy", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+
+    const id = (await researchPolicy(
+      { runMutation: (ref: any, args: any) => t.mutation(ref, args) },
+      { userId, merchantDomain: "stub-mode.example", kind: "returns" },
+    ))!;
+
+    const doc = await t.run(async (ctx) => ctx.db.get(id));
+    expect(doc?.confidence).toBe(0);
+    expect(doc?.channel).toBe("unknown");
+    expect(doc?.note).toMatch(/Firecrawl error.*RECOUP_PROVIDER_MODE=stub/);
   });
 });

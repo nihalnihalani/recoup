@@ -357,3 +357,42 @@ describe("convex/testing.ts — resetUser", () => {
     expect(result.deleted).toBe(false);
   });
 });
+
+describe("convex/testing.ts — providerMode (P10-OW-12)", () => {
+  afterEach(() => {
+    restoreEnv();
+    delete process.env.RECOUP_PROVIDER_MODE;
+  });
+
+  it("is gated exactly like every other export here: throws when E2E_SEED_ENABLED is unset", async () => {
+    saveEnv();
+    disableE2E();
+    const t = setup();
+    await expect(t.query(internal.testing.providerMode, {})).rejects.toThrow();
+  });
+
+  it("throws when enabled but CONVEX_SITE_URL matches the production host", async () => {
+    saveEnv();
+    enableE2E(PROD_SITE_URL);
+    const t = setup();
+    await expect(t.query(internal.testing.providerMode, {})).rejects.toThrow();
+  });
+
+  it("reports \"live\" when RECOUP_PROVIDER_MODE is unset", async () => {
+    saveEnv();
+    enableE2E();
+    delete process.env.RECOUP_PROVIDER_MODE;
+    const t = setup();
+    expect(await t.query(internal.testing.providerMode, {})).toEqual({ mode: "live" });
+  });
+
+  it("reports \"stub\" when RECOUP_PROVIDER_MODE=stub -- never any credential or other secret value, only the mode name", async () => {
+    saveEnv();
+    enableE2E();
+    process.env.RECOUP_PROVIDER_MODE = "stub";
+    const t = setup();
+    const result = await t.query(internal.testing.providerMode, {});
+    expect(result).toEqual({ mode: "stub" });
+    expect(Object.keys(result)).toEqual(["mode"]);
+  });
+});

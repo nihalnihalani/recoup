@@ -51,6 +51,7 @@ import {
   type SearchHit,
 } from "./lib/offerMatch";
 import { observePrice, rejectionReason, truncate, type Observation, type PageObservation } from "./priceWatch";
+import { providerStubMode, stubbedProviderError } from "./lib/providerMode";
 import {
   GLOBAL_DAILY_BUDGETS,
   MAX_OFFER_FINDS_PER_DAY,
@@ -527,8 +528,19 @@ export type OfferDeps = {
   observe: (ctx: ActionCtx, name: string | null, productUrl: string) => Promise<PageObservation>;
 };
 
+/**
+ * P10-OW-12: the Firecrawl-search choke point for `offers.search`/`recheckConfirmedOffers`. `watchForSearch`
+ * already runs first and `searchOffers`'s own catch below already turns a Firecrawl error into a stored,
+ * user-visible "search failed" candidate row (never a fabricated offer), so a stubbed run takes that same,
+ * already-tested path.
+ */
+export async function searchDep(ctx: ActionCtx, query: string, options?: Parameters<FirecrawlClient["search"]>[2]): Promise<SearchResponse> {
+  if (providerStubMode()) throw stubbedProviderError("Firecrawl search", query.slice(0, 80));
+  return firecrawl.search(ctx, query, options);
+}
+
 const defaultDeps: OfferDeps = {
-  search: firecrawl.search.bind(firecrawl),
+  search: searchDep,
   observe: observePrice,
 };
 

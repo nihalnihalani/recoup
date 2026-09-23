@@ -39,6 +39,7 @@ import { openClaim } from "./claims";
 import { windowEndsAt } from "./lib/ledger";
 import { ensurePurchaseTransaction } from "./transactions";
 import { maskPans } from "./lib/pan";
+import { providerStubMode } from "./lib/providerMode";
 
 /** D83 item 6 / D95 / D102: the documented production host. Substring match against `CONVEX_SITE_URL`. */
 const PRODUCTION_HOST_MARKER = "cool-oyster-399";
@@ -801,5 +802,25 @@ export const resetUser = internalMutation({
     await ctx.db.delete(userId);
 
     return { deleted: true };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// providerMode
+// ---------------------------------------------------------------------------
+
+/**
+ * P10-OW-12: reports whether this deployment is honouring `RECOUP_PROVIDER_MODE=stub` -- never any provider
+ * credential or other secret value, only the mode name. `e2e/global-setup.ts` (via `e2e/fixtures.ts`'s
+ * `providerMode()` wrapper, the same `convex run` shell-out every other export here uses) calls this before any
+ * spec runs and fails the whole Playwright run if the target deployment is not in stub mode, so P10-OW-12's fix
+ * is a fact the suite checks for itself on every run, not a runbook instruction a human can forget to set.
+ */
+export const providerMode = internalQuery({
+  args: {},
+  returns: v.object({ mode: v.union(v.literal("stub"), v.literal("live")) }),
+  handler: async () => {
+    assertE2EEnabled();
+    return { mode: providerStubMode() ? ("stub" as const) : ("live" as const) };
   },
 });

@@ -34,6 +34,7 @@ import { getFactSpec } from "./lib/facts/catalog";
 import { normalizeUrl, unverifiedContent, type Allowances } from "./lib/contentCheck";
 import { boundFactsHash, canonicalHash } from "./lib/canonical";
 import { rateLimiter } from "./lib/rateLimits";
+import { providerStubMode, stubbedProviderError } from "./lib/providerMode";
 import { isApprovable } from "./lib/rules/types";
 import { r01LateAskAcknowledgeable } from "./lib/rules/r01_price_adjustment_v1";
 import { evaluatePurchase, evaluateTransaction } from "./opportunities";
@@ -1217,6 +1218,12 @@ async function enqueueClaimEmail(
   send: CheckedSend,
   recipientConfirmed: boolean,
 ): Promise<OutboundId> {
+  // P10-OW-12: the claim-email AgentMail-send choke point. No e2e spec today reaches a confirmed-recipient
+  // send (claims.spec.ts and r01-opportunity.spec.ts both deliberately stop at an earlier refusal), so this
+  // throwing here -- exactly like a genuine component/provider failure already would, uncaught, straight out
+  // of `approveAndSend` -- changes no currently-tested behavior; it only closes the path a future test (or a
+  // manual click) could otherwise use to mail a real merchant from the dev deployment.
+  if (providerStubMode()) throw stubbedProviderError("AgentMail send", `claim ${claim._id}`);
   const outboundId = await agentmail.sendMessage(sendCtx(ctx), send.inboxId, {
     to: send.to,
     subject: send.subject,

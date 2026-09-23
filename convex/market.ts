@@ -41,6 +41,7 @@ import { tryCharge, tryConsumeGlobalBudget } from "./lib/budget";
 import { cleanStoreUrl, FIND_MARKER, registrableHost, sameStore } from "./lib/offerMatch";
 import { WATCH_ROWS } from "./offers";
 import { parseEnvelope, flattenHistory, hostOf, isNewCondition, type MarketSnapshot } from "./lib/shopsavvy";
+import { providerStubMode } from "./lib/providerMode";
 import { marketState } from "./schema";
 import {
   DAILY_BUDGETS,
@@ -131,6 +132,10 @@ export type FetchOutcome =
  * as text with a bounded length before it is ever parsed.
  */
 export async function fetchSnapshot(productUrl: string, now: number): Promise<FetchOutcome> {
+  // P10-OW-12: the one ShopSavvy call site. Stubbed the same way an unconfigured key already, genuinely,
+  // behaves (`not_configured`) -- a calm, already-supported no-op rather than a classified "failure" that would
+  // log `market_failed` and schedule a retry against a provider that was never actually asked anything.
+  if (providerStubMode()) return { kind: "not_configured" };
   const key = process.env.SHOPSAVVY_API_KEY;
   if (!key) return { kind: "not_configured" };
 

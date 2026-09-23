@@ -3,6 +3,8 @@ import { ConvexError } from "convex/values";
 import { api, internal } from "./_generated/api";
 import { setup, signedIn, fakeSchedulerTimersEach } from "./test.setup";
 import { inboxTransport } from "./account";
+import { createInboxRemote } from "./profiles";
+import { rateLimiter } from "./lib/rateLimits";
 
 // D247 (KX3): a job this file's code schedules never runs on a real timer in the background; tests flush it.
 fakeSchedulerTimersEach();
@@ -449,5 +451,80 @@ describe("T18.6 (D129 B-5): a stale-reclaim loser deletes its OWN just-created i
     expect(result).toBe("winner@agentmail.to");
     expect(del).toHaveBeenCalledWith("inbox-loser");
     expect(del).not.toHaveBeenCalledWith("inbox-winner");
+  });
+});
+
+describe("P10-OW-12: RECOUP_PROVIDER_MODE=stub", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("createInboxRemote (the AgentMail inbox-creation call site) returns a fixed, per-user synthetic inbox instead of ever calling AgentMail", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    // QA2-3: stub mode now refuses without a positive dev/E2E signal; supply the dev host.
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const inbox = await createInboxRemote(userId);
+
+    expect(inbox.inboxEmail.endsWith("@inbox.e2e.example")).toBe(true);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // Deterministic per user: calling it again for the same user gives the same address.
+    expect(await createInboxRemote(userId)).toEqual(inbox);
+  });
+
+  it("ensureInbox (the real caller) provisions and saves that stub inbox end to end, with no fetch and no real AgentMail call", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    // QA2-3: stub mode now refuses without a positive dev/E2E signal; supply the dev host.
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const email = await as.action(api.profiles.ensureInbox, {});
+
+    expect(email).not.toBeNull();
+    expect((email as string).endsWith("@inbox.e2e.example")).toBe(true);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const profile = await t.run((ctx) => ctx.db.query("profiles").withIndex("by_user", (q) => q.eq("userId", userId)).unique());
+    expect(profile?.inboxEmail).toBe(email);
+  });
+
+  /**
+   * QA2-4 (adversarial re-review of P10-OW-12): the FIRST version of the fix left this call site -- the B-5
+   * stale-reclaim-loser branch below -- unguarded. In stub mode, `inboxId` here is always THIS call's own
+   * `createInboxRemote` result, i.e. one of `stubInboxFor`'s synthetic `stub-inbox-*` ids (never a real AgentMail
+   * one); the un-guarded delete issued a genuine `DELETE .../inboxes/stub-inbox-...` against the real AgentMail
+   * API whenever this race fired on a deployment that carries real credentials (exactly the deployment
+   * `providerStubMode()` exists to protect). `createInboxRemote`'s own stub branch never calls `fetch`
+   * (`providerStubMode()` is checked before any network call), so the race that the non-stub B-5 test above
+   * injects via a `fetch` mock has no `fetch` call to hook here; `rateLimiter.limit` is the one other await
+   * boundary `ensureInbox` crosses between its own claim and its own save, so the "concurrent winner" is injected
+   * there instead, calling straight through to the real rate limiter afterwards so this call's own flow is
+   * otherwise unaffected.
+   */
+  it("in stub mode, a stale-reclaim loser does NOT call the real inboxTransport.deleteInbox on its own just-created stub inbox (QA2-4)", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+    const del = vi.spyOn(inboxTransport, "deleteInbox").mockResolvedValue(undefined);
+    const realLimit = rateLimiter.limit.bind(rateLimiter);
+    vi.spyOn(rateLimiter, "limit").mockImplementation(async (...args: unknown[]) => {
+      // Simulates a concurrent winner (e.g. a stale-reclaim race) finishing -- claiming and saving ITS OWN
+      // inbox -- while THIS call is still mid-flight, the same shape as the non-stub B-5 test above.
+      await t.mutation(internal.profiles.save, { userId, inboxId: "winner-inbox", inboxEmail: "winner@agentmail.to" });
+      return realLimit(...(args as Parameters<typeof realLimit>));
+    });
+
+    const result = await as.action(api.profiles.ensureInbox, {});
+
+    console.log("[QA2-4] loser ensureInbox (stub mode) result:", result, "deleteInbox calls:", del.mock.calls);
+    expect(result).toBe("winner@agentmail.to");
+    expect(del).not.toHaveBeenCalled();
   });
 });

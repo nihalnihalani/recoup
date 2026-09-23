@@ -10,6 +10,7 @@ import { inboxTransport } from "./account";
 import { rateLimiter } from "./lib/rateLimits";
 import { logEvent } from "./lib/log";
 import { sanitizeError } from "./lib/errors";
+import { providerStubMode, stubInboxFor } from "./lib/providerMode";
 
 /** Shown in the UI as "forward your order emails here". */
 const DISPLAY_NAME = "Recoup";
@@ -288,7 +289,13 @@ async function waitForProvisioning(ctx: ActionCtx, userId: Id<"users">): Promise
  * (same base URL, bearer auth and snake_case body), so it can be swapped back
  * to `agentmail.createInbox` the moment the component publishes a fix.
  */
-async function createInboxRemote(): Promise<{ inboxId: string; inboxEmail: string }> {
+export async function createInboxRemote(userId: Id<"users">): Promise<{ inboxId: string; inboxEmail: string }> {
+  // P10-OW-12: unlike the other stubbed provider call sites, this one returns a fixed SUCCESS, not a fixed
+  // failure -- every flow downstream of `ensureInbox` (Composer, drafts, claims) needs a real address to work
+  // with, and `convex/testing.ts`'s own `seedInbox` already establishes exactly this "reserved .example
+  // address, no provider involved" pattern for the same reason. Deterministic per user, so two accounts in the
+  // same run never collide on one address.
+  if (providerStubMode()) return stubInboxFor(userId);
   const apiKey = process.env.AGENTMAIL_API_KEY;
   if (!apiKey) throw new ConvexError("Email is not configured on this deployment");
   const baseUrl = (process.env.AGENTMAIL_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/$/, "");
@@ -398,7 +405,7 @@ export const ensureInbox = action({
     let inboxEmail: string;
     try {
       await rateLimiter.limit(ctx, "inboxProvision", { key: userId, throws: true });
-      ({ inboxId, inboxEmail } = await createInboxRemote());
+      ({ inboxId, inboxEmail } = await createInboxRemote(userId));
     } catch (err) {
       // B-3: release the claim so the next call can retry immediately
       // instead of finding this placeholder still "claimed".
@@ -413,7 +420,16 @@ export const ensureInbox = action({
       // saved ITS OWN inbox first; THIS call's own just-created inbox
       // (`inboxId`, never `saved.inboxId`) is the one now orphaned.
       try {
-        await inboxTransport.deleteInbox(inboxId);
+        // QA2-4 (P10-OW-12 re-review): `inboxId` above is always the one THIS call itself just created a few
+        // lines up via `createInboxRemote(userId)`, never a pre-existing real inbox -- so in stub mode it is
+        // always one of `stubInboxFor`'s synthetic `stub-inbox-*` ids (`createInboxRemote` already honours
+        // `providerStubMode()`, above). Calling the REAL `inboxTransport.deleteInbox` on that id would be a live
+        // AgentMail DELETE for an id the provider never issued, on a deployment `providerStubMode()` has already
+        // established carries real credentials and must make no real provider calls at all. Skipped, not
+        // stubbed-and-called: there is nothing on the real provider to clean up.
+        if (!providerStubMode()) {
+          await inboxTransport.deleteInbox(inboxId);
+        }
       } catch (err) {
         logEvent("notification_failed", { inboxId, error: sanitizeError(err instanceof Error ? err.message : String(err)) });
         throw err;

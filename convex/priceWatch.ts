@@ -43,6 +43,7 @@ import { extract } from "./lib/ai";
 import { imageUrlChange, pageImageUrl } from "./lib/imageUrl";
 import { charge } from "./lib/budget";
 import { parseProductUrl } from "./lib/watchUrl";
+import { providerStubMode, stubbedProviderError } from "./lib/providerMode";
 import { INELIGIBLE_REST_MS, PRICE_CHECK_PER_USER_PER_TICK, WATCH_CHECK_INTERVAL_MS, WATCH_SWEEP_BUMP_MS } from "./limits";
 
 const firecrawl = new FirecrawlClient(components.firecrawl);
@@ -647,6 +648,11 @@ export async function observePrice(
   name: string | null,
   productUrl: string,
 ): Promise<PageObservation> {
+  // P10-OW-12: shared by both `priceWatch.checkItem` and `watches.checkWatch` -- the ONE Firecrawl-scrape choke
+  // point for both "a purchase's price watch" and "a plain watch" checks. Both callers already wrap this call in
+  // a try/catch that records the failure as a truthful `note` (never a fabricated price), so a stubbed run takes
+  // exactly the same, already-tested path a real placeholder-key failure always has.
+  if (providerStubMode()) throw stubbedProviderError("Firecrawl scrape", productUrl);
   const page = await firecrawl.scrape(ctx, productUrl, scrapeOptions());
   const markdown = typeof page.markdown === "string" ? page.markdown : "";
   // Same scrape, no second request: the Open Graph image rides in the metadata.

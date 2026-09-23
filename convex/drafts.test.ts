@@ -448,6 +448,46 @@ describe("drafts.approveAndSend reaches the component", () => {
   });
 });
 
+describe("P10-OW-12: RECOUP_PROVIDER_MODE=stub", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /**
+   * `enqueueClaimEmail`'s AgentMail-send choke point. Same fixture as "reaches the component" above (every D11/D18
+   * guard passes), so this proves the stub check runs BEFORE the real component send, not that some earlier guard
+   * happened to refuse first.
+   */
+  it("approveAndSend throws a stub error before ever reaching the AgentMail component, and writes nothing", async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    await withInbox(t, userId);
+    await confirmedPolicy(t, userId);
+    const { claimId } = await seed(t, userId);
+    const draftId = await newDraft(t, claimId, userId);
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    // QA2-3: stub mode now refuses without a positive dev/E2E signal; supply the dev host.
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+
+    await expect(
+      as.mutation(api.drafts.approveAndSend, {
+        draftId,
+        to: CONTACT,
+        subject: "Refund for order AC-1",
+        body: "Hello, could you confirm the credit?",
+        claimVersion: 1,
+        draftVersion: 1,
+      }),
+    ).rejects.toThrow(/RECOUP_PROVIDER_MODE=stub/);
+
+    const draft = await t.run((ctx) => ctx.db.get(draftId));
+    expect(draft?.outboundId).toBeUndefined();
+    const claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).not.toBe("queued");
+  });
+});
+
 describe("drafts.reconcileSend transitions (D13)", () => {
   async function sentDraft(t: ReturnType<typeof setup>, userId: Id<"users">) {
     const { claimId } = await seed(t, userId, { status: "queued" });

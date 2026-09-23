@@ -48,6 +48,7 @@ import { requireUserId } from "./lib/access";
 import { rateLimiter } from "./lib/rateLimits";
 import { sanitizeError } from "./lib/errors";
 import { logEvent } from "./lib/log";
+import { providerStubMode, stubbedProviderError } from "./lib/providerMode";
 import { BACKOFF_MS, isAmbiguousSendFailure, isTerminalSendFailure } from "./drafts";
 import { clearPendingMailEvent, getPendingMailEvent } from "./mailEvents";
 import {
@@ -400,6 +401,9 @@ export const sendDrop = internalMutation({
     // scheduler itself to throw, which convex-test does not support).
     let outboundId: OutboundId;
     try {
+      // P10-OW-12: the drop-alert AgentMail-send choke point. Falls straight into the same catch a genuine
+      // component/provider failure already hits below (recorded as `status: "failed", reason: "send_failed"`).
+      if (providerStubMode()) throw stubbedProviderError("AgentMail send", `watch ${watch._id}`);
       outboundId = await agentmail.sendMessage(sendCtx(ctx), inboxId, {
         to,
         subject: DROP_SUBJECT,

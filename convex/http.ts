@@ -10,6 +10,7 @@ import { containsPan } from "./lib/pan";
 import { ACCEPTED_MIMES, EXTENSION, pdfLooksEncrypted, pdfRawText, sniffMime, type SniffedMime } from "./lib/sniff";
 import { parseDocTypeHeader } from "./evidence";
 import { MAX_UPLOAD_BYTES } from "./limits";
+import { DEV_DEPLOYMENT_MARKER, isDevDeployment } from "./lib/deploymentIdentity";
 
 const http = httpRouter();
 
@@ -133,9 +134,12 @@ export const EVIDENCE_FILE_PATH = "/evidence/file";
 
 /**
  * DA-A-28c: the Vite dev server's origin is allowed ONLY when this deployment is the dev deployment (D62:
- * `adorable-lion-138`). A positive match, so an unset, unknown or production `CONVEX_SITE_URL` never allows it.
+ * `adorable-lion-138`). `DEV_DEPLOYMENT_MARKER`/`isDevDeployment` now live in `./lib/deploymentIdentity` (QA2-3:
+ * `convex/lib/providerMode.ts` needs the same positive-match helper and cannot import it from here -- see that
+ * module's doc comment) and are re-exported below (not `export … from`, so the import above and this stay one
+ * binding) so every existing import of them from `./http` keeps working.
  */
-export const DEV_DEPLOYMENT_MARKER = "adorable-lion-138";
+export { DEV_DEPLOYMENT_MARKER, isDevDeployment };
 export const DEV_FRONTEND_ORIGIN = "http://localhost:5173";
 
 function httpsOrigin(raw: string | undefined): string | null {
@@ -145,15 +149,6 @@ function httpsOrigin(raw: string | undefined): string | null {
     return url.protocol === "https:" ? url.origin : null;
   } catch {
     return null;
-  }
-}
-
-export function isDevDeployment(convexSiteUrl: string | undefined): boolean {
-  if (!convexSiteUrl) return false;
-  try {
-    return new URL(convexSiteUrl.trim()).hostname === `${DEV_DEPLOYMENT_MARKER}.convex.site`;
-  } catch {
-    return false;
   }
 }
 

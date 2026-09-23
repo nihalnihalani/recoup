@@ -31,6 +31,16 @@ const appConvexUrl = process.env.VITE_CONVEX_URL || process.env.E2E_CONVEX_URL;
 export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
+  // QA2-1 (P10-OW-12b re-review): `e2e/smoke/*.spec.ts` is the live-provider smoke suite -- it REQUIRES the
+  // target NOT be in stub mode (the opposite of globalSetup below) and is run only via the dedicated
+  // `playwright.smoke.config.ts`. Excluded here so the two can never both apply to one run: the first version
+  // of this split ran `e2e/smoke/live-provider.spec.ts` under this config's own stub-requiring globalSetup,
+  // which made that spec unable to execute under either provider mode. See playwright.smoke.config.ts and
+  // convex/lib/e2eSmokeSeparation.static.test.ts (a static guard pinning this separation stays true).
+  testIgnore: "smoke/**",
+  // P10-OW-12: fails the whole run before any spec starts unless the target deployment reports
+  // RECOUP_PROVIDER_MODE=stub (see e2e/global-setup.ts).
+  globalSetup: "./e2e/global-setup.ts",
   timeout: 60_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,

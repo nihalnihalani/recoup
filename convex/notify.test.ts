@@ -1262,3 +1262,31 @@ describe("F11b: sendDrop's try only wraps the sendMessage call", () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("P10-OW-12: RECOUP_PROVIDER_MODE=stub", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("sendDrop's AgentMail-send call site throws a stub error, caught by its own existing catch as a genuine send_failed -- same as a real component/provider failure, never a fabricated send", async () => {
+    const t = setup();
+    const { userId } = await account(t);
+    const watchId = await seedWatch(t, userId, { targetCents: 5_000 });
+    await observe(t, watchId, 4_000);
+    const [claimedRow] = await mailRows(t);
+    expect(claimedRow.status).toBe("claimed");
+
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    // QA2-3: stub mode now refuses without a positive dev/E2E signal; supply the dev host.
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+    await t.mutation(internal.notify.sendDrop, { mailLogId: claimedRow._id });
+
+    expect(send).not.toHaveBeenCalled();
+    const [row] = await mailRows(t);
+    expect(row.status).toBe("failed");
+    expect(row.reason).toBe("send_failed");
+    // F12b: sanitizeError collapses the raw stub message to a fixed, user-safe category before it reaches
+    // mailLog.error -- the same behavior a real component/provider failure already gets (never verbatim).
+    expect(typeof row.error).toBe("string");
+  });
+});

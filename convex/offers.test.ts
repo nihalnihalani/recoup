@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
-import { NEEDS_RECONFIRM_NOTE, OFFER_CHECK_DEDUPE_MS, recheckConfirmedOffers, searchOffers, type OfferDeps } from "./offers";
+import { NEEDS_RECONFIRM_NOTE, OFFER_CHECK_DEDUPE_MS, recheckConfirmedOffers, searchDep, searchOffers, type OfferDeps } from "./offers";
 import type { PageObservation } from "./priceWatch";
 import {
   GLOBAL_DAILY_BUDGETS,
@@ -1121,5 +1121,32 @@ describe("offers.sweepRechecks (daily cron)", () => {
     const before = (await jobs(t)).length;
     expect(await t.mutation(internal.offers.sweepRechecks, {})).toEqual({ watches: 0 });
     expect((await jobs(t)).length).toBe(before);
+  });
+});
+
+describe("P10-OW-12: RECOUP_PROVIDER_MODE=stub", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("searchDep (defaultDeps.search, the real Firecrawl-search call site) throws a stub error instead of ever reaching Firecrawl", async () => {
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    // QA2-3: stub mode now refuses without a positive dev/E2E signal; supply the dev host.
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+    await expect(searchDep({} as never, "acme trail runner buy")).rejects.toThrow(/RECOUP_PROVIDER_MODE=stub/);
+  });
+
+  it("that stub error is exactly what searchOffers' own try/catch already turns into: nothing stored, never a fabricated offer (same as any other Firecrawl failure, e.g. \"stores nothing and does not throw when the search or a page fails\" above)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await makeWatch(t, userId);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+
+    const n = await searchOffers(runner(t), watchId); // default deps -- the real searchDep, not a test double
+    expect(n).toBe(0);
+    expect((await rows(t, watchId))).toEqual([]);
+    errors.mockRestore();
   });
 });

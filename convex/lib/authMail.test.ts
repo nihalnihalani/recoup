@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConvexError } from "convex/values";
 import { setup } from "../test.setup";
 import { internal } from "../_generated/api";
-import { authMail, authMailTransport } from "./authMail";
+import { authMail, authMailTransport, sendViaProvider } from "./authMail";
 
 /** `sendVerificationRequest` is typed with one declared parameter (the
  * library's own `EmailConfig` shape); the library actually calls it with an
@@ -293,5 +293,56 @@ describe("authMailTransport.send — D102: E2E code capture (E2E_SEED_ENABLED)",
     ).rejects.toThrow();
 
     expect(await readCapturedCode(t, email)).toBeNull();
+  });
+});
+
+describe("P10-OW-12: RECOUP_PROVIDER_MODE=stub", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    delete process.env.AGENTMAIL_API_KEY;
+    delete process.env.ALERTS_INBOX_ID;
+  });
+
+  it("sendViaProvider (the auth-code AgentMail-send call site) throws a stub error without ever calling fetch, even with real-looking credentials present", async () => {
+    process.env.AGENTMAIL_API_KEY = "a-real-looking-key";
+    process.env.ALERTS_INBOX_ID = "inbox-real";
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    // QA2-3: stub mode now refuses without a positive dev/E2E signal; supply the dev host.
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(sendViaProvider({ to: "user@example.com", kind: "verify", code: "12345678", expiresInMinutes: 15 })).rejects.toThrow(
+      /RECOUP_PROVIDER_MODE=stub/,
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("with E2E_SEED_ENABLED=true, a signUp's code send still records the code and succeeds under RECOUP_PROVIDER_MODE=stub, without ever calling fetch (real credentials present, unlike the keyless case above)", async () => {
+    process.env.E2E_SEED_ENABLED = "true";
+    process.env.CONVEX_SITE_URL = "https://adorable-lion-138.convex.site";
+    process.env.AGENTMAIL_API_KEY = "a-real-looking-key";
+    process.env.ALERTS_INBOX_ID = "inbox-real";
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const t = setup();
+    const email = "e2e-stub-capture@example.com";
+    const expires = new Date(Date.now() + 900_000);
+
+    await t.run(async (ctx) => {
+      await send("verify")({ identifier: email, token: "22334455", expires }, ctx);
+    });
+
+    const row = await t.run(async (ctx) =>
+      ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", `e2e:code:${email}`)).unique(),
+    );
+    expect(row?.cursor).toBe("22334455");
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    delete process.env.E2E_SEED_ENABLED;
+    delete process.env.CONVEX_SITE_URL;
   });
 });

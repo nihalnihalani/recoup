@@ -5,7 +5,7 @@ import type { Id } from "./_generated/dataModel";
 import { setup, signedIn, fakeSchedulerTimersEach, sleepReal } from "./test.setup";
 import { fetchBothImpl } from "./policies";
 import { activePack } from "./lib/rules/registry";
-import { CONFIRM_BEFORE_CHECK, MIN_PLAUSIBLE_FRACTION, implausiblyCheap } from "./priceWatch";
+import { CONFIRM_BEFORE_CHECK, MIN_PLAUSIBLE_FRACTION, implausiblyCheap, observePrice } from "./priceWatch";
 import {
   DAILY_BUDGETS,
   GLOBAL_DAILY_BUDGETS,
@@ -1306,5 +1306,40 @@ describe("implausiblyCheap (live 2026-09-20: a $449.99 mixer read as $1.00)", ()
   it("is quiet when there is nothing to judge", () => {
     expect(implausiblyCheap(undefined, 44_999)).toBeNull();
     expect(implausiblyCheap(100, 0)).toBeNull();
+  });
+});
+
+describe("P10-OW-12: RECOUP_PROVIDER_MODE=stub", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("observePrice (shared by priceWatch.checkItem and watches.checkWatch) throws a stub error before ever calling Firecrawl", async () => {
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    // QA2-3: stub mode now refuses without a positive dev/E2E signal; supply the dev host.
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // Stub mode throws before `ctx` is ever touched, so a bare object stands in for the real ActionCtx Firecrawl needs.
+    await expect(observePrice({} as never, "Trail runner", "https://acme.example/p/1")).rejects.toThrow(
+      /RECOUP_PROVIDER_MODE=stub.*acme\.example/,
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("checkItem's own try/catch turns that stub error into the same truthful \"Price check failed\" note a genuine Firecrawl failure already gets", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { itemId } = await world(t, userId);
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+
+    await t.action(internal.priceWatch.checkItem, { itemId });
+
+    const checks = await t.run((ctx) => ctx.db.query("priceChecks").withIndex("by_item", (q) => q.eq("itemId", itemId)).collect());
+    expect(checks).toHaveLength(1);
+    expect(checks[0].observedCents).toBeUndefined();
+    expect(checks[0].note).toMatch(/Price check failed/);
   });
 });

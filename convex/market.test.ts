@@ -3,7 +3,7 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { FIND_MARKER } from "./lib/offerMatch";
-import { OUT_OF_STOCK_NOTE } from "./market";
+import { fetchSnapshot, OUT_OF_STOCK_NOTE } from "./market";
 import { OUT_OF_STOCK_NOTE as OUT_OF_STOCK_NOTE_UI } from "../src/lib/offerNotes";
 import {
   DAILY_BUDGETS,
@@ -1418,5 +1418,26 @@ describe("P03-B (re-audit): removing the key never erases stored market state or
     const watchId = await seedWatch(t, userId);
     expect(await t.mutation(internal.market.requestLookup, { watchId, trigger: "auto" })).toEqual({ scheduled: false, state: "not_configured", reason: "not_configured" });
     expect((await watchRow(t, watchId)).marketState).toBe("not_configured");
+  });
+});
+
+describe("P10-OW-12: RECOUP_PROVIDER_MODE=stub", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("fetchSnapshot goes straight to not_configured -- even with a real key set -- and never calls fetch", async () => {
+    process.env.SHOPSAVVY_API_KEY = "a-real-looking-key"; // present, so a real call WOULD have been attempted if not stubbed
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    // QA2-3: stub mode now refuses without a positive dev/E2E signal (convex/lib/providerMode.ts); this test is
+    // about fetchSnapshot's own stub branch, not that signal, so supply the same dev host providerMode.test.ts uses.
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await fetchSnapshot(URL, T0);
+
+    expect(result).toEqual({ kind: "not_configured" });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

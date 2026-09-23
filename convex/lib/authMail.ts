@@ -47,6 +47,7 @@ import type { DataModel } from "../_generated/dataModel";
 import { internalMutation } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { rateLimiter } from "./rateLimits";
+import { providerStubMode, stubbedProviderError } from "./providerMode";
 import { VERIFICATION_CODE_TTL_S } from "../limits";
 
 export type AuthMailKind = "verify" | "reset";
@@ -165,7 +166,11 @@ export const authMailTransport = {
   },
 };
 
-async function sendViaProvider(args: { to: string; kind: AuthMailKind; code: string; expiresInMinutes: number }): Promise<void> {
+export async function sendViaProvider(args: { to: string; kind: AuthMailKind; code: string; expiresInMinutes: number }): Promise<void> {
+  // P10-OW-12: the auth-code send is an "AgentMail send" call site like any other. `authMailTransport.send`'s
+  // own caller (below) already tolerates a thrown failure here when `E2E_SEED_ENABLED=true` -- the exact
+  // deployment this stub is for -- by swallowing it and letting sign-up complete on the captured code alone.
+  if (providerStubMode()) throw stubbedProviderError("AgentMail send", args.kind);
   const apiKey = process.env.AGENTMAIL_API_KEY;
   const inboxId = process.env.ALERTS_INBOX_ID;
   if (!apiKey || !inboxId) {

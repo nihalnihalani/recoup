@@ -84,4 +84,21 @@ describe("extract", () => {
     const callArgs = parseMock.mock.calls[0][0];
     expect(callArgs.input[1].content.length).toBe(60_000);
   });
+
+  // P10-OW-12: `extract` is the single choke point for every OpenAI extract/draft call in the app
+  // (policies.researchPolicy, priceWatch.observePrice, offers-adjacent price reads, replies, drafts.generate).
+  it("P10-OW-12: RECOUP_PROVIDER_MODE=stub throws a stub error without ever calling the OpenAI client", async () => {
+    process.env.OPENAI_API_KEY = "test-key"; // present, so a real call WOULD have been attempted if not stubbed
+    vi.stubEnv("RECOUP_PROVIDER_MODE", "stub");
+    // QA2-3: stub mode now refuses without a positive dev/E2E signal; supply the dev host.
+    vi.stubEnv("CONVEX_SITE_URL", "https://adorable-lion-138.convex.site");
+    try {
+      await expect(extract("draft", Simple, "system prompt", "user content")).rejects.toThrow(
+        /RECOUP_PROVIDER_MODE=stub.*draft/,
+      );
+      expect(parseMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });

@@ -6,6 +6,7 @@ import type { ActionCtx, MutationCtx, QueryCtx } from "./_generated/server";
 import { components, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { extract } from "./lib/ai";
+import { providerStubMode, stubbedProviderError } from "./lib/providerMode";
 import { Policy } from "./lib/schemas";
 import type { PolicyT } from "./lib/schemas";
 import { verifyPassage } from "./lib/passage";
@@ -78,8 +79,18 @@ export type ResearchDeps = {
   extract: typeof extract;
 };
 
+/**
+ * P10-OW-12: the Firecrawl-search choke point for `researchPolicy`. Its own caller below already treats a
+ * thrown search error as a genuine Firecrawl failure and records a confidence-0 "no policy page found"
+ * snapshot (never a fabricated policy), so a stubbed run takes that same, already-tested path.
+ */
+export async function searchDep(ctx: ActionCtx, query: string, options?: Parameters<FirecrawlClient["search"]>[2]): Promise<SearchResponse> {
+  if (providerStubMode()) throw stubbedProviderError("Firecrawl search", query.slice(0, 80));
+  return firecrawl.search(ctx, query, options);
+}
+
 const defaultDeps: ResearchDeps = {
-  search: firecrawl.search.bind(firecrawl),
+  search: searchDep,
   extract,
 };
 

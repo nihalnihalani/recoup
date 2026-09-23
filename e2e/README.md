@@ -5,6 +5,87 @@ on `http://localhost:5173`) talking to the disposable Convex dev deployment
 `adorable-lion-138` (D83 item 3). There is no mock backend and no test
 build: every spec exercises the actual UI and the actual Convex functions.
 
+## Provider stub mode (`RECOUP_PROVIDER_MODE`, P10-OW-12)
+
+**`adorable-lion-138` now carries real Firecrawl/OpenAI/ShopSavvy/AgentMail
+keys** (this changed after this suite was first written — see "Why
+provider-dependent steps assert an error state" below for the history). A
+run of this suite against that deployment MUST set `RECOUP_PROVIDER_MODE=stub`
+in the deployment's own environment, or every provider-backed step (a fresh
+watch's first price check, "I bought it", "Check price now", draft
+generation, a claim/drop email, inbox provisioning) makes a real,
+quota-spending, possibly-merchant-facing call.
+
+- **`e2e/global-setup.ts` enforces this itself**, before any spec runs: it
+  calls `convex/testing.ts`'s `providerMode` query (gated exactly like every
+  other export there — `E2E_SEED_ENABLED=true`, never the production host)
+  and fails the whole Playwright run if the target does not report
+  `"stub"`. There is no way to accidentally run the mocked suite against a
+  non-stub deployment; the run refuses to start.
+- **Stub mode is fail-closed by default, not just against production**
+  (`convex/lib/providerMode.ts`, QA2-3): every call site checks
+  `providerStubMode()` on every call, and that function throws (and logs
+  loudly) rather than ever returning `true` UNLESS there is a *positive*
+  dev/E2E signal — `CONVEX_SITE_URL` is `adorable-lion-138` (the same
+  `isDevDeployment` check `convex/http.ts`'s CORS allowlist uses) **or**
+  `E2E_SEED_ENABLED=true` (never set on production) — and, even then, still
+  refuses outright if `CONVEX_SITE_URL` matches the documented production
+  host (`cool-oyster-399`), defense in depth. An unset, unknown or
+  mis-configured deployment refuses by default; it does not silently enter
+  stub mode.
+- **Setting the flag is a lead/ops action**, not something a test run or
+  this file can do: set the environment variable `RECOUP_PROVIDER_MODE` to
+  the exact string `stub` on `adorable-lion-138`. See the "Provider call
+  sites" list below for exactly what that flag changes.
+- **The live-provider smoke spec is the opposite case**: `e2e/smoke/live-provider.spec.ts`
+  (P10-OW-12b) exists specifically to run against a deployment that is
+  **NOT** in stub mode, and refuses to run against `adorable-lion-138` or
+  the production host. It is opt-in only (`RECOUP_LIVE_SMOKE=1` plus two
+  more env vars — see that file's own header) and never runs in CI.
+  It runs under its **own** Playwright config, `playwright.smoke.config.ts`
+  — `npx playwright test --config=playwright.smoke.config.ts` — never under
+  the plain `npx playwright test` above (QA2-1): the main config's
+  `globalSetup` *requires* stub mode, the opposite of what this spec needs,
+  so the two configs partition `e2e/` (`testIgnore: "smoke/**"` on the main
+  one, `testDir: "./e2e/smoke"` on the smoke one) rather than ever both
+  applying to one run. `convex/lib/e2eSmokeSeparation.static.test.ts` pins
+  that split staying true.
+
+### Provider call sites this covers
+
+Every outbound Firecrawl/OpenAI/ShopSavvy/AgentMail-**send** call in `convex/`
+checks `providerStubMode()` (`convex/lib/providerMode.ts`) before it fires:
+
+| Provider call | File | What stub mode does instead |
+| --- | --- | --- |
+| OpenAI extract/draft | `convex/lib/ai.ts` `extract()` (single choke point: `policies.ts`, `priceWatch.ts`, `offers.ts`-adjacent price reads, `replies.ts`, `drafts.ts generate` all call this) | Throws a stub error; each caller's own already-tested failure path records it (never a fabricated extraction) |
+| Firecrawl scrape | `convex/priceWatch.ts` `observePrice()` (shared by `priceWatch.checkItem` and `watches.checkWatch`) | Throws; recorded as a truthful "Price check failed" note, same as any real scrape failure |
+| Firecrawl search | `convex/offers.ts` `searchDep()`, `convex/policies.ts` `searchDep()` | Throws; each caller's own catch records a "search failed" / confidence-0 outcome |
+| ShopSavvy | `convex/market.ts` `fetchSnapshot()` | Returns `{ kind: "not_configured" }` — the same calm no-op a genuinely unset key already produces |
+| AgentMail inbox creation | `convex/profiles.ts` `createInboxRemote()` | Returns a **fixed success**: a deterministic, per-user synthetic inbox on the reserved `inbox.e2e.example` domain (every flow downstream of having an inbox needs one to work with) |
+| AgentMail send (claim email) | `convex/drafts.ts` `enqueueClaimEmail()` | Throws before the component call; no e2e spec today reaches a confirmed-recipient send, so this changes no currently-tested behavior |
+| AgentMail send (price-drop alert) | `convex/notify.ts` `sendDrop()` | Throws inside the existing try/catch; recorded as `status: "failed", reason: "send_failed"`, same as a real send failure |
+| AgentMail send (auth verify/reset code) | `convex/lib/authMail.ts` `sendViaProvider()` | Throws; `authMailTransport.send`'s existing `E2E_SEED_ENABLED` catch swallows it exactly as it already does for a keyless deployment |
+
+**Known gap, not yet fully closed (QA2-4):** `convex/account.ts`'s
+`inboxTransport.deleteInbox` (a raw AgentMail `DELETE`) does **not** check
+`providerStubMode()`. `convex/profiles.ts`'s `ensureInbox` race-loser path
+(the one call site this lane owns) now skips it in stub mode — the inbox it
+would delete there is always one THIS call itself just created, so in stub
+mode it is always a synthetic `stub-inbox-*` id, never a real one. The
+account-deletion purge call site (`convex/account.ts`, owned by a different
+lane) is **still unguarded**: an account purge that races stub mode being on
+would issue a real `DELETE` for a `stub-inbox-*` id. No current spec reaches
+that path, so the risk is latent, not exercised by this suite today — see
+this lane's report for the requested follow-up.
+
+Unit tests for every one of these live next to the real call: `convex/lib/providerMode.test.ts` (the
+core switch) plus a `describe("P10-OW-12: RECOUP_PROVIDER_MODE=stub", ...)`
+block in `convex/lib/ai.test.ts`, `convex/priceWatch.test.ts`,
+`convex/market.test.ts`, `convex/offers.test.ts`, `convex/policies.test.ts`,
+`convex/profiles.test.ts`, `convex/lib/authMail.test.ts`,
+`convex/notify.test.ts`, `convex/drafts.test.ts` and `convex/testing.test.ts`.
+
 ## Running locally
 
 ```sh
@@ -38,10 +119,11 @@ file.
   `E2E_SEED_ENABLED=true`, and `e2e/fixtures.ts` adds its own client-side
   check on top (`assertSafeDeployment`, fails fast with a clear message
   instead of relying only on the server-side guard).
-- Placeholder values for the mail/AI/scrape provider keys (AgentMail,
-  OpenAI, Firecrawl/ShopSavvy) rather than real ones. See "Why provider
-  steps assert error states" below — this is intentional, not a
-  misconfiguration to fix.
+- `RECOUP_PROVIDER_MODE=stub` (P10-OW-12, see above). The deployment now
+  carries **real** mail/AI/scrape provider keys (AgentMail, OpenAI,
+  Firecrawl/ShopSavvy), so this flag — not a placeholder key — is what keeps
+  the mocked suite from making live provider calls. `e2e/global-setup.ts`
+  refuses to run the suite at all if this is not set to `"stub"`.
 - No production host anywhere in the chain: not as `CONVEX_DEPLOYMENT`, not
   as `VITE_CONVEX_URL`/`VITE_CONVEX_SITE_URL` in `.env.local`, not as
   `E2E_BASE_URL`.
@@ -78,16 +160,23 @@ human operator would use, because `convex/testing.ts`'s exports are
 
 ## Why provider-dependent steps assert an error state, not success
 
-`adorable-lion-138`'s AgentMail/OpenAI/ShopSavvy keys are placeholders (D83
-item 3), so any step that actually calls one of those providers — a fresh
-watch's first price check, "Check price now", draft generation (`Write the
-message`) — genuinely fails on this deployment. The suite treats that as the
-**correct, expected outcome** and asserts the truthful failure state the UI
-is supposed to show (a real note like "No price last time: …", a rendered
-`ErrorBox`/`role=alert`), never a fabricated success. This mirrors D104: real
-provider calls stay in a separate, untagged `smoke` suite (not part of this
-one, and not yet written — nothing in this deployment's current scope needs
-it) that would run with real keys and is never part of CI.
+Originally (D83 item 3) `adorable-lion-138`'s AgentMail/OpenAI/ShopSavvy
+keys were placeholders, so any step that actually called one of those
+providers genuinely failed on this deployment, for real. **That is no
+longer true of the keys** — the deployment now carries real ones — **but it
+is still true of the suite's behavior**, now via `RECOUP_PROVIDER_MODE=stub`
+(P10-OW-12, see above) rather than an absent key: every provider call site
+still throws (or, for inbox creation, returns a fixed stand-in) instead of
+reaching the real provider, so a fresh watch's first price check, "Check
+price now" and draft generation (`Write the message`) still, deliberately,
+fail. The suite treats that as the **correct, expected outcome** and asserts
+the truthful failure state the UI is supposed to show (a real note like "No
+price last time: …", a rendered `ErrorBox`/`role=alert`), never a fabricated
+success. This mirrors D104: real provider calls stay in a separate suite,
+`e2e/smoke/live-provider.spec.ts` (P10-OW-12b) — opt-in only
+(`RECOUP_LIVE_SMOKE=1` plus two more env vars, see that file's header),
+never part of CI, and refuses to run against `adorable-lion-138` or
+production.
 
 Two consequences worth knowing before you touch these specs:
 
@@ -157,8 +246,11 @@ look like real regressions, not evidence of a new defect.
   green job that ran nothing (KC1; kept by
   `convex/testing/ciWorkflow.static.test.ts`). When it runs, it uploads `playwright-report/` as a build
   artifact. The dedicated deployment needs `E2E_SEED_ENABLED=true`,
-  placeholder provider keys and the commit's functions already deployed; the
-  job does not deploy.
+  `RECOUP_PROVIDER_MODE=stub` (P10-OW-12, see above — `e2e/global-setup.ts`
+  now refuses the whole run without it, on any deployment), placeholder or
+  real provider keys (stub mode makes the distinction irrelevant for this
+  job) and the commit's functions already deployed; the job does not
+  deploy.
 
 ## File map
 
@@ -188,6 +280,12 @@ look like real regressions, not evidence of a new defect.
 - `e2e/isolation.spec.ts` — user B cannot reach user A's purchase/claim by
   URL and sees none of A's data; A's board/watchlist never surfaces
   something B created.
+- `e2e/global-setup.ts` — fails the whole run before any spec starts unless
+  the target deployment reports `RECOUP_PROVIDER_MODE=stub` (P10-OW-12).
+- `e2e/smoke/live-provider.spec.ts` — the separate, opt-in, never-in-CI
+  live-provider smoke spec (P10-OW-12b); see its own header. Run only via
+  `npx playwright test --config=playwright.smoke.config.ts` (QA2-1) — the
+  plain `npx playwright test` above never reaches it (`testIgnore`).
 
 ## Test triage: `test.fixme` vs a truthful pass
 
@@ -199,8 +297,8 @@ look like real regressions, not evidence of a new defect.
   "Known findings" below) — they are not weakened assertions, they are the
   real `expect(serious).toEqual([])` check, just not required to pass until
   the defect they found is fixed.
-- A step that is **provider-dependent** (calls OpenAI/Firecrawl/AgentMail
-  with this deployment's placeholder keys) is never skipped: the spec
+- A step that is **provider-dependent** (calls OpenAI/Firecrawl/AgentMail,
+  stubbed via `RECOUP_PROVIDER_MODE=stub`, P10-OW-12) is never skipped: the spec
   asserts the truthful failure state instead (see "Why provider-dependent
   steps..." above). `claims.spec.ts`'s draft-generation test is the
   clearest example — it is written to pass either way (truthful failure, or
@@ -240,10 +338,11 @@ look like real regressions, not evidence of a new defect.
   (account export/deletion UI) ship.
 - The recipient-confirm-checkbox and approve-without-confirming flow in
   `claims.spec.ts` is only exercised end-to-end when draft generation
-  actually succeeds, which it does not on `adorable-lion-138` with a
-  placeholder OpenAI key (see above). A future `smoke`-style run against a
-  deployment with a real key would additionally exercise that branch for
-  real every time.
+  actually succeeds, which it does not under `RECOUP_PROVIDER_MODE=stub`
+  (see above — `adorable-lion-138` now has a real OpenAI key, but the mocked
+  suite must never spend it). `e2e/smoke/live-provider.spec.ts` (P10-OW-12b)
+  exercises approve/enqueue for real, opt-in only, against a deployment with
+  a real key and NOT in stub mode.
 - `resilience.spec.ts` covers Board/Watching/Settings/a Purchase/a Claim for
   axe; it does not scan the sign-in screen itself (unauthenticated) or the
   error-boundary fallback screens — both are small enough surfaces that a

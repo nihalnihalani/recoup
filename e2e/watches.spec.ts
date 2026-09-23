@@ -1,8 +1,11 @@
 /**
- * T20 watches.spec (D104). The dev deployment's scrape/AI/mail provider keys
- * are placeholders (adorable-lion-138, D83 item 3) so every provider-backed
- * step here genuinely fails -- the assertions below are written against that
- * truthful failure, never a faked success. `pause`/`resume` and `checkNow`
+ * T20 watches.spec (D104). P10-OW-12 (2026-09-23 re-audit): the dev
+ * deployment (`adorable-lion-138`) now carries REAL scrape/AI/mail provider
+ * keys, not placeholders -- `RECOUP_PROVIDER_MODE=stub` (enforced by
+ * `e2e/global-setup.ts` before any spec runs; see `e2e/README.md`) is what
+ * makes every provider-backed step below genuinely fail, deterministically
+ * and with zero live calls, instead of a real key. The assertions below are
+ * written against that truthful failure, never a faked success. `pause`/`resume` and `checkNow`
  * are pure Convex mutations with no provider dependency and are asserted
  * for real. "I bought it" is exercised on a fresh watch created in-test
  * (never the shared seeded fixture) so this file cannot destructively

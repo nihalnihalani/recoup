@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import type { z } from "zod";
+import { providerStubMode, stubbedProviderError } from "./providerMode";
 
 /** Validated against platform.openai.com/docs/models on 2026-09-20 (DECISIONS D05). Single place to change. */
 export const MODEL = "gpt-5.6-terra";
@@ -15,6 +16,9 @@ function openai() {
 
 /** Untrusted content goes in `user`; instructions only in `system`. Output is validated by zod and is proposed data, never authority. */
 export async function extract<T extends z.ZodTypeAny>(name: string, schema: T, system: string, user: string): Promise<z.infer<T>> {
+  // P10-OW-12: the single choke point for every OpenAI extract/draft call in the app (policies, priceWatch,
+  // offers-adjacent price reads, replies, drafts.generate all call this, never the OpenAI client directly).
+  if (providerStubMode()) throw stubbedProviderError("OpenAI", name);
   const res = await openai().responses.parse({
     model: MODEL,
     // P09-SK-1: the Responses API STORES the request and response for later retrieval unless told not to ("Defaults to
