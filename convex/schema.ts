@@ -633,7 +633,16 @@ export default defineSchema({
     summary: v.optional(v.string()), payload: v.optional(v.any()),
     /** When the row last entered `processing`; stuck detection compares against this, not `_creationTime` (review H5). */
     processingStartedAt: v.optional(v.number()),
-  }).index("by_external", ["externalId"]).index("by_status", ["status"]).index("by_user_status", ["userId", "status"]),
+    /**
+     * P07-SK-1: when a budget refusal last paused the row (`summary` is `BUDGET_PAUSED_SUMMARY` or
+     * `PER_USER_BUDGET_PAUSED_SUMMARY`), re-stamped when `intake.retryFailed` skips it for the per-user cap so every
+     * user rotates to the front. Cleared when the row is retried. Absent on rows paused before the field existed,
+     * which the index below still finds, first.
+     */
+    pausedAt: v.optional(v.number()),
+  }).index("by_external", ["externalId"]).index("by_status", ["status"]).index("by_user_status", ["userId", "status"])
+    /** P07-SK-1: the budget-paused rows alone, oldest pause first; the pause marker is the summary (see `intake.ts`). */
+    .index("by_status_and_summary_and_paused_at", ["status", "summary", "pausedAt"]),
 
   /** Account-deletion tombstone (D77); absence of a row means the account is active. */
   accountState: defineTable({

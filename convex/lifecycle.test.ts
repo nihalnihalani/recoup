@@ -290,7 +290,7 @@ describe("tombstoned account: scheduled/webhook readers skip it (D87)", () => {
 
     await tombstone(a.as);
 
-    const result = await t.mutation(internal.intake.retryFailed, {});
+    const result = await t.action(internal.intake.retryFailed, {});
     expect(result.retried).toBe(0);
 
     const row = await t.run((ctx) => ctx.db.get(rowId));

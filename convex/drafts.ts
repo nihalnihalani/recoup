@@ -16,7 +16,7 @@ import { ownedClaim, requireUserId } from "./lib/access";
 import { isClosedForAsk } from "./lib/claimState";
 import { balanceValidator, claimBalance } from "./lib/balance";
 import { extract } from "./lib/ai";
-import { DraftOut } from "./lib/schemas";
+import { DraftOut, type DraftOutT } from "./lib/schemas";
 import { agentmail } from "./mail";
 import { scheduleClaimReminder } from "./followUps";
 import { charge } from "./lib/budget";
@@ -47,6 +47,8 @@ const MAX_SUBJECT_CHARS = 80;
 const MAX_BODY_CHARS = 1_200;
 const MAX_ERROR_CHARS = 1_000;
 const MAX_NOTE_CHARS = 500;
+/** P10-MW-2: the only copy `generate` ever shows the claim page when its model call fails, dev or production. */
+export const DRAFT_GENERATE_FAILED_MESSAGE = "Couldn't write the message right now. Try again later.";
 /** How many policy snapshots per kind we scan for a user-confirmed contact. */
 const POLICY_SCAN = 20;
 
@@ -444,7 +446,19 @@ export const generate = action({
     }
     await ctx.runMutation(internal.budget.consume, { userId, kind: "draft_generate" });
 
-    const out = item && purchase ? await writeRetail(c, item, purchase) : await writeScenario(c);
+    // P10-MW-2 (re-audit): `extract()` (OpenAI) is the only provider-backed public action that did not sanitize
+    // its own failure. Uncaught, the claim page showed the raw provider text, a masked key fragment or a bare
+    // stack line depending on environment. Budget policy: no refund primitive exists anywhere in this codebase
+    // for a paid call that fails after `consume` above (nothing un-charges a failed `extraction_failed` call
+    // elsewhere either) -- the charge stays spent, same as every other paid call in Recoup that fails after
+    // it is taken.
+    let out: DraftOutT;
+    try {
+      out = item && purchase ? await writeRetail(c, item, purchase) : await writeScenario(c);
+    } catch (err) {
+      logEvent("extraction_failed", { claimId, stage: "draft_generate", error: sanitizeError(err instanceof Error ? err.message : String(err)) });
+      throw new ConvexError(DRAFT_GENERATE_FAILED_MESSAGE);
+    }
     const subject = `${out.subject.replace(/[[\]]/g, "").trim().slice(0, MAX_SUBJECT_CHARS)} [RC-${claim.token}]`;
     const body = out.body.trim().slice(0, MAX_BODY_CHARS);
 

@@ -34,7 +34,7 @@ import { queueTextSecondStage, recordTextEvidence, STATUS_SUMMARY, TEXT_EXTRACTO
 import { candidatesFromDoc, type DocCandidate } from "./lib/docFacts";
 import { boundExtracted, CLASSIFIER_SYSTEM, DocClassification, DOC_SCHEMAS, DOC_SYSTEMS, type ExtractableDocType } from "./lib/schemas_docs";
 import { textLayerHasPan } from "./lib/sniff";
-import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS, MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER, RETENTION_PAYLOAD_DAYS } from "./limits";
+import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS, MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER, PROCESSED_EVENTS_PAGE, RETENTION_PAYLOAD_DAYS } from "./limits";
 
 /**
  * What the model is told. The email itself is untrusted content and goes in
@@ -54,8 +54,12 @@ const MAX_CENTS = 100_000_000;
 const MAX_QTY = 10_000;
 /** Bounded read of the user's purchases when matching a refund to an order. */
 const PURCHASE_SCAN_LIMIT = 200;
-/** Rows shown in the board's "needs attention" list. */
-const ATTENTION_LIMIT = 50;
+/**
+ * Rows shown in the board's "needs attention" list, per status. P07-W4: each row is read whole (payload included), so
+ * this is the byte-safe `PROCESSED_EVENTS_PAGE` (25): two statuses of maximum-size CJK rows stay near 9 MB, under the
+ * 16 MiB read limit (50 + 50 threw).
+ */
+const ATTENTION_LIMIT = PROCESSED_EVENTS_PAGE;
 const MIN_PASTE_CHARS = 40;
 const MAX_PASTE_CHARS = 60_000;
 
@@ -138,7 +142,7 @@ export const pauseForBudget = internalMutation({
   handler: async (ctx, { processedEventId }) => {
     const row = await ctx.db.get(processedEventId);
     if (!row) return null;
-    await ctx.db.patch(processedEventId, { status: "needs_review", summary: BUDGET_PAUSED_SUMMARY, lastError: undefined });
+    await ctx.db.patch(processedEventId, { status: "needs_review", summary: BUDGET_PAUSED_SUMMARY, lastError: undefined, pausedAt: Date.now() });
     return null;
   },
 });
@@ -150,7 +154,7 @@ export const pauseForUserBudget = internalMutation({
   handler: async (ctx, { processedEventId }) => {
     const row = await ctx.db.get(processedEventId);
     if (!row) return null;
-    await ctx.db.patch(processedEventId, { status: "needs_review", summary: PER_USER_BUDGET_PAUSED_SUMMARY, lastError: undefined });
+    await ctx.db.patch(processedEventId, { status: "needs_review", summary: PER_USER_BUDGET_PAUSED_SUMMARY, lastError: undefined, pausedAt: Date.now() });
     return null;
   },
 });
@@ -258,11 +262,11 @@ export const beginEvent = internalMutation({
     // exhausting the shared switch alone) and gets its own distinct
     // summary and no global-pause marker.
     if (!(await reserveInboundExtractForUser(ctx, row.userId))) {
-      await ctx.db.patch(processedEventId, { status: "needs_review", summary: PER_USER_BUDGET_PAUSED_SUMMARY });
+      await ctx.db.patch(processedEventId, { status: "needs_review", summary: PER_USER_BUDGET_PAUSED_SUMMARY, pausedAt: Date.now() });
       return null;
     }
     if (!(await reserveInboundExtractBudget(ctx))) {
-      await ctx.db.patch(processedEventId, { status: "needs_review", summary: BUDGET_PAUSED_SUMMARY });
+      await ctx.db.patch(processedEventId, { status: "needs_review", summary: BUDGET_PAUSED_SUMMARY, pausedAt: Date.now() });
       return null;
     }
     await ctx.db.patch(processedEventId, {
@@ -1221,16 +1225,22 @@ export const confirmRefundEmail = mutation({
   },
 });
 
-/** How many failed or stuck rows one tick looks at; the rest wait for the next tick. */
+/** How many failed or stuck rows one tick looks at, per pass; the rest wait for the next tick. */
 const RETRY_PAGE = 50;
+/**
+ * P07-W1: rows one `retryFailedPage`/`retryPausedPage` call reads. Convex has no projections: every row is read
+ * whole, `payload` included (up to ~180 KB of CJK text), so one call reads one byte-safe `PROCESSED_EVENTS_PAGE`
+ * (25 rows, ~4.5 MB) and the tick (`retryFailed`, an action) runs as many calls as the caps below allow, each its own
+ * transaction. The old single mutation read up to 400 whole rows and threw "Read too much data" from about 93
+ * maximum-size CJK rows, which stopped every user's retries every hour.
+ */
+const RETRY_READ_PAGE = PROCESSED_EVENTS_PAGE;
 /** A row still `processing` after this long lost its action (timeout or redeploy); review M2. */
 const STUCK_AFTER_MS = 15 * 60_000;
 /**
- * D112 6a-2: scan window for the budget-paused round-robin below. Bounded
- * (never an unbounded scan), but wide enough that a single flooder's
- * backlog (the checkpoint's own DA repro: 60 rows from one user) does not
- * stop the scan from reaching an older row belonging to somebody else in
- * the same hourly pass.
+ * D112 6a-2 / P07-SK-1: paused rows one tick scans, across both pause lists. Bounded (never an unbounded scan); a
+ * user whose rows are skipped for the per-user cap is rotated to the back (see `retryPausedPage`), so a backlog
+ * larger than this still reaches every other user's row within a bounded number of ticks.
  */
 const BUDGET_PAUSE_SCAN_LIMIT = 300;
 /**
@@ -1242,6 +1252,224 @@ const BUDGET_PAUSE_SCAN_LIMIT = 300;
  * rather than spending the rest of the pass on that one user.
  */
 const BUDGET_RETRY_PER_USER = 5;
+
+/** A row nothing can re-run automatically (never routed, or a reply with no message id). */
+const NOT_RERUNNABLE_SUMMARY = "This message could not be routed and cannot be re-read automatically.";
+
+/**
+ * P07-SK-1: the two pause lists, each read through `by_status_and_summary_and_paused_at`. The summary IS the pause
+ * marker (D76: `beginEvent`, `pauseForBudget` and `pauseForUserBudget` are its only writers), so the index reads paused
+ * rows alone, never the ordinary `needs_review` rows (orders, "other" mail) that used to fill the scan window.
+ */
+const PAUSE_LISTS = { global: BUDGET_PAUSED_SUMMARY, user: PER_USER_BUDGET_PAUSED_SUMMARY } as const;
+const pauseList = v.union(v.literal("global"), v.literal("user"));
+const userCounts = v.array(v.object({ userId: v.id("users"), count: v.number() }));
+type UserCounts = { userId: Id<"users">; count: number }[];
+
+type ProcessedEvent = Doc<"processedEvents">;
+
+function payloadField(row: ProcessedEvent, key: string): string {
+  const payload = (row.payload ?? {}) as Record<string, unknown>;
+  return typeof payload[key] === "string" ? (payload[key] as string) : "";
+}
+
+/**
+ * F1 (D266 audit): retention clears a row's `text` once it is `RETENTION_PAYLOAD_DAYS` old (`sweepProcessedEvents`
+ * in retention.ts), so a `failed` row (not yet at `MAX_ATTEMPTS`) or a budget-paused row can sit past that window
+ * with nothing left to read. Without this guard, `processEvent`/`replies.classify` would be rescheduled anyway and
+ * run on empty text -- a real, charged model call over nothing (`beginEvent` never checks payload content, only
+ * attempts/budget/tombstone).
+ */
+function isPayloadCleared(row: ProcessedEvent): boolean {
+  return typeof (row.payload as Record<string, unknown> | undefined)?.text !== "string";
+}
+
+/** Schedules `replies.classify` for a reply row that has its claim and message id. */
+async function scheduleClassify(ctx: MutationCtx, row: ProcessedEvent, claimId: Id<"claims">): Promise<void> {
+  await ctx.scheduler.runAfter(0, internal.replies.classify, {
+    processedEventId: row._id,
+    claimId,
+    messageId: payloadField(row, "messageId"),
+    from: payloadField(row, "from"),
+    subject: payloadField(row, "subject"),
+    text: payloadField(row, "text"),
+  });
+}
+
+/**
+ * The failed pass for one row (points 2 and 3 of `retryFailed`'s docstring). Returns whether it re-ran the row.
+ */
+async function retryFailedRow(ctx: MutationCtx, row: ProcessedEvent, now: number): Promise<boolean> {
+  if (!row.userId) {
+    if (now - row._creationTime >= OWNERLESS_AFTER_MS) {
+      await ctx.db.patch(row._id, { status: "succeeded", summary: "Ignored: no matching inbox" });
+    }
+    return false;
+  }
+  // D87 (D103): never spend a retry (a model call) on a user whose
+  // account is being deleted, and leave the `failed` page the same way
+  // the "out of attempts"/"nothing to re-run" branches below do --
+  // otherwise a backlog of a tombstoned user's rows would occupy this
+  // same bounded page on every tick, the same starvation shape F1/F2
+  // fixed for the price/watch sweeps.
+  if (await isTombstoned(ctx, row.userId)) {
+    await ctx.db.patch(row._id, { status: "succeeded", summary: "Ignored: account deleted" });
+    return false;
+  }
+  if (row.attempts >= MAX_ATTEMPTS) {
+    await ctx.db.patch(row._id, {
+      status: "needs_review",
+      summary: `This email could not be read after ${MAX_ATTEMPTS} attempts. You can try it again by hand.`,
+    });
+    return false;
+  }
+  const payloadCleared = isPayloadCleared(row);
+  if (row.route === "intake" && !payloadCleared) {
+    await ctx.db.patch(row._id, { status: "received", lastError: undefined });
+    await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId: row._id });
+    return true;
+  }
+  if (row.route === "reply" && row.claimId && payloadField(row, "messageId") && !payloadCleared) {
+    await ctx.db.patch(row._id, {
+      status: "processing",
+      processingStartedAt: now,
+      lastError: undefined,
+      attempts: row.attempts + 1,
+    });
+    await scheduleClassify(ctx, row, row.claimId);
+    return true;
+  }
+  // Nothing here can be re-run: never routed, a reply with no message id, or (F1) content already cleared.
+  await ctx.db.patch(row._id, {
+    status: "needs_review",
+    summary: payloadCleared ? PAYLOAD_CLEARED_MESSAGE : (row.summary ?? NOT_RERUNNABLE_SUMMARY),
+  });
+  return false;
+}
+
+const pageCursor = v.union(v.string(), v.null());
+
+/**
+ * P07-W1: one byte-safe page of `retryFailed`'s processing or failed pass (points 1-3 of its docstring). Internal:
+ * `retryFailed` is the only caller, and it passes back the returned `cursor` until the pass is done or its cap is met.
+ */
+export const retryFailedPage = internalMutation({
+  args: { pass: v.union(v.literal("processing"), v.literal("failed")), cursor: pageCursor },
+  returns: v.object({ unstuck: v.number(), retried: v.number(), examined: v.number(), cursor: pageCursor }),
+  handler: async (ctx, { pass, cursor }) => {
+    const now = Date.now();
+    const page = await ctx.db
+      .query("processedEvents")
+      .withIndex("by_status", (q) => q.eq("status", pass))
+      .paginate({ cursor, numItems: RETRY_READ_PAGE });
+    let unstuck = 0;
+    let retried = 0;
+    for (const row of page.page) {
+      if (pass === "processing") {
+        if (now - (row.processingStartedAt ?? row._creationTime) < STUCK_AFTER_MS) continue;
+        await ctx.db.patch(row._id, { status: "failed", lastError: "Timed out while being read" });
+        unstuck++;
+      } else if (await retryFailedRow(ctx, row, now)) {
+        retried++;
+      }
+    }
+    return { unstuck, retried, examined: page.page.length, cursor: page.isDone ? null : page.continueCursor };
+  },
+});
+
+/**
+ * P07-SK-1 (D76/Invariant 10, D112 6a-2): one byte-safe page of `retryFailed`'s budget-paused pass, point 4 of its
+ * docstring. Reads one pause list only, oldest pause first; a row paused before `pausedAt` existed has none and sorts
+ * first. `before` is the tick's start: a row this tick re-stamps (rotation) or a pause written during the tick falls
+ * outside the range, so no row is read twice in one tick. Internal: `retryFailed` is the only caller.
+ */
+export const retryPausedPage = internalMutation({
+  args: {
+    list: pauseList,
+    cursor: pageCursor,
+    before: v.number(),
+    /** Retries (and tombstone closures) already counted against each user this tick. */
+    perUser: userCounts,
+    /** How many more rows this tick may retry (`RETRY_PAGE` in total). */
+    room: v.number(),
+  },
+  returns: v.object({ retried: v.number(), examined: v.number(), cursor: pageCursor, perUser: userCounts }),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const page = await ctx.db
+      .query("processedEvents")
+      .withIndex("by_status_and_summary_and_paused_at", (q) =>
+        // `lte`, not `lt`: `args.before` is `Date.now()` read once at the top of `retryFailed`, and a pause
+        // (`beginEvent`/`pauseForBudget`/`pauseForUserBudget`) that lands in the same millisecond -- entirely
+        // possible, since `Date.now()` is millisecond-granular and the two calls can be microseconds apart --
+        // must still be read THIS tick, not stranded a whole hour. Same-tick rotation (below) is kept out of
+        // this range a different way: by the value it re-stamps to, not by this comparison being strict.
+        q.eq("status", "needs_review").eq("summary", PAUSE_LISTS[args.list]).lte("pausedAt", args.before),
+      )
+      .paginate({ cursor: args.cursor, numItems: RETRY_READ_PAGE });
+    const used = new Map(args.perUser.map((u) => [u.userId, u.count]));
+    let retried = 0;
+    let examined = 0;
+    for (const row of page.page) {
+      if (retried >= args.room) break; // this tick's total is spent; the rest wait for the next tick.
+      examined++;
+      if (!row.userId) {
+        await ctx.db.patch(row._id, { summary: NOT_RERUNNABLE_SUMMARY, pausedAt: undefined });
+        continue;
+      }
+      const count = used.get(row.userId) ?? 0;
+      if (count >= BUDGET_RETRY_PER_USER) {
+        // This user's share is full. Rotation: re-stamp the row so it moves behind every other user's paused rows
+        // (and out of this tick's range); a backlog larger than one tick's scan therefore cannot keep a newer row of
+        // another user out of reach forever (the priceWatch T12 rotation-stamp pattern). Stamped to `before + 1`,
+        // not a fresh `Date.now()`: under the `lte` comparison above, `before + 1` is guaranteed greater than
+        // `args.before` for every call in THIS tick regardless of clock resolution, so a rotated row cannot be
+        // re-read until a later tick reads a fresh, larger `before` -- a real `Date.now()` call here could tie
+        // with `args.before` (same millisecond) and be read again on the very next page.
+        await ctx.db.patch(row._id, { pausedAt: args.before + 1 });
+        continue;
+      }
+      used.set(row.userId, count + 1);
+      if (await isTombstoned(ctx, row.userId)) {
+        await ctx.db.patch(row._id, { status: "succeeded", summary: "Ignored: account deleted", pausedAt: undefined });
+        continue;
+      }
+      // NOT charged against `attempts`: a budget refusal, per-user or global, is never this row's own failed attempt.
+      // F1 (D266 audit): retention's needs_review clear also retitles a budget-paused row's summary away from
+      // BUDGET_PAUSED_SUMMARY/PER_USER_BUDGET_PAUSED_SUMMARY (sweepProcessedEvents), so a freshly cleared row no
+      // longer matches this list's index query going forward. This is defence in depth for a row whose summary
+      // still reads budget-paused despite a cleared payload: never reschedule `processEvent`/`replies.classify` on
+      // missing text -- that would be a real, charged model call over nothing.
+      const payloadCleared = isPayloadCleared(row);
+      if (row.route === "intake" && !payloadCleared) {
+        await ctx.db.patch(row._id, { status: "received", summary: undefined, pausedAt: undefined });
+        await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId: row._id });
+        retried++;
+      } else if (row.route === "reply" && row.claimId && payloadField(row, "messageId") && !payloadCleared) {
+        await ctx.db.patch(row._id, { status: "processing", processingStartedAt: now, summary: undefined, pausedAt: undefined });
+        await scheduleClassify(ctx, row, row.claimId);
+        retried++;
+      } else if (payloadCleared) {
+        await ctx.db.patch(row._id, { status: "needs_review", summary: PAYLOAD_CLEARED_MESSAGE, pausedAt: undefined });
+      } else {
+        // Neither pause writer marks a row this way without a runnable route/payload; if one ever does, it leaves the
+        // list instead of promising a retry that will never come.
+        await ctx.db.patch(row._id, { summary: NOT_RERUNNABLE_SUMMARY, pausedAt: undefined });
+      }
+    }
+    const stoppedEarly = examined < page.page.length;
+    return {
+      retried,
+      examined,
+      cursor: page.isDone || stoppedEarly ? null : page.continueCursor,
+      perUser: [...used].map(([userId, count]) => ({ userId, count })),
+    };
+  },
+});
+
+type RetryTotals = { unstuck: number; retried: number };
+type FailedPageResult = { unstuck: number; retried: number; examined: number; cursor: string | null };
+type PausedPageResult = { retried: number; examined: number; cursor: string | null; perUser: UserCounts };
 
 /**
  * Hourly safety net for inbound mail (idea from origin's a2ceb98, rewritten for this pipeline).
@@ -1260,159 +1488,58 @@ const BUDGET_RETRY_PER_USER = 5;
  *     the day (marked with `BUDGET_PAUSED_SUMMARY` or, for a per-user cap, `PER_USER_BUDGET_PAUSED_SUMMARY`;
  *     never `failed`) are re-run the same way, but WITHOUT touching `attempts` -- a budget refusal, per-user or
  *     global, is never counted as this row's own failed attempt to read the email. This pass is per-user
- *     round-robin (`BUDGET_RETRY_PER_USER`, `BUDGET_PAUSE_SCAN_LIMIT`): one user flooding the paused page with
- *     their own rows cannot crowd out another user's single paused row from the same hourly pass (checkpoint
- *     6a-2's DA repro: a 60-row flood must not starve a 1-row victim).
+ *     round-robin (`BUDGET_RETRY_PER_USER`, `BUDGET_PAUSE_SCAN_LIMIT`): one user flooding the paused lists with
+ *     their own rows cannot crowd out another user's single paused row (checkpoint 6a-2's DA repro: a 60-row
+ *     flood must not starve a 1-row victim). P07-SK-1: it reads the paused rows alone, oldest pause first, and
+ *     rotates a capped user's skipped rows to the back, so neither ordinary `needs_review` rows nor a larger
+ *     backlog can starve a paused row. The two lists take turns going first, by the hour.
+ *
+ * P07-W1: an action, so each page above is its own transaction of at most `RETRY_READ_PAGE` whole rows (see there).
+ * Passes 1 and 2-3 each look at up to `RETRY_PAGE` rows a tick; pass 4 scans up to `BUDGET_PAUSE_SCAN_LIMIT` and
+ * re-runs up to `RETRY_PAGE`. A tick with nothing to do costs four small indexed reads.
  */
-export const retryFailed = internalMutation({
+export const retryFailed = internalAction({
   args: {},
   returns: v.object({ unstuck: v.number(), retried: v.number() }),
-  handler: async (ctx) => {
-    const now = Date.now();
-    let unstuck = 0;
-    let retried = 0;
+  handler: async (ctx): Promise<RetryTotals> => {
+    const startedAt = Date.now();
+    const totals: RetryTotals = { unstuck: 0, retried: 0 };
 
-    const processing = await ctx.db
-      .query("processedEvents")
-      .withIndex("by_status", (q) => q.eq("status", "processing"))
-      .take(RETRY_PAGE);
-    for (const row of processing) {
-      if (now - (row.processingStartedAt ?? row._creationTime) < STUCK_AFTER_MS) continue;
-      await ctx.db.patch(row._id, { status: "failed", lastError: "Timed out while being read" });
-      unstuck++;
+    for (const pass of ["processing", "failed"] as const) {
+      let cursor: string | null = null;
+      let examined = 0;
+      do {
+        const page: FailedPageResult = await ctx.runMutation(internal.intake.retryFailedPage, { pass, cursor });
+        totals.unstuck += page.unstuck;
+        totals.retried += page.retried;
+        examined += page.examined;
+        cursor = page.cursor;
+      } while (cursor !== null && examined < RETRY_PAGE);
     }
 
-    const failed = await ctx.db
-      .query("processedEvents")
-      .withIndex("by_status", (q) => q.eq("status", "failed"))
-      .take(RETRY_PAGE);
-    for (const row of failed) {
-      if (!row.userId) {
-        if (now - row._creationTime >= OWNERLESS_AFTER_MS) {
-          await ctx.db.patch(row._id, { status: "succeeded", summary: "Ignored: no matching inbox" });
-        }
-        continue;
-      }
-      // D87 (D103): never spend a retry (a model call) on a user whose
-      // account is being deleted, and leave the `failed` page the same way
-      // the "out of attempts"/"nothing to re-run" branches below do --
-      // otherwise a backlog of a tombstoned user's rows would occupy this
-      // same bounded page on every tick, the same starvation shape F1/F2
-      // fixed for the price/watch sweeps.
-      if (await isTombstoned(ctx, row.userId)) {
-        await ctx.db.patch(row._id, { status: "succeeded", summary: "Ignored: account deleted" });
-        continue;
-      }
-      if (row.attempts >= MAX_ATTEMPTS) {
-        await ctx.db.patch(row._id, {
-          status: "needs_review",
-          summary: `This email could not be read after ${MAX_ATTEMPTS} attempts. You can try it again by hand.`,
+    let perUser: UserCounts = [];
+    let pausedRetried = 0;
+    let scanned = 0;
+    const lists = Math.floor(startedAt / 3_600_000) % 2 === 0 ? (["global", "user"] as const) : (["user", "global"] as const);
+    for (const list of lists) {
+      let cursor: string | null = null;
+      while (scanned < BUDGET_PAUSE_SCAN_LIMIT && pausedRetried < RETRY_PAGE) {
+        const page: PausedPageResult = await ctx.runMutation(internal.intake.retryPausedPage, {
+          list,
+          cursor,
+          before: startedAt,
+          perUser,
+          room: RETRY_PAGE - pausedRetried,
         });
-        continue;
-      }
-      const payload = (row.payload ?? {}) as Record<string, unknown>;
-      const read = (key: string) => (typeof payload[key] === "string" ? (payload[key] as string) : "");
-      // F1 (D266 audit): retention clears a `failed` row's whole payload once it is RETENTION_PAYLOAD_DAYS old
-      // (sweepProcessedEvents), so a row can sit in `failed` (not yet at MAX_ATTEMPTS) past that window with
-      // nothing left to read. Without this guard, `processEvent`/`replies.classify` would be rescheduled anyway
-      // and run on empty text -- a real model call, charged budget, over nothing (`beginEvent` never checks
-      // payload content, only attempts/budget/tombstone).
-      const payloadCleared = typeof payload.text !== "string";
-      if (row.route === "intake" && !payloadCleared) {
-        await ctx.db.patch(row._id, { status: "received", lastError: undefined });
-        await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId: row._id });
-        retried++;
-      } else if (row.route === "reply" && row.claimId && read("messageId") && !payloadCleared) {
-        await ctx.db.patch(row._id, {
-          status: "processing",
-          processingStartedAt: now,
-          lastError: undefined,
-          attempts: row.attempts + 1,
-        });
-        await ctx.scheduler.runAfter(0, internal.replies.classify, {
-          processedEventId: row._id,
-          claimId: row.claimId,
-          messageId: read("messageId"),
-          from: read("from"),
-          subject: read("subject"),
-          text: read("text"),
-        });
-        retried++;
-      } else {
-        // Nothing here can be re-run: never routed, a reply with no message id, or (F1) content already cleared.
-        await ctx.db.patch(row._id, {
-          status: "needs_review",
-          summary: payloadCleared ? PAYLOAD_CLEARED_MESSAGE : (row.summary ?? "This message could not be routed and cannot be re-read automatically."),
-        });
+        pausedRetried += page.retried;
+        scanned += page.examined;
+        perUser = page.perUser;
+        cursor = page.cursor;
+        if (cursor === null) break;
       }
     }
-
-    // D76/Invariant 10, point 4 above, extended by D112 6a-2: budget-paused
-    // rows, picked up hourly and NOT charged against `attempts`. Newest
-    // first within the scan window: a refusal is a same-day event, so the
-    // rows worth unblocking first are the freshest -- but the per-user cap
-    // below (`BUDGET_RETRY_PER_USER`) is what actually makes this pass
-    // round-robin: once one user's rows fill their share of the pass, the
-    // loop keeps scanning PAST their remaining rows to reach the next
-    // user's, instead of a plain "take the newest 50" that a single
-    // flooder's rows could fill entirely.
-    const budgetPausedCandidates = await ctx.db
-      .query("processedEvents")
-      .withIndex("by_status", (q) => q.eq("status", "needs_review"))
-      .order("desc")
-      .take(BUDGET_PAUSE_SCAN_LIMIT);
-    const budgetRetriesByUser = new Map<Id<"users">, number>();
-    let budgetRetried = 0;
-    for (const row of budgetPausedCandidates) {
-      if (budgetRetried >= RETRY_PAGE) break; // D112 6a-2: ≤ 50 total for this pass.
-      const isBudgetPause = row.summary === BUDGET_PAUSED_SUMMARY || row.summary === PER_USER_BUDGET_PAUSED_SUMMARY;
-      if (!isBudgetPause || !row.userId) continue;
-      const usedByUser = budgetRetriesByUser.get(row.userId) ?? 0;
-      if (usedByUser >= BUDGET_RETRY_PER_USER) continue; // this user's share is full; keep scanning for others.
-
-      if (await isTombstoned(ctx, row.userId)) {
-        await ctx.db.patch(row._id, { status: "succeeded", summary: "Ignored: account deleted" });
-        budgetRetriesByUser.set(row.userId, usedByUser + 1);
-        continue;
-      }
-      const payload = (row.payload ?? {}) as Record<string, unknown>;
-      const read = (key: string) => (typeof payload[key] === "string" ? (payload[key] as string) : "");
-      // F1 (D266 audit): retention's needs_review clear ALSO retitles a budget-paused row's summary away from
-      // BUDGET_PAUSED_SUMMARY/PER_USER_BUDGET_PAUSED_SUMMARY (sweepProcessedEvents), so `isBudgetPause` above
-      // already excludes a freshly cleared row going forward. This is defence in depth for a row whose summary
-      // still reads budget-paused despite a cleared payload (e.g. cleared before that retitle existed): never
-      // reschedule `processEvent`/`replies.classify` on missing text -- that would be a real, charged model call
-      // over nothing.
-      const payloadCleared = typeof payload.text !== "string";
-      if (row.route === "intake" && !payloadCleared) {
-        await ctx.db.patch(row._id, { status: "received", summary: undefined });
-        await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId: row._id });
-        retried++;
-        budgetRetried++;
-        budgetRetriesByUser.set(row.userId, usedByUser + 1);
-      } else if (row.route === "reply" && row.claimId && read("messageId") && !payloadCleared) {
-        await ctx.db.patch(row._id, { status: "processing", processingStartedAt: now, summary: undefined });
-        await ctx.scheduler.runAfter(0, internal.replies.classify, {
-          processedEventId: row._id,
-          claimId: row.claimId,
-          messageId: read("messageId"),
-          from: read("from"),
-          subject: read("subject"),
-          text: read("text"),
-        });
-        retried++;
-        budgetRetried++;
-        budgetRetriesByUser.set(row.userId, usedByUser + 1);
-      } else if (payloadCleared) {
-        await ctx.db.patch(row._id, { status: "needs_review", summary: PAYLOAD_CLEARED_MESSAGE });
-        budgetRetriesByUser.set(row.userId, usedByUser + 1);
-      }
-      // Else: nothing to re-run. Neither writer of a budget-paused summary
-      // marks a row this way without a runnable route/payload, so this is
-      // unreached in practice; left as a no-op rather than an assertion.
-    }
-
-    return { unstuck, retried };
+    totals.retried += pausedRetried;
+    return totals;
   },
 });
 
@@ -1530,7 +1657,7 @@ export const needsAttention = query({
     return pages
       .flat()
       .sort((a, b) => b._creationTime - a._creationTime)
-      .map(({ payload, processingStartedAt: _startedAt, lastError, errorSummary, ...row }) => {
+      .map(({ payload, processingStartedAt: _startedAt, pausedAt: _pausedAt, lastError, errorSummary, ...row }) => {
         const pendingRefund = row.status === "needs_review" && row.route === "intake" ? pendingRefundView(payload, row._creationTime) : undefined;
         return {
         ...row,

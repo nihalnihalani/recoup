@@ -136,21 +136,32 @@ above before assuming any given invocation is safe to copy-paste.
      itself, but this closes the loop on any change made concurrently by
      someone else during the release window.
 
-## 2. Manual patch-completeness check (F-T18.4-1)
+## 2. Patch-completeness check (F-T18.4-1)
 
-`scripts/check-patch.mjs` (`npm run verify:patch`, also a CI step) currently
-only asserts that `node_modules/@agentmail/convex/dist/component/
-convex.config.js` has the `env: { AGENTMAIL_API_KEY` declaration from
-`patches/@agentmail+convex+0.1.0.patch`. That patch does more than that now
-(T18.4/D119 added `purgeInbox`/`purgeOutbound` and their `by_inbox` indexes
-for account-deletion mail purging), and `check-patch.mjs` does not assert
-those parts. D119 routes extending the script to T25 — **not done here**:
-`scripts/check-patch.mjs` is source, and this task's owned files are limited
-to `docs/ops/RELEASE.md`, `docs/reviews/release-candidate.md`,
-`docs/team/HANDOFF.md`, and one note in `e2e/README.md`. Until someone with
-`convex/**`/`scripts/**` in scope extends the script, **run this by hand**
-as part of every release (after `npm ci`, before trusting a deploy that
-depends on account-deletion mail purging):
+> **Update (P11-W3 / P12-W11 re-audit, ingestion-integrations lane, D244):**
+> `scripts/check-patch.mjs` (`npm run verify:patch`, also a CI step) now
+> asserts the `purgeInbox`/`purgeOutbound`/`by_inbox` hunks below itself —
+> it checks dist `lib.js`'s and `schema.js`'s exports/indexes against the
+> `@agentmail/convex` package's own shipped `src/`, plus an explicit floor
+> (both purge exports present; at least 3 `by_inbox` indexes) so a `src/`
+> that regressed the same way cannot pass by matching a bad `dist/`. The
+> manual grep this section used to require is now redundant with `npm run
+> verify:patch` and is kept below only as a description of what that command
+> checks, not as a separate release step. Regression coverage:
+> `convex/checkPatch.reaudit.test.ts` (runs the real script against
+> constructed dist/src fixtures, including a scratch copy with only the
+> `lib.js`/`schema.js` hunks reverted — the exact case this section used to
+> warn about, and the one D119 originally left as a manual step because
+> `scripts/check-patch.mjs` was out of that task's owned files).
+
+`scripts/check-patch.mjs` asserts that `node_modules/@agentmail/convex/dist/
+component/convex.config.js` has the `env: { AGENTMAIL_API_KEY` declaration
+from `patches/@agentmail+convex+0.1.0.patch`, AND that the same patch's
+`purgeInbox`/`purgeOutbound` (T18.4/D119, account-deletion mail purging) and
+their `by_inbox` indexes survived into dist `lib.js`/`schema.js`. `npm run
+verify:patch` (part of the standard gate, and a CI step) is sufficient —
+nothing below needs to be run by hand. Equivalent to what the script itself
+checks, if you want to eyeball it:
 
 ```sh
 grep -c 'purgeInbox' node_modules/@agentmail/convex/dist/component/lib.js
@@ -163,9 +174,9 @@ grep -n 'by_inbox' node_modules/@agentmail/convex/dist/component/schema.js
 # this check)
 ```
 
-If either check comes back empty/short, `patch-package` silently failed to
-apply the full patch (or `@agentmail/convex` was reinstalled without it) —
-treat it the same as a `verify:patch` failure: do not deploy, re-run `npx
+If `verify:patch` fails on either the lib.js/schema.js parity check or the
+floor check, `patch-package` silently failed to apply the full patch (or
+`@agentmail/convex` was reinstalled without it) — do not deploy, re-run `npx
 patch-package --error-on-fail`, and re-check.
 
 ## 3. Rollback limits

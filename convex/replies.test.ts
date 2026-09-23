@@ -455,7 +455,7 @@ describe("intake.retryFailed pass 2: a failed reply row whose payload was alread
         payload: { messageId: "msg-cleared" }, // retention already cleared `text`/`subject`/`from`
       }),
     );
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
     const row = await t.run((ctx) => ctx.db.get(id));
     expect(row!.status).toBe("needs_review"); // never "processing" -- replies.classify was never scheduled
     expect(row!.summary).toBe(PAYLOAD_CLEARED_MESSAGE);

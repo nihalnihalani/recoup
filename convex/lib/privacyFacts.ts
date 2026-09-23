@@ -100,6 +100,37 @@ export const MAIL_COMPONENT_RAW_COPY = {
   purgedOnAccountDeletion: true,
 } as const;
 
+/**
+ * P09-F1 (S-M03-2) / P07-SK-6 (re-audit, D244): distinct from `MAIL_COMPONENT_RAW_COPY` above on purpose --
+ * that one is about the user's OWN Recoup inbox, which `account.purge` drains via `mailPurge.purgeInboxData`
+ * (D119/D121, closed). This is about the SEPARATE, shared inbox Recoup sends from as itself, never as the
+ * user (`process.env.ALERTS_INBOX_ID`, `convex/lib/authMail.ts`'s sign-in/reset codes and `convex/notify.ts`'s
+ * price-drop alerts): a sign-in/reset-code send's own delivery events, and a user's inbound REPLY to a price-
+ * drop alert (landing in that shared inbox, not the user's own), are never purged by anything in this codebase.
+ * `purgeInboxData` cannot reach them (draining the shared inbox wholesale would destroy every other user's
+ * alert history too, `mailPurge.ts`'s own docstring), and no per-message purge is wired for a reply's message id.
+ * The alert's own OUTBOUND send is different and NOT covered by this constant: `deleteMailLogPage`'s existing
+ * per-message `mailPurge.purgeOutbound` call already purges that component row (and its events) as part of the
+ * recipient's own deletion, because `notify.sendDrop` records a `mailLog` row under that same user (D129,
+ * checkpoint 6d) -- see `account.ts:797`. What is NOT purged is the delivery record of a sign-in/reset code
+ * (`authMail.ts` sends by REST with no local join key at all) and a user's INBOUND reply to an alert (the
+ * component's raw copy in the shared inbox's `inboundMessages`/`events`, unreachable by any per-user id today
+ * -- ING2-R2, re-audit re-review: `onMessageReceived` never resolves a `profiles` row for the shared inbox, so
+ * these rows carry no `userId` for a purge loop to key off in the first place). `purgedOnAccountDeletion` is
+ * `false` on purpose -- keep it that way until a bounded, per-user-scoped purge for these two cases actually
+ * ships (tracked: a new patched component mutation to delete one thread's `inboundMessages`/`events` for
+ * replies, a way to attribute a shared-inbox reply to its user safely, and send-time message-id tracking for
+ * auth mail -- re-audit's own "Fix, then" tier for P09-F1/P07-SK-6, row 1580 of the reaudit doc); `keptUntil`
+ * is `"indefinitely"`, not a specific provider policy name, because nothing in this codebase ever clears it, on
+ * any schedule -- this constant exists so `mailComponentCopy` below reads it instead of a hand-typed clause
+ * going stale again.
+ */
+export const SENDER_MAILBOX_COPY = {
+  maskedByRecoup: false,
+  keptUntil: "indefinitely",
+  purgedOnAccountDeletion: false,
+} as const;
+
 // --- Copy ---------------------------------------------------------------------
 
 /**
@@ -123,11 +154,20 @@ export const PRIVACY_STATEMENTS = {
     `Rule-check history older than ${EVALUATION_RETENTION_DAYS} days is pruned, except the latest check for each ` +
     `recovery opportunity and every check behind a claim or a message you approved.`,
   // P09-F2 (X2/X5): the purge can be left unfinished, so the copy promises the purge and the record, not the result.
+  // ING2-R1 (re-audit re-review): this used to say deletion "does not purge" the shared mailbox's copy of alert
+  // SENDS -- false since D129/checkpoint 6d: `deleteMailLogPage` already purges that outbound row (and its
+  // events) as part of the recipient's own deletion. What deletion still does not purge is the delivery record
+  // of a sign-in/reset code and a user's reply to an alert -- see `SENDER_MAILBOX_COPY`'s docstring for why.
   mailComponentCopy:
     `Recoup masks card numbers in the email text it stores, but the mail system inside Recoup's backend also keeps ` +
     `its own copy of every email sent to your Recoup inbox, and Recoup cannot mask that copy. It is kept until you ` +
     `delete your account. Deleting your account starts a purge of it; if the purge does not finish, that is ` +
-    `recorded on the account's deletion record for Recoup's operator.`,
+    `recorded on the account's deletion record for Recoup's operator. Sign-in and password-reset codes, and price-drop ` +
+    `alerts, are sent from a separate mailbox Recoup itself owns, not your Recoup inbox. Its copy of an alert's own ` +
+    `outbound send is purged the same way, when your account is deleted -- but deleting your account does not purge ` +
+    `that mailbox's copy of the delivery record of a sign-in or reset code, or of any reply you sent to one of its ` +
+    `alerts: both are kept ${SENDER_MAILBOX_COPY.keptUntil}, and Recoup does not control how long the mail provider ` +
+    `itself separately keeps its own copies of any of this.`,
   inboundPayload:
     `The raw content of a processed inbound email is cleared ${RETENTION_PAYLOAD_DAYS} days after Recoup receives ` +
     `it, including an email still waiting for your review. Only its message ID is kept, and, while a refund it ` +

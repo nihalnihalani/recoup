@@ -891,7 +891,7 @@ describe("intake.retryFailed (hourly safety net)", () => {
       await ctx.db.patch(exhausted, { status: "failed", attempts: 5, lastError: "Gave up after 5 attempts" });
     });
 
-    const res = await t.mutation(internal.intake.retryFailed, {});
+    const res = await t.action(internal.intake.retryFailed, {});
     expect(res).toEqual({ unstuck: 0, retried: 1 });
 
     const again = await eventRow(t, retryable);
@@ -902,7 +902,7 @@ describe("intake.retryFailed (hourly safety net)", () => {
     expect(parked.status).toBe("needs_review");
     expect(parked.summary).toContain("5 attempts");
     expect(parked.attempts).toBe(5);
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
   });
 
   it("D76: picks up a budget-paused needs_review row hourly, without spending one of its attempts", async () => {
@@ -913,7 +913,7 @@ describe("intake.retryFailed (hourly safety net)", () => {
     expect(await t.mutation(internal.intake.beginEvent, { processedEventId: id })).toBeNull();
     expect((await eventRow(t, id)).status).toBe("needs_review");
 
-    const res = await t.mutation(internal.intake.retryFailed, {});
+    const res = await t.action(internal.intake.retryFailed, {});
     expect(res.retried).toBe(1);
     const row = await eventRow(t, id);
     expect(row.status).toBe("received");
@@ -926,7 +926,7 @@ describe("intake.retryFailed (hourly safety net)", () => {
     const { userId } = await signedIn(t);
     const id = await queueEvent(t, userId, "evt-ordinary-review");
     await t.run(async (ctx) => await ctx.db.patch(id, { status: "needs_review", summary: "Duplicate of an existing purchase." }));
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
     expect((await eventRow(t, id)).status).toBe("needs_review");
   });
 
@@ -942,10 +942,10 @@ describe("intake.retryFailed (hourly safety net)", () => {
     const live = await queueEvent(t, userId, "evt-live");
     await t.run(async (ctx) => await ctx.db.patch(live, { status: "failed", attempts: 1 }));
 
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
     expect((await eventRow(t, live)).status).toBe("failed");
     // The first tick cleared the page, so the second one reaches the live row.
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 1 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 1 });
     expect((await eventRow(t, live)).status).toBe("received");
   });
 
@@ -966,7 +966,7 @@ describe("intake.retryFailed (hourly safety net)", () => {
     // scheduled a retry) -- unlike before this fix, where it would have been
     // left untouched and re-read on every subsequent tick, the same
     // starvation shape F1/F2 fixed for the price/watch sweeps.
-    const first = await t.mutation(internal.intake.retryFailed, {});
+    const first = await t.action(internal.intake.retryFailed, {});
     expect(first.retried).toBe(0);
     const oneOfGone = await eventRow(t, await t.run(async (ctx) => {
       const row = await ctx.db
@@ -980,7 +980,7 @@ describe("intake.retryFailed (hourly safety net)", () => {
     expect((await eventRow(t, liveId)).status).toBe("failed"); // not yet reached
 
     // Tick 2: the backlog has left the `failed` page; the live row is retried.
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 1 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 1 });
     expect((await eventRow(t, liveId)).status).toBe("received");
   });
 
@@ -993,7 +993,7 @@ describe("intake.retryFailed (hourly safety net)", () => {
           externalId: "evt-unrouted", kind: "agentmail.message.received", status: "failed", attempts: 0, userId,
         }),
     );
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
     expect((await eventRow(t, id)).status).toBe("needs_review");
   });
 
@@ -1011,7 +1011,7 @@ describe("intake.retryFailed (hourly safety net)", () => {
           payload: { messageId: "msg-cleared" }, // retention already cleared `text`/`subject`/`from`
         }),
     );
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
     const row = await eventRow(t, id);
     expect(row.status).toBe("needs_review"); // never "received" -- processEvent was never scheduled
     expect(row.summary).toBe(PAYLOAD_CLEARED_MESSAGE);
@@ -1030,12 +1030,12 @@ describe("intake.retryFailed (hourly safety net)", () => {
     expect(started).toBe(Date.now());
 
     vi.advanceTimersByTime(60_000);
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
     expect((await eventRow(t, old)).status).toBe("processing");
 
     // Only once THIS run has been going for 15 minutes is it stuck.
     vi.advanceTimersByTime(15 * 60_000);
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 1, retried: 1 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 1, retried: 1 });
   });
 
   it("falls back to the creation time for a processing row written before processingStartedAt existed", async () => {
@@ -1044,7 +1044,7 @@ describe("intake.retryFailed (hourly safety net)", () => {
     const legacy = await queueEvent(t, userId, "evt-legacy");
     await t.run(async (ctx) => await ctx.db.patch(legacy, { status: "processing", attempts: 1 }));
     vi.advanceTimersByTime(16 * 60_000);
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 1, retried: 1 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 1, retried: 1 });
   });
 
   it("marks a row stuck in processing as failed so it becomes visible and retryable", async () => {
@@ -1055,10 +1055,10 @@ describe("intake.retryFailed (hourly safety net)", () => {
     await t.run(async (ctx) => await ctx.db.patch(fresh, { status: "processing", attempts: 1 }));
 
     // Inside the grace period nothing happens.
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
 
     vi.advanceTimersByTime(16 * 60_000);
-    const res = await t.mutation(internal.intake.retryFailed, {});
+    const res = await t.action(internal.intake.retryFailed, {});
     // Unstuck and, having attempts left, re-queued in the same tick.
     expect(res).toEqual({ unstuck: 1, retried: 1 });
     const row = await eventRow(t, fresh);
@@ -1076,11 +1076,11 @@ describe("intake.retryFailed (hourly safety net)", () => {
           attempts: 0,
         }),
     );
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
     expect((await eventRow(t, orphan)).status).toBe("failed");
 
     vi.advanceTimersByTime(25 * 3_600_000);
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
     const closed = await eventRow(t, orphan);
     expect(closed.status).toBe("succeeded");
     expect(closed.summary).toBe("Ignored: no matching inbox");
@@ -1107,7 +1107,7 @@ describe("intake.retryFailed (hourly safety net)", () => {
         await pausedRow(t, flooder, `evt-flood-${i}`, BUDGET_PAUSED_SUMMARY);
       }
 
-      const res = await t.mutation(internal.intake.retryFailed, {});
+      const res = await t.action(internal.intake.retryFailed, {});
       // Bounded at 50 total, but the victim's single row is still among them.
       expect(res.retried).toBeLessThanOrEqual(50);
       expect((await eventRow(t, victimId)).status).toBe("received");
@@ -1123,7 +1123,7 @@ describe("intake.retryFailed (hourly safety net)", () => {
       }
       const otherId = await pausedRow(t, other, "evt-other", PER_USER_BUDGET_PAUSED_SUMMARY);
 
-      await t.mutation(internal.intake.retryFailed, {});
+      await t.action(internal.intake.retryFailed, {});
 
       const hogRetried = (
         await Promise.all(hogIds.map((id) => eventRow(t, id)))
@@ -1139,7 +1139,7 @@ describe("intake.retryFailed (hourly safety net)", () => {
       const globalId = await pausedRow(t, a, "evt-global", BUDGET_PAUSED_SUMMARY);
       const perUserId = await pausedRow(t, b, "evt-per-user", PER_USER_BUDGET_PAUSED_SUMMARY);
 
-      await t.mutation(internal.intake.retryFailed, {});
+      await t.action(internal.intake.retryFailed, {});
 
       expect((await eventRow(t, globalId)).status).toBe("received");
       expect((await eventRow(t, perUserId)).status).toBe("received");

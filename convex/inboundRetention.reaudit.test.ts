@@ -91,7 +91,7 @@ describe("F1: an inbound_extract pause outlasting the retention window is never 
     // The primary fix: retitled away from BUDGET_PAUSED_SUMMARY in the same patch as the clear.
     expect(cleared.summary).toBe(PAYLOAD_CLEARED_MESSAGE);
 
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
     const after = (await t.run((ctx) => ctx.db.get(id)))!;
     expect(after.status).toBe("needs_review"); // never "received" -- processEvent was never scheduled
     expect(after.summary).toBe(PAYLOAD_CLEARED_MESSAGE);
@@ -108,7 +108,7 @@ describe("F1: an inbound_extract pause outlasting the retention window is never 
         summary: BUDGET_PAUSED_SUMMARY, payload: { messageId: "m-stale" },
       }),
     );
-    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    expect(await t.action(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
     const after = (await t.run((ctx) => ctx.db.get(id)))!;
     expect(after.status).toBe("needs_review");
     expect(after.summary).toBe(PAYLOAD_CLEARED_MESSAGE);
