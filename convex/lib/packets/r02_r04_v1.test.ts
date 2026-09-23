@@ -1,6 +1,7 @@
 /**
- * R02 v1 and R04 v1 packet templates (M22), rendered from the bound facts of real pack evaluations through the
- * registered dispatchers (`r02_v1.letter`, `r04_v1.letter`). For every letter: (a) a snapshot of the draft,
+ * R02 v1 and R04 v1 packet templates (M22), rendered from the bound facts of real pack evaluations through the template
+ * the server selects (D249: `templateFor(ruleId, version, { remedyKey })` — R02's one `r02_v1.letter`, R04's one
+ * template per path). For every letter: (a) a snapshot of the draft,
  * (b) `packetFindings(...)` is [] (SEC-AI-4), (c) every fact the template read is bound and known (DA-A-15). Also:
  * nothing unconfirmed is ever stated (an unconfirmed ticket number or merchant of record stops rendering), the letter
  * always matches the path, a deadline date is never a day early, and the 14 CFR 254.4 figure never appears.
@@ -16,7 +17,8 @@ import { ENGINE_VERSION, type EvaluationResult } from "../rules/types";
 import { factReader, packetFindings, PacketRenderError, type PacketContext, type PacketTemplate } from "./common";
 import { templateFor } from "./index";
 import { r02AgentRefundRequest, r02V1Letter, R02_V1_TEMPLATES } from "./r02_v1";
-import { r04PathOf, r04V1Letter, R04_V1_TEMPLATES } from "./r04_v1";
+import { r04BagFeeRefundRequest, r04ExpenseClaim, r04PropertyClaim, R04_V1_TEMPLATES } from "./r04_v1";
+import { R04_REMEDY_KEYS } from "../rules/r04_baggage_v1";
 
 const TXN_ID = "packettxn1" as Id<"transactions">;
 const NOW = Date.parse("2026-10-15T12:00:00-04:00");
@@ -93,12 +95,12 @@ function r04(path: "a" | "b" | "c", rows: CellRow[], bag = "txn"): EvaluationRes
 function ctxOf(r: EvaluationResult, amountMinor: number): PacketContext {
   return {
     scenarioId: r.scenarioId, ruleId: r.ruleId, ruleVersion: r.ruleVersion, amount: { amountMinor, currency: "USD" },
-    boundFacts: r.boundFacts, deadlines: r.deadlines, claimToken: "RC-TEST-0001", channel: "web_form",
+    boundFacts: r.boundFacts, deadlines: r.deadlines, claimToken: "RC-TEST-0001", channel: "web_form", remedyKey: r.remedyKey,
   };
 }
 
-/** Renders through the registered dispatcher for the pack version (what `packets.prepare` does with no templateId). */
-function check(ctx: PacketContext, template: PacketTemplate = templateFor(ctx.ruleId, ctx.ruleVersion)!) {
+/** Renders through the template the server selects for the claim's remedy (what `packets.prepare` does, D249). */
+function check(ctx: PacketContext, template: PacketTemplate = templateFor(ctx.ruleId, ctx.ruleVersion, { remedyKey: ctx.remedyKey })!) {
   const facts = factReader(ctx.boundFacts);
   const draft = template.compose(ctx, facts);
   expect(packetFindings(draft.body, ctx, template, draft.recipient?.text ?? null)).toEqual([]);
@@ -116,8 +118,9 @@ function check(ctx: PacketContext, template: PacketTemplate = templateFor(ctx.ru
 }
 
 describe("R02 v1 packet templates", () => {
-  it("one registered letter for R02 v1 (the dispatcher), found by templateFor", () => {
-    expect(R02_V1_TEMPLATES.map((t) => [t.ruleId, t.version, t.templateId])).toEqual([["R02.airline_fare_refund.us_dot", 1, "r02_v1.letter"]]);
+  it("one registered letter for R02 v1 (remedy fare_refund; the merchant of record picks agent vs carrier)", () => {
+    expect(R02_V1_TEMPLATES.map((t) => [t.ruleId, t.version, t.templateId, t.remedyKey])).toEqual([["R02.airline_fare_refund.us_dot", 1, "r02_v1.letter", "fare_refund"]]);
+    expect(templateFor("R02.airline_fare_refund.us_dot", 1, { remedyKey: "fare_refund" })).toBe(r02V1Letter);
     expect(templateFor("R02.airline_fare_refund.us_dot", 1)).toBe(r02V1Letter);
   });
 
@@ -172,10 +175,19 @@ describe("R02 v1 packet templates", () => {
 });
 
 describe("R04 v1 packet templates", () => {
-  it("one registered letter for R04 v1 (the dispatcher); each path's evaluation selects its own letter", () => {
-    expect(R04_V1_TEMPLATES.map((t) => t.templateId)).toEqual(["r04_v1.letter"]);
-    expect(templateFor("R04.baggage.us_dot", 1)).toBe(r04V1Letter);
-    for (const p of ["a", "b", "c"] as const) expect(r04PathOf(r04(p, R04_ROWS).boundFacts)).toBe(p);
+  it("one template per R04 remedy (D249); each path's evaluation selects its own letter, and none is guessed", () => {
+    expect(R04_V1_TEMPLATES.map((t) => [t.templateId, t.remedyKey])).toEqual([
+      ["r04_v1.bag_fee_refund_request", R04_REMEDY_KEYS.a],
+      ["r04_v1.expense_claim", R04_REMEDY_KEYS.b],
+      ["r04_v1.property_claim", R04_REMEDY_KEYS.c],
+    ]);
+    const expected = { a: r04BagFeeRefundRequest, b: r04ExpenseClaim, c: r04PropertyClaim };
+    for (const p of ["a", "b", "c"] as const) {
+      const r = r04(p, R04_ROWS);
+      expect(r.remedyKey).toBe(R04_REMEDY_KEYS[p]);
+      expect(templateFor(r.ruleId, r.ruleVersion, { remedyKey: r.remedyKey })).toBe(expected[p]);
+    }
+    expect(templateFor("R04.baggage.us_dot", 1)).toBeNull();
   });
 
   it("path a → bag-fee refund request", () => {

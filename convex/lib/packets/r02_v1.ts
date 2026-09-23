@@ -3,9 +3,9 @@
  * fields only: no context, clock, randomness or `lib/ai`. Every fact is read through the `FactReader`, so a fact that is
  * not bound or not known (confirmed/observed/derived) stops rendering with "confirm X first" (DA-A-15).
  *
- *   r02_v1.letter  the registered template: picks the letter from the bound merchant of record (both letters share
- *                  R02 v1's ruleId/version, and a packet context carries no remedy path), so the wrong letter can
- *                  never be written; an unconfirmed merchant of record stops rendering ("confirm it first").
+ *   r02_v1.letter  the registered template (remedy `fare_refund`, D249). Both letters are the same remedy, so the
+ *                  remedy key cannot tell them apart: the letter is picked from the bound merchant of record, and an
+ *                  unconfirmed merchant of record stops rendering ("confirm it first").
  *     agent_refund_request  R02.b — a ticket agent took the payment: it refunds on request (14 CFR 399.80(l)).
  *     carrier_request       R02.a — the airline refunds automatically; the letter asks for it, and once the airline's
  *                           deadline has passed in every US time zone it says so (DA-A-5 overdue → escalate).
@@ -18,7 +18,7 @@
  */
 import { localParts, US_ZONES } from "../deadlines/usZones";
 import type { DeadlineResult } from "../rules/types";
-import { R02_CARRIER_TIMER_CREDIT_ID, R02_CARRIER_TIMER_OTHER_ID, R02_V1_RULE_ID, R02_V1_VERSION } from "../rules/r02_air_refund_v1";
+import { R02_CARRIER_TIMER_CREDIT_ID, R02_CARRIER_TIMER_OTHER_ID, R02_REMEDY_KEY, R02_V1_RULE_ID, R02_V1_VERSION } from "../rules/r02_air_refund_v1";
 import { fill, formatLocalDate, formatMoney, type FactReader, type ManualChannel, type PacketContext, type PacketDraft, type PacketTemplate } from "./common";
 
 const TXN = "txn";
@@ -170,7 +170,7 @@ export const r02CarrierRequest: PacketTemplate = Object.freeze({
 });
 
 /**
- * The registered R02 v1 template: the bound merchant of record picks the letter (a ticket agent → the 399.80(l)
+ * The registered R02 v1 template (remedy `fare_refund`): the bound merchant of record picks the letter (a ticket agent → the 399.80(l)
  * request; the carrier → the carrier letter). Reading it through the FactReader means an unconfirmed merchant of
  * record stops rendering with "confirm it first".
  */
@@ -178,6 +178,7 @@ export const r02V1Letter: PacketTemplate = Object.freeze({
   ruleId: R02_V1_RULE_ID,
   version: R02_V1_VERSION,
   templateId: "r02_v1.letter",
+  remedyKey: R02_REMEDY_KEY,
   channels: CHANNELS,
   textBlocks: Object.freeze([...r02AgentRefundRequest.textBlocks, ...r02CarrierRequest.textBlocks]),
   compose(context: PacketContext, facts: FactReader): PacketDraft {

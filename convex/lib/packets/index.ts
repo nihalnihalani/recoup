@@ -5,10 +5,10 @@
 import type { PacketTemplate } from "./common";
 import { r02V1Letter } from "./r02_v1";
 import { r03V1Letter } from "./r03_v1";
-import { r04V1Letter } from "./r04_v1";
+import { R04_V1_TEMPLATES } from "./r04_v1";
 import { r05V1Letter } from "./r05_v1";
 
-export const PACKET_TEMPLATES: readonly PacketTemplate[] = Object.freeze([r05V1Letter, r03V1Letter, r02V1Letter, r04V1Letter]);
+export const PACKET_TEMPLATES: readonly PacketTemplate[] = Object.freeze([r05V1Letter, r03V1Letter, r02V1Letter, ...R04_V1_TEMPLATES]);
 
 /**
  * D249: the template for a pack version, deterministically — the named one (`templateId`); else the one registered

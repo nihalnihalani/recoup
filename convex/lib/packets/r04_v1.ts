@@ -2,13 +2,12 @@
  * R04 v1 packet templates (M22; contract §6). Deterministic text from the evaluation's bound facts (N6) and server
  * fields only: no context, clock, randomness or `lib/ai`; every fact is read through the `FactReader` (DA-A-15).
  *
- *   r04_v1.letter  the registered template. Paths a, b and c share R04 v1's ruleId/version and a packet context carries
- *                  no remedy path, so the letter is picked from the path's bound-fact set (a binds the 260.5(f)
- *                  exemptions, b the reimbursement key, c neither) — the wrong letter can never be written.
- *     bag_fee_refund_request  path a — the bag-fee refund is automatic after the report (260.5(d)); this is the
- *                             user-initiated request when it has not arrived (DOT-REF-8: ask the airline).
- *     expense_claim           path b — documented, unallocated incidental expenses (receipts attached).
- *     property_claim          path c — lost or damaged items, with the values the user documented.
+ * Paths a, b and c share R04 v1's ruleId/version, so each template carries its path's `remedyKey` and the server selects
+ * by the claim's remedy (D249: `templateFor(ruleId, version, { remedyKey })`, never a guess):
+ *   r04_v1.bag_fee_refund_request  path a (bag_fee_refund) — the bag-fee refund is automatic after the report
+ *                                  (260.5(d)); this is the user-initiated request when it has not arrived (DOT-REF-8).
+ *   r04_v1.expense_claim           path b (delayed_bag_expenses) — documented, unallocated incidental expenses.
+ *   r04_v1.property_claim          path c (lost_or_damaged_property) — lost or damaged items, with documented values.
  *
  * The airline's claim channel and deadlines are not captured in v1, so the recipient is always entered by the user.
  * The 14 CFR 254.4 figure is never stated in a packet (a limit, never a payout). SEC-AI-4: every number is a bound value
@@ -16,7 +15,7 @@
  */
 import { localParts, US_ZONES } from "../deadlines/usZones";
 import { lineSubject, R04_MAX_EXPENSE_LINES, R04_MAX_PROPERTY_ITEMS } from "../facts/snapshot_air";
-import { R04_ALLOCATION_REF, R04_RECEIPT_REF, R04_V1_RULE_ID, R04_V1_VERSION } from "../rules/r04_baggage_v1";
+import { R04_ALLOCATION_REF, R04_RECEIPT_REF, R04_REMEDY_KEYS, R04_V1_RULE_ID, R04_V1_VERSION } from "../rules/r04_baggage_v1";
 import type { BoundFactValue } from "../rules/types";
 import { fill, formatLocalDate, formatMoney, type FactReader, type ManualChannel, type PacketContext, type PacketDraft, type PacketTemplate } from "./common";
 
@@ -74,6 +73,7 @@ export const r04BagFeeRefundRequest: PacketTemplate = Object.freeze({
   ruleId: R04_V1_RULE_ID,
   version: R04_V1_VERSION,
   templateId: "r04_v1.bag_fee_refund_request",
+  remedyKey: R04_REMEDY_KEYS.a,
   channels: CHANNELS,
   textBlocks: Object.freeze([R04_FEE_RULE_TEXT]),
   compose(context: PacketContext, facts: FactReader): PacketDraft {
@@ -135,6 +135,7 @@ export const r04ExpenseClaim: PacketTemplate = Object.freeze({
   ruleId: R04_V1_RULE_ID,
   version: R04_V1_VERSION,
   templateId: "r04_v1.expense_claim",
+  remedyKey: R04_REMEDY_KEYS.b,
   channels: CHANNELS,
   textBlocks: Object.freeze([R04_EXPENSE_GUIDANCE_TEXT]),
   compose(context: PacketContext, facts: FactReader): PacketDraft {
@@ -172,6 +173,7 @@ export const r04PropertyClaim: PacketTemplate = Object.freeze({
   ruleId: R04_V1_RULE_ID,
   version: R04_V1_VERSION,
   templateId: "r04_v1.property_claim",
+  remedyKey: R04_REMEDY_KEYS.c,
   channels: CHANNELS,
   textBlocks: Object.freeze([R04_PROPERTY_GUIDANCE_TEXT]),
   compose(context: PacketContext, facts: FactReader): PacketDraft {
@@ -213,26 +215,5 @@ export const r04PropertyClaim: PacketTemplate = Object.freeze({
   },
 });
 
-/** The path an R04 evaluation is for, from its bound-fact set (`snapshot_air.r04BoundFacts`). */
-export function r04PathOf(boundFacts: readonly BoundFactValue[]): "a" | "b" | "c" {
-  if (boundFacts.some((b) => b.key === "air.exemption_failed_recheck")) return "a";
-  if (boundFacts.some((b) => b.key === "air.reimbursement_received")) return "b";
-  return "c";
-}
-
-const BY_PATH = { a: r04BagFeeRefundRequest, b: r04ExpenseClaim, c: r04PropertyClaim } as const;
-
-/** The registered R04 v1 template: the path's own letter. */
-export const r04V1Letter: PacketTemplate = Object.freeze({
-  ruleId: R04_V1_RULE_ID,
-  version: R04_V1_VERSION,
-  templateId: "r04_v1.letter",
-  channels: CHANNELS,
-  textBlocks: Object.freeze([...r04BagFeeRefundRequest.textBlocks, ...r04ExpenseClaim.textBlocks, ...r04PropertyClaim.textBlocks]),
-  compose(context: PacketContext, facts: FactReader): PacketDraft {
-    return BY_PATH[r04PathOf(context.boundFacts)].compose(context, facts);
-  },
-});
-
-/** For `lib/packets/index.ts` (`PACKET_TEMPLATES`): only the dispatcher is registered. */
-export const R04_V1_TEMPLATES: readonly PacketTemplate[] = Object.freeze([r04V1Letter]);
+/** For `lib/packets/index.ts` (`PACKET_TEMPLATES`): one template per remedy (D249). */
+export const R04_V1_TEMPLATES: readonly PacketTemplate[] = Object.freeze([r04BagFeeRefundRequest, r04ExpenseClaim, r04PropertyClaim]);
