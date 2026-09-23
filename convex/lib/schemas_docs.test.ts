@@ -7,7 +7,10 @@ import {
   CLASSIFIER_SYSTEM,
   DOC_SCHEMAS,
   DOC_SYSTEMS,
+  boundExtracted,
+  DocClassification,
   EXTRACTABLE_DOC_TYPES,
+  MAX_QUOTE_CHARS,
   MAX_STATEMENT_LINES,
   StatementDoc,
 } from "./schemas_docs";
@@ -39,9 +42,11 @@ describe("doc schemas (M23; SEC-SD-1, SEC-AI-1/2/5, DA-A-6)", () => {
       const bad = keysOf(schema).filter((k) => forbidden.test(k));
       expect(bad, docType).toEqual([]);
     }
-    // The statement keeps the last 4 only, bounded to 4 characters.
-    const last4 = (StatementDoc.shape.last4.shape.value as z.ZodNullable<z.ZodString>).unwrap();
-    expect(last4.maxLength).toBe(4);
+    // The statement keeps the last 4 only: a schema cannot bound it (D30), so boundExtracted keeps exactly four digits
+    // and DROPS anything longer (a longer run could be a card number), never truncating it.
+    expect(boundExtracted({ last4: { value: "1111", quote: "ending 1111" } })).toEqual({ last4: { value: "1111", quote: "1111" } });
+    expect(boundExtracted({ last4: { value: "4111111111111111", quote: "4111111111111111" } })).toEqual({ last4: { value: null, quote: null } });
+    expect(boundExtracted({ last4: { value: "11a1", quote: "x" } })).toEqual({ last4: { value: null, quote: null } });
   });
 
   it("every extracted field is a { value, quote } pair (DA-A-6), and quotes are bounded", () => {
@@ -49,8 +54,9 @@ describe("doc schemas (M23; SEC-SD-1, SEC-AI-1/2/5, DA-A-6)", () => {
       expect(unquotedLeaves(schema), docType).toEqual([]);
     }
     const sample = DOC_SCHEMAS.receipt.shape.total;
-    expect(sample.safeParse({ value: "79.98", quote: "x".repeat(301) }).success).toBe(false);
     expect(sample.safeParse({ value: null, quote: null }).success).toBe(true);
+    const bounded = boundExtracted({ total: { value: "79.98", quote: "x".repeat(MAX_QUOTE_CHARS + 50) } });
+    expect(bounded.total.quote).toHaveLength(MAX_QUOTE_CHARS);
   });
 
   it("amounts are decimal strings, never numbers (DA-A-26 reads them)", () => {
@@ -64,11 +70,20 @@ describe("doc schemas (M23; SEC-SD-1, SEC-AI-1/2/5, DA-A-6)", () => {
       amount: { value: "12.00", quote: "12.00" }, currency: { value: "USD", quote: "USD" }, referenceNumber: { value: null, quote: null } };
     const base = Object.fromEntries(Object.keys(StatementDoc.shape).map((k) => [k, { value: null, quote: null }]));
     expect(StatementDoc.safeParse({ ...base, lines: [line, line] }).success).toBe(true);
-    expect(StatementDoc.safeParse({ ...base, lines: Array(MAX_STATEMENT_LINES + 1).fill(line) }).success).toBe(false);
+    const many = StatementDoc.parse({ ...base, lines: Array(MAX_STATEMENT_LINES + 5).fill(line) });
+    expect(boundExtracted(many).lines).toHaveLength(MAX_STATEMENT_LINES);
   });
 
   it("every schema converts to an OpenAI structured-output format (the shape extract() sends)", () => {
     for (const [docType, schema] of Object.entries(DOC_SCHEMAS)) expect(() => zodTextFormat(schema, docType)).not.toThrow();
+  });
+
+  it("D30: no strict JSON schema carries maxLength/minLength/maxItems (OpenAI's strict mode rejects them); objects are closed", () => {
+    for (const [name, schema] of [...Object.entries(DOC_SCHEMAS), ["classification", DocClassification] as const]) {
+      const json = JSON.stringify(zodTextFormat(schema as z.ZodTypeAny, name));
+      expect(json, name).not.toMatch(/"(maxLength|minLength|maxItems|minItems)"/);
+      expect(json, name).toContain('"additionalProperties":false');
+    }
   });
 
   it("SEC-AI-1: every system prompt is a module constant with no interpolated data", () => {

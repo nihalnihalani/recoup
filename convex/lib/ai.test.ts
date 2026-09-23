@@ -49,6 +49,13 @@ describe("extract", () => {
     expect(callArgs.input[1]).toEqual({ role: "user", content: "user content" });
   });
 
+  it("P09-SK-1: asks OpenAI not to store the request or response (the Responses API stores by default)", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    parseMock.mockResolvedValue({ output_parsed: { ok: true } });
+    await extract("simple", Simple, "system prompt", "user content");
+    expect(parseMock.mock.calls[0][0].store).toBe(false);
+  });
+
   it("throws when OpenAI returns no parsed output", async () => {
     process.env.OPENAI_API_KEY = "test-key";
     parseMock.mockResolvedValue({ output_parsed: null });

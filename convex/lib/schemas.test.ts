@@ -134,7 +134,7 @@ describe("ReplyClass", () => {
     const fixture = {
       classification: "promise",
       summary: "Merchant promised a refund of $79.99 within 5 business days.",
-      promisedAmount: 79.99,
+      promised: { value: "79.99", currency: "$" },
     };
     expect(() => ReplyClass.parse(fixture)).not.toThrow();
   });
@@ -143,7 +143,7 @@ describe("ReplyClass", () => {
     const fixture = {
       classification: "denial",
       summary: "Merchant refused.",
-      promisedAmount: null,
+      promised: null,
     };
     expect(() => ReplyClass.parse(fixture)).toThrow();
   });

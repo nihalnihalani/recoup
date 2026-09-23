@@ -12,16 +12,22 @@ const PHONE_IN_TEXT = /(?:\+\d{1,3}[\s.-]?)?\(?\b\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\
 const CURRENCY_CODES = "USD|EUR|GBP|CAD|AUD";
 const CURRENCY_WORDS = "dollars?|euros?|pounds?|bucks";
 /**
+ * A digit run with grouping commas only BETWEEN digits: "1,450" is one number, but the comma in "2, 2026, USD" is
+ * punctuation (M28: the date "September 2, 2026, USD 129.99" used to read as the amount "2026, USD").
+ */
+const DIGITS = "\\d(?:[\\d,]*\\d)?";
+/**
  * Money in every form DA-B-5 names: a leading symbol ("$450"), a two-decimal number with or without a code ("95.00
  * USD"), a number then a code or word ("40 dollars"), a code first ("USD 450"), and a trailing symbol ("450$").
  */
 const AMOUNT_IN_TEXT = new RegExp(
   [
-    "[$€£]\\s?\\d[\\d,]*(?:\\.\\d{1,2})?",
-    `\\b(?:${CURRENCY_CODES})\\s?\\d[\\d,]*(?:\\.\\d{1,2})?`,
-    `\\b\\d[\\d,]*(?:\\.\\d{1,2})?\\s?[$€£]`,
-    `\\b\\d[\\d,]*\\.\\d{2}\\b(?:\\s?(?:${CURRENCY_CODES}|${CURRENCY_WORDS}))?`,
-    `\\b\\d[\\d,]*\\s?(?:${CURRENCY_CODES}|${CURRENCY_WORDS})\\b`,
+    `[$€£]\\s?${DIGITS}(?:\\.\\d{1,2})?`,
+    `\\b(?:${CURRENCY_CODES})\\s?${DIGITS}(?:\\.\\d{1,2})?`,
+    `\\b${DIGITS}(?:\\.\\d{1,2})?\\s?[$€£]`,
+    `\\b${DIGITS}\\.\\d{2}\\b(?:\\s?(?:${CURRENCY_CODES}|${CURRENCY_WORDS}))?`,
+    // A number then a code, unless the code opens the NEXT amount ("2026 USD 129.99": the code belongs to 129.99).
+    `\\b${DIGITS}\\s?(?:${CURRENCY_CODES}|${CURRENCY_WORDS})\\b(?!\\s?\\d)`,
   ].join("|"),
   "gi",
 );

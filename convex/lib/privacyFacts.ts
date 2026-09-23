@@ -18,6 +18,7 @@
  * `verbatimModuleSyntax`). The test pins that import list.
  */
 import {
+  MARKET_MAX_POINTS,
   MAX_LOCATOR_QUOTE_CHARS,
   RETENTION_EVIDENCE_DAYS,
   RETENTION_KEEP_NEWEST,
@@ -130,7 +131,8 @@ export const PRIVACY_STATEMENTS = {
     `handling it.`,
   observations:
     `Individual price-check and offer-check observations older than ${RETENTION_OBSERVATION_DAYS} days are pruned, ` +
-    `always keeping at least the newest ${RETENTION_KEEP_NEWEST} per item.`,
+    `always keeping at least the newest ${RETENTION_KEEP_NEWEST} per item. Market price history from ShopSavvy keeps ` +
+    `only the newest ${MARKET_MAX_POINTS} points per watched item.`,
   mailLog: `Finished mail-log rows (sent, failed or suppressed) are pruned after ${RETENTION_MAILLOG_DAYS} days.`,
   stash: `Small internal bookkeeping rows are pruned after ${RETENTION_STASH_DAYS} days.`,
   unverifiedAccounts: `An account that never verifies its email is pruned after ${RETENTION_UNVERIFIED_DAYS} days.`,

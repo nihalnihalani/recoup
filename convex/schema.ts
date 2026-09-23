@@ -602,6 +602,9 @@ export default defineSchema({
   replies: defineTable({
     claimId: v.id("claims"), userId: v.id("users"), messageId: v.string(), from: v.string(), classification: replyClass,
     summary: v.string(), promisedCents: v.optional(v.number()), senderMismatch: v.boolean(), receivedAt: v.number(),
+    /** D21/D178 (M28): a promise from a mismatched sender, recorded only once the user confirms it (`confirmHeldPromise`). */
+    heldForConfirmation: v.optional(v.boolean()),
+    confirmedByUserAt: v.optional(v.number()),
   }).index("by_claim", ["claimId"]).index("by_message", ["messageId"]),
 
   /** Reminder-only follow-ups (D03, D28). Schedule first, then insert with the returned id. */

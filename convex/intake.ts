@@ -32,7 +32,7 @@ import { subjectKey } from "./lib/facts/subject";
 import { ensurePurchaseTransaction } from "./transactions";
 import { queueTextSecondStage, recordTextEvidence, STATUS_SUMMARY, TEXT_EXTRACTOR_VERSION, type EvidenceProvenance } from "./evidence";
 import { candidatesFromDoc, type DocCandidate } from "./lib/docFacts";
-import { CLASSIFIER_SYSTEM, DocClassification, DOC_SCHEMAS, DOC_SYSTEMS, type ExtractableDocType } from "./lib/schemas_docs";
+import { boundExtracted, CLASSIFIER_SYSTEM, DocClassification, DOC_SCHEMAS, DOC_SYSTEMS, type ExtractableDocType } from "./lib/schemas_docs";
 import { textLayerHasPan } from "./lib/sniff";
 import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS, MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER } from "./limits";
 
@@ -985,7 +985,7 @@ export const extractTextEvidence = internalAction({
       }
       let candidates: DocCandidate[] = [];
       if (readableType(docType)) {
-        const doc: unknown = await extract(`document_${docType}`, DOC_SCHEMAS[docType], TEXT_DOC_SYSTEM(docType), layer.text);
+        const doc: unknown = boundExtracted(await extract(`document_${docType}`, DOC_SCHEMAS[docType], TEXT_DOC_SYSTEM(docType), layer.text));
         candidates = candidatesFromDoc(docType, doc, lease.category, layer);
       }
       await ctx.runMutation(internal.evidence.completeExtraction, {

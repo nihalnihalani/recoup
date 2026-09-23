@@ -27,7 +27,7 @@ import { extract } from "./lib/ai";
 import { candidatesFromDoc, type DocCandidate } from "./lib/docFacts";
 import { maskPans } from "./lib/pan";
 import { extractPdfText } from "./lib/pdfText";
-import { DOC_SCHEMAS, DOC_SYSTEMS, type ExtractableDocType } from "./lib/schemas_docs";
+import { boundExtracted, DOC_SCHEMAS, DOC_SYSTEMS, type ExtractableDocType } from "./lib/schemas_docs";
 import { textLayerHasPan } from "./lib/sniff";
 import { EXTRACTION_SUMMARY, STATUS_SUMMARY } from "./evidence";
 
@@ -63,7 +63,8 @@ async function readUpload(ctx: ActionCtx, lease: Lease): Promise<Outcome> {
   const docType = lease.docType as ExtractableDocType;
   // Masked again as defence in depth (D142); after the pre-scan found no card number this changes nothing.
   const layer = { text: maskPans(pdf.text), pages: pdf.pages.map(maskPans) };
-  const doc: unknown = await extract(`document_${docType}`, DOC_SCHEMAS[docType], DOC_SYSTEM(docType), layer.text);
+  // D30: the schema carries no bounds, so they are enforced on the parsed output before any field is read.
+  const doc: unknown = boundExtracted(await extract(`document_${docType}`, DOC_SCHEMAS[docType], DOC_SYSTEM(docType), layer.text));
   return { status: "succeeded", hasTextLayer: true, pageCount: pdf.pageCount, candidates: candidatesFromDoc(docType, doc, lease.category, layer) };
 }
 

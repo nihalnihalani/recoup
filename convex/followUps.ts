@@ -20,8 +20,10 @@ export async function reminderFireAt(
   claim: Doc<"claims">,
   from: number = Date.now(),
 ): Promise<number> {
-  // M20 (D206): an item-less (scenario) claim has no retail returns window: the 7-day floor, never a throw.
-  const purchase = claim.purchaseId !== undefined ? await ctx.db.get(claim.purchaseId) : null;
+  // M28: an item-less (scenario) claim has no retail returns window; its pack's response expectation decides.
+  // (An order-level scenario claim may carry its purchase id; it is still the pack's claim, not a retail return.)
+  if (claim.type === "scenario" || claim.purchaseId === undefined) return await responseExpectationFireAt(ctx, claim, from);
+  const purchase = await ctx.db.get(claim.purchaseId);
   let days = MIN_REMINDER_DAYS;
   if (purchase) {
     const policy = await ctx.db
@@ -39,6 +41,26 @@ export async function reminderFireAt(
     }
   }
   return from + days * DAY_MS;
+}
+
+/** A reminder is never set further out than this (the retail path caps a returns window the same way). */
+const MAX_REMINDER_DAYS = 365;
+
+/**
+ * M28 (`responseExpectation`, contract §6 "Attachments"): the reminder for a scenario claim lands when the counterparty
+ * was due to answer — the earliest counterparty deadline of the claim's current evaluation that is still open and in
+ * the future — and never sooner than the 7-day floor (D26). With no such deadline (none computed, or the anchor is
+ * unknown), the floor.
+ */
+async function responseExpectationFireAt(ctx: MutationCtx, claim: Doc<"claims">, from: number): Promise<number> {
+  const floor = from + MIN_REMINDER_DAYS * DAY_MS;
+  const opportunity = claim.opportunityId !== undefined ? await ctx.db.get(claim.opportunityId) : null;
+  const evaluation = opportunity?.currentEvaluationId ? await ctx.db.get(opportunity.currentEvaluationId) : null;
+  const due = (evaluation?.deadlines ?? [])
+    .filter((d) => d.obligor === "counterparty" && d.status === "open" && d.dueAt !== undefined && d.dueAt > from)
+    .map((d) => d.dueAt as number);
+  if (due.length === 0) return floor;
+  return Math.min(Math.max(floor, Math.min(...due)), from + MAX_REMINDER_DAYS * DAY_MS);
 }
 
 /** Cancels every pending follow-up for a claim (D28). */

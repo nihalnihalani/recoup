@@ -15,6 +15,7 @@ import type { Id } from "../_generated/dataModel";
 import { setup, signedIn } from "../test.setup";
 import { evidenceKind } from "../schema";
 import {
+  MARKET_MAX_POINTS,
   MAX_LOCATOR_QUOTE_CHARS,
   RETENTION_EVIDENCE_DAYS,
   RETENTION_KEEP_NEWEST,
@@ -102,7 +103,7 @@ describe("lib/privacyFacts — the published copy matches the code", () => {
       ["unfinishedUploads", [ORPHAN_BLOB_MIN_AGE_HOURS]],
       ["evaluations", [EVALUATION_RETENTION_DAYS]],
       ["inboundPayload", [RETENTION_PAYLOAD_DAYS]],
-      ["observations", [RETENTION_OBSERVATION_DAYS, RETENTION_KEEP_NEWEST]],
+      ["observations", [RETENTION_OBSERVATION_DAYS, RETENTION_KEEP_NEWEST, MARKET_MAX_POINTS]],
       ["mailLog", [RETENTION_MAILLOG_DAYS]],
       ["stash", [RETENTION_STASH_DAYS]],
       ["unverifiedAccounts", [RETENTION_UNVERIFIED_DAYS]],

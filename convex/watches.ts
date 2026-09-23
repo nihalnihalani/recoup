@@ -200,11 +200,15 @@ async function recentChecks(ctx: QueryCtx, watchId: Id<"watches">, n: number) {
     .take(n);
 }
 
-/** Third-party dated prices for the verdict (W1b). Bounded by MARKET_MAX_POINTS on write. */
+/**
+ * Third-party dated prices for the verdict (W1b): the NEWEST `MARKET_MAX_POINTS` (P07-W5; retention keeps no more
+ * than that on write, `market.pruneMarketPoints`).
+ */
 async function marketFor(ctx: QueryCtx, watchId: Id<"watches">): Promise<Array<Doc<"marketPrices">>> {
   return await ctx.db
     .query("marketPrices")
     .withIndex("by_watch", (q) => q.eq("watchId", watchId))
+    .order("desc")
     .take(MARKET_MAX_POINTS);
 }
 

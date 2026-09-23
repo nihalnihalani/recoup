@@ -11,7 +11,7 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import schema, { approvalBinding, money as moneyValidator } from "./schema";
+import schema, { approvalBinding, factValue, money as moneyValidator } from "./schema";
 import { ownedClaim, requireUserId } from "./lib/access";
 import { isClosedForAsk } from "./lib/claimState";
 import { balanceValidator, claimBalance } from "./lib/balance";
@@ -30,7 +30,7 @@ import { MAIL_RECONCILE_STALL_MS, MAX_SENDS_PER_CLAIM } from "./limits";
 import { claimCurrency, formatMinor, type Money } from "./lib/money";
 import { amountExceedsEstimate } from "./lib/amountReview";
 import { isPackActive } from "./lib/rules/registry";
-import { legacyIds } from "./lib/legacyClaim";
+import { getFactSpec } from "./lib/facts/catalog";
 import { normalizeUrl, unverifiedContent, type Allowances } from "./lib/contentCheck";
 import { boundFactsHash, canonicalHash } from "./lib/canonical";
 import { rateLimiter } from "./lib/rateLimits";
@@ -195,6 +195,96 @@ export async function confirmedContactFor(
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// What a claim is about (M28: DA-A-12 / HC-1 — item-less scenario claims)
+// ---------------------------------------------------------------------------
+
+/**
+ * M28: what a claim is about. A wave-1 retail claim has its purchase and item; a wave-2 `scenario` claim has neither
+ * and is about its transaction (an order, a flight, a card charge). Every draft path reads a claim through this, never
+ * by dereferencing `purchaseId`/`itemId`, so an item-less claim drafts, prepares and sends like any other.
+ */
+export type ClaimParty = {
+  purchase: Doc<"purchases"> | null;
+  item: Doc<"items"> | null;
+  transaction: Doc<"transactions"> | null;
+  /** HC-1: the claim's own currency, else its purchase's, else its transaction's; null when none is known (never "USD"). */
+  currency: string | null;
+  /** Who the claim is addressed to: the store, or the transaction's counterparty. */
+  counterpartyName: string;
+  counterpartyDomain: string | null;
+  isExample: boolean;
+};
+
+export async function claimParty(ctx: QueryCtx | MutationCtx, claim: Doc<"claims">): Promise<ClaimParty> {
+  const purchase = claim.purchaseId !== undefined ? await ctx.db.get(claim.purchaseId) : null;
+  // A retail claim whose purchase is gone keeps its wave-1 error.
+  if (claim.purchaseId !== undefined && purchase === null) throw new ConvexError("Purchase not found");
+  const item = claim.itemId !== undefined ? await ctx.db.get(claim.itemId) : null;
+  const transaction = claim.transactionId !== undefined ? await ctx.db.get(claim.transactionId) : null;
+  if (purchase === null && transaction === null) throw new ConvexError("Claim not found");
+  const domain = purchase?.merchantDomain ?? transaction?.counterpartyDomain ?? null;
+  return {
+    purchase,
+    item,
+    transaction,
+    currency: claimCurrency(claim, purchase) ?? transaction?.currency ?? null,
+    counterpartyName: purchase?.merchant ?? transaction?.counterpartyName ?? "",
+    counterpartyDomain: domain === null ? null : domain.toLowerCase(),
+    isExample: claim.isExample === true || purchase?.isExample === true || transaction?.isExample === true,
+  };
+}
+
+/**
+ * DA-A-9 (M28): an email on a claim whose required channel is not email (a postal notice, a portal) is informal
+ * outreach — correspondence only, never the claim's submission. Absent `purpose` means formal.
+ */
+export function draftPurpose(claim: Doc<"claims">): "formal" | "informal" {
+  return claim.requiredChannel !== undefined && claim.requiredChannel !== "email" ? "informal" : "formal";
+}
+
+/** A bound fact's value in words, for the writer (SEC-AI-4: only bound values from confirmed cells). */
+function boundValueText(value: Infer<typeof factValue> | undefined): string | null {
+  if (value === undefined) return null;
+  switch (value.kind) {
+    case "money":
+      return formatMinor(value.amountMinor, value.currency);
+    case "instant":
+      return new Date(value.epochMs).toISOString().slice(0, 10);
+    case "local_date":
+      return value.date;
+    case "local_datetime":
+      return value.dateTime.replace("T", " ");
+    case "code":
+      return value.code.replace(/_/g, " ");
+    case "text":
+      return value.text;
+    case "identifier":
+      return value.value;
+    case "bool":
+      return value.value ? "yes" : "no";
+    case "count":
+      return String(value.n);
+    case "minutes":
+      return `${value.minutes} minutes`;
+    case "user_unknown":
+      return null;
+  }
+}
+
+/** The confirmed values an evaluation's approval binds, as "label: value" lines (bounded). */
+function boundFactLines(evaluation: Doc<"evaluations"> | null): string[] {
+  const lines: string[] = [];
+  for (const f of evaluation?.boundFacts ?? []) {
+    if (f.status !== "confirmed" && f.status !== "observed" && f.status !== "derived") continue;
+    const text = boundValueText(f.value);
+    if (text === null || getFactSpec(f.key) === null) continue;
+    lines.push(`${f.key.split(".").slice(1).join(".").replace(/_/g, " ")}: ${text.slice(0, 200)}`);
+    if (lines.length >= 30) break;
+  }
+  return lines;
+}
+
 /**
  * The AgentMail component's ctx types predate convex 1.46's
  * `runMutation(fn, args, options)` overload, so a real `MutationCtx` fails
@@ -218,6 +308,13 @@ const draftContext = v.object({
   claim: schema.doc("claims"),
   item: v.union(schema.doc("items"), v.null()),
   purchase: v.union(schema.doc("purchases"), v.null()),
+  /** M28: the transaction of a scenario claim (also set for a linked retail claim). */
+  transaction: v.union(schema.doc("transactions"), v.null()),
+  /** HC-1: `ClaimParty.currency`; null when unknown. */
+  currency: v.union(v.string(), v.null()),
+  counterpartyName: v.string(),
+  /** The confirmed values the claim's current evaluation binds ("label: value"), for a scenario claim's writer. */
+  boundFacts: v.array(v.string()),
   policy: v.union(schema.doc("policies"), v.null()),
   latestCheck: v.union(schema.doc("priceChecks"), v.null()),
   replies: v.array(schema.doc("replies")),
@@ -238,14 +335,23 @@ export const context = internalQuery({
   handler: async (ctx, { claimId }) => {
     const claim = await ctx.db.get(claimId);
     if (!claim) return null;
-    const ids = legacyIds(claim); // M20 (D206): an item-less claim has no retail draft context yet (M28)
-    const item = await ctx.db.get(ids.itemId);
-    const purchase = await ctx.db.get(ids.purchaseId);
+    let party: ClaimParty;
+    try {
+      party = await claimParty(ctx, claim);
+    } catch {
+      return null;
+    }
+    const { item, purchase } = party;
     const user = await ctx.db.get(claim.userId);
+    const link = await liveLink(ctx, claim);
     return {
       claim,
       item,
       purchase,
+      transaction: party.transaction,
+      currency: party.currency,
+      counterpartyName: party.counterpartyName,
+      boundFacts: boundFactLines(link?.evaluation ?? null),
       policy: claim.policyId ? await ctx.db.get(claim.policyId) : null,
       latestCheck: claim.openedFromPriceCheckId
         ? await ctx.db.get(claim.openedFromPriceCheckId)
@@ -257,8 +363,8 @@ export const context = internalQuery({
       balance: await claimBalance(ctx, claim),
       // Password sign-up stores no name; the mailbox name is a truthful sign-off (review H5).
       userName: user?.name ?? user?.email?.split("@")[0] ?? null,
-      confirmedContact: purchase
-        ? await confirmedContactFor(ctx, claim.userId, purchase.merchantDomain)
+      confirmedContact: party.counterpartyDomain
+        ? await confirmedContactFor(ctx, claim.userId, party.counterpartyDomain)
         : null,
     };
   },
@@ -273,6 +379,16 @@ const SYSTEM = [
   "Ask about exactly one item and exactly one amount.",
   "Quote the retailer's own policy passage if one is given.",
   "Do not threaten, do not mention laws or chargebacks, and never state anything the facts below do not state.",
+  "Under 150 words. Sign off with the customer name.",
+  `Subject under ${MAX_SUBJECT_CHARS} characters and must not contain square brackets.`,
+].join(" ");
+
+/** M28: the writer for a scenario claim (an order, a flight, a card charge): one request, only the facts given. */
+const SCENARIO_SYSTEM = [
+  "Write a short, polite customer email to a company's customer-service team about one request for money back.",
+  "Ask for exactly the one remedy and the one amount given below.",
+  "State only the facts listed below, never anything else; if a fact is not listed, do not mention it.",
+  "Do not threaten, do not cite laws, regulations or chargebacks, and never invent a reference number, a date or an amount.",
   "Under 150 words. Sign off with the customer name.",
   `Subject under ${MAX_SUBJECT_CHARS} characters and must not contain square brackets.`,
 ].join(" ");
@@ -304,7 +420,6 @@ export const generate = action({
     const c = await ctx.runQuery(internal.drafts.context, { claimId });
     if (!c || c.claim.userId !== userId) throw new ConvexError("Claim not found");
     const { claim, item, purchase } = c;
-    if (!item || !purchase) throw new ConvexError("Claim not found");
     // B1/B5: refusals first, then the budget, then the model, so a refused call spends nothing.
     // Writing a draft for an example claim is allowed (it is how a new account sees what Recoup writes, and it
     // is budgeted like any other draft); SENDING one is what `approveAndSend` refuses.
@@ -313,7 +428,34 @@ export const generate = action({
     }
     await ctx.runMutation(internal.budget.consume, { userId, kind: "draft_generate" });
 
-    const currency = purchase.currency;
+    const out = item && purchase ? await writeRetail(c, item, purchase) : await writeScenario(c);
+    const subject = `${out.subject.replace(/[[\]]/g, "").trim().slice(0, MAX_SUBJECT_CHARS)} [RC-${claim.token}]`;
+    const body = out.body.trim().slice(0, MAX_BODY_CHARS);
+
+    const draftId: Id<"drafts"> | null = await ctx.runMutation(internal.drafts.insert, {
+      claimId,
+      userId,
+      to: c.confirmedContact ?? "",
+      subject,
+      body,
+    });
+    // T18.5 (D124 B5): the account was deleted while `extract` above was in
+    // flight -- `insert` refused rather than writing a draft the finished
+    // purge would never see again. Nothing useful can be returned to a
+    // caller whose account no longer exists; `generate`'s declared return
+    // stays a plain `Id<"drafts">` (never widened to nullable) so every
+    // OTHER caller keeps its existing non-null contract.
+    if (draftId === null) throw new ConvexError("This account is being deleted.");
+    return draftId;
+  },
+});
+
+type DraftContext = Infer<typeof draftContext>;
+
+/** The wave-1 retail writer: one item, one amount, the store's own policy passage. */
+async function writeRetail(c: DraftContext, item: Doc<"items">, purchase: Doc<"purchases">) {
+    const { claim } = c;
+    const currency = c.currency ?? purchase.currency;
     const purchasedOn = day(purchase.purchasedAt);
     const observed =
       c.latestCheck?.observedCents !== undefined && c.latestCheck?.observedCents !== null
@@ -344,27 +486,28 @@ export const generate = action({
       `Customer name: ${c.userName ?? "the customer"}`,
     ].join("\n");
 
-    const out = await extract("draft", DraftOut, SYSTEM, facts);
-    const subject = `${out.subject.replace(/[[\]]/g, "").trim().slice(0, MAX_SUBJECT_CHARS)} [RC-${claim.token}]`;
-    const body = out.body.trim().slice(0, MAX_BODY_CHARS);
+    return await extract("draft", DraftOut, SYSTEM, facts);
+}
 
-    const draftId: Id<"drafts"> | null = await ctx.runMutation(internal.drafts.insert, {
-      claimId,
-      userId,
-      to: c.confirmedContact ?? "",
-      subject,
-      body,
-    });
-    // T18.5 (D124 B5): the account was deleted while `extract` above was in
-    // flight -- `insert` refused rather than writing a draft the finished
-    // purge would never see again. Nothing useful can be returned to a
-    // caller whose account no longer exists; `generate`'s declared return
-    // stays a plain `Id<"drafts">` (never widened to nullable) so every
-    // OTHER caller keeps its existing non-null contract.
-    if (draftId === null) throw new ConvexError("This account is being deleted.");
-    return draftId;
-  },
-});
+/**
+ * M28: the scenario writer (a claim with no item). SEC-AI-4: the facts block is the counterparty, the remedy, the
+ * claim's own amount in its own currency, and the confirmed values its evaluation binds — never document text.
+ */
+async function writeScenario(c: DraftContext) {
+  const { claim } = c;
+  if (c.currency === null) throw new ConvexError("This claim's currency is unknown");
+  const facts = [
+    `Company: ${c.counterpartyName || "the company"}`,
+    `Request: ${(claim.remedyKey ?? "refund").replace(/_/g, " ")}`,
+    `Amount being asked for: ${formatMinor(Math.max(c.balance.unresolved, 0), c.currency)}`,
+    ...(c.boundFacts.length > 0 ? ["Facts the customer confirmed:", ...c.boundFacts.map((l) => `- ${l}`)] : []),
+    c.replies.length > 0
+      ? `Earlier replies from the company: ${c.replies.map((r) => `${r.classification}: ${r.summary}`).join(" | ")}`
+      : "The company has not replied yet.",
+    `Customer name: ${c.userName ?? "the customer"}`,
+  ].join("\n");
+  return await extract("draft", DraftOut, SCENARIO_SYSTEM, facts);
+}
 
 /**
  * Stores one draft version bound to the claim's current version (D11).
@@ -403,12 +546,12 @@ export const insert = internalMutation({
     // NOW: a change the user just made (a corrected quantity, an adjusted amount — DA-B-2) is absorbed here, with its
     // version bump, instead of invalidating this very draft at its first review.
     // Example claims never send (B1), so they are never re-evaluated for approval.
-    const claimPurchase = await ctx.db.get(legacyIds(claim).purchaseId);
-    if (claim.isExample !== true && claimPurchase?.isExample !== true) await reevaluateForApproval(ctx, claim, Date.now());
+    const claimParty0 = await claimParty(ctx, claim);
+    if (!claimParty0.isExample) await reevaluateForApproval(ctx, claim, Date.now());
     const current = (await ctx.db.get(claim._id))!;
-    const purchase = await ctx.db.get(legacyIds(current).purchaseId);
+    const party = await claimParty(ctx, current);
     const link = await liveLink(ctx, current);
-    const binding = purchase && link?.evaluation ? await bindingFor(current, purchase, link.opportunity._id, link.evaluation) : undefined;
+    const binding = party.currency !== null && link?.evaluation ? await bindingFor(current, party.currency, link.opportunity._id, link.evaluation) : undefined;
     const draftId = await ctx.db.insert("drafts", {
       claimId: args.claimId,
       userId: args.userId,
@@ -418,8 +561,10 @@ export const insert = internalMutation({
       subject: args.subject.slice(0, 200),
       body: args.body.slice(0, MAX_BODY_CHARS),
       ...(binding !== undefined ? { binding } : {}),
+      purpose: draftPurpose(current),
     });
-    if (current.status === "detected") await ctx.db.patch(claim._id, { status: "drafted" });
+    // DA-A-9: informal outreach is correspondence only; it never moves the claim's own delivery status.
+    if (current.status === "detected" && draftPurpose(current) === "formal") await ctx.db.patch(claim._id, { status: "drafted" });
     return draftId;
   },
 });
@@ -495,11 +640,11 @@ export type ApprovalBinding = Infer<typeof approvalBinding>;
  */
 export async function bindingFor(
   claim: Doc<"claims">,
-  purchase: Doc<"purchases">,
+  currency: string,
   opportunityId: Id<"opportunities">,
   evaluation: Doc<"evaluations">,
 ): Promise<ApprovalBinding> {
-  const amount = { amountMinor: claim.expectedCents, currency: claimCurrency(claim, purchase) ?? purchase.currency };
+  const amount = { amountMinor: claim.expectedCents, currency };
   const bfh = await boundFactsHash(evaluation.boundFacts ?? []);
   const contextHash = await canonicalHash({
     claimVersion: claim.version,
@@ -545,15 +690,15 @@ export { unverifiedContent };
 async function draftAllowances(
   ctx: QueryCtx | MutationCtx,
   claim: Doc<"claims">,
-  purchase: Doc<"purchases">,
+  party: ClaimParty,
   to: string,
   evaluation: Doc<"evaluations"> | null,
 ): Promise<Allowances> {
   const emails = new Set<string>([to.toLowerCase()]);
   const urls = new Set<string>();
-  const hosts = new Set<string>([purchase.merchantDomain.toLowerCase().replace(/^www\./, "")]);
+  const hosts = new Set<string>(party.counterpartyDomain !== null ? [party.counterpartyDomain.replace(/^www\./, "")] : []);
   const amountsMinor = new Set<number>([claim.expectedCents]);
-  const item = await ctx.db.get(legacyIds(claim).itemId);
+  const item = party.item;
   if (item) {
     amountsMinor.add(item.unitCents);
     amountsMinor.add(item.unitCents * item.qty);
@@ -655,7 +800,7 @@ async function approvalState(
   ctx: QueryCtx | MutationCtx,
   draft: Doc<"drafts">,
   claim: Doc<"claims">,
-  purchase: Doc<"purchases">,
+  party: ClaimParty,
   text: ApprovalText,
   acks: Acks,
   now: number,
@@ -681,12 +826,13 @@ async function approvalState(
       }
       needsWindowAck = true;
     }
-    binding = await bindingFor(claim, purchase, link.opportunity._id, evaluation);
+    if (party.currency === null) return { ok: false, code: "outcome_not_approvable", message: "This claim's currency is unknown." };
+    binding = await bindingFor(claim, party.currency, link.opportunity._id, evaluation);
     if (draft.binding !== undefined && draft.binding.contextHash !== binding.contextHash) {
       return { ok: false, code: "binding_changed", message: "What this draft asks for changed since it was written. Generate a new draft and review it again." };
     }
     // DA-B-2: the one shared predicate (`lib/amountReview`, also behind the opportunity's `review_amount`).
-    const review = amountExceedsEstimate({ expectedCents: claim.expectedCents, currency: claimCurrency(claim, purchase) }, evaluation.amount);
+    const review = amountExceedsEstimate({ expectedCents: claim.expectedCents, currency: party.currency }, evaluation.amount);
     if (review.exceeds) amountReview = review;
   }
   // DA-B-1 (a) / DA-A-21: the legacy window is read from the clock for EVERY claim that has one — linked or not —
@@ -702,7 +848,7 @@ async function approvalState(
       estimate,
     };
   }
-  const findings = unverifiedContent(text.body, await draftAllowances(ctx, claim, purchase, text.to, link?.evaluation ?? null));
+  const findings = unverifiedContent(text.body, await draftAllowances(ctx, claim, party, text.to, link?.evaluation ?? null));
   const findingsHash = await findingsHashOf(draft, text, findings);
   if (findings.length > 0 && acks.unverifiedContent !== findingsHash) {
     return {
@@ -806,10 +952,10 @@ type PrepareResult =
 async function reevaluateForApproval(ctx: MutationCtx, claim: Doc<"claims">, now: number): Promise<PrepareResult | null> {
   if (claim.type !== "price_adjustment" && !claim.opportunityId) return null;
   const before = claim.opportunityId ? await ctx.db.get(claim.opportunityId) : null;
-  const ids = legacyIds(claim);
-  const subjects = [`item:${ids.itemId}`];
-  if (claim.transactionId) await evaluateTransaction(ctx, claim.transactionId, "approval_check", now, { subjects });
-  else await evaluatePurchase(ctx, ids.purchaseId, "approval_check", now, { subjects });
+  // M28: a retail claim re-evaluates its item; a scenario claim (no item) its whole transaction.
+  const opts = claim.itemId !== undefined ? { subjects: [`item:${claim.itemId}`] } : {};
+  if (claim.transactionId) await evaluateTransaction(ctx, claim.transactionId, "approval_check", now, opts);
+  else if (claim.purchaseId) await evaluatePurchase(ctx, claim.purchaseId, "approval_check", now, opts);
   if (before && before.status !== "superseded") {
     const after = await ctx.db.get(before._id);
     if (after?.status === "superseded") {
@@ -833,7 +979,7 @@ async function prepareCore(
   userId: Id<"users">,
   draft: Doc<"drafts">,
   claim: Doc<"claims">,
-  purchase: Doc<"purchases">,
+  party: ClaimParty,
   input: {
     to: string;
     subject: string;
@@ -856,7 +1002,7 @@ async function prepareCore(
     ctx,
     draft,
     fresh,
-    purchase,
+    party,
     text,
     acksOf(input),
     now,
@@ -883,11 +1029,10 @@ export const prepareSend = mutation({
     const userId = await requireUserId(ctx);
     const draft = await ownedDraft(ctx, args.draftId, userId);
     const claim = await ownedClaim(ctx, draft.claimId, userId);
-    const purchase = await ctx.db.get(legacyIds(claim).purchaseId);
-    if (!purchase) throw new ConvexError("Purchase not found");
-    if (claim.isExample || purchase.isExample) return { ok: false, code: "example_claim", message: EXAMPLE_ERROR };
+    const party = await claimParty(ctx, claim);
+    if (party.isExample) return { ok: false, code: "example_claim", message: EXAMPLE_ERROR };
     if (draft.outboundId) throw new ConvexError("This draft was already sent");
-    return await prepareCore(ctx, userId, draft, claim, purchase, args);
+    return await prepareCore(ctx, userId, draft, claim, party, args);
   },
 });
 
@@ -973,14 +1118,13 @@ async function checkSend(
   // B1 + S-M03-5: nothing that could break out of a header survives, and the length is capped before any regex.
   const to = parseRecipient(args.to);
 
-  const purchase = await ctx.db.get(legacyIds(claim).purchaseId);
-  if (!purchase) throw new ConvexError("Purchase not found");
-  if (claim.isExample || purchase.isExample) throw new ConvexError(EXAMPLE_ERROR);
+  const party = await claimParty(ctx, claim);
+  if (party.isExample) throw new ConvexError(EXAMPLE_ERROR);
 
   // D18: an unticked recipient is only allowed when it is exactly the contact from a policy snapshot this user
-  // confirmed themselves.
+  // confirmed themselves (a scenario claim's counterparty domain has none unless the user confirmed one).
   if (args.recipientConfirmed !== true) {
-    const contact = await confirmedContactFor(ctx, userId, purchase.merchantDomain);
+    const contact = party.counterpartyDomain !== null ? await confirmedContactFor(ctx, userId, party.counterpartyDomain) : null;
     if (contact !== to) throw new ConvexError("Confirm this recipient before sending");
   }
 
@@ -1007,7 +1151,7 @@ async function checkSend(
   // recomputed read-only from the current state, so a change since the review ("Review the claim again") refuses
   // before anything is charged or sent. A resend runs the full prepare pass itself in the same transaction.
   let approvedHash: string | undefined;
-  if (mode === "first") approvedHash = await verifyPrepared(ctx, draft, claim, purchase, args);
+  if (mode === "first") approvedHash = await verifyPrepared(ctx, draft, claim, party, args);
   // Last, so every refusal above costs nothing; throws at 10 sends a day.
   await charge(ctx, userId, "claim_email");
   return { to, subject, body, inboxId: profile.inboxId, ...(approvedHash !== undefined ? { approvedHash } : {}) };
@@ -1018,7 +1162,7 @@ async function verifyPrepared(
   ctx: MutationCtx,
   draft: Doc<"drafts">,
   claim: Doc<"claims">,
-  purchase: Doc<"purchases">,
+  party: ClaimParty,
   args: SendApproval,
 ): Promise<string | undefined> {
   const now = Date.now();
@@ -1028,7 +1172,7 @@ async function verifyPrepared(
     ctx,
     draft,
     claim,
-    purchase,
+    party,
     text,
     acksOf(args),
     now,
@@ -1075,8 +1219,11 @@ async function enqueueClaimEmail(
     ...(send.approvedHash !== undefined ? { approvedHash: send.approvedHash } : {}),
   });
   // Status only: the version is the money version, and bumping it here would strand this very draft (and every
-  // reminder) behind a stale check.
-  await ctx.db.patch(claim._id, { status: "queued", attentionAt: undefined, sendUnknown: undefined });
+  // reminder) behind a stale check. DA-A-9 (M28): an informal email (the claim's required channel is not email) is
+  // correspondence only — it never moves the claim's delivery status, so nothing reads it as the claim's submission.
+  if (draftPurpose(claim) === "formal") {
+    await ctx.db.patch(claim._id, { status: "queued", attentionAt: undefined, sendUnknown: undefined });
+  }
   await ctx.scheduler.runAfter(BACKOFF_MS[0], internal.drafts.reconcileSend, { draftId, attempt: 1 });
   return outboundId;
 }
@@ -1141,9 +1288,8 @@ export const resendAfterUnknown = mutation({
     const userId = await requireUserId(ctx);
     const draft = await ownedDraft(ctx, args.draftId, userId);
     const claim = await ownedClaim(ctx, draft.claimId, userId);
-    const purchase = await ctx.db.get(legacyIds(claim).purchaseId);
-    if (!purchase) throw new ConvexError("Purchase not found");
-    if (claim.isExample || purchase.isExample) throw new ConvexError(EXAMPLE_ERROR);
+    const party = await claimParty(ctx, claim);
+    if (party.isExample) throw new ConvexError(EXAMPLE_ERROR);
     if (!draft.outboundId || args.acknowledgedOutboundId !== draft.outboundId) {
       throw new ConvexError("Review the earlier attempt before sending again");
     }
@@ -1165,7 +1311,7 @@ export const resendAfterUnknown = mutation({
     }
 
     // 3. The full prepare pass (committed re-evaluation; refusals returned), then every approval check.
-    const prepared = await prepareCore(ctx, userId, draft, claim, purchase, args);
+    const prepared = await prepareCore(ctx, userId, draft, claim, party, args);
     if (!prepared.ok) return prepared;
     const current = (await ctx.db.get(claim._id))!;
     const send = await checkSend(ctx, userId, draft, current, args, "resend");
@@ -1180,7 +1326,7 @@ export const resendAfterUnknown = mutation({
       to: send.to,
       subject: send.subject,
       body: send.body,
-      ...(bound?.evaluation ? { binding: await bindingFor(current, purchase, bound.opportunity._id, bound.evaluation) } : {}),
+      ...(bound?.evaluation && party.currency !== null ? { binding: await bindingFor(current, party.currency, bound.opportunity._id, bound.evaluation) } : {}),
       approvedHash: prepared.preparedHash,
     });
     await ctx.db.insert("claimNotes", {

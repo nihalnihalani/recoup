@@ -192,6 +192,35 @@ describe("reading a synthetic receipt (DA-A-6)", () => {
     expect(total.source).toMatchObject({ quoteStatus: "unverified" });
   });
 
+  it("D247: an email's exact instant and a receipt's printed date on the same day → no second, conflicting date candidate", async () => {
+    for (const [emailInstant, expectedDates] of [
+      ["2026-03-04T04:30:00Z", 1], // 8:30 pm Pacific on March 3 (already March 4 in UTC): the same calendar day
+      ["2026-03-05T18:00:00Z", 2], // March 5: a real disagreement, which the user resolves
+    ] as const) {
+      const t = setup();
+      await enableExtraction(t);
+      const { a, transactionId, evidenceId } = await attachedReceipt(t);
+      const emailEvidence = await t.run((ctx) =>
+        ctx.db.insert("evidence", {
+          userId: a.userId, transactionId, kind: "email", docType: "order_confirmation", sourceChannel: "agentmail_forward", provenance: "unverified_sender",
+          contentHash: "e".repeat(64), text: "Your order", receivedAt: T0, extractionStatus: "succeeded", extractionAttempts: 1, retention: "active",
+        }),
+      );
+      await t.run((ctx) =>
+        putFact(ctx, a.userId, {
+          transactionId, subjectKey: "txn", key: "retail.purchase_date", state: "extracted_candidate",
+          value: { kind: "instant", epochMs: Date.parse(emailInstant) },
+          source: { kind: "evidence", evidenceId: emailEvidence, locator: { kind: "whole_document" }, quoteStatus: "unverified", extractorVersion: "intake_email_v1" },
+        }),
+      );
+      vi.mocked(extract).mockResolvedValue(orderDoc() as never);
+      await run(t, evidenceId);
+      const dates = (await factsOf(t, transactionId)).filter((f) => f.key === "retail.purchase_date" && f.state === "extracted_candidate");
+      expect(dates, emailInstant).toHaveLength(expectedDates);
+      vi.mocked(extract).mockReset();
+    }
+  });
+
   it("an unverified or unverifiable quote can never back an observed fact (it never counts toward evidenceSupports)", async () => {
     const t = setup();
     const { a, transactionId, evidenceId } = await attachedReceipt(t);

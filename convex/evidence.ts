@@ -24,7 +24,7 @@ import { internalMutation, internalQuery, mutation, query, type MutationCtx, typ
 import type { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { evidenceDocType, evidenceLocator, extractionStatus as extractionStatusValidator, factValue, quoteStatus as quoteStatusValidator } from "./schema";
-import { putFact } from "./lib/facts/write";
+import { putFact, readCellRows } from "./lib/facts/write";
 import { isTombstoned } from "./lib/accountState";
 import { assertSameTransaction, ownedEvidence, ownedTransaction, requireUserId } from "./lib/access";
 import { rateLimiter } from "./lib/rateLimits";
@@ -950,6 +950,35 @@ export const claimExtraction = internalMutation({
   },
 });
 
+const HOUR_MS = 3_600_000;
+
+/**
+ * D247 (DA E3): does `epochMs` name the calendar day `isoDate`? A document's date-only value is stored at noon UTC
+ * (`lib/docFacts`, and intake's `safeDate` — the documented convention), which is that same calendar day from UTC-11
+ * to UTC+12. So an instant names day D when D is its local date in some zone of that range:
+ * [D 00:00 at UTC+12, D 24:00 at UTC-11).
+ */
+export function instantOnDay(epochMs: number, isoDate: string): boolean {
+  const midnight = Date.parse(`${isoDate}T00:00:00Z`);
+  return epochMs >= midnight - 12 * HOUR_MS && epochMs < midnight + 24 * HOUR_MS + 11 * HOUR_MS;
+}
+
+/**
+ * D247: a date candidate that names the same calendar day as a live row already in its cell (an email's exact instant,
+ * a confirmed date) adds nothing but a false "which date?" conflict, so it is not written.
+ */
+async function sameDayAlreadyInCell(
+  ctx: MutationCtx,
+  transactionId: Id<"transactions">,
+  key: string,
+  value: Infer<typeof factValue>,
+): Promise<boolean> {
+  if (value.kind !== "instant") return false;
+  const day = new Date(value.epochMs).toISOString().slice(0, 10);
+  const rows = await readCellRows(ctx, transactionId, "txn", key);
+  return rows.some((r) => r.value.kind === "instant" && instantOnDay(r.value.epochMs, day));
+}
+
 const candidateValidator = v.object({ key: v.string(), value: factValue, locator: evidenceLocator, quoteStatus: quoteStatusValidator });
 
 /**
@@ -995,6 +1024,7 @@ export const completeExtraction = internalMutation({
     let written = 0;
     if (args.status === "succeeded" && row.transactionId !== undefined) {
       for (const c of args.candidates) {
+        if (await sameDayAlreadyInCell(ctx, row.transactionId, c.key, c.value)) continue;
         try {
           const res = await putFact(ctx, row.userId, {
             transactionId: row.transactionId,

@@ -16,7 +16,9 @@
  *     banking credential or PDF password. A statement carries the issuer, the exact card product name and the LAST 4
  *     digits only. A test walks every schema's keys.
  *   - SEC-AI-5: a statement is one candidate PER LINE; the model never merges lines, and the user picks the line.
- *   - Arrays are bounded, so a hostile document cannot make the model return an unbounded list.
+ *   - D30: OpenAI's strict structured outputs reject `maxLength` (and bounds are not trusted from a model anyway), so
+ *     no string or array carries a zod `.max()`. Every limit is stated in the description and ENFORCED IN CODE on
+ *     the parsed output by `boundExtracted` (quotes, text, list lengths, and `last4` kept only as four digits).
  *   - Every system prompt is a module constant (SEC-AI-1): no stored or document text is ever interpolated into it.
  *     The untrusted document goes in the user turn only (`lib/ai.extract` adds the injection guard).
  */
@@ -29,18 +31,20 @@ export const MAX_STATEMENT_LINES = 60;
 export const MAX_SEGMENTS = 8;
 export const MAX_CREDITS = 20;
 
-const quote = () => z.string().max(MAX_QUOTE_CHARS).nullable().describe("the shortest verbatim span of the document this came from, or null");
+const quote = () =>
+  z.string().nullable().describe(`the shortest verbatim span of the document this came from, at most ${MAX_QUOTE_CHARS} characters, or null`);
 
 /** `{ value, quote }` for one field. */
 export function quoted<T extends z.ZodTypeAny>(value: T) {
   return z.object({ value: value.nullable(), quote: quote() });
 }
 
-const text = (max: number, what: string) => quoted(z.string().max(max).describe(what));
+// (Concatenated, not interpolated: the SEC-AI-1 source test allows only UPPER_CASE constants and `what` in templates.)
+const text = (max: number, what: string) => quoted(z.string().describe(what + "; at most " + String(max) + " characters"));
 const decimal = (what: string) =>
-  quoted(z.string().max(40).describe(`${what}: the amount exactly as printed, e.g. "1,234.50"; keep a minus sign, parentheses or CR/DR`));
-const printedDate = (what: string) => quoted(z.string().max(60).describe(`${what}: the date (and time, if shown) exactly as printed`));
-const currency = () => quoted(z.string().max(8).describe("the currency as printed: an ISO code like USD, or a symbol like $"));
+  quoted(z.string().describe(`${what}: the amount exactly as printed, e.g. "1,234.50"; keep a minus sign, parentheses or CR/DR`));
+const printedDate = (what: string) => quoted(z.string().describe(`${what}: the date (and time, if shown) exactly as printed`));
+const currency = () => quoted(z.string().describe("the currency as printed: an ISO code like USD, or a symbol like $"));
 
 // ---------------------------------------------------------------------------
 // Second-stage classifier (email/paste text; uploads use the user's declaration, DA-A-8)
@@ -56,7 +60,7 @@ export const CLASSIFIABLE_DOC_TYPES = [
 export const DocClassification = z.object({
   docType: z.enum(CLASSIFIABLE_DOC_TYPES),
   confidence: z.number().min(0).max(1),
-  reason: z.string().max(200).describe("one short sentence naming what in the document shows its type"),
+  reason: z.string().describe("one short sentence naming what in the document shows its type, at most 200 characters"),
 });
 
 export const CLASSIFIER_SYSTEM = [
@@ -71,7 +75,7 @@ export const CLASSIFIER_SYSTEM = [
 
 const LineItem = z.object({
   name: text(200, "the item as named on the document"),
-  quantity: quoted(z.string().max(12).describe("the quantity as printed")),
+  quantity: quoted(z.string().describe("the quantity as printed")),
   unitPrice: decimal("price for one unit"),
   lineTotal: decimal("the line total"),
   variant: text(120, "size, colour or model as printed"),
@@ -84,7 +88,7 @@ export const OrderDoc = z.object({
   orderRef: text(100, "the order or receipt number"),
   orderDate: printedDate("the order or purchase date"),
   currency: currency(),
-  items: z.array(LineItem).max(MAX_LINE_ITEMS),
+  items: z.array(LineItem).describe(`at most ${MAX_LINE_ITEMS} lines`),
   subtotal: decimal("the subtotal"),
   tax: decimal("tax"),
   shipping: decimal("shipping or delivery charge"),
@@ -106,7 +110,7 @@ export const RefundDoc = z.object({
         date: printedDate("when it was or will be issued"),
       }),
     )
-    .max(MAX_CREDITS),
+    .describe(`at most ${MAX_CREDITS} credits`),
 });
 
 /** shipping_notice, delivery_notice, delay_notice. */
@@ -138,8 +142,8 @@ export const TravelDoc = z.object({
   sellingCarrier: text(80, "who sold the ticket (airline or agency)"),
   ticketNumber: text(20, "the 13-digit ticket number"),
   bookingReference: text(12, "the booking reference or PNR"),
-  segments: z.array(Segment).max(MAX_SEGMENTS),
-  changedSegments: z.array(Segment).max(MAX_SEGMENTS).describe("the new itinerary, for a change notice"),
+  segments: z.array(Segment).describe(`at most ${MAX_SEGMENTS} segments`),
+  changedSegments: z.array(Segment).describe(`the new itinerary, for a change notice; at most ${MAX_SEGMENTS} segments`),
   change: quoted(z.enum(["cancelled", "schedule_changed", "renumbered_only", "delayed", "none"])),
   noticeDate: printedDate("when the notice was sent"),
   fareTotal: decimal("the total fare paid"),
@@ -163,7 +167,7 @@ export const BaggageDoc = z.object({
 export const StatementDoc = z.object({
   issuer: text(80, "the bank or issuer"),
   cardProduct: text(80, "the exact card product name as printed"),
-  last4: quoted(z.string().max(4).describe("ONLY the last four digits of the card; never more")),
+  last4: quoted(z.string().describe("ONLY the last four digits of the card; never more than four characters")),
   closingDate: printedDate("the statement closing date"),
   periodStart: printedDate("the first day of the statement period"),
   periodEnd: printedDate("the last day of the statement period"),
@@ -179,8 +183,7 @@ export const StatementDoc = z.object({
         referenceNumber: text(40, "the line's reference number, if printed"),
       }),
     )
-    .max(MAX_STATEMENT_LINES)
-    .describe("one entry per printed transaction line; never combine lines"),
+    .describe(`one entry per printed transaction line, never combining lines; at most ${MAX_STATEMENT_LINES} lines`),
 });
 
 /** submission_proof. */
@@ -251,3 +254,42 @@ export type BaggageDocT = z.infer<typeof BaggageDoc>;
 export type StatementDocT = z.infer<typeof StatementDoc>;
 export type SubmissionDocT = z.infer<typeof SubmissionDoc>;
 export type DocClassificationT = z.infer<typeof DocClassification>;
+
+// ---------------------------------------------------------------------------
+// Bounds, enforced on the parsed output (D30: the schemas carry none)
+// ---------------------------------------------------------------------------
+
+/** The longest list each named array may keep. */
+const ARRAY_LIMITS: Readonly<Record<string, number>> = {
+  items: MAX_LINE_ITEMS,
+  credits: MAX_CREDITS,
+  segments: MAX_SEGMENTS,
+  changedSegments: MAX_SEGMENTS,
+  lines: MAX_STATEMENT_LINES,
+};
+
+/**
+ * Bounds one parsed extraction, recursively: every string to `MAX_QUOTE_CHARS`, every named list to its limit, and
+ * SEC-SD-1's `last4` to exactly four digits or nothing (a longer digit run could be a card number, so it is DROPPED,
+ * never truncated). Callers run it on `extract()`'s output before reading any field.
+ */
+export function boundExtracted<T>(value: T): T {
+  return bound(value, "") as T;
+}
+
+function bound(value: unknown, key: string): unknown {
+  if (typeof value === "string") return value.slice(0, MAX_QUOTE_CHARS);
+  if (Array.isArray(value)) return value.slice(0, ARRAY_LIMITS[key] ?? MAX_STATEMENT_LINES).map((v) => bound(v, ""));
+  if (value === null || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (k === "last4" && v !== null && typeof v === "object") {
+      const pair = v as { value?: unknown; quote?: unknown };
+      const digits = typeof pair.value === "string" && /^\d{4}$/.test(pair.value.trim()) ? pair.value.trim() : null;
+      out[k] = { value: digits, quote: digits };
+      continue;
+    }
+    out[k] = bound(v, k);
+  }
+  return out;
+}

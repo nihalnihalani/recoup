@@ -94,6 +94,25 @@ describe("the advisory gate live extraction depends on (P5, D227)", () => {
     expect(executable).not.toMatch(/continue-on-error|\|\|\s*true|^\s+if:/m);
   });
 
+  it("a daily schedule runs the advisories job (an advisory published on a quiet day is still caught); every other job skips it", () => {
+    const ci = readFileSync(path.join(REPO, ".github/workflows/ci.yml"), "utf8");
+    const on = /\non:\n([\s\S]*?)\n(?=\S)/.exec(ci)?.[1] ?? "";
+    expect(on).toMatch(/^ {2}schedule:\n {4}- cron: "\d{1,2} \d{1,2} \* \* \*"$/m);
+    const jobsBlock = ci.slice(ci.indexOf("\njobs:\n"));
+    const jobs = [...jobsBlock.matchAll(/\n {2}([A-Za-z0-9_-]+):\n([\s\S]*?)(?=\n {2}[A-Za-z0-9_-]+:\n|$)/g)].map((m) => ({ name: m[1], body: m[2] }));
+    expect(jobs.map((j) => j.name)).toEqual(expect.arrayContaining(["checks", "clockshift", "localeshift", "advisories", "e2e"]));
+    // A job skips the schedule through its own `if:`, or through `needs:` on a job that skips it (a skipped need skips
+    // the job; `e2e` keeps its own secrets `if:`, KC1).
+    const ownSkip = new Map(jobs.map((j) => [j.name, /^ {4}if: github\.event_name != 'schedule'$/m.test(j.body)]));
+    const needs = new Map(jobs.map((j) => [j.name, [...(/^ {4}needs: \[?([^\]\n]*)\]?$/m.exec(j.body)?.[1] ?? "").matchAll(/[A-Za-z0-9_-]+/g)].map((m) => m[0])]));
+    const skipsSchedule = (name: string, seen = new Set<string>()): boolean =>
+      ownSkip.get(name) === true || (needs.get(name) ?? []).some((n) => !seen.has(n) && skipsSchedule(n, new Set([...seen, name])));
+    for (const job of jobs) {
+      expect(skipsSchedule(job.name), `${job.name} ${job.name === "advisories" ? "must run" : "must skip"} on the schedule`).toBe(job.name !== "advisories");
+    }
+    expect(/^ {4}(if|needs):/m.test(jobs.find((j) => j.name === "advisories")?.body ?? "")).toBe(false);
+  });
+
   it("the guard itself fails on a workflow without the job", () => {
     expect(advisoriesJob("jobs:\n  checks:\n    runs-on: ubuntu-latest\n")).toBeNull();
   });

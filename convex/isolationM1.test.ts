@@ -139,7 +139,9 @@ type World = {
   /** M20: A's approved manual packet on the return claim, and its recorded submission. */
   packetId: Id<"packets">;
   submissionId: Id<"submissions">;
-  missing: Record<"purchases" | "transactions" | "opportunities" | "claims" | "drafts" | "evidence" | "processedEvents" | "packets" | "submissions", string>;
+  /** A promise from a sender A never wrote to, held for A's confirmation (M28, D21/D178). */
+  heldReplyId: Id<"replies">;
+  missing: Record<"purchases" | "transactions" | "opportunities" | "claims" | "drafts" | "evidence" | "processedEvents" | "packets" | "submissions" | "replies", string>;
   pdf: Uint8Array<ArrayBuffer>;
 };
 
@@ -196,6 +198,12 @@ async function buildWorld(t: T): Promise<World> {
     await ctx.db.patch(sentDraftId, { outboundId: "outbound-owner-a" as NonNullable<Doc<"drafts">["outboundId"]>, approvedAt: NOW - DAY });
     await ctx.db.patch(sentClaimId, { status: "queued", sendUnknown: true });
   });
+  const heldReplyId = await t.run((ctx) =>
+    ctx.db.insert("replies", {
+      claimId, userId: a.userId, messageId: "<held-owner-a@elsewhere.example>", from: "refunds@elsewhere.example", classification: "promise",
+      summary: `Refund of 80.00 from ${SECRET}`, promisedCents: 8_000, senderMismatch: true, receivedAt: NOW, heldForConfirmation: true,
+    }),
+  );
 
   // A refund email from an address that is not A's: held for A's confirmation (SEC-AI-6).
   const pendingRefundEventId = await t.run(async (ctx) =>
@@ -259,6 +267,8 @@ async function buildWorld(t: T): Promise<World> {
     const { _id: _k, _creationTime: _kc, ...kFields } = pk;
     const sb = (await ctx.db.get(submissionId))!;
     const { _id: _b, _creationTime: _bc, ...bFields } = sb;
+    const rp = (await ctx.db.get(heldReplyId))!;
+    const { _id: _r, _creationTime: _rc, ...rFields } = rp;
     return {
       purchases: await del("purchases", pFields),
       transactions: await del("transactions", { ...tFields, purchaseId: undefined, naturalKey: "deleted" }),
@@ -269,10 +279,11 @@ async function buildWorld(t: T): Promise<World> {
       processedEvents: await del("processedEvents", { ...xFields, externalId: "deleted" }),
       packets: await del("packets", kFields),
       submissions: await del("submissions", bFields),
+      replies: await del("replies", { ...rFields, messageId: "deleted" }),
     };
   });
 
-  return { a, b, purchaseId, itemIds, transactionId, opportunityId, claimId, draftId, sentDraftId, evidenceId, bEvidenceId, pendingRefundEventId, packetId, submissionId, missing, pdf };
+  return { a, b, purchaseId, itemIds, transactionId, opportunityId, claimId, draftId, sentDraftId, evidenceId, bEvidenceId, pendingRefundEventId, heldReplyId, packetId, submissionId, missing, pdf };
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +304,7 @@ async function outcome(p: Promise<unknown>, id: string): Promise<string> {
 const OWNED_TABLES = [
   "purchases", "items", "transactions", "facts", "evidence", "opportunities", "evaluations", "claims", "ledgerEvents",
   "drafts", "claimNotes", "processedEvents", "nonCashRemedies", "policies", "priceChecks", "followUps",
-  "packets", "submissions",
+  "packets", "submissions", "replies",
 ] as const;
 
 /** Every row A owns, in every table a probe could touch. */
@@ -351,6 +362,8 @@ const PROBES: Probe[] = [
     fn: "drafts.resendAfterUnknown", table: "drafts", ownerId: (w) => w.sentDraftId,
     call: (as, id) => as.mutation(api.drafts.resendAfterUnknown, { ...draftSend(id), claimVersion: 1, draftVersion: 1, recipientConfirmed: true, acknowledgedOutboundId: "outbound-owner-a" }),
   },
+  // M28 (D21/D178): a held promise from a mismatched sender is confirmed by its owner only.
+  { fn: "replies.confirmHeldPromise", table: "replies", ownerId: (w) => w.heldReplyId, call: (as, id) => as.mutation(api.replies.confirmHeldPromise, { replyId: id as Id<"replies"> }) },
   { fn: "intake.confirmRefundEmail", table: "processedEvents", ownerId: (w) => w.pendingRefundEventId, call: (as, id) => as.mutation(api.intake.confirmRefundEmail, { processedEventId: id as Id<"processedEvents"> }) },
   {
     fn: "claims.recordProvisionalCredit", table: "claims", ownerId: (w) => w.claimId,

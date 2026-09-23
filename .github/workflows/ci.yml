@@ -4,6 +4,11 @@ on:
   pull_request:
   push:
     branches: [main]
+  # D227 P5 follow-up (M28): a daily run, so a new advisory against a production dependency (pdf.js above all, the
+  # RUNBOOK §14 7-day rule) is caught on a day nobody pushes. Only the `advisories` job runs on the schedule; every
+  # other job skips it (`if: github.event_name != 'schedule'`, or through `needs:` on a job that does).
+  schedule:
+    - cron: "17 5 * * *"
 
 # Least-privilege default; no job here needs to write to the repo or open PRs.
 permissions:
@@ -27,6 +32,7 @@ concurrency:
 jobs:
   checks:
     name: checks
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -118,6 +124,7 @@ jobs:
   # time (48 s vs 50 s), so it runs on every push, in parallel with checks.
   clockshift:
     name: clockshift (+400 days)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -139,6 +146,7 @@ jobs:
   # the default locale from LC_ALL even where the OS has no de_DE installed; the first step proves it did.
   localeshift:
     name: localeshift (de_DE locale)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       LC_ALL: de_DE.UTF-8
@@ -206,6 +214,7 @@ jobs:
   # keeps this shape: no per-step secret checks inside `e2e`, and the skip stays visible.
   e2e-secrets:
     name: "e2e: secrets configured?"
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     outputs:
       present: ${{ steps.check.outputs.present }}

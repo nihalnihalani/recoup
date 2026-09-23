@@ -50,10 +50,20 @@ export const Price = z.object({
   confidence: z.number().min(0).max(1),
 });
 
+/**
+ * DA-A-19 (M28): the stated amount comes back as printed, WITH its currency, never as a bare number: the server parses
+ * it (`parseDecimalToMinor`) and records it only when the currency is the claim's own (`replies.apply`).
+ */
 export const ReplyClass = z.object({
   classification: z.enum(["promise", "credit_issued", "refusal", "question", "other"]),
   summary: z.string().describe("one sentence, at most 240 characters"),
-  promisedAmount: z.number().nullable().describe("amount the merchant states will be or was refunded, in major units; null if none stated"),
+  promised: z
+    .object({
+      value: z.string().describe('the amount exactly as printed, e.g. "40.00" or "1,234.50"; at most 40 characters'),
+      currency: z.string().describe("the currency as the reply states it: an ISO code like USD or EUR, or a symbol like $, € or £"),
+    })
+    .nullable()
+    .describe("the refund or credit amount the reply says will be or was issued; null when it states no amount"),
 });
 
 export const DraftOut = z.object({

@@ -30,6 +30,7 @@
  */
 import { v, type Infer } from "convex/values";
 import { internalAction, internalMutation, internalQuery, mutation, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { pruneMarketPoints } from "./lib/marketRetention";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { ownedWatch, requireUserId } from "./lib/access";
@@ -430,6 +431,7 @@ export const recordSnapshot = internalMutation({
       });
       written++;
     }
+    if (written > 0) await pruneMarketPoints(ctx, watchId);
 
     // Stores ShopSavvy lists become offer candidates: the user still confirms each match (W3),
     // and an unconfirmed offer never drives a verdict or an alert. Bounded by MAX_OFFERS_PER_WATCH
@@ -646,16 +648,22 @@ export const lookup = internalAction({
   },
 });
 
-/** Every market point for a watch, oldest first. Used by the verdict and the chart. */
+/**
+ * The NEWEST `MARKET_MAX_POINTS` market points for a watch, returned oldest first (P07-W5: an ascending `take` read the
+ * oldest points, so once history outgrew the cap the verdict and chart never showed today's prices).
+ */
 export async function marketPointsFor(
   ctx: QueryCtx,
   watchId: Id<"watches">,
 ): Promise<Array<Doc<"marketPrices">>> {
-  return await ctx.db
+  const newestFirst = await ctx.db
     .query("marketPrices")
     .withIndex("by_watch", (q) => q.eq("watchId", watchId))
+    .order("desc")
     .take(MARKET_MAX_POINTS);
+  return newestFirst.reverse();
 }
+
 
 /**
  * One-time, bounded, resumable conversion of pre-D71 watches: back then the

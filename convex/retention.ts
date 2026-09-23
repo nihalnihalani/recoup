@@ -14,6 +14,7 @@ import {
 } from "./limits";
 import { EVALUATION_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, EVIDENCE_TEXT_KINDS, ORPHAN_BLOB_MIN_AGE_HOURS } from "./lib/privacyFacts";
 import { isBlobReferenced, releaseEvidenceBlob } from "./lib/blobRefs";
+import { pruneMarketPoints } from "./lib/marketRetention";
 
 /**
  * D75: a resumable, bounded data-retention sweep. NEVER touches
@@ -422,7 +423,10 @@ export const RECOVERY_RETENTION_OPS_KEY = "retentionRecovery";
 export const ORPHAN_SWEEP_OPS_KEY = "orphanSweep";
 
 /** `sweepRecovery`'s cycle order. Evidence first: it is the privacy promise (D146); evaluation pruning is housekeeping (DA-A-32). */
-export const RECOVERY_STEPS = ["evidence", "evaluations"] as const;
+export const RECOVERY_STEPS = ["evidence", "evaluations", "marketPrices"] as const;
+
+/** Watches per call of the `marketPrices` step (each prunes at most `MARKET_PRUNE_BATCH` old points; P07-W5). */
+export const MARKET_RETENTION_WATCH_PAGE = 20;
 
 /**
  * Evidence rows per call: `text` holds up to 60,000 chars (§2.6), the same
@@ -624,7 +628,20 @@ async function runRecoveryStep(ctx: MutationCtx, step: (typeof RECOVERY_STEPS)[n
       return sweepEvidenceStep(ctx, page, startedAt);
     case "evaluations":
       return pruneEvaluationsStep(ctx, page, startedAt);
+    case "marketPrices":
+      return pruneMarketStep(ctx, page);
   }
+}
+
+/**
+ * P07-W5: one page of watches, each trimmed to its newest `MARKET_MAX_POINTS` market points. New points are trimmed on
+ * write (`market.recordSnapshot`); this catches history written before that bound and watches never refreshed since.
+ */
+async function pruneMarketStep(ctx: MutationCtx, page: string | null): Promise<StepResult> {
+  const result = await ctx.db.query("watches").paginate({ cursor: page, numItems: MARKET_RETENTION_WATCH_PAGE });
+  let deleted = 0;
+  for (const watch of result.page) deleted += await pruneMarketPoints(ctx, watch._id);
+  return { isDone: result.isDone, continueCursor: result.continueCursor, deleted, patched: 0 };
 }
 
 /**
