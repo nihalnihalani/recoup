@@ -27,6 +27,7 @@ import {
   secondaryButtonClass,
   tableHeadClass,
   toDateInput,
+  todayInput,
 } from "../lib/ui";
 
 type PurchaseData = FunctionReturnType<typeof api.purchases.get>;
@@ -58,9 +59,11 @@ function ReviewForm({ data, onDone }: { data: PurchaseData; onDone?: () => void 
   const [merchant, setMerchant] = useState(data.purchase.merchant);
   const [merchantDomain, setMerchantDomain] = useState(data.purchase.merchantDomain);
   const [orderRef, setOrderRef] = useState(data.purchase.orderRef ?? "");
-  const [purchasedAt, setPurchasedAt] = useState(() =>
-    toDateInput(data.purchase.purchasedAt ?? Date.now()),
-  );
+  const storedPurchasedAt = data.purchase.purchasedAt;
+  // The day as first shown. If the user leaves it alone, the stored instant is sent back unchanged (never later
+  // than now), so re-saving a purchase never moves its window start (QA-M16-4).
+  const [initialDate] = useState(() => toDateInput(storedPurchasedAt ?? Date.now()));
+  const [purchasedAt, setPurchasedAt] = useState(initialDate);
   const [items, setItems] = useState<ItemDraft[]>(() =>
     data.items.map((item) => ({
       itemId: item._id,
@@ -81,7 +84,15 @@ function ReviewForm({ data, onDone }: { data: PurchaseData; onDone?: () => void 
 
   async function handleSubmit() {
     setError(null);
-    const at = fromDateInput(purchasedAt);
+    const now = Date.now();
+    if (purchasedAt > todayInput(now)) {
+      setError("The purchase date can't be in the future.");
+      return;
+    }
+    const at =
+      purchasedAt === initialDate && storedPurchasedAt !== undefined
+        ? Math.min(storedPurchasedAt, now)
+        : fromDateInput(purchasedAt, { now });
     if (at === null) {
       setError("Enter the purchase date.");
       return;
@@ -195,6 +206,7 @@ function ReviewForm({ data, onDone }: { data: PurchaseData; onDone?: () => void 
           <input
             id="purchasedAt"
             type="date"
+            max={todayInput()}
             className={inputClass}
             value={purchasedAt}
             onChange={(event) => setPurchasedAt(event.target.value)}

@@ -58,6 +58,18 @@ import {
 } from "./limits";
 
 /**
+ * QA-M16-4 (D217): a purchase date is never a future instant. It is validated like any user timestamp
+ * (`assertTimestamp`: finite, not negative, at most a day ahead) and then CLAMPED to the server's now instead of
+ * refused. The client sends its own clock for "bought today", and a device clock running a few seconds or minutes
+ * fast would otherwise make "I bought it today" fail; clamping keeps exactly what the user meant (today, now) and
+ * still guarantees the invariant every window depends on: a price-adjustment window counted from it can never run
+ * past the store's rule. Anything more than a day ahead is still refused by `assertTimestamp`.
+ */
+export function purchasedAtNotAfterNow(purchasedAt: number, now: number = Date.now()): number {
+  return Math.min(assertTimestamp(purchasedAt, "purchasedAt", now), now);
+}
+
+/**
  * P06 (D73): a client-supplied coarse "now" for DISPLAY computations only
  * (never eligibility, cooldowns or money -- those keep reading `Date.now()`
  * in the mutation/action that enforces them). Validated so a broken or
@@ -575,7 +587,7 @@ export const markBought = mutation({
     }
     // Same validations as `purchases.create`, except a paid price of zero is refused.
     const unitCents = assertPositiveCents(args.paidCents, "paidCents");
-    const purchasedAt = assertTimestamp(args.purchasedAt, "purchasedAt");
+    const purchasedAt = purchasedAtNotAfterNow(args.purchasedAt);
     const qty = assertQty(args.qty ?? 1);
     const currency = assertCurrency(watch.currency ?? "USD");
     const orderRef = (args.orderRef === undefined ? "" : cleanLine(args.orderRef)) || undefined;
