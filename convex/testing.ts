@@ -491,13 +491,15 @@ export const recordObservation = internalAction({
     observedCents: v.number(),
     currency: v.optional(v.string()),
     variantMatch: v.optional(v.union(v.literal("exact"), v.literal("unsure"), v.literal("none"))),
+    /** The page the "scraper" read; defaults to the `seedR01Purchase` product page. Pass the item's own link. */
+    sourceUrl: v.optional(v.string()),
   },
   returns: v.object({ claimId: v.union(v.id("claims"), v.null()), accepted: v.boolean(), note: v.optional(v.string()) }),
   handler: async (ctx, args): Promise<{ claimId: Id<"claims"> | null; accepted: boolean; note?: string }> => {
     assertE2EEnabled();
     const r = await ctx.runMutation(internal.priceWatch.recordCheck, {
       itemId: args.itemId,
-      sourceUrl: "https://e2e-r01.example/p/e2e-trail-runner",
+      sourceUrl: args.sourceUrl ?? "https://e2e-r01.example/p/e2e-trail-runner",
       observedCents: args.observedCents,
       currency: args.currency ?? "USD",
       confidence: 0.95,
@@ -505,6 +507,127 @@ export const recordObservation = internalAction({
       note: "E2E fixture observation",
     });
     return { claimId: r.claimId, accepted: r.accepted, ...(r.note !== undefined ? { note: r.note } : {}) };
+  },
+});
+
+/**
+ * A draft for one of the user's claims through the REAL writer (`drafts.insert`: the same binding to the claim's
+ * current evaluation that `drafts.generate` gets), standing in for the model call the dev deployment cannot make
+ * (placeholder OpenAI key, D83). The default recipient is the fixture store's `.example` contact. Nothing here sends:
+ * a send needs the user's own approval in the browser, and `e2e/r01-opportunity.spec.ts` never ticks the recipient box,
+ * so `approveAndSend` refuses at the D18 gate before anything is queued.
+ */
+export const seedDraft = internalAction({
+  args: { claimId: v.id("claims"), userId: v.id("users"), to: v.optional(v.string()), subject: v.optional(v.string()), body: v.optional(v.string()) },
+  returns: v.union(v.id("drafts"), v.null()),
+  handler: async (ctx, args): Promise<Id<"drafts"> | null> => {
+    assertE2EEnabled();
+    return await ctx.runMutation(internal.drafts.insert, {
+      claimId: args.claimId,
+      userId: args.userId,
+      to: args.to ?? "care@e2e-r01.example",
+      subject: args.subject ?? "Price adjustment request",
+      body: args.body ?? "Hello, the price of my E2E trail runners dropped after I bought them. Please refund the difference. Thank you.",
+    });
+  },
+});
+
+/**
+ * A price-adjustment policy snapshot for `merchantDomain` as the policy research writes it
+ * (`policies.insertSnapshot`: a new immutable row, `confirmedByUser: false`), standing in for the Firecrawl + model
+ * read the dev deployment cannot make (placeholder keys, D83). Seeded BEFORE the purchase, it is also the fresh
+ * snapshot that makes the purchase's own scheduled research skip this kind. The user confirms it in the browser.
+ */
+export const seedRetrievedPolicy = internalMutation({
+  args: { userId: v.id("users"), merchantDomain: v.string(), windowDays: v.optional(v.number()) },
+  returns: v.id("policies"),
+  handler: async (ctx, { userId, merchantDomain, windowDays }): Promise<Id<"policies">> => {
+    assertE2EEnabled();
+    if (!(await ctx.db.get(userId))) throw new ConvexError("seedRetrievedPolicy: user not found");
+    const days = windowDays ?? 14;
+    const policyId: Id<"policies"> | null = await ctx.runMutation(internal.policies.insertSnapshot, {
+      userId,
+      merchantDomain,
+      kind: "price_adjustment",
+      windowDays: days,
+      channel: "email",
+      contactEmail: `care@${merchantDomain}`,
+      passage: `E2E fixture policy: if our price drops within ${days} days of your purchase, email care@${merchantDomain} and we refund the difference.`,
+      sourceUrl: `https://${merchantDomain}/price-promise`,
+      confidence: 0.9,
+    });
+    if (policyId === null) throw new ConvexError("seedRetrievedPolicy: the account is being deleted");
+    return policyId;
+  },
+});
+
+/** The only domain `seedInbox` may write an address on: under `.example`, reserved by RFC 2606 (D202). */
+const E2E_INBOX_DOMAIN = "inbox.e2e.example";
+
+/**
+ * A synthetic Recoup inbox on the user's profile, so the Composer's `profiles.ensureInbox` finds one ready instead of
+ * calling the inbox provider (a placeholder key on the dev deployment, D83). The id is one no provider issued and the
+ * address is on a reserved `.example` domain (asserted below, D202): nothing can be sent from or routed to them.
+ */
+export const seedInbox = internalMutation({
+  args: { userId: v.id("users") },
+  returns: v.string(),
+  handler: async (ctx, { userId }) => {
+    assertE2EEnabled();
+    if (!(await ctx.db.get(userId))) throw new ConvexError("seedInbox: user not found");
+    const inboxId = `e2e-inbox-${userId}`;
+    const inboxEmail = `recoup-e2e-${String(userId).slice(-8).toLowerCase()}@${E2E_INBOX_DOMAIN}`;
+    const domain = inboxEmail.slice(inboxEmail.lastIndexOf("@") + 1);
+    if (!domain.endsWith(".example") || domain !== E2E_INBOX_DOMAIN) throw new ConvexError("seedInbox: only a reserved .example address");
+    const existing = await ctx.db.query("profiles").withIndex("by_user", (q) => q.eq("userId", userId)).unique();
+    if (existing) await ctx.db.patch(existing._id, { inboxId, inboxEmail, provisioningAt: undefined });
+    else await ctx.db.insert("profiles", { userId, inboxId, inboxEmail });
+    return inboxEmail;
+  },
+});
+
+/** A purchase's items (id and product link), for a browser spec that bought through the UI and must name the item. */
+export const itemsOfPurchase = internalQuery({
+  args: { purchaseId: v.id("purchases") },
+  returns: v.array(v.object({ itemId: v.id("items"), productUrl: v.union(v.string(), v.null()) })),
+  handler: async (ctx, { purchaseId }) => {
+    assertE2EEnabled();
+    const items = await ctx.db.query("items").withIndex("by_purchase", (q) => q.eq("purchaseId", purchaseId)).take(BOUND);
+    return items.map((item) => ({ itemId: item._id, productUrl: item.productUrl ?? null }));
+  },
+});
+
+/**
+ * Everything a claim email or an alert leaves behind for this user, so a browser spec can CHECK that nothing was sent
+ * (D202) instead of assuming it. A claim email is enqueued only by `drafts.enqueueClaimEmail`, which writes the
+ * component's outbound row and the draft's `outboundId`/`approvedAt` and moves the claim to `queued` in ONE
+ * transaction; so no draft with an `outboundId` means no claim email was enqueued. Alert mail is a `mailLog` row.
+ */
+export const sendTrace = internalQuery({
+  args: { userId: v.id("users") },
+  returns: v.object({
+    mailLogRows: v.number(),
+    drafts: v.number(),
+    draftsWithOutbound: v.number(),
+    draftsApproved: v.number(),
+    claimsQueuedOrLater: v.number(),
+  }),
+  handler: async (ctx, { userId }) => {
+    assertE2EEnabled();
+    const mailLogRows = (await ctx.db.query("mailLog").withIndex("by_user", (q) => q.eq("userId", userId)).take(BOUND)).length;
+    const claims = await ctx.db.query("claims").withIndex("by_user", (q) => q.eq("userId", userId)).take(BOUND);
+    let drafts = 0;
+    let draftsWithOutbound = 0;
+    let draftsApproved = 0;
+    for (const claim of claims) {
+      for (const draft of await ctx.db.query("drafts").withIndex("by_claim", (q) => q.eq("claimId", claim._id)).take(BOUND)) {
+        drafts += 1;
+        if (draft.outboundId !== undefined) draftsWithOutbound += 1;
+        if (draft.approvedAt !== undefined) draftsApproved += 1;
+      }
+    }
+    const claimsQueuedOrLater = claims.filter((c) => c.status === "queued" || c.status === "sent" || c.status === "packet" || c.status === "promised").length;
+    return { mailLogRows, drafts, draftsWithOutbound, draftsApproved, claimsQueuedOrLater };
   },
 });
 
@@ -659,6 +782,9 @@ export const resetUser = internalMutation({
 
     // Mail log.
     await deleteAll(ctx, await ctx.db.query("mailLog").withIndex("by_user", (q) => q.eq("userId", userId)).take(BOUND));
+
+    // Profile (the inbox row `seedInbox` or `profiles.ensureInbox` wrote).
+    await deleteAll(ctx, await ctx.db.query("profiles").withIndex("by_user", (q) => q.eq("userId", userId)).take(BOUND));
 
     // Auth rows: authAccounts (+ their authVerificationCodes) and authSessions (+ their authRefreshTokens).
     const accounts = await ctx.db.query("authAccounts").withIndex("userIdAndProvider", (q) => q.eq("userId", userId)).take(BOUND);

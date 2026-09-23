@@ -514,7 +514,7 @@ describe("DA-B-11: the content acknowledgment is bound to the findings (findings
 
   it("U2 inverted: A acknowledged, then the findings become B → the send refuses with the fresh findings; nothing sent", async () => {
     const t = setup();
-    const { a, w, draftId, ack, res } = await acknowledgedA(t);
+    const { a, draftId, ack, res } = await acknowledgedA(t);
     // The server's allowances change between attempts: the user's Recoup inbox address is no longer theirs.
     await t.run(async (ctx) => {
       const profile = (await ctx.db.query("profiles").withIndex("by_user", (q) => q.eq("userId", a.userId)).unique())!;
