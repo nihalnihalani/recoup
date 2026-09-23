@@ -158,7 +158,7 @@ describe("ops.backlog M29 additions", () => {
       const r = await t.query(internal.ops.backlog, { now: NOW + 2 * HOUR });
       expect(r.deadlineSweep).toEqual({
         ageMs: 2 * HOUR,
-        lastCycle: { cycleNow: NOW, status: "case_open", scanned: 0, scheduled: 0, reevaluated: 0, reevaluateFailed: false, done: true },
+        lastCycle: { cycleNow: NOW, phase: "reconcile", scanned: 0, scheduled: 0, reconciled: 0, reevaluated: 0, reevaluateFailed: false, done: true },
       });
       const row = await t.run(async (ctx) => (await ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", DEADLINE_SWEEP_OPS_KEY)).first())!);
       expect(row.updatedAt).toBe(NOW);

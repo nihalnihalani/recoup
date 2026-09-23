@@ -22,6 +22,11 @@
  *    case, the claim is neither closed for ask nor submitted on its required channel. It is cleared once the deadline
  *    passes ("after the deadline passes → no attention"), is met, or the work closes.
  *
+ * 3. **Reconciliation of passed deadlines (P06-OW-1, re-audit).** An `open` opportunity whose user deadline passed
+ *    after its last evaluation is re-evaluated once (`opportunities.evaluateInternal`, one per transaction), so a stored
+ *    in-window verdict (R01: likely_eligible, "start a claim", the deadline "open") never outlives its window — the
+ *    time-based state is materialised by this scheduled job, never by filtering on a client's `now` (D73).
+ *
  * Every page records its outcome in the `opsState` row `DEADLINE_SWEEP_OPS_KEY`, which `ops.backlog` reports.
  */
 import { v } from "convex/values";
@@ -170,14 +175,22 @@ export const remind = internalMutation({
   },
 });
 
-const sweepStatus = v.union(v.literal("open"), v.literal("case_open"));
+/**
+ * The cycle's phases, in order: attention over `open`, then `case_open` opportunities, then P06-OW-1 reconciliation of
+ * `open` opportunities whose user deadline passed after their last evaluation.
+ */
+export type SweepPhase = "open" | "case_open" | "reconcile";
+const sweepPhase = v.union(v.literal("open"), v.literal("case_open"), v.literal("reconcile"));
+const NEXT_PHASE: Record<SweepPhase, SweepPhase | null> = { open: "case_open", case_open: "reconcile", reconcile: null };
 
-/** What the last page did, for `ops.backlog` (JSON in the opsState row's `cursor` field). */
+/** What the cycle has done so far, for `ops.backlog` (JSON in the opsState row's `cursor` field). */
 export type DeadlineSweepRecord = {
   cycleNow: number;
-  status: "open" | "case_open";
+  phase: SweepPhase;
   scanned: number;
   scheduled: number;
+  /** P06-OW-1: opportunities sent back for re-evaluation because their deadline passed after they were evaluated. */
+  reconciled: number;
   reevaluated: number | null;
   reevaluateFailed: boolean;
   done: boolean;
@@ -188,11 +201,12 @@ export function parseSweepRecord(raw: string | undefined): DeadlineSweepRecord |
   if (!raw) return null;
   try {
     const r = JSON.parse(raw) as Partial<DeadlineSweepRecord>;
-    if (typeof r.cycleNow !== "number" || (r.status !== "open" && r.status !== "case_open")) return null;
+    if (typeof r.cycleNow !== "number" || (r.phase !== "open" && r.phase !== "case_open" && r.phase !== "reconcile")) return null;
     return {
-      cycleNow: r.cycleNow, status: r.status,
+      cycleNow: r.cycleNow, phase: r.phase,
       scanned: typeof r.scanned === "number" ? r.scanned : 0,
       scheduled: typeof r.scheduled === "number" ? r.scheduled : 0,
+      reconciled: typeof r.reconciled === "number" ? r.reconciled : 0,
       reevaluated: typeof r.reevaluated === "number" ? r.reevaluated : null,
       reevaluateFailed: r.reevaluateFailed === true,
       done: r.done === true,
@@ -203,15 +217,25 @@ export function parseSweepRecord(raw: string | undefined): DeadlineSweepRecord |
 }
 
 /**
- * Stamps the page. `scanned`/`scheduled` add up over the cycle; the re-evaluation result is the cycle's first page's
- * (continuation pages carry it forward).
+ * P06-OW-1 (pure): an `open` opportunity whose user deadline has passed (`nextDeadlineAt` ≤ now) but whose stored
+ * evaluation predates that instant still says what it said inside the window (R01: likely_eligible, open_case, the
+ * deadline "open"). It needs one re-evaluation; afterwards `lastEvaluatedAt` > `nextDeadlineAt` (or the passed deadline
+ * leaves `nextDeadlineAt`), so it is never sent twice.
  */
+export function needsReconcile(o: Pick<Doc<"opportunities">, "status" | "nextDeadlineAt" | "lastEvaluatedAt" | "isExample">, now: number): boolean {
+  return o.status === "open" && o.isExample !== true && o.nextDeadlineAt !== undefined && o.nextDeadlineAt <= now && o.lastEvaluatedAt <= o.nextDeadlineAt;
+}
+
 async function recordPage(ctx: MutationCtx, page: DeadlineSweepRecord, firstOfCycle: boolean, at: number): Promise<void> {
   const row = await ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", DEADLINE_SWEEP_OPS_KEY)).first();
   const prev = firstOfCycle ? null : parseSweepRecord(row?.cursor);
   const sameCycle = prev !== null && prev.cycleNow === page.cycleNow;
   const record: DeadlineSweepRecord = sameCycle
-    ? { ...page, scanned: prev.scanned + page.scanned, scheduled: prev.scheduled + page.scheduled, reevaluated: prev.reevaluated, reevaluateFailed: prev.reevaluateFailed }
+    ? {
+        ...page,
+        scanned: prev.scanned + page.scanned, scheduled: prev.scheduled + page.scheduled, reconciled: prev.reconciled + page.reconciled,
+        reevaluated: prev.reevaluated, reevaluateFailed: prev.reevaluateFailed,
+      }
     : page;
   const cursor = JSON.stringify(record);
   if (row) await ctx.db.patch(row._id, { cursor, updatedAt: at });
@@ -219,29 +243,32 @@ async function recordPage(ctx: MutationCtx, page: DeadlineSweepRecord, firstOfCy
 }
 
 /**
- * The cron target (hourly). The first call of a cycle (no `status`) runs the re-evaluation page, then scans `open`
- * opportunities; each page schedules its reminders and, while the scan is not done, its own continuation (same
- * `now`, so the index range is stable across pages), then moves on to `case_open`. `now` defaults to the clock; tests
- * pass it.
+ * The cron target (hourly). The first call of a cycle (no `phase`) runs the re-evaluation page, then scans `open`
+ * opportunities; each page schedules its work and, while its range is not done, its own continuation (same `now`, so
+ * the index range is stable across pages), then moves on to `case_open`, then to `reconcile` (P06-OW-1: every `open`
+ * opportunity whose user deadline passed after its last evaluation is re-evaluated once, through
+ * `opportunities.evaluateInternal`, so no card keeps an in-window verdict — "likely eligible", "start a claim" — after
+ * its deadline). `now` defaults to the clock; tests pass it.
  */
 export const sweep = internalMutation({
   args: {
     now: v.optional(v.number()),
-    status: v.optional(sweepStatus),
+    phase: v.optional(sweepPhase),
     cursor: v.optional(v.union(v.string(), v.null())),
   },
   returns: v.object({
     scanned: v.number(),
     scheduled: v.number(),
+    reconciled: v.number(),
     reevaluated: v.union(v.number(), v.null()),
     continued: v.boolean(),
   }),
   handler: async (ctx, args) => {
     const now = args.now ?? Date.now();
-    const status = args.status ?? "open";
+    const phase: SweepPhase = args.phase ?? "open";
     let reevaluated: number | null = null;
     let reevaluateFailed = false;
-    if (args.status === undefined) {
+    if (args.phase === undefined) {
       try {
         const r: { transactions: number } = await ctx.runMutation(
           internal.opportunities.sweepReevaluateDue,
@@ -259,31 +286,50 @@ export const sweep = internalMutation({
     const page = await ctx.db
       .query("opportunities")
       .withIndex("by_status_and_next_deadline_at", (q) =>
-        q.eq("status", status).gte("nextDeadlineAt", now - ATTENTION_CLEAR_LOOKBACK_MS).lte("nextDeadlineAt", now + DEADLINE_ATTENTION_LEAD_MS),
+        phase === "reconcile"
+          ? q.eq("status", "open").gt("nextDeadlineAt", 0).lte("nextDeadlineAt", now)
+          : q.eq("status", phase).gte("nextDeadlineAt", now - ATTENTION_CLEAR_LOOKBACK_MS).lte("nextDeadlineAt", now + DEADLINE_ATTENTION_LEAD_MS),
       )
       .paginate({ numItems: DEADLINE_SWEEP_PAGE, cursor: args.cursor ?? null });
 
     let scheduled = 0;
-    for (const o of page.page) {
-      if (!needsReminder(o, now)) continue;
-      await ctx.scheduler.runAfter(0, internal.deadlines.remind, { opportunityId: o._id });
-      scheduled += 1;
+    let reconciled = 0;
+    if (phase === "reconcile") {
+      const subjectsByTxn = new Map<Doc<"transactions">["_id"], Set<string>>();
+      for (const o of page.page) {
+        if (!needsReconcile(o, now)) continue;
+        const subjects = subjectsByTxn.get(o.transactionId) ?? new Set<string>();
+        subjects.add(o.subjectKey);
+        subjectsByTxn.set(o.transactionId, subjects);
+        reconciled += 1;
+      }
+      for (const [transactionId, subjects] of subjectsByTxn) {
+        await ctx.scheduler.runAfter(0, internal.opportunities.evaluateInternal, { transactionId, trigger: "fact_change", subjects: [...subjects] });
+        scheduled += 1;
+      }
+    } else {
+      for (const o of page.page) {
+        if (!needsReminder(o, now)) continue;
+        await ctx.scheduler.runAfter(0, internal.deadlines.remind, { opportunityId: o._id });
+        scheduled += 1;
+      }
     }
 
     let continued = true;
+    const next = NEXT_PHASE[phase];
     if (!page.isDone) {
-      await ctx.scheduler.runAfter(0, internal.deadlines.sweep, { now, status, cursor: page.continueCursor });
-    } else if (status === "open") {
-      await ctx.scheduler.runAfter(0, internal.deadlines.sweep, { now, status: "case_open", cursor: null });
+      await ctx.scheduler.runAfter(0, internal.deadlines.sweep, { now, phase, cursor: page.continueCursor });
+    } else if (next !== null) {
+      await ctx.scheduler.runAfter(0, internal.deadlines.sweep, { now, phase: next, cursor: null });
     } else {
       continued = false;
     }
     await recordPage(
       ctx,
-      { cycleNow: now, status, scanned: page.page.length, scheduled, reevaluated, reevaluateFailed, done: !continued },
-      args.status === undefined,
+      { cycleNow: now, phase, scanned: page.page.length, scheduled, reconciled, reevaluated, reevaluateFailed, done: !continued },
+      args.phase === undefined,
       now,
     );
-    return { scanned: page.page.length, scheduled, reevaluated, continued };
+    return { scanned: page.page.length, scheduled, reconciled, reevaluated, continued };
   },
 });

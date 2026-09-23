@@ -754,7 +754,9 @@ const C4_RANK: Record<C4Tile, number> = { potential: 0, ready: 1, sendingOrUnkno
 /** §3.4 + D195/D196, by hand: one loss component per case (every claim and the alternative share one loss key). */
 function c4Oracle(c: C4Case): C4Expected {
   const net = (x: C4Claim) => Math.max(0, x.credit - x.debit);
-  const nodes = c.claims.filter((x) => x.status !== "dismissed"); // nodes(c): claims not dismissed
+  // nodes(c): claims not dismissed — and, since D244a (P05-OW8), a dismissed claim that kept confirmed money (dismissal
+  // only closes it for asking; its net stays in Recovered).
+  const nodes = c.claims.filter((x) => x.status !== "dismissed" || net(x) > 0);
   const isOpen = (x: C4Claim) => x.status !== "confirmed" && x.status !== "dismissed"; // not closed-for-ask
   const openClaims = nodes.filter(isOpen);
   const hasOpen = openClaims.length > 0 || c.alt !== null;

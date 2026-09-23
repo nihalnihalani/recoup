@@ -20,7 +20,7 @@ const VER = vi.hoisted(() => ({
 }));
 vi.mock("./lib/rules/verification", () => VER);
 
-import { internal } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { evaluateTransaction } from "./opportunities";
@@ -170,5 +170,51 @@ describe("rev 5.5 (D158): R03 manual_review with the received-by deadline runnin
     // One day after the deadline passed: cleared.
     await sweepAt(t, due + DAY);
     expect((await t.run((ctx) => ctx.db.get(r03._id)))!.deadlineAttention).toBeUndefined();
+  });
+});
+
+describe("P06-OW-1 (re-audit): the sweep reconciles a stored R01 verdict whose window has passed", () => {
+  it("in window: likely_eligible, open_case, 2,500 Potential; one day after the window + a sweep → deadline_passed, nothing in Potential", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const IN = Date.UTC(2026, 8, 20, 14);
+    vi.setSystemTime(IN);
+    const w = await t.run(async (ctx) => {
+      const purchaseId = await ctx.db.insert("purchases", { userId, merchant: "Acme", merchantDomain: "acme.example", purchasedAt: IN - 2 * DAY, currency: "USD", status: "active" });
+      const itemId = await ctx.db.insert("items", { purchaseId, userId, name: "Jacket", unitCents: 12_000, qty: 1, productUrl: "https://acme.example/p/jacket", returned: false });
+      await ctx.db.insert("policies", {
+        userId, merchantDomain: "acme.example", kind: "price_adjustment", windowDays: 14, channel: "email", contactEmail: "help@acme.example",
+        passage: "We adjust within 14 days.", sourceUrl: "https://acme.example/policy", retrievedAt: IN - 2 * DAY + 60_000, confidence: 0.9, confirmedByUser: true,
+      });
+      return { purchaseId, itemId };
+    });
+    const r = await t.mutation(internal.priceWatch.recordCheck, {
+      itemId: w.itemId, sourceUrl: "https://acme.example/p/jacket", observedCents: 9_500, currency: "USD", confidence: 0.92, isRange: false, variantMatch: "exact",
+    });
+    // The user dismisses the auto-opened claim and re-checks: the opportunity is a card again ("Start a claim").
+    await as.mutation(api.claims.dismiss, { claimId: r.claimId! });
+    await as.mutation(api.opportunities.reevaluate, { purchaseId: w.purchaseId });
+    const card = async () => (await as.query(api.opportunities.forPurchase, { purchaseId: w.purchaseId })).opportunities.find((o) => o.opportunity.scenarioId === "R01")!;
+    const inWindow = await card();
+    expect(inWindow.opportunity).toMatchObject({ status: "open", outcome: "likely_eligible" });
+    expect(inWindow.evaluation?.nextAction).toEqual({ kind: "open_case" });
+    const windowEnd = inWindow.opportunity.nextDeadlineAt!;
+    expect(windowEnd).toBe(IN - 2 * DAY + 14 * DAY);
+    const potential = async (now: number) => (await as.query(api.recovery.summary, { now })).currencies.find((c) => c.currency === "USD")?.tiles.potential;
+    expect((await potential(IN))?.amountMinor).toBe(2_500);
+
+    const after = windowEnd + DAY;
+    const res = await sweepAt(t, after);
+    expect(res.reconciled ?? 0).toBe(0); // the first page is attention; reconciliation is the cycle's last phase
+    const passed = await card();
+    expect(passed.opportunity.outcome).toBe("deadline_passed");
+    expect(passed.evaluation?.nextAction.kind).not.toBe("open_case");
+    expect(passed.opportunity.nextDeadlineAt).toBeUndefined();
+    expect((await potential(after))?.components ?? 0).toBe(0);
+
+    // Reconciled once: the next tick sends nothing back.
+    await sweepAt(t, after + 3_600_000);
+    const evaluations = await t.run((ctx) => ctx.db.query("evaluations").withIndex("by_opportunity", (q) => q.eq("opportunityId", passed.opportunity._id)).collect());
+    expect(evaluations.filter((e) => e.outcome === "deadline_passed")).toHaveLength(1);
   });
 });

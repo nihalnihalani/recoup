@@ -25,6 +25,7 @@
  */
 import { ConvexError, v, type Infer } from "convex/values";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { ownedOpportunity, ownedPurchase, ownedTransaction, requireUserId } from "./lib/access";
@@ -468,6 +469,31 @@ export async function materialChange(
   return null;
 }
 
+/** Opportunities one archive closes per call (a transaction carries a handful; the lazy path finishes any rest). */
+const ARCHIVE_CLOSE_PAGE = 100;
+
+/**
+ * P05-OW2 (D244b, D254): archiving a purchase or transaction closes its `open` opportunities — `closed` with the
+ * `closedByArchiveAt` marker, so they leave Potential and the cards — and `evaluateRun` reopens them (clearing the
+ * marker) once the transaction is live again. A `case_open` opportunity keeps its case; claims and money are never
+ * touched (D244a). Called by `purchases.remove` in the archiving mutation, and lazily by `evaluateTransaction` for an
+ * archived transaction. Returns how many it closed.
+ */
+export async function closeOpportunitiesForArchive(ctx: MutationCtx, txn: Doc<"transactions">, now: number): Promise<number> {
+  if (txn.status !== "archived") return 0;
+  const opps = await ctx.db
+    .query("opportunities")
+    .withIndex("by_transaction", (q) => q.eq("transactionId", txn._id))
+    .take(ARCHIVE_CLOSE_PAGE);
+  let closed = 0;
+  for (const o of opps) {
+    if (o.userId !== txn.userId || o.status !== "open") continue;
+    await ctx.db.patch(o._id, { status: "closed", closedByArchiveAt: now, deadlineAttention: undefined });
+    closed += 1;
+  }
+  return closed;
+}
+
 export async function evaluateTransaction(
   ctx: MutationCtx,
   transactionId: Id<"transactions">,
@@ -479,7 +505,11 @@ export async function evaluateTransaction(
   if (!txn) throw new ConvexError("Transaction not found");
   if (await isTombstoned(ctx, txn.userId)) return [];
   await supersedeWithdrawn(ctx, txn, now);
-  if (txn.status === "archived") return [];
+  if (txn.status === "archived") {
+    // P05-OW2 (D244b, D254): lazily, for a transaction archived before its opportunities were closed with it.
+    await closeOpportunitiesForArchive(ctx, txn, now);
+    return [];
+  }
 
   const out: Evaluated[] = [];
   let rowsCache: Promise<CellRow[]> | null = null;
@@ -604,6 +634,7 @@ async function evaluateRun(
     if (activeClaimId) status = "case_open";
     else if (status === "case_open") status = "open";
     else if (status === "superseded") status = "open"; // the pack is active again
+    else if (status === "closed" && existing.closedByArchiveAt !== undefined) status = "open"; // D254: unarchived
     else if (status === "closed" && lossKeys.join("|") !== existing.lossKeys.join("|") && isApprovable(result.outcome)) {
       status = "open"; // a further loss on the same subject (R01: price_diff:n+1)
     }
@@ -617,6 +648,7 @@ async function evaluateRun(
       activeClaimId: activeClaimId ?? undefined,
       ...(denialBasis ? { deniedResultHash: rh } : {}),
       ...(attentionMoved ? { deadlineAttention: undefined } : {}),
+      ...(existing.closedByArchiveAt !== undefined ? { closedByArchiveAt: undefined } : {}),
     });
     opp = { ...opp, ...projection, status, activeClaimId: activeClaimId ?? undefined };
   }
@@ -883,27 +915,48 @@ export const evaluateInternal = internalMutation({
   },
 });
 
+/** A due row that is still due right after its re-evaluation retries after this long (the M29 cron's cadence). */
+export const REEVALUATE_RETRY_MS = 3_600_000;
+
 /**
- * rev 5.2 (D147(6)) — a STUB of the sweep's evaluation half for M29's cron (M29 owns crons.ts and may replace it):
- * open opportunities whose `reevaluateAt` ≤ now, one bounded page on `by_status_and_reevaluate_at`, each opportunity's
- * subject evaluated once per transaction, recorded with trigger `fact_change` (the trigger a `reevaluate.when` event
- * uses). Returns how many transactions it evaluated.
+ * rev 5.2 (D147(6)); M29 runs it from its hourly cron (`deadlines.sweep`): open opportunities whose `reevaluateAt` ≤
+ * now, one bounded page on `by_status_and_reevaluate_at`, each transaction evaluated once for ALL its due subjects in
+ * the page, recorded with trigger `fact_change` (the trigger a `reevaluate.when` event uses). Tombstone and archive
+ * gates are `evaluateTransaction`'s.
+ *
+ * Starvation guard (M29 residual): a row that is STILL due after its re-evaluation (its date has begun in UTC but not
+ * yet in its local zone, or its account is being deleted) is deferred by `REEVALUATE_RETRY_MS`, which moves it behind
+ * every other due row; and a full page schedules the next page at once (same `now`). Every row of a page therefore
+ * leaves the range, so the chain ends and no due row waits behind a stuck one.
  */
 export const sweepReevaluateDue = internalMutation({
   args: { now: v.number() },
-  returns: v.object({ transactions: v.number() }),
-  handler: async (ctx, { now }) => {
+  returns: v.object({ transactions: v.number(), deferred: v.number(), continued: v.boolean() }),
+  handler: async (ctx, { now }): Promise<{ transactions: number; deferred: number; continued: boolean }> => {
     const due = await ctx.db
       .query("opportunities")
       .withIndex("by_status_and_reevaluate_at", (q) => q.eq("status", "open").gt("reevaluateAt", 0).lte("reevaluateAt", now))
       .take(REEVALUATE_PAGE);
-    const seen = new Set<string>();
+    const subjectsByTxn = new Map<Id<"transactions">, Set<string>>();
     for (const opp of due) {
-      if (seen.has(opp.transactionId)) continue;
-      seen.add(opp.transactionId);
-      await evaluateTransaction(ctx, opp.transactionId, "fact_change", now, { subjects: [opp.subjectKey] });
+      const subjects = subjectsByTxn.get(opp.transactionId) ?? new Set<string>();
+      subjects.add(opp.subjectKey);
+      subjectsByTxn.set(opp.transactionId, subjects);
     }
-    return { transactions: seen.size };
+    for (const [transactionId, subjects] of subjectsByTxn) {
+      await evaluateTransaction(ctx, transactionId, "fact_change", now, { subjects: [...subjects] });
+    }
+    let deferred = 0;
+    for (const opp of due) {
+      const current = await ctx.db.get(opp._id);
+      if (current && current.status === "open" && current.reevaluateAt !== undefined && current.reevaluateAt <= now) {
+        await ctx.db.patch(current._id, { reevaluateAt: now + REEVALUATE_RETRY_MS });
+        deferred += 1;
+      }
+    }
+    const continued = due.length === REEVALUATE_PAGE;
+    if (continued) await ctx.scheduler.runAfter(0, internal.opportunities.sweepReevaluateDue, { now });
+    return { transactions: subjectsByTxn.size, deferred, continued };
   },
 });
 

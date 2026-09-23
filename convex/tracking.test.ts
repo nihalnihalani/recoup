@@ -284,6 +284,50 @@ describe("M2C: tracking.overview money (DA-A-34 A.7 inverted, isClosedForAsk, cl
   });
 });
 
+describe("P06-OW-2 (QA-4): owned items carry a data-age signal", () => {
+  const NOW = Date.UTC(2026, 8, 23, 12);
+  const DAY = 86_400_000;
+  pinClockEach(NOW);
+
+  async function itemWithChecks(t: ReturnType<typeof setup>, userId: Id<"users">, checks: { at: number; cents?: number; note?: string }[]) {
+    return await t.run(async (ctx) => {
+      const purchaseId = await ctx.db.insert("purchases", { userId, merchant: "Acme", merchantDomain: "acme.example", purchasedAt: NOW - 30 * DAY, currency: "USD", status: "active" });
+      const itemId = await ctx.db.insert("items", { purchaseId, userId, name: "Jacket", unitCents: 12_000, qty: 1, productUrl: "https://acme.example/p/j", returned: false });
+      for (const c of checks) {
+        await ctx.db.insert("priceChecks", {
+          itemId, userId, observedAt: c.at, sourceUrl: "https://acme.example/p/j",
+          ...(c.cents !== undefined ? { observedCents: c.cents, currency: "USD", confidence: 0.9, variantMatch: "exact" as const } : { note: c.note ?? "blocked" }),
+        });
+      }
+      return { purchaseId, itemId };
+    });
+  }
+
+  it("a 9,000 price read 20 days ago + a failed read an hour ago → priceStale, lastObservedAt 20 days ago, lastCheckedAt an hour ago", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { purchaseId } = await itemWithChecks(t, userId, [{ at: NOW - 20 * DAY, cents: 9_000 }, { at: NOW - 3_600_000, note: "The product page could not be read" }]);
+    const [item] = (await as.query(api.tracking.overview, { now: NOW })).items;
+    expect(item).toMatchObject({ priceStale: true, lastObservedAt: NOW - 20 * DAY, lastCheckedAt: NOW - 3_600_000, dropCents: 3_000 });
+    // purchases.get: the stale drop is not judged as today's (verdict unknown, age named).
+    const got = await as.query(api.purchases.get, { purchaseId, now: NOW });
+    expect(got.items[0]).toMatchObject({ priceStale: true, lastObservedAt: NOW - 20 * DAY });
+    expect(got.items[0].verdict.label).toBe("unknown");
+    expect(got.items[0].verdict.reason).toMatch(/20 days ago/);
+  });
+
+  it("a price read an hour ago → not stale; no price at all → stale", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    await itemWithChecks(t, userId, [{ at: NOW - 3_600_000, cents: 9_000 }]);
+    await itemWithChecks(t, userId, [{ at: NOW - 3_600_000, note: "blocked" }]);
+    const items = (await as.query(api.tracking.overview, { now: NOW })).items;
+    expect(items.map((i) => [i.priceStale, i.lastObservedAt ?? null])).toEqual(
+      expect.arrayContaining([[false, NOW - 3_600_000], [true, null]]),
+    );
+  });
+});
+
 // ---------------------------------------------------------------------------
 // C1 (D107, Opus checkpoint-5 recheck): MAX_ITEMS_TOTAL is now budgeted off
 // rows actually read, purchase by purchase, instead of allotted up front per

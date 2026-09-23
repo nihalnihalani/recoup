@@ -645,6 +645,14 @@ describe("recovery.summary (query)", () => {
         await ctx.db.insert("claims", { purchaseId: w.purchaseId, itemId: w.itemId, userId, type: "return_credit", expectedCents: 100, status: "dismissed", token: `D${i}`, version: 1 });
       }
     });
+    // P05-OW1 (D244): money-less dismissed claims can never count, so they are skipped inside the read — no live row
+    // was left unread, and the summary says so.
+    expect((await as.query(api.recovery.summary, { now: NOW })).complete).toBe(true);
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 201; i++) {
+        await ctx.db.insert("claims", { purchaseId: w.purchaseId, itemId: w.itemId, userId, type: "return_credit", expectedCents: 100, status: "detected", token: `L${i}`, version: 1 });
+      }
+    });
     expect((await as.query(api.recovery.summary, { now: NOW })).complete).toBe(false);
     const theirs = await other.as.query(api.recovery.summary, { now: NOW });
     expect(theirs.currencies).toEqual([]);

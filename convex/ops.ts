@@ -656,8 +656,9 @@ export const backlog = internalQuery({
       lastCycle: v.union(
         v.null(),
         v.object({
-          cycleNow: v.number(), status: v.union(v.literal("open"), v.literal("case_open")), scanned: v.number(), scheduled: v.number(),
-          reevaluated: v.union(v.number(), v.null()), reevaluateFailed: v.boolean(), done: v.boolean(),
+          cycleNow: v.number(), phase: v.union(v.literal("open"), v.literal("case_open"), v.literal("reconcile")), scanned: v.number(),
+          scheduled: v.number(), reconciled: v.number(), reevaluated: v.union(v.number(), v.null()), reevaluateFailed: v.boolean(),
+          done: v.boolean(),
         }),
       ),
     }),

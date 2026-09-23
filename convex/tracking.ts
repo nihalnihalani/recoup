@@ -10,6 +10,7 @@ import { MAX_ITEMS_PER_PURCHASE } from "./limits";
 import { isTombstoned } from "./lib/accountState";
 import { isClosedForAsk } from "./lib/claimState";
 import { claimCurrency } from "./lib/money";
+import { isPriceStale } from "./lib/freshness";
 
 /** Most recent purchases the dashboard reads; older ones stay reachable from their own page. */
 const MAX_PURCHASES = 60;
@@ -89,7 +90,19 @@ const trackedItem = v.object({
   /** Priced observations only, oldest first. Unpriced checks are counted, not plotted. */
   points: v.array(point),
   checks: v.number(),
+  /** The newest check ATTEMPT, failed reads included ("last checked"). Never a price age: see `lastObservedAt`. */
   lastCheckedAt: v.optional(v.number()),
+  /**
+   * P06-OW-2 (QA-4): when the newest PRICED observation (the one `latestCents`/`dropCents` come from) was read. A failed
+   * read an hour ago never makes a 20-day-old price look fresh.
+   */
+  lastObservedAt: v.optional(v.number()),
+  /**
+   * P06-OW-2: `latestCents`/`dropCents` rest on no price or on one older than `STALE_PRICE_MS` at `now`
+   * (`lib/freshness.isPriceStale`, the rule watches and insights use). Without `now` the age is judged at the price's
+   * own time (never stale unless there is no price) — the D73 fallback that can only err toward "fresh-looking".
+   */
+  priceStale: v.boolean(),
   latestCents: v.optional(v.number()),
   lowestCents: v.optional(v.number()),
   /** paid minus latest, per unit. Negative when the price went up. */
@@ -321,6 +334,8 @@ export const overview = query({
           points,
           checks: recent.length,
           lastCheckedAt: recent[0]?.observedAt,
+          lastObservedAt: latestPoint?.at,
+          priceStale: isPriceStale(latestPoint?.at, validatedNow ?? latestPoint?.at ?? 0),
           latestCents: latestPoint?.cents,
           lowestCents: points.length > 0 ? Math.min(...points.map((p) => p.cents)) : undefined,
           dropCents: latestPoint ? item.unitCents - latestPoint.cents : undefined,

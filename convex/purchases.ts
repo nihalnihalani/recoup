@@ -10,6 +10,7 @@ import { cancelPending } from "./followUps";
 import { normalizeDomain } from "./lib/policyText";
 import { latestPolicy } from "./lib/latestPolicy";
 import { verdict } from "./lib/verdict";
+import { isPriceStale } from "./lib/freshness";
 import { parseProductUrl } from "./lib/watchUrl";
 import { boundedLine } from "./lib/text";
 import { clearItemSchedule } from "./lib/schedule";
@@ -17,7 +18,7 @@ import { schedulePolicyFetch } from "./policies";
 import { assertCoarseNow, purchasedAtNotAfterNow } from "./watches";
 import { ensurePurchaseTransaction } from "./transactions";
 import { putFact } from "./lib/facts/write";
-import { evaluateTransaction } from "./opportunities";
+import { closeOpportunitiesForArchive, evaluateTransaction } from "./opportunities";
 import { evaluationScope } from "./lib/facts/subject";
 import schema, { processedStatus, verdictValidator } from "./schema";
 import {
@@ -60,6 +61,10 @@ const itemWithHistory = schema.doc("items").extend({
   claims: v.array(claimWithBalance),
   priceChecks: v.array(schema.doc("priceChecks")),
   verdict: verdictValidator,
+  /** P06-OW-2 (QA-4): when the newest PRICED check was read (failed reads never count). */
+  lastObservedAt: v.optional(v.number()),
+  /** P06-OW-2: no price, or the newest one is older than `STALE_PRICE_MS` at `now` (`lib/freshness.isPriceStale`). */
+  priceStale: v.boolean(),
 });
 
 /** `board`'s per-purchase row. */
@@ -355,7 +360,10 @@ export const remove = mutation({
     }
     await ctx.db.patch(purchaseId, { status: "archived" });
     // The transaction mirrors the purchase's status, so an archived purchase never leaves an active transaction.
-    await ensurePurchaseTransaction(ctx, purchaseId);
+    const transactionId = await ensurePurchaseTransaction(ctx, purchaseId);
+    // P05-OW2 (D244b, D254): its open opportunities close with it (out of Potential and the cards), reversibly.
+    const txn = await ctx.db.get(transactionId);
+    if (txn) await closeOpportunitiesForArchive(ctx, txn, Date.now());
     return null;
   },
 });
@@ -401,17 +409,22 @@ export const get = query({
           c.observedCents === undefined ? [] : [{ observedAt: c.observedAt, cents: c.observedCents }],
         );
         const now = validatedNow ?? history[0]?.observedAt ?? purchase.purchasedAt ?? purchase._creationTime;
+        const lastObservedAt = history[0]?.observedAt;
         return {
           ...it,
           claims: await claimsWithBalance(ctx, it._id),
           priceChecks,
+          // P06-OW-2: the price's own age is an input, so a 20-day-old drop is never judged as today's.
           verdict: verdict({
             currentCents: history[0]?.cents ?? null,
             listCents: null,
             history,
             now,
             currency: purchase.currency,
+            ...(lastObservedAt !== undefined ? { priceObservedAt: lastObservedAt } : {}),
           }),
+          lastObservedAt,
+          priceStale: isPriceStale(lastObservedAt, now),
         };
       }),
     );

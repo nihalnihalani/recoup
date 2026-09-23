@@ -444,9 +444,9 @@ describe("rev 5.2 reevaluateAt and the sweep stub", () => {
     const transactionId = await seed(t, userId, baseFacts({ "test.outcome": { kind: "code", code: "not_yet_due" } }));
     const opp = await oppOf(t, transactionId);
     expect(opp).toMatchObject({ outcome: "not_yet_due", reevaluateAt: Date.UTC(2026, 9, 11) });
-    expect(await t.mutation(internal.opportunities.sweepReevaluateDue, { now: Date.UTC(2026, 9, 10) })).toEqual({ transactions: 0 });
+    expect(await t.mutation(internal.opportunities.sweepReevaluateDue, { now: Date.UTC(2026, 9, 10) })).toMatchObject({ transactions: 0 });
     await setFact(t, userId, transactionId, "test.outcome", { kind: "code", code: "eligible" });
-    expect(await t.mutation(internal.opportunities.sweepReevaluateDue, { now: Date.UTC(2026, 9, 11) })).toEqual({ transactions: 1 });
+    expect(await t.mutation(internal.opportunities.sweepReevaluateDue, { now: Date.UTC(2026, 9, 11) })).toMatchObject({ transactions: 1 });
     const after = await oppOf(t, transactionId);
     expect(after.outcome).toBe("eligible");
     expect(after.reevaluateAt).toBeUndefined();

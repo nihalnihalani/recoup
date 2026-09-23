@@ -20,7 +20,7 @@ import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { setup, signedIn } from "./test.setup";
-import { evaluateTransaction } from "./opportunities";
+import { evaluateTransaction, REEVALUATE_RETRY_MS } from "./opportunities";
 import { setFakeActive, TXN } from "./testing/scenarioPack.kit";
 import type { FactValue } from "./lib/rules/types";
 import {
@@ -172,7 +172,7 @@ describe("deadline attention through the sweep (fake pack; C50)", () => {
     const claimId = await openCaseOn(t, as, opportunityId);
     // The sweep schedules the reminder for the open case...
     expect(await t.mutation(internal.deadlines.sweep, { now: NOW })).toMatchObject({ scanned: 0, continued: true }); // `open` page: none
-    await t.mutation(internal.deadlines.sweep, { now: NOW, status: "case_open", cursor: null });
+    await t.mutation(internal.deadlines.sweep, { now: NOW, phase: "case_open", cursor: null });
     const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
     expect(scheduled.filter((f) => f.name === "deadlines:remind" && f.state.kind === "pending")).toHaveLength(1);
     // ...then the case closes before it runs: the credit is confirmed in full.
@@ -301,19 +301,45 @@ describe("the same cron re-evaluates due not_yet_due paths (rev 5.2, M20's sweep
     const rows = await t.run((ctx) => ctx.db.query("evaluations").withIndex("by_opportunity", (q) => q.eq("opportunityId", opportunityId)).collect());
     expect(rows.map((r) => r.outcome)).toEqual(["not_yet_due", "eligible"]);
     const record = await t.run(async (ctx) => (await ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", DEADLINE_SWEEP_OPS_KEY)).first())!);
-    expect(parseSweepRecord(record.cursor)).toMatchObject({ cycleNow: Date.UTC(2026, 9, 11), status: "case_open", reevaluated: 1, reevaluateFailed: false, done: true });
+    expect(parseSweepRecord(record.cursor)).toMatchObject({ cycleNow: Date.UTC(2026, 9, 11), phase: "reconcile", reevaluated: 1, reevaluateFailed: false, done: true });
+  });
+});
+
+describe("M29 residual: the re-evaluation page cannot starve (stuck rows are deferred; a full page continues)", () => {
+  it("50 due rows that stay not_yet_due (older) + 1 that ripened (newest) → the ripened one is re-evaluated in the same tick", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const stuck: Id<"opportunities">[] = [];
+    for (let i = 0; i < 50; i++) stuck.push((await seed(t, userId, { outcome: "not_yet_due" })).opportunityId);
+    const ripe = await seed(t, userId, { outcome: "not_yet_due" });
+    await t.run(async (ctx) => {
+      const [old] = await ctx.db.query("facts").withIndex("by_transaction_and_subject_key_and_key", (q) => q.eq("transactionId", ripe.transactionId).eq("subjectKey", TXN).eq("key", "test.outcome")).collect();
+      await ctx.db.patch(old._id, { state: "superseded" });
+      await ctx.db.insert("facts", { userId, transactionId: ripe.transactionId, subjectKey: TXN, key: "test.outcome", state: "user_confirmed", value: code("eligible"), source: { kind: "user" }, recordedAt: NOW });
+    });
+    // The fake pack keeps saying "check again on 2026-10-11" for the 50 (like a date begun in UTC, not yet locally).
+    const at = Date.UTC(2026, 9, 11, 2);
+    await sweepAt(t, at);
+    expect((await oppOf(t, ripe.opportunityId)).outcome).toBe("eligible");
+    for (const id of stuck.slice(0, 3)) {
+      const o = await oppOf(t, id);
+      expect([o.outcome, o.reevaluateAt]).toEqual(["not_yet_due", at + REEVALUATE_RETRY_MS]); // retried in an hour, behind the rest
+    }
   });
 });
 
 describe("the re-evaluation is tombstone-gated", () => {
-  it("a due not_yet_due path of an account being deleted is not re-evaluated (no evaluation row, no change)", async () => {
+  it("a due not_yet_due path of an account being deleted is not re-evaluated (no evaluation row); it only waits behind the rest", async () => {
     const t = setup();
     const { userId } = await signedIn(t);
     const { opportunityId } = await seed(t, userId, { outcome: "not_yet_due" });
     await t.run((ctx) => ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: NOW, attempts: 0 }));
     const before = await oppOf(t, opportunityId);
-    await sweepAt(t, Date.UTC(2026, 9, 11));
-    expect(await oppOf(t, opportunityId)).toEqual(before);
+    const at = Date.UTC(2026, 9, 11);
+    await sweepAt(t, at);
+    const after = await oppOf(t, opportunityId);
+    expect({ ...after, reevaluateAt: undefined }).toEqual({ ...before, reevaluateAt: undefined }); // nothing else changed
+    expect(after.reevaluateAt).toBe(at + REEVALUATE_RETRY_MS); // the starvation guard defers it behind every other due row
     const rows = await t.run((ctx) => ctx.db.query("evaluations").withIndex("by_opportunity", (q) => q.eq("opportunityId", opportunityId)).collect());
     expect(rows).toHaveLength(1);
   });
@@ -435,7 +461,8 @@ describe("M29 bounds at the caps (enforced transaction limits)", () => {
       expect(metrics.databaseQueries).toBeLessThan(4_096);
       expect(metrics.documentsRead).toBeLessThan(32_000);
       expect(metrics.bytesRead).toBeLessThan(16 * 1024 * 1024);
-      expect(metrics.functionsScheduled).toBeLessThanOrEqual(DEADLINE_SWEEP_PAGE + 1);
+      // 100 reminders + the attention page's continuation + the re-evaluation page's continuation (its page was full).
+      expect(metrics.functionsScheduled).toBeLessThanOrEqual(DEADLINE_SWEEP_PAGE + 2);
     },
     150_000,
   );

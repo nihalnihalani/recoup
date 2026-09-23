@@ -39,6 +39,12 @@
  * `not_yet_due` is never a money tile (only a count). Reads are bounded: claims `by_user` ≤ 200 and open opportunities
  * ≤ 200; a real cut reports `complete: false`. The query never reads the clock: `now` is a coarse client argument
  * used only for the "deadlines this week" strip. `purchases.board` totals are untouched (D145, D39).
+ *
+ * P05-OW1 (re-audit, D244): every bounded read is NEWEST first, and rows that can never count (examples; a dismissed
+ * claim with no confirmed money) are skipped INSIDE the read, so they never take a live row's place. Each stream stops
+ * at its cap of counted rows or at twice that many rows scanned; `complete: false` only when a row was actually left
+ * unread. P05-OW8 (D244a): a dismissed claim that received confirmed money stays a node — closed for asking, in no
+ * tile, but its net stays in Recovered (dismissal never erases confirmed money).
  */
 import { ConvexError, v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
@@ -311,6 +317,33 @@ const summaryShape = v.object({
   counts: v.object({ notYetDue: v.number(), needsAnswers: v.number(), deadlinesThisWeek: v.number() }),
 });
 
+/** P05-OW1: rows each summary stream may scan (skipped rows included) before it stops and reports `complete: false`. */
+const SUMMARY_SCAN_CLAIMS = SUMMARY_MAX_CLAIMS * 2;
+const SUMMARY_SCAN_OPEN_OPPORTUNITIES = SUMMARY_MAX_OPEN_OPPORTUNITIES * 2;
+/** Sibling price claims read per item to number a legacy claim's loss key (`legacyLossKeys`). */
+const LOSS_KEY_SIBLINGS = 100;
+
+/**
+ * A claim's loss keys for the components. Stored keys win; a legacy keyless PRICE claim is numbered from ALL of its
+ * item's price claims (their own index range, not the rows this call happened to read), so its ordinal never depends
+ * on read order or on where the bounded claims read was cut (P05-OW1).
+ */
+async function summaryLossKeys(ctx: QueryCtx, c: Doc<"claims">, siblingsCache: Map<string, Doc<"claims">[]>): Promise<string[]> {
+  if ((c.lossKeys && c.lossKeys.length > 0) || c.itemId === undefined || c.type !== "price_adjustment") return legacyLossKeys(c, [c]);
+  const itemId = c.itemId;
+  let siblings = siblingsCache.get(itemId);
+  if (!siblings) {
+    siblings = (
+      await ctx.db
+        .query("claims")
+        .withIndex("by_item_type_status", (q) => q.eq("itemId", itemId).eq("type", "price_adjustment"))
+        .take(LOSS_KEY_SIBLINGS)
+    ).filter((s) => s.userId === c.userId);
+    siblingsCache.set(itemId, siblings); // one read per item, however many of its claims are counted
+  }
+  return legacyLossKeys(c, siblings);
+}
+
 /** Ledger events read per claim (a claim collects a promise, a few credits and debits). */
 const EVENTS_PER_CLAIM = 200;
 /** Drafts read per claim for the delivery projection. */
@@ -397,13 +430,7 @@ export const summary = query({
     const now = Math.floor(args.now / COARSE_MS) * COARSE_MS;
     const userId = await requireUserId(ctx);
 
-    const claimRows = await ctx.db.query("claims").withIndex("by_user", (q) => q.eq("userId", userId)).take(SUMMARY_MAX_CLAIMS + 1);
-    const oppRows = await ctx.db
-      .query("opportunities")
-      .withIndex("by_user_and_status", (q) => q.eq("userId", userId).eq("status", "open"))
-      .take(SUMMARY_MAX_OPEN_OPPORTUNITIES + 1);
-    let complete = claimRows.length <= SUMMARY_MAX_CLAIMS && oppRows.length <= SUMMARY_MAX_OPEN_OPPORTUNITIES;
-
+    let complete = true;
     const purchases = new Map<Id<"purchases">, Doc<"purchases"> | null>();
     const purchaseOf = async (id: Id<"purchases">) => {
       if (!purchases.has(id)) purchases.set(id, await ctx.db.get(id));
@@ -416,13 +443,27 @@ export const summary = query({
       return txns.get(id)!;
     };
 
-    const realClaims = claimRows.slice(0, SUMMARY_MAX_CLAIMS).filter((c) => c.isExample !== true && c.status !== "dismissed");
-    const byItem = new Map<Id<"items">, Doc<"claims">[]>();
-    for (const c of claimRows) if (c.itemId !== undefined) byItem.set(c.itemId, [...(byItem.get(c.itemId) ?? []), c]);
-
+    // P05-OW1: newest first; examples and money-less dismissed claims are skipped inside the bounded read.
     const claims: SummaryClaim[] = [];
     const unsupported = new Map<string, number>();
-    for (const c of realClaims) {
+    const countedClaimIds = new Set<string>();
+    const siblingsCache = new Map<string, Doc<"claims">[]>();
+    let claimsCounted = 0;
+    let claimsScanned = 0;
+    for await (const c of ctx.db.query("claims").withIndex("by_user", (q) => q.eq("userId", userId)).order("desc")) {
+      if (claimsScanned >= SUMMARY_SCAN_CLAIMS || claimsCounted >= SUMMARY_MAX_CLAIMS) {
+        complete = false; // a row exists beyond what this call reads
+        break;
+      }
+      claimsScanned += 1;
+      if (c.isExample === true) continue;
+      const events = await ctx.db.query("ledgerEvents").withIndex("by_claim", (q) => q.eq("claimId", c._id)).take(EVENTS_PER_CLAIM);
+      const ledger: LedgerEvent[] = events.map((e) => ({ kind: e.kind, cents: e.cents }));
+      const b = balance(c.expectedCents, ledger);
+      // P05-OW8 (D244a): a dismissed claim is only closed for asking; its confirmed money stays in Recovered.
+      if (c.status === "dismissed" && Math.max(0, b.confirmed - b.debited) === 0) continue;
+      claimsCounted += 1;
+      if (events.length === EVENTS_PER_CLAIM) complete = false;
       // M20: an item-less (scenario) claim is anchored on its transaction (its purchase when it has one, like the
       // opportunities below), so the paid cap and loss components treat it exactly like its opportunity.
       const txn = c.transactionId !== undefined ? await txnOf(c.transactionId) : null;
@@ -437,20 +478,20 @@ export const summary = query({
         unsupported.set(currency, (unsupported.get(currency) ?? 0) + 1);
         continue;
       }
-      const events = await ctx.db.query("ledgerEvents").withIndex("by_claim", (q) => q.eq("claimId", c._id)).take(EVENTS_PER_CLAIM);
-      if (events.length === EVENTS_PER_CLAIM) complete = false;
-      const ledger: LedgerEvent[] = events.map((e) => ({ kind: e.kind, cents: e.cents }));
-      const b = balance(c.expectedCents, ledger);
-      const drafts = await ctx.db.query("drafts").withIndex("by_claim", (q) => q.eq("claimId", c._id)).order("desc").take(DRAFTS_PER_CLAIM);
-      // DA-A-9: a manual-channel claim is submitted only through its packets and the user's recorded submissions.
-      const manual = c.requiredChannel !== undefined && c.requiredChannel !== "email";
-      const packets = manual ? await ctx.db.query("packets").withIndex("by_claim", (q) => q.eq("claimId", c._id)).order("desc").take(PACKETS_PER_CLAIM) : [];
-      const submissions = manual
-        ? await ctx.db.query("submissions").withIndex("by_claim", (q) => q.eq("claimId", c._id)).order("desc").take(SUBMISSIONS_PER_CLAIM)
-        : [];
+      if (c.status !== "dismissed") countedClaimIds.add(c._id); // non-cash counts: as before, never a dismissed claim's
       const closedForAsk = isClosedForAsk(c);
+      // Delivery and refusal only decide the tile of an OPEN claim; a closed one sits in no tile.
+      let claimDelivery: Delivery = "none";
       let refused = false;
       if (!closedForAsk) {
+        const drafts = await ctx.db.query("drafts").withIndex("by_claim", (q) => q.eq("claimId", c._id)).order("desc").take(DRAFTS_PER_CLAIM);
+        // DA-A-9: a manual-channel claim is submitted only through its packets and the user's recorded submissions.
+        const manual = c.requiredChannel !== undefined && c.requiredChannel !== "email";
+        const packets = manual ? await ctx.db.query("packets").withIndex("by_claim", (q) => q.eq("claimId", c._id)).order("desc").take(PACKETS_PER_CLAIM) : [];
+        const submissions = manual
+          ? await ctx.db.query("submissions").withIndex("by_claim", (q) => q.eq("claimId", c._id)).order("desc").take(SUBMISSIONS_PER_CLAIM)
+          : [];
+        claimDelivery = delivery(c, { drafts, packets, submissions });
         const r = await refusedState(ctx, c._id, events);
         refused = r.refused;
         if (r.cut) complete = false;
@@ -460,12 +501,12 @@ export const summary = query({
         currency,
         status: c.status,
         expectedMinor: c.expectedCents,
-        lossKeys: legacyLossKeys(c, (c.itemId !== undefined ? byItem.get(c.itemId) : undefined) ?? [c]),
+        lossKeys: await summaryLossKeys(ctx, c, siblingsCache),
         confirmedMinor: b.confirmed,
         debitedMinor: b.debited,
         promisedMinor: b.promised,
         provisionalMinor: provisionalOutstanding(ledger),
-        delivery: delivery(c, { drafts, packets, submissions }),
+        delivery: claimDelivery,
         closedForAsk,
         refused,
         anchor,
@@ -476,10 +517,22 @@ export const summary = query({
     let notYetDue = 0;
     let needsAnswers = 0;
     let deadlinesThisWeek = 0;
-    for (const o of oppRows.slice(0, SUMMARY_MAX_OPEN_OPPORTUNITIES)) {
+    // P05-OW1: newest first; example rows skipped inside the bounded read (an archived transaction's opportunities are
+    // closed by the archive, D244b/D254, so they are not in this range at all).
+    let oppsCounted = 0;
+    let oppsScanned = 0;
+    for await (const o of ctx.db
+      .query("opportunities")
+      .withIndex("by_user_and_status", (q) => q.eq("userId", userId).eq("status", "open"))
+      .order("desc")) {
+      if (oppsScanned >= SUMMARY_SCAN_OPEN_OPPORTUNITIES || oppsCounted >= SUMMARY_MAX_OPEN_OPPORTUNITIES) {
+        complete = false;
+        break;
+      }
+      oppsScanned += 1;
       if (o.isExample) continue;
-      if (!txns.has(o.transactionId)) txns.set(o.transactionId, await ctx.db.get(o.transactionId));
-      const txn = txns.get(o.transactionId)!;
+      oppsCounted += 1;
+      const txn = await txnOf(o.transactionId);
       if (!txn || txn.status === "archived" || txn.userId !== userId) continue;
       if (o.outcome === "not_yet_due") notYetDue += 1; // a count, never a money tile (rev 5.2)
       if (o.outcome === "needs_facts") needsAnswers += 1;
@@ -527,12 +580,12 @@ export const summary = query({
       if (p) paid.set(anchor, p);
     }
 
-    const claimIds = new Set(realClaims.map((c) => c._id as string));
-    const remedies = await ctx.db.query("nonCashRemedies").withIndex("by_user", (q) => q.eq("userId", userId)).take(SUMMARY_MAX_CLAIMS + 1);
+    // P05-OW1: newest first, like the claims they belong to.
+    const remedies = await ctx.db.query("nonCashRemedies").withIndex("by_user", (q) => q.eq("userId", userId)).order("desc").take(SUMMARY_MAX_CLAIMS + 1);
     if (remedies.length > SUMMARY_MAX_CLAIMS) complete = false;
     const nonCashCounts = new Map<string, number>();
     for (const r of remedies.slice(0, SUMMARY_MAX_CLAIMS)) {
-      if (!claimIds.has(r.claimId)) continue; // example claims (and claims past the cut) never count
+      if (!countedClaimIds.has(r.claimId)) continue; // example and dismissed claims (and claims past the cut) never count
       nonCashCounts.set(r.kind, (nonCashCounts.get(r.kind) ?? 0) + 1);
     }
 

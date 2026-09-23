@@ -819,6 +819,12 @@ export default defineSchema({
      * (`deadlines.deadlineAttentionActive`); `evaluateRun` clears it when `nextDeadlineAt` moves, never sets it.
      */
     deadlineAttention: v.optional(v.object({ setAt: v.number(), dueAt: v.number(), deadlineId: v.string() })),
+    /**
+     * P05-OW2 (D244b, D254): set when archiving the transaction closed this `open` opportunity (`status: "closed"`; out of
+     * Potential and the cards). `evaluateRun` reopens a closed, marked opportunity once its transaction is live again
+     * and clears the marker — so archiving is reversible, and an opportunity closed by its CLAIM (no marker) never is.
+     */
+    closedByArchiveAt: v.optional(v.number()),
   }).index("by_user_and_dedupe_key", ["userId", "dedupeKey"])
     .index("by_transaction", ["transactionId"])
     .index("by_user_and_status", ["userId", "status"])
