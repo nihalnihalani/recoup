@@ -8,7 +8,7 @@
  * This test drives the real `ErrorBoundary` (its `reset` calls `resetFailedChunks`) around a `lazyWithRetry`
  * component whose loader rejects once and then resolves, and checks "Try again" recovers it.
  */
-import { Suspense, act } from "react";
+import { Suspense, act, useEffect } from "react";
 import { MemoryRouter, Outlet, useNavigate } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -111,10 +111,12 @@ vi.mock("./pages/Settings", () => {
   return { default: () => <div>SETTINGS PAGE</div> };
 });
 
-let nav: ((to: string) => void) | null = null;
+const navRef: { current: ((to: string) => void) | null } = { current: null };
 function Nav() {
   const n = useNavigate();
-  nav = n;
+  useEffect(() => {
+    navRef.current = n;
+  }, [n]);
   return null;
 }
 
@@ -128,9 +130,9 @@ describe("App.tsx: FreshChunks recovers a route chunk that failed once (F5 regre
       </MemoryRouter>,
     );
     await waitFor(() => expect(screen.getByRole("button", { name: /try again/i })).toBeTruthy());
-    await act(async () => nav!("/"));
+    await act(async () => navRef.current!("/"));
     await waitFor(() => expect(screen.getByText("BOARD PAGE")).toBeTruthy());
-    await act(async () => nav!("/settings"));
+    await act(async () => navRef.current!("/settings"));
     await waitFor(() => expect(screen.getByText("SETTINGS PAGE")).toBeTruthy());
     expect(settingsAttempts).toBeGreaterThanOrEqual(2);
   });
