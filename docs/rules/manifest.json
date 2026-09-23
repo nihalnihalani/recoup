@@ -18,8 +18,8 @@
         "convex/lib/rules/outcome.ts",
         "convex/lib/deadlines/engine.ts"
       ],
-      "engineClosureSha256": "76893d8ec8af531cf97a56fceeff95fce68e725e55dc1a924c964b35e36cb248",
-      "engineClosureDecision": "D193",
+      "engineClosureSha256": "8d45cd20fe87f98fbc2f349bb56f3db174319b4b09891599b0a9318815677091",
+      "engineClosureDecision": "D210",
       "reviewer": "opus-rules-reviewer",
       "reviewedAt": "2026-09-23",
       "reviews": {
@@ -279,6 +279,7 @@
       "scenarioId": "R05",
       "version": 1,
       "lifecycle": "researched",
+      "packFile": "convex/lib/rules/r05_late_order_v1.ts",
       "spec": "docs/rules/R05-mail-internet-order.md",
       "fixtures": "docs/rules/fixtures/R05.json",
       "sources": [
