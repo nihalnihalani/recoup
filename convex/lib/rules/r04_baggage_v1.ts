@@ -1017,6 +1017,7 @@ function makePack(path: R04Path): RulePack<R04View, R04Params, CaseContext> {
     fixturesPath: "docs/rules/fixtures/R04.json",
     lateAskDeadlineIds: [],
     overlap: OVERLAP[path],
+    adapter: R04_ADAPTERS[path],
     knownLimitations: a
       ? [
           ...LIMITS_COMMON,

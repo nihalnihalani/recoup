@@ -8,6 +8,7 @@ import { latest } from "./policies";
 import { assertCoarseNow } from "./watches";
 import { MAX_ITEMS_PER_PURCHASE } from "./limits";
 import { isTombstoned } from "./lib/accountState";
+import { hasLegacyIds } from "./lib/legacyClaim";
 
 /** Most recent purchases the dashboard reads; older ones stay reachable from their own page. */
 const MAX_PURCHASES = 60;
@@ -226,7 +227,9 @@ export const overview = query({
         .collect();
       const priceClaimByItem = new Map<string, (typeof purchaseClaims)[number]>();
       for (const c of purchaseClaims) {
-        if (c.status === "dismissed") continue;
+        // M20 (D206): a batch reader SKIPS item-less claims (none on this index in practice: scenario claims have
+        // type "scenario"), never throws.
+        if (c.status === "dismissed" || !hasLegacyIds(c)) continue;
         const existing = priceClaimByItem.get(c.itemId);
         if (!existing || c._creationTime > existing._creationTime) priceClaimByItem.set(c.itemId, c);
       }

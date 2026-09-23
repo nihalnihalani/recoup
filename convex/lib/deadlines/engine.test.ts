@@ -9,6 +9,7 @@ import {
   computeDeadline,
   computeDeadlineDetailed,
   isLateAskAcknowledgeable,
+  markMet,
   nextCounterpartyDueAt,
   nextUserDeadlineAt,
   overdueCounterpartyDeadlines,
@@ -273,5 +274,35 @@ describe("late ask acknowledgeable (rev 5 C1)", () => {
       conditions: [{ id: "drop", result: "fail", kind: "applicability" }],
     }, ack)).toBe(false);
     expect(isLateAskAcknowledgeable({ outcome: "not_eligible", deadlines: [passedWindow], conditions: [] }, ack)).toBe(false);
+  });
+});
+
+describe("D212: `met` — a user notice/act deadline satisfied in time", () => {
+  const userDl = {
+    id: "r03.notice", label: "Notice received by", obligor: "user" as const, status: "open" as const,
+    dueAt: T("2026-10-31T03:59:59.999Z"), mustBe: "received" as const, basis: "60 days after the statement.",
+  };
+  const creditorDl = {
+    id: "r03.ack", label: "Creditor acknowledges by", obligor: "counterparty" as const, status: "open" as const,
+    dueAt: T("2026-11-30T04:59:59.999Z"), mustBe: "sent" as const, basis: "30 days after receipt.",
+  };
+
+  it("markMet keeps dueAt for display and only changes the status (and appends the note)", () => {
+    const met = markMet(userDl, "Notice received 2026-10-02.");
+    expect(met).toEqual({ ...userDl, status: "met", basis: "60 days after the statement. Notice received 2026-10-02." });
+  });
+
+  it("a counterparty deadline can never be met: its clock is never extended or paused by the user's act", () => {
+    expect(() => markMet(creditorDl, "x")).toThrow(/only a user-obligor deadline can be met/);
+    const met = markMet(userDl, "in time");
+    expect(nextCounterpartyDueAt([met, creditorDl])).toBe(creditorDl.dueAt);
+  });
+
+  it("windowOpen counts met as satisfied; a met deadline is never the next user deadline (no attention, no sweep)", () => {
+    const met = markMet(userDl, "in time");
+    expect(userWindowOpen([met])).toBe("pass");
+    expect(userWindowOpen([met, { ...userDl, id: "other", status: "passed" }])).toBe("fail");
+    expect(nextUserDeadlineAt([met])).toBeUndefined();
+    expect(nextUserDeadlineAt([met, creditorDl])).toBeUndefined();
   });
 });

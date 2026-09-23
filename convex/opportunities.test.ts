@@ -4,7 +4,7 @@
  * the production registry has no active pack until the lead's activation commit, so these tests prove the v1 path.
  * Expected values are written by hand from the R01 v1 rules (a 12,000 item, a 9,500 observation → 2,500 × qty).
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./lib/rules/registry", async () => await import("./lib/rules/testRegistry"));
 
@@ -22,6 +22,8 @@ const PURCHASED = NOW - 2 * DAY;
 const DOMAIN = "acme.example";
 type T = ReturnType<typeof setup>;
 
+// M20 (D208): R05 (wave 2) now evaluates retail transactions through its adapter; these R01 tests narrow the C3 seam to R01 v1.
+beforeEach(() => setTestActivations([{ ruleId: "R01.retail_price_adjustment", version: 1, status: "active", decision: "TEST" }]));
 afterEach(() => resetTestRegistry());
 
 async function world(

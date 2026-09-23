@@ -148,6 +148,8 @@ export const EXPORT_TABLE_NAMES = [
   "mailLog", "processedEvents", "alertSettings", "profiles",
   // M14 (contract rev 5 §8): the wave-1 transaction-recovery tables (M10 schema, 92993cb).
   "transactions", "facts", "incidents", "evidence", "opportunities", "evaluations", "nonCashRemedies",
+  // M20 (wave 2, §6): manual-channel packets and the user's recorded submissions.
+  "packets", "submissions",
 ] as const;
 type ExportTable = (typeof EXPORT_TABLE_NAMES)[number];
 const EXPORT_TABLES = v.union(...EXPORT_TABLE_NAMES.map((name) => v.literal(name)));
@@ -167,6 +169,8 @@ const EXPORT_TABLES = v.union(...EXPORT_TABLE_NAMES.map((name) => v.literal(name
  *  - `evidence` (→ transactions, processedEvents) goes before both, and
  *    deletes each row's blob in the same mutation as the row (SEC-DEL-2).
  *  - `transactions` (→ purchases) goes before `purchases`.
+ *  - M20: `submissions` (→ packets, claims, evidence) goes before `packets`, and `packets` (→ claims, evidence,
+ *    and `binding` → opportunities/evaluations) before `evaluations`, with the other claim children.
  * Three edges form cycles that no order satisfies:
  *  - evaluations ↔ opportunities.currentEvaluationId
  *  - opportunities.activeClaimId ↔ claims.opportunityId
@@ -180,6 +184,7 @@ const EXPORT_TABLES = v.union(...EXPORT_TABLE_NAMES.map((name) => v.literal(name
  */
 export const PURGE_STEPS = [
   "followUps", "claimNotes", "drafts", "replies", "ledgerEvents",
+  "submissions", "packets",
   "nonCashRemedies", "evaluations", "opportunities", "facts", "incidents",
   "claims",
   "evidence", "transactions",
@@ -254,6 +259,9 @@ const TABLE_SPECS: Record<ExportTable | "usage", TableSpec> = {
   opportunities: { kind: "direct", index: "by_user_and_status" },
   evaluations: { kind: "direct", index: "by_user" },
   nonCashRemedies: { kind: "direct", index: "by_user" },
+  // M20: both wave-2 manual-channel tables carry `by_user`.
+  packets: { kind: "direct", index: "by_user" },
+  submissions: { kind: "direct", index: "by_user" },
 };
 
 /**
@@ -269,9 +277,12 @@ const TABLE_SPECS: Record<ExportTable | "usage", TableSpec> = {
  *    200 rows would not.
  */
 const EVALUATION_PAGE = 50;
+/** M20: a packet row holds a body ≤ 8,000 chars, a recipient ≤ 500 and ≤ 25 evidence entries (~40 KB worst case). */
+const PACKET_PAGE = 100;
 const DIRECT_PAGE_OVERRIDES: Partial<Record<ExportTable | "usage", number>> = {
   evidence: PROCESSED_EVENTS_PAGE,
   evaluations: EVALUATION_PAGE,
+  packets: PACKET_PAGE,
 };
 
 /**

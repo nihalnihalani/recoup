@@ -24,7 +24,7 @@
  * `recordEvaluation` is the ONLY writer of `evaluations` (array bounds asserted before any write).
  */
 import { ConvexError, v, type Infer } from "convex/values";
-import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { ownedOpportunity, ownedPurchase, ownedTransaction, requireUserId } from "./lib/access";
@@ -36,7 +36,9 @@ import { assertUserAmount, claimCurrency } from "./lib/money";
 import { amountExceedsEstimate } from "./lib/amountReview";
 import { loadRetailSnapshot } from "./lib/facts/legacyRetail";
 import { cellLookup } from "./lib/facts/resolve";
-import { snapshotHash } from "./lib/facts/snapshot_retail";
+import { snapshotHash, type CellRow } from "./lib/facts/snapshot_retail";
+import { readLiveFacts, toResolveRow } from "./lib/facts/write";
+import { engineVersionFor } from "./lib/rules/engineVersion";
 import { isLateAskAcknowledgeable, nextCounterpartyDueAt, nextUserDeadlineAt } from "./lib/deadlines/engine";
 import { pathsNotChecked } from "./lib/rules/coverage";
 import { leavesApprovableSet, resultHash } from "./lib/rules/outcome";
@@ -48,9 +50,9 @@ import {
   type R01Snapshot,
 } from "./lib/rules/r01_price_adjustment_v1";
 import { VERIFICATION } from "./lib/rules/verification";
-import { ENGINE_VERSION, isApprovable, type AnyRulePack, type CaseContext, type EvaluationResult, type NextAction } from "./lib/rules/types";
+import { isApprovable, type AnyRulePack, type CaseContext, type EvaluationResult, type NextAction } from "./lib/rules/types";
 import { MAX_BOUND_FACTS, MAX_ITEMS_PER_PURCHASE, MAX_LOSS_KEYS } from "./limits";
-import { openClaim } from "./claims";
+import { insertScenarioClaim, openClaim } from "./claims";
 import { recordRuleEvaluationFailure } from "./ops";
 import { ensurePurchaseTransaction } from "./transactions";
 import { closurePatch } from "./lib/opportunityClosure";
@@ -64,6 +66,10 @@ const OPPORTUNITIES_PER_TRANSACTION = 100;
 const CLAIMS_PER_ITEM = 100;
 /** Claims read per transaction by the overlap guard. */
 const OVERLAP_CLAIMS = 100;
+/** Claims read per opportunity to find its open case and settled losses (a handful over a case's life). */
+const CLAIMS_PER_OPPORTUNITY = 50;
+/** Opportunities re-evaluated per `sweepReevaluateDue` call (M29 wires it to a cron; bounded page). */
+const REEVALUATE_PAGE = 50;
 
 // ---------------------------------------------------------------------------
 // The single evaluation writer (DA-A-32 bounds)
@@ -153,6 +159,7 @@ const itemIdOf = (subjectKey: string): Id<"items"> | null =>
 /** Legacy loss-key synthesis (§3.3): `item:<id>:price_diff:<n>`, n = 1 + the confirmed price claims created before it. */
 export function legacyLossKeys(claim: Doc<"claims">, siblings: readonly Doc<"claims">[]): string[] {
   if (claim.lossKeys && claim.lossKeys.length > 0) return [...claim.lossKeys];
+  if (claim.itemId === undefined) return []; // an item-less (scenario) claim always records its own keys
   if (claim.type === "return_credit") return [`item:${claim.itemId}:return_credit`];
   const confirmedBefore = siblings.filter(
     (c) => c.type === "price_adjustment" && c.status === "confirmed" && c._creationTime < claim._creationTime,
@@ -255,14 +262,82 @@ async function r01Runs(ctx: QueryCtx, txn: Doc<"transactions">, subjects: readon
   return runs;
 }
 
-/** Subjects and snapshots per scenario. A scenario with no adapter yet (wave 2) evaluates nothing. */
-async function runsFor(ctx: QueryCtx, pack: AnyRulePack, txn: Doc<"transactions">, subjects?: readonly string[]): Promise<Run[]> {
-  switch (pack.scenarioId) {
-    case "R01":
-      return await r01Runs(ctx, txn, subjects);
-    default:
-      return [];
+/**
+ * M20 (D208): the runs of a wave-2 pack from the transaction's live fact rows, through its pure `adapter`. The rows are
+ * read once per `evaluateTransaction` call (bounded by `MAX_LIVE_FACTS_PER_TRANSACTION`, four index ranges) and shared
+ * by every adapter pack. Requested subjects filter the runs exactly (DA-A-32: an item-level change never re-runs a
+ * transaction-level pack). CaseContext comes from the opportunity's linked cases (`claims.by_opportunity`, bounded):
+ * the newest open one (the mandatory link, DA-A-3 generalised) and the settled amount per loss key.
+ */
+async function adapterRuns(
+  ctx: QueryCtx,
+  pack: AnyRulePack,
+  txn: Doc<"transactions">,
+  rows: () => Promise<readonly CellRow[]>,
+  subjects?: readonly string[],
+): Promise<Run[]> {
+  if (!pack.adapter) return [];
+  let relatedTransactionId: Id<"transactions"> | undefined;
+  if (txn.relatedTransactionId) {
+    // DA-A-29: server-set; still passed only when it is the same user's transaction.
+    const related = await ctx.db.get(txn.relatedTransactionId);
+    if (related && related.userId === txn.userId) relatedTransactionId = related._id;
   }
+  const produced = pack.adapter.runs({
+    transactionId: txn._id,
+    ...(relatedTransactionId ? { relatedTransactionId } : {}),
+    isExample: txn.isExample === true,
+    rows: await rows(),
+  });
+  const wanted = subjects === undefined ? null : new Set(subjects);
+  const out: Run[] = [];
+  for (const r of produced) {
+    if (wanted && !wanted.has(r.subjectKey)) continue;
+    const opp = await ctx.db
+      .query("opportunities")
+      .withIndex("by_user_and_dedupe_key", (q) => q.eq("userId", txn.userId).eq("dedupeKey", dedupeKeyOf(txn._id, pack, r.subjectKey)))
+      .unique();
+    let open: Doc<"claims"> | null = null;
+    const settledMinorByLossKey: Record<string, number> = {};
+    if (opp) {
+      const claims = await ctx.db
+        .query("claims")
+        .withIndex("by_opportunity", (q) => q.eq("opportunityId", opp._id))
+        .take(CLAIMS_PER_OPPORTUNITY);
+      for (const c of claims) {
+        if (c.userId !== txn.userId) continue;
+        if (!isClosedForAsk(c) && (open === null || c._creationTime > open._creationTime)) open = c;
+        if (c.status === "confirmed") for (const k of c.lossKeys ?? []) settledMinorByLossKey[k] = (settledMinorByLossKey[k] ?? 0) + c.expectedCents;
+      }
+    }
+    out.push({
+      subjectKey: r.subjectKey,
+      snapshot: r.snapshot,
+      factSnapshotHash: await snapshotHash({ lookup: r.lookup }),
+      caseContext: { settledMinorByLossKey, ...(open ? { activeClaimId: open._id } : {}) },
+      openClaim: open,
+      openClaimCurrency: open ? claimCurrency(open, null) : null,
+    });
+  }
+  return out;
+}
+
+/** The transaction's live fact rows as resolution rows (values only; the owner's rows only). */
+async function liveCellRows(ctx: QueryCtx, txn: Doc<"transactions">): Promise<CellRow[]> {
+  const facts = await readLiveFacts(ctx, txn._id);
+  return facts.filter((f) => f.userId === txn.userId).map((f) => ({ subjectKey: f.subjectKey, key: f.key, row: toResolveRow(f) }));
+}
+
+/** Subjects and snapshots per scenario: R01's legacy adapter, else the pack's facts adapter (D208). */
+async function runsFor(
+  ctx: QueryCtx,
+  pack: AnyRulePack,
+  txn: Doc<"transactions">,
+  rows: () => Promise<readonly CellRow[]>,
+  subjects?: readonly string[],
+): Promise<Run[]> {
+  if (pack.scenarioId === "R01") return await r01Runs(ctx, txn, subjects);
+  return await adapterRuns(ctx, pack, txn, rows, subjects);
 }
 
 export function dedupeKeyOf(txnId: Id<"transactions">, pack: Pick<AnyRulePack, "scenarioId" | "remedyKey">, subjectKey: string, incidentId?: Id<"incidents">): string {
@@ -309,6 +384,18 @@ async function supersedeWithdrawn(ctx: MutationCtx, txn: Doc<"transactions">, no
   }
 }
 
+/**
+ * M20 (rev 5.2, D147(6)): `opportunities.reevaluateAt` for M29's sweep — for a `not_yet_due` result with
+ * `reevaluate.at` ("YYYY-MM-DD"), the start of that date in UTC, which is no later than its start in any US zone (the
+ * sweep may run a few hours early; a still-not-due result is simply recorded again). Undefined otherwise.
+ */
+export function reevaluateAtOf(result: Pick<EvaluationResult, "outcome" | "reevaluate">): number | undefined {
+  const at = result.outcome === "not_yet_due" ? result.reevaluate?.at : undefined;
+  if (at === undefined || !/^\d{4}-\d{2}-\d{2}$/.test(at)) return undefined;
+  const ms = Date.parse(`${at}T00:00:00Z`);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
 /** Materiality (§2.8 step 8) between the previous evaluation of an open case and the new result. */
 export async function materialChange(
   prev: Pick<Doc<"evaluations">, "outcome" | "ruleVersion" | "engineVersion" | "deadlines" | "boundFacts">,
@@ -345,10 +432,12 @@ export async function evaluateTransaction(
   if (txn.status === "archived") return [];
 
   const out: Evaluated[] = [];
+  let rowsCache: Promise<CellRow[]> | null = null;
+  const rows = () => (rowsCache ??= liveCellRows(ctx, txn));
   for (const pack of activePacksForCategory(txn.category)) {
     let runs: Run[];
     try {
-      runs = await runsFor(ctx, pack, txn, opts.subjects);
+      runs = await runsFor(ctx, pack, txn, rows, opts.subjects);
     } catch (error) {
       await recordRuleEvaluationFailure(ctx, { now, scenarioId: pack.scenarioId, ruleId: pack.ruleId, ruleVersion: pack.version, error, trigger, transactionId });
       continue;
@@ -416,7 +505,7 @@ async function evaluateRun(
     snapshotHash: run.factSnapshotHash,
     pack: { ruleId: pack.ruleId, scenarioId: pack.scenarioId, version: pack.version, params: pack.params, sources: pack.sources },
     verification: VERIFICATION,
-    engineVersion: ENGINE_VERSION,
+    engineVersion: engineVersionFor(pack.ruleId, pack.version),
     remedyKey: pack.remedyKey,
     subjectKey: run.subjectKey,
     caseContext: run.caseContext,
@@ -440,6 +529,7 @@ async function evaluateRun(
     nextCounterpartyDueAt: nextCounterpartyDueAt(result.deadlines),
     lossKeys,
     lastEvaluatedAt: now,
+    reevaluateAt: reevaluateAtOf(result),
   };
 
   let opp: Doc<"opportunities">;
@@ -466,10 +556,13 @@ async function evaluateRun(
     else if (status === "closed" && lossKeys.join("|") !== existing.lossKeys.join("|") && isApprovable(result.outcome)) {
       status = "open"; // a further loss on the same subject (R01: price_diff:n+1)
     }
+    // D226: the first evaluation of a denied loss without its case records the denied basis (its resultHash).
+    const denialBasis = existing.deniedAt !== undefined && existing.deniedResultHash === undefined && activeClaimId === null;
     await ctx.db.patch(existing._id, {
       ...projection,
       status,
       activeClaimId: activeClaimId ?? undefined,
+      ...(denialBasis ? { deniedResultHash: rh } : {}),
     });
     opp = { ...opp, ...projection, status, activeClaimId: activeClaimId ?? undefined };
   }
@@ -641,8 +734,8 @@ async function openFromEvaluation(
   if (!isApprovable(e.result.outcome)) {
     return { ok: false, code: "not_approvable", message: `A claim cannot be opened while the result is ${e.result.outcome}.`, nextAction: e.result.nextAction };
   }
-  if (e.pack.scenarioId !== "R01") {
-    return { ok: false, code: "unsupported_scenario", message: "Opening this kind of case arrives with the scenario claims of wave 2." };
+  if (e.pack.scenarioId !== "R01" && !e.pack.adapter) {
+    return { ok: false, code: "unsupported_scenario", message: "This kind of case cannot be opened yet." };
   }
   let amount: number;
   if (e.result.amount?.basis === "user_claimed") {
@@ -655,7 +748,24 @@ async function openFromEvaluation(
   }
   const overlap = await overlapCheck(ctx, txn.userId, txn, e.pack, e.result.lossKeys, null);
   if (overlap.refused) return { ok: false, code: "overlap", message: overlap.refused };
-  const claimId = await insertR01Case(ctx, txn, e, amount);
+  const claimId =
+    e.pack.scenarioId === "R01"
+      ? await insertR01Case(ctx, txn, e, amount)
+      : await insertScenarioClaim(ctx, {
+          userId: txn.userId,
+          transactionId: txn._id,
+          opportunityId: e.opportunityId,
+          ruleId: e.pack.ruleId,
+          ruleVersion: e.pack.version,
+          scenarioId: e.pack.scenarioId,
+          remedyKey: e.pack.remedyKey,
+          expectedMinor: amount,
+          currency: e.result.amount?.estimate.currency ?? txn.currency,
+          lossKeys: e.result.lossKeys.slice(0, MAX_LOSS_KEYS),
+          requiredChannel: e.pack.requiredChannel?.(e.result) ?? "email",
+          caseMode: e.pack.caseMode?.(e.result) ?? "request",
+          ...(txn.isExample ? { isExample: true } : {}),
+        });
   await evaluateTransaction(ctx, txn._id, "case_open", now, { subjects: [e.result.subjectKey], freshCaseId: claimId });
   return { ok: true, claimId, created: true, ...(overlap.notice ? { notice: overlap.notice } : {}) };
 }
@@ -683,6 +793,52 @@ export async function autoOpenR01(
   const opened = await openFromEvaluation(ctx, txn, e, now, undefined);
   return opened.ok ? { claimId: opened.claimId } : { claimId: null, note: opened.message };
 }
+
+// ---------------------------------------------------------------------------
+// Internal triggers (M20): scheduled re-evaluation, and the reevaluateAt sweep M29 wires to a cron
+// ---------------------------------------------------------------------------
+
+const evaluationTrigger = schema.tables.evaluations.validator.fields.trigger;
+
+/**
+ * Re-evaluates one transaction in its own transaction — scheduled by writers that must not import this module (e.g.
+ * `claims.recordNonCashResolution` after writing a pack's acceptance fact). Tombstone and archive checks are
+ * `evaluateTransaction`'s.
+ */
+export const evaluateInternal = internalMutation({
+  args: { transactionId: v.id("transactions"), trigger: evaluationTrigger, subjects: v.optional(v.array(v.string())) },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const txn = await ctx.db.get(args.transactionId);
+    if (!txn) return null;
+    await evaluateTransaction(ctx, txn._id, args.trigger, Date.now(), args.subjects ? { subjects: args.subjects } : {});
+    return null;
+  },
+});
+
+/**
+ * rev 5.2 (D147(6)) — a STUB of the sweep's evaluation half for M29's cron (M29 owns crons.ts and may replace it):
+ * open opportunities whose `reevaluateAt` ≤ now, one bounded page on `by_status_and_reevaluate_at`, each opportunity's
+ * subject evaluated once per transaction, recorded with trigger `fact_change` (the trigger a `reevaluate.when` event
+ * uses). Returns how many transactions it evaluated.
+ */
+export const sweepReevaluateDue = internalMutation({
+  args: { now: v.number() },
+  returns: v.object({ transactions: v.number() }),
+  handler: async (ctx, { now }) => {
+    const due = await ctx.db
+      .query("opportunities")
+      .withIndex("by_status_and_reevaluate_at", (q) => q.eq("status", "open").gt("reevaluateAt", 0).lte("reevaluateAt", now))
+      .take(REEVALUATE_PAGE);
+    const seen = new Set<string>();
+    for (const opp of due) {
+      if (seen.has(opp.transactionId)) continue;
+      seen.add(opp.transactionId);
+      await evaluateTransaction(ctx, opp.transactionId, "fact_change", now, { subjects: [opp.subjectKey] });
+    }
+    return { transactions: seen.size };
+  },
+});
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -809,6 +965,61 @@ async function viewFor(ctx: QueryCtx, txn: Doc<"transactions">) {
 }
 
 /** Opportunity cards (active packs only) + "Paths not checked" (no amounts) for one of the caller's transactions. */
+/** D220: rows `listMine` returns at most (the dashboard's open-opportunity cap). */
+export const LIST_MINE_MAX = 200;
+
+const listMineItem = v.object({
+  opportunity: schema.doc("opportunities"),
+  evaluation: v.union(schema.doc("evaluations"), v.null()),
+  transactionId: v.id("transactions"),
+  category: schema.tables.transactions.validator.fields.category,
+  counterpartyName: v.string(),
+});
+
+/**
+ * D220 (M24's /opportunities page): the caller's `open` and `case_open` opportunities (or the requested subset), each
+ * with its current evaluation, transaction id, category and counterparty. Owner-scoped (`by_user_and_status`, no ids
+ * taken); no card without an active pack (§2.7) and none on an archived transaction; newest evaluation first;
+ * at most `LIST_MINE_MAX` rows with `truncated` on a real cut.
+ */
+export const listMine = query({
+  args: { statuses: v.optional(v.array(v.union(v.literal("open"), v.literal("case_open")))) },
+  returns: v.object({ items: v.array(listMineItem), truncated: v.boolean() }),
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const statuses: ("open" | "case_open")[] = [...new Set(args.statuses ?? (["open", "case_open"] as const))];
+    let truncated = false;
+    const rows: Doc<"opportunities">[] = [];
+    for (const status of statuses) {
+      const page = await ctx.db
+        .query("opportunities")
+        .withIndex("by_user_and_status", (q) => q.eq("userId", userId).eq("status", status))
+        .order("desc")
+        .take(LIST_MINE_MAX + 1);
+      if (page.length > LIST_MINE_MAX) truncated = true;
+      rows.push(...page.slice(0, LIST_MINE_MAX));
+    }
+    const live = rows.filter((o) => isPackActive(o.ruleId, o.ruleVersion)).sort((a, b) => b.lastEvaluatedAt - a.lastEvaluatedAt);
+    if (live.length > LIST_MINE_MAX) truncated = true;
+    const txns = new Map<Id<"transactions">, Doc<"transactions"> | null>();
+    const items = [];
+    for (const opportunity of live.slice(0, LIST_MINE_MAX)) {
+      if (!txns.has(opportunity.transactionId)) txns.set(opportunity.transactionId, await ctx.db.get(opportunity.transactionId));
+      const txn = txns.get(opportunity.transactionId)!;
+      if (!txn || txn.userId !== userId || txn.status === "archived") continue;
+      const ev = opportunity.currentEvaluationId ? await ctx.db.get(opportunity.currentEvaluationId) : null;
+      items.push({
+        opportunity,
+        evaluation: ev && ev.userId === userId ? ev : null,
+        transactionId: txn._id,
+        category: txn.category,
+        counterpartyName: txn.counterpartyName,
+      });
+    }
+    return { items, truncated };
+  },
+});
+
 export const forTransaction = query({
   args: { transactionId: v.id("transactions") },
   returns: transactionView,

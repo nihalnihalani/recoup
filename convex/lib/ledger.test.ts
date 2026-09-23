@@ -209,12 +209,30 @@ describe("deriveStatus / netRecovered (D39, D41)", () => {
 // as a later debit (ledger.ts `else debited += …`), so a provisional credit
 // would have INCREASED "unresolved" as if money had been taken back.
 // ---------------------------------------------------------------------------
-import { eventKind as schemaEventKind } from "../schema";
+import { claimStatus as schemaClaimStatus, eventKind as schemaEventKind } from "../schema";
 import { EVENT_KINDS, provisionalOutstanding, type ClaimStatus, type EventKind, type LedgerEvent } from "./ledger";
 
 const ALL_STATUSES: ClaimStatus[] = [
-  "detected", "drafted", "queued", "sent", "packet", "promised", "confirmed", "reopened", "dismissed",
+  "detected", "drafted", "queued", "sent", "packet", "promised", "confirmed", "reopened", "dismissed", "denied",
 ];
+
+describe("M20 (wave 2, §5, D206): denied — money arriving reopens it; dismissed stays terminal", () => {
+  it("ALL_STATUSES is exactly the schema's claimStatus (so the every-kind × every-status sweep stays exhaustive)", () => {
+    expect(schemaClaimStatus.members.map((m) => m.value).sort()).toEqual([...ALL_STATUSES].sort());
+  });
+
+  it("a promise on a denied claim → promised; a settling credit → confirmed; a partial credit → reopened", () => {
+    expect(statusAfterEvent("denied", "promised_credit", balance(4000, [{ kind: "promised_credit", cents: 4000 }]))).toBe("promised");
+    expect(statusAfterEvent("denied", "confirmed_credit", balance(4000, [{ kind: "confirmed_credit", cents: 4000 }]))).toBe("confirmed");
+    expect(statusAfterEvent("denied", "confirmed_credit", balance(4000, [{ kind: "confirmed_credit", cents: 1000 }]))).toBe("reopened");
+  });
+
+  it("provisional money never moves a denied claim (§3.2); dismissed ignores every kind", () => {
+    const b = balance(4000, [{ kind: "provisional_credit", cents: 1000 }]);
+    expect(statusAfterEvent("denied", "provisional_credit", b)).toBe("denied");
+    for (const kind of EVENT_KINDS) expect(statusAfterEvent("dismissed", kind, balance(4000, [{ kind, cents: 1000 }]))).toBe("dismissed");
+  });
+});
 
 describe("HC-3: an exhaustive ledger (every kind handled explicitly)", () => {
   it("a provisional credit never counts as a debit: unresolved stays at expected", () => {

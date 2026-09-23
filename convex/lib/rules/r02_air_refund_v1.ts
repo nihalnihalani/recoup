@@ -43,6 +43,7 @@
 import { currencyExponent, formatMinor } from "../money";
 import { alternatives, knownCell, withOverride, type Cell, type CellLookup as FactLookup } from "../facts/resolve";
 import { AIR_TXN_SUBJECT, buildAirSnapshot, r02BoundFacts, r02View, type AirSnapshotInput, type R02View } from "../facts/snapshot_air";
+import { AIR_VOUCHER_ACCEPTANCE } from "../facts/keys_air";
 import { computeDeadlineDetailed, overdueCounterpartyDeadlines } from "../deadlines/engine";
 import { localParts, US_ZONES, zoneRule, type ZoneRule } from "../deadlines/usZones";
 import { addMissing, evaluateConditions } from "./conditions";
@@ -1025,4 +1026,6 @@ export const r02AirRefundV1: RulePack<R02View, R02Params, CaseContext> = {
     "USD amounts only (O6); amounts in different currencies are never added — a person works out the amount.",
   ],
   evaluate: evaluateR02V1,
+  adapter: r02Adapter,
+  nonCashAcceptance: AIR_VOUCHER_ACCEPTANCE,
 };

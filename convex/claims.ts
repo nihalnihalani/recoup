@@ -2,16 +2,21 @@ import { ConvexError, v } from "convex/values";
 import { components } from "./_generated/api";
 import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { ownedClaim, ownedItem, requireUserId } from "./lib/access";
+import { ownedClaim, ownedEvidence, ownedItem, requireUserId } from "./lib/access";
 import { balance, deriveStatus, newToken, provisionalOutstanding, statusAfterEvent } from "./lib/ledger";
-import { assertCents, assertPositiveCents, assertUserAmount, claimCurrency } from "./lib/money";
+import { assertCents, assertPositiveCents, assertUserAmount, claimCurrency, isTwoDecimalCurrency } from "./lib/money";
 import { assertMaxChars } from "./lib/text";
 import schema, { claimStatus, eventKind, money, nonCashKind } from "./schema";
 import { cancelPending } from "./followUps";
 import { claimBalance, claimEvents, balanceValidator } from "./lib/balance";
 import { isClosedForAsk } from "./lib/claimState";
-import { syncOpportunityClosure } from "./lib/opportunityClosure";
+import { relinkAfterDenial, syncOpportunityClosure } from "./lib/opportunityClosure";
 import { agentmail } from "./mail";
+import { internal } from "./_generated/api";
+import { putFact } from "./lib/facts/write";
+import { activePacks, isPackActive } from "./lib/rules/registry";
+import type { CaseMode, RequiredChannel, ScenarioId } from "./lib/rules/types";
+import { MAX_LOSS_KEYS } from "./limits";
 
 /**
  * P08 (T16, docs/reviews/2026-09-21-phase0-reproduction.md's boundary.test.ts
@@ -41,6 +46,19 @@ function cancelCtx(ctx: MutationCtx): Parameters<typeof agentmail.cancel>[0] {
 }
 
 const MAX_TOKEN_ATTEMPTS = 10;
+
+/** A globally unique claim token (D23). */
+async function uniqueToken(ctx: MutationCtx): Promise<string> {
+  for (let i = 0; i < MAX_TOKEN_ATTEMPTS; i++) {
+    const candidate = newToken();
+    const hit = await ctx.db
+      .query("claims")
+      .withIndex("by_token", (q) => q.eq("token", candidate))
+      .first();
+    if (!hit) return candidate;
+  }
+  throw new ConvexError("Could not generate a unique claim token");
+}
 
 /**
  * Shared claim-creation path used by the public `open` mutation (always
@@ -106,19 +124,7 @@ export async function openClaim(
     }
   }
 
-  let token: string | undefined;
-  for (let i = 0; i < MAX_TOKEN_ATTEMPTS; i++) {
-    const candidate = newToken();
-    const hit = await ctx.db
-      .query("claims")
-      .withIndex("by_token", (q) => q.eq("token", candidate))
-      .first();
-    if (!hit) {
-      token = candidate;
-      break;
-    }
-  }
-  if (!token) throw new ConvexError("Could not generate a unique claim token");
+  const token = await uniqueToken(ctx);
 
   return ctx.db.insert("claims", {
     purchaseId: args.purchaseId,
@@ -134,6 +140,71 @@ export async function openClaim(
     version: 1,
     isExample: args.isExample,
   });
+}
+
+/**
+ * M20 (wave 2; D206, D208): THE writer of `scenario` claims, called only by `opportunities.openCase` for a pack other
+ * than R01. A scenario claim is item-less by construction (no `purchaseId`/`itemId`; the transaction carries the
+ * purchase link, and `lib/legacyClaim` keeps retail readers away from it), so it can exist only while its pack is
+ * ACTIVE: an inactive or unknown pack is refused before anything is read or written. The opportunity must be the
+ * caller's, on this transaction, evaluated by this pack, with no open case. The amount is minor units of `currency`.
+ * Sets the opportunity's `activeClaimId` / `case_open` in the same mutation.
+ */
+export async function insertScenarioClaim(
+  ctx: MutationCtx,
+  args: {
+    userId: Id<"users">;
+    transactionId: Id<"transactions">;
+    opportunityId: Id<"opportunities">;
+    ruleId: string;
+    ruleVersion: number;
+    scenarioId: ScenarioId;
+    remedyKey: string;
+    expectedMinor: number;
+    currency: string;
+    lossKeys: readonly string[];
+    requiredChannel: RequiredChannel;
+    caseMode: CaseMode;
+    isExample?: boolean;
+  },
+): Promise<Id<"claims">> {
+  if (!isPackActive(args.ruleId, args.ruleVersion)) throw new ConvexError("This path is not checked by an active rule");
+  assertPositiveCents(args.expectedMinor, "expectedMinor");
+  assertUserAmount(args.expectedMinor, "expectedMinor");
+  if (!/^[A-Z]{3}$/.test(args.currency)) throw new ConvexError("A claim needs its ISO currency");
+  if (args.lossKeys.length === 0 || args.lossKeys.length > MAX_LOSS_KEYS || args.lossKeys.some((k) => k.length === 0)) {
+    throw new ConvexError("A scenario claim needs 1 to 20 loss keys");
+  }
+  const txn = await ctx.db.get(args.transactionId);
+  if (!txn || txn.userId !== args.userId) throw new ConvexError("Transaction not found");
+  const opp = await ctx.db.get(args.opportunityId);
+  if (!opp || opp.userId !== args.userId || opp.transactionId !== txn._id) throw new ConvexError("Opportunity not found");
+  if (opp.ruleId !== args.ruleId || opp.ruleVersion !== args.ruleVersion || opp.scenarioId !== args.scenarioId) {
+    throw new ConvexError("The opportunity was evaluated by a different rule");
+  }
+  if (opp.activeClaimId) {
+    const open = await ctx.db.get(opp.activeClaimId);
+    if (open && !isClosedForAsk(open)) throw new ConvexError("This opportunity already has an open claim");
+  }
+  const claimId = await ctx.db.insert("claims", {
+    userId: args.userId,
+    type: "scenario",
+    expectedCents: args.expectedMinor,
+    status: "detected",
+    token: await uniqueToken(ctx),
+    version: 1,
+    transactionId: txn._id,
+    opportunityId: opp._id,
+    scenarioId: args.scenarioId,
+    remedyKey: args.remedyKey,
+    currency: args.currency,
+    lossKeys: [...args.lossKeys],
+    requiredChannel: args.requiredChannel,
+    caseMode: args.caseMode,
+    ...(args.isExample || txn.isExample ? { isExample: true } : {}),
+  });
+  await ctx.db.patch(opp._id, { activeClaimId: claimId, status: "case_open" });
+  return claimId;
 }
 
 /**
@@ -300,6 +371,8 @@ async function appendLedgerEvent(
     patch.attentionAt = undefined;
   }
   await ctx.db.patch(claim._id, patch);
+  // M20 (§5): money arriving on a denied claim reopens the case; its opportunity follows in this mutation.
+  if (claim.status === "denied" && status !== "denied") await relinkAfterDenial(ctx, claim._id);
   return { deduped: false as const, status };
 }
 
@@ -348,7 +421,7 @@ async function writeConfirmedCredit(
 /** The claim's currency (`lib/money.claimCurrency`): its own, else its purchase's; null when neither is known. */
 async function currencyOf(ctx: MutationCtx, claim: Doc<"claims">): Promise<string | null> {
   if (claim.currency !== undefined) return claim.currency;
-  return claimCurrency(claim, await ctx.db.get(claim.purchaseId));
+  return claimCurrency(claim, claim.purchaseId !== undefined ? await ctx.db.get(claim.purchaseId) : null);
 }
 
 /** As `currencyOf`, for the new money writers that REQUIRE a currency (§2.4: ledgerEvents.currency). */
@@ -515,43 +588,175 @@ export const recordNonCashRemedy = mutation({
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, args.claimId, userId);
     if (claim.status === "dismissed") throw new ConvexError("Claim is dismissed");
-    assertMaxChars(args.idempotencyKey, "idempotencyKey", MAX_IDEMPOTENCY_KEY_CHARS);
-    if (args.idempotencyKey.trim().length === 0) throw new ConvexError("idempotencyKey must not be empty");
-    const description = args.description.trim();
-    if (description.length === 0) throw new ConvexError("description must not be empty");
-    assertMaxChars(description, "description", MAX_NON_CASH_DESCRIPTION_CHARS);
-    if (args.faceValue) {
-      assertPositiveCents(args.faceValue.amountMinor, "faceValue");
-      assertUserAmount(args.faceValue.amountMinor, "faceValue");
-      const currency = await requireCurrency(ctx, claim);
-      if (args.faceValue.currency !== currency) throw new ConvexError(`currency mismatch: this claim is in ${currency}`);
-    }
+    return await appendNonCashRemedy(ctx, userId, claim, args, args.state);
+  },
+});
 
-    const dup = await ctx.db
-      .query("nonCashRemedies")
-      .withIndex("by_claim_and_idempotency_key", (q) => q.eq("claimId", claim._id).eq("idempotencyKey", args.idempotencyKey))
-      .unique();
-    if (dup) {
-      const same =
-        dup.kind === args.kind &&
-        dup.state === args.state &&
-        dup.description === description &&
-        dup.faceValue?.amountMinor === args.faceValue?.amountMinor &&
-        dup.faceValue?.currency === args.faceValue?.currency;
-      if (!same) throw new ConvexError("idempotency conflict");
-      return { deduped: true, remedyId: dup._id };
+type NonCashInput = {
+  kind: Doc<"nonCashRemedies">["kind"];
+  description: string;
+  faceValue?: { amountMinor: number; currency: string };
+  idempotencyKey: string;
+};
+
+/** The one `nonCashRemedies` writer (validation + per-claim idempotency), shared by the remedy and resolution paths. */
+async function appendNonCashRemedy(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  claim: Doc<"claims">,
+  args: NonCashInput,
+  state: "promised" | "received",
+): Promise<{ deduped: boolean; remedyId: Id<"nonCashRemedies"> }> {
+  assertMaxChars(args.idempotencyKey, "idempotencyKey", MAX_IDEMPOTENCY_KEY_CHARS);
+  if (args.idempotencyKey.trim().length === 0) throw new ConvexError("idempotencyKey must not be empty");
+  const description = args.description.trim();
+  if (description.length === 0) throw new ConvexError("description must not be empty");
+  assertMaxChars(description, "description", MAX_NON_CASH_DESCRIPTION_CHARS);
+  if (args.faceValue) {
+    assertPositiveCents(args.faceValue.amountMinor, "faceValue");
+    assertUserAmount(args.faceValue.amountMinor, "faceValue");
+    const currency = await requireCurrency(ctx, claim);
+    if (args.faceValue.currency !== currency) throw new ConvexError(`currency mismatch: this claim is in ${currency}`);
+    // DA-B-17 (D160 rule): a face value is ISO minor units of its currency, which equal the legacy hundredths only for
+    // a two-decimal currency. Any other currency is unsupported — refused, never stored in a unit that would display
+    // wrong (a ¥1,200 gift card shown as ¥120,000). The remedy can still be recorded with its description alone.
+    if (!isTwoDecimalCurrency(currency)) {
+      throw new ConvexError(`Recoup cannot record an amount in ${currency} yet; describe the remedy in words instead`);
     }
-    const remedyId = await ctx.db.insert("nonCashRemedies", {
-      userId,
-      claimId: claim._id,
-      kind: args.kind,
-      description,
-      ...(args.faceValue ? { faceValue: args.faceValue } : {}),
-      state: args.state,
-      idempotencyKey: args.idempotencyKey,
-      recordedAt: Date.now(),
+  }
+
+  const dup = await ctx.db
+    .query("nonCashRemedies")
+    .withIndex("by_claim_and_idempotency_key", (q) => q.eq("claimId", claim._id).eq("idempotencyKey", args.idempotencyKey))
+    .unique();
+  if (dup) {
+    const same =
+      dup.kind === args.kind &&
+      dup.state === state &&
+      dup.description === description &&
+      dup.faceValue?.amountMinor === args.faceValue?.amountMinor &&
+      dup.faceValue?.currency === args.faceValue?.currency;
+    if (!same) throw new ConvexError("idempotency conflict");
+    return { deduped: true, remedyId: dup._id };
+  }
+  const remedyId = await ctx.db.insert("nonCashRemedies", {
+    userId,
+    claimId: claim._id,
+    kind: args.kind,
+    description,
+    ...(args.faceValue ? { faceValue: args.faceValue } : {}),
+    state,
+    idempotencyKey: args.idempotencyKey,
+    recordedAt: Date.now(),
+  });
+  return { deduped: false, remedyId };
+}
+
+/**
+ * M20 (wave 2; DA-A-18, contract §3.2): the case ends with a NON-CASH remedy the user accepted (a voucher, points…).
+ * Appends a `received` non-cash row (same validation and idempotency as `recordNonCashRemedy`), sets
+ * `nonCashResolvedAt` — the claim is closed for ask (`isClosedForAsk`), so it leaves every cash tile and counts once
+ * under Non-cash — cancels pending reminders, closes the linked opportunity in this mutation, and writes a note. When
+ * the claim's pack declares `nonCashAcceptance` (R02: `AIR_VOUCHER_ACCEPTANCE`, D204), that fact is written as the
+ * user's own confirmation on the claim's transaction and the transaction is re-evaluated (scheduled, so claims.ts
+ * never imports the evaluation module). A retry under the same key dedupes; a second resolution is refused.
+ */
+export const recordNonCashResolution = mutation({
+  args: {
+    claimId: v.id("claims"),
+    kind: nonCashKind,
+    description: v.string(),
+    faceValue: v.optional(money),
+    idempotencyKey: v.string(),
+  },
+  returns: v.object({ deduped: v.boolean(), remedyId: v.id("nonCashRemedies") }),
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const claim = await ownedClaim(ctx, args.claimId, userId);
+    if (claim.status === "dismissed") throw new ConvexError("Claim is dismissed");
+    if (claim.status === "confirmed") throw new ConvexError("This claim is already settled in cash");
+    const written = await appendNonCashRemedy(ctx, userId, claim, args, "received");
+    if (written.deduped) {
+      // The same key once recorded a plain remedy (not a resolution): a different request under a reused key.
+      if (claim.nonCashResolvedAt === undefined) throw new ConvexError("idempotency conflict");
+      return written;
+    }
+    // Throwing here rolls back the row just appended (one transaction).
+    if (claim.nonCashResolvedAt !== undefined) throw new ConvexError("This claim is already resolved with a non-cash remedy");
+    const now = Date.now();
+    await ctx.db.patch(claim._id, { nonCashResolvedAt: now, version: claim.version + 1, attentionAt: undefined });
+    await cancelPending(ctx, claim._id);
+    await ctx.db.insert("claimNotes", {
+      claimId: claim._id, userId, kind: "status", text: `Resolved with a non-cash remedy (${args.kind}); no cash is owed on this claim.`,
     });
-    return { deduped: false, remedyId };
+    await syncOpportunityClosure(ctx, claim._id);
+    const acceptance = await acceptanceFactFor(ctx, claim);
+    if (acceptance && claim.transactionId) {
+      const fact = await putFact(ctx, userId, {
+        transactionId: claim.transactionId,
+        subjectKey: acceptance.subjectKey,
+        key: acceptance.key,
+        state: "user_confirmed",
+        value: acceptance.value,
+        source: { kind: "user" },
+      });
+      if (fact.outcome !== "unchanged") {
+        await ctx.scheduler.runAfter(0, internal.opportunities.evaluateInternal, {
+          transactionId: claim.transactionId, trigger: "fact_change", subjects: [acceptance.subjectKey],
+        });
+      }
+    }
+    return written;
+  },
+});
+
+/** The claim's pack's declared non-cash acceptance fact (D204), when the pack is still active. */
+async function acceptanceFactFor(ctx: MutationCtx, claim: Doc<"claims">) {
+  if (!claim.opportunityId) return null;
+  const opp = await ctx.db.get(claim.opportunityId);
+  if (!opp || opp.userId !== claim.userId) return null;
+  const pack = activePacks().find((p) => p.ruleId === opp.ruleId && p.version === opp.ruleVersion);
+  return pack?.nonCashAcceptance ?? null;
+}
+
+/** Statuses a claim can be denied from (§5): it reached the counterparty (or was promised) and is still open. */
+const DENIABLE: ReadonlySet<Doc<"claims">["status"]> = new Set(["sent", "packet", "promised", "reopened"]);
+const MAX_DENIAL_REASON_CHARS = 500;
+
+/**
+ * M20 (wave 2, §5; D206): the user records that the counterparty refused. {sent, packet, promised, reopened} →
+ * `denied`: closed for ask (`isClosedForAsk`), so the claim leaves every tile — including `refused`, which means
+ * "a refusal reply arrived and no denial is recorded yet" — reminders are cancelled, the linked opportunity reopens
+ * (`open`, no `activeClaimId`, §2.8 Closing) and a note records the reason. Money arriving later reopens the claim
+ * (`lib/ledger.statusAfterEvent`). An optional evidence row (the refusal letter) must be the caller's.
+ */
+export const recordDenial = mutation({
+  args: { claimId: v.id("claims"), reason: v.string(), evidenceId: v.optional(v.id("evidence")) },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const claim = await ownedClaim(ctx, args.claimId, userId);
+    if (!DENIABLE.has(claim.status) || claim.nonCashResolvedAt !== undefined) {
+      throw new ConvexError("Only a claim that was sent, submitted or promised can be recorded as denied");
+    }
+    const reason = args.reason.trim();
+    if (reason.length === 0) throw new ConvexError("Say briefly what the answer was");
+    assertMaxChars(reason, "reason", MAX_DENIAL_REASON_CHARS);
+    if (args.evidenceId) await ownedEvidence(ctx, args.evidenceId, userId);
+    await ctx.db.patch(claim._id, { status: "denied", version: claim.version + 1, attentionAt: undefined });
+    await cancelPending(ctx, claim._id);
+    await ctx.db.insert("claimNotes", { claimId: claim._id, userId, kind: "status", text: `Denied: ${reason}` });
+    await syncOpportunityClosure(ctx, claim._id);
+    // D226: the reopened opportunity is not Potential money on the same basis. Its denied basis is the resultHash of
+    // the first evaluation without the case, which runs right after this mutation.
+    const opp = claim.opportunityId ? await ctx.db.get(claim.opportunityId) : null;
+    if (opp && opp.userId === userId && opp.activeClaimId === undefined) {
+      await ctx.db.patch(opp._id, { deniedAt: Date.now(), deniedResultHash: undefined });
+      await ctx.scheduler.runAfter(0, internal.opportunities.evaluateInternal, {
+        transactionId: opp.transactionId, trigger: "fact_change", subjects: [opp.subjectKey],
+      });
+    }
+    return null;
   },
 });
 
@@ -669,6 +874,8 @@ export const get = query({
     claim: schema.doc("claims"),
     item: v.union(schema.doc("items"), v.null()),
     purchase: v.union(schema.doc("purchases"), v.null()),
+    /** M20: the claim's transaction (the counterparty of an item-less scenario claim), or null for a legacy claim. */
+    transaction: v.union(schema.doc("transactions"), v.null()),
     events: v.array(schema.doc("ledgerEvents")),
     drafts: v.array(schema.doc("drafts")),
     replies: v.array(schema.doc("replies")),
@@ -688,8 +895,11 @@ export const get = query({
   handler: async (ctx, { claimId }) => {
     const userId = await requireUserId(ctx);
     const claim = await ownedClaim(ctx, claimId, userId);
-    const item = await ctx.db.get(claim.itemId);
-    const purchase = await ctx.db.get(claim.purchaseId);
+    // M20: an item-less (scenario) claim has no item or purchase; its transaction carries the counterparty.
+    const item = claim.itemId !== undefined ? await ctx.db.get(claim.itemId) : null;
+    const purchase = claim.purchaseId !== undefined ? await ctx.db.get(claim.purchaseId) : null;
+    const txnRow = claim.transactionId !== undefined ? await ctx.db.get(claim.transactionId) : null;
+    const transaction = txnRow && txnRow.userId === userId ? txnRow : null;
     const events = await ctx.db
       .query("ledgerEvents")
       .withIndex("by_claim", (q) => q.eq("claimId", claimId))
@@ -725,6 +935,7 @@ export const get = query({
       claim,
       item,
       purchase,
+      transaction,
       events,
       drafts,
       replies,

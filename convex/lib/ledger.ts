@@ -41,7 +41,9 @@ export type ClaimStatus =
   | "promised"
   | "confirmed"
   | "reopened"
-  | "dismissed";
+  | "dismissed"
+  /** M20 (wave 2, §5): the counterparty refused (`claims.recordDenial`); closed for ask until money arrives. */
+  | "denied";
 
 export type Balance = {
   expected: number;
@@ -156,6 +158,8 @@ export function windowEndsAt(purchasedAt: number, windowDays: number): number {
  * previously-confirmed claim that a later debit had already pushed back
  * into the red. `promised_credit` never moves a confirmed claim backwards.
  * Provisional kinds never change status (§3.2). Exhaustive: an unknown kind throws.
+ * M20 (wave 2, §5, D206): money arriving on a `denied` claim reopens it — a promise → `promised`, a settling credit →
+ * `confirmed`, a partial credit → `reopened` (open again, money still unresolved). `dismissed` stays terminal.
  */
 export function statusAfterEvent(
   current: ClaimStatus,
@@ -168,7 +172,7 @@ export function statusAfterEvent(
       return b.unresolved > 0 ? "reopened" : current;
     case "confirmed_credit":
       if (isSettled(b)) return "confirmed";
-      return current === "confirmed" ? "reopened" : current;
+      return current === "confirmed" || current === "denied" ? "reopened" : current;
     case "promised_credit":
       return current === "confirmed" ? current : "promised";
     case "provisional_credit":

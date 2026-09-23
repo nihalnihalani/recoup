@@ -21,7 +21,7 @@ import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { pinClockEach, setup, signedIn } from "./test.setup";
 import { evaluateTransaction } from "./opportunities";
-import { resetTestRegistry } from "./lib/rules/testRegistry";
+import { resetTestRegistry, setTestActivations } from "./lib/rules/testRegistry";
 import { ensurePurchaseTransaction } from "./transactions";
 import schema from "./schema";
 
@@ -32,6 +32,8 @@ const DOMAIN = "acme.example";
 type T = ReturnType<typeof setup>;
 
 const spy = vi.mocked(evaluateTransaction);
+// M20 (D208): R05 (wave 2) now evaluates retail transactions through its adapter; these R01 tests narrow the C3 seam to R01 v1.
+beforeEach(() => setTestActivations([{ ruleId: "R01.retail_price_adjustment", version: 1, status: "active", decision: "TEST" }]));
 beforeEach(() => {
   spy.mockClear();
 });

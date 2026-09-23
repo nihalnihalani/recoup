@@ -8,6 +8,7 @@ import { MAX_ITEMS_PER_PURCHASE } from "./limits";
 import { assertCoarseNow } from "./watches";
 import { isPriceStale } from "./lib/freshness";
 import { isTombstoned } from "./lib/accountState";
+import { hasLegacyIds } from "./lib/legacyClaim";
 
 /**
  * Read models for the dashboard: what happened lately, and how each store is
@@ -307,7 +308,8 @@ export const activity = query({
     // ledger pages) are independent of every other claim's, so they run in
     // parallel too.
     const claimEventLists = await Promise.all(
-      claims.map(async (claim) => {
+      // M20 (D206): a batch reader SKIPS item-less (scenario) claims, never throws (M2C adds them).
+      claims.filter(hasLegacyIds).map(async (claim) => {
         const claimEvents: ActivityEvent[] = [];
         const [item, purchase, drafts, replies, ledger] = await Promise.all([
           ctx.db.get(claim.itemId),

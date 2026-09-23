@@ -7,6 +7,8 @@
  */
 import type { Infer } from "convex/values";
 import type { Id } from "../../_generated/dataModel";
+import type { CellLookup as FactsLookup } from "../facts/resolve";
+import type { CellRow } from "../facts/snapshot_retail";
 import type {
   amountCalc,
   assumption,
@@ -25,6 +27,7 @@ import type {
   overlapRelation,
   reevaluate,
   remedyType,
+  requiredChannel,
   scenarioId,
   sourceRef,
   transactionCategory,
@@ -56,6 +59,8 @@ export type CashClass = Infer<typeof cashClass>;
 export type OverlapRelation = Infer<typeof overlapRelation>;
 export type TransactionCategory = Infer<typeof transactionCategory>;
 export type Money = { amountMinor: number; currency: string };
+export type RequiredChannel = Infer<typeof requiredChannel>;
+export type CaseMode = "request" | "track_automatic";
 
 /**
  * `APPROVABLE_OUTCOMES` (contract §2.8, DA-A-14): the ONE allow-list shared by case opening, `drafts.prepareSend`
@@ -342,6 +347,32 @@ export interface EvaluationResult {
 
 export type Evaluator<S, P, C extends CaseContext = CaseContext> = (input: EvaluationInput<S, P, C>) => EvaluationResult;
 
+/**
+ * One evaluation run of a pack on a transaction (M20, D208): the subject, the pack's snapshot for it, and the resolved
+ * cells it was built from (`lookup`, hashed values-only into `factSnapshotHash`, DA-A-15).
+ */
+export interface PackRun<S> {
+  subjectKey: string;
+  snapshot: S;
+  lookup: FactsLookup;
+}
+
+/**
+ * How a wave-2 pack is fed from the `facts` table (M20, D208). PURE: type-only imports from `_generated`, no ctx, no
+ * clock, no randomness (the `lib/rules` purity grep covers pack files). The engine reads the transaction's live fact
+ * rows (bounded by the per-transaction fact cap), calls `runs`, keeps the requested subjects, and evaluates each run.
+ * Every implemented pack other than R01 v1 (whose legacy adapter is `opportunities.r01Runs`) must have one.
+ */
+export interface PackAdapter<S> {
+  runs(input: {
+    transactionId: Id<"transactions">;
+    /** Server-set only (DA-A-29): e.g. the order a card line belongs to, for R03's shared `txn:<orderTxnId>:paid` key. */
+    relatedTransactionId?: Id<"transactions">;
+    isExample: boolean;
+    rows: readonly CellRow[];
+  }): readonly PackRun<S>[];
+}
+
 /** The README field map (docs/rules/README.md "From spec to evaluator"): one field per spec section. */
 export interface RulePack<S, P, C extends CaseContext = CaseContext> {
   ruleId: string;
@@ -366,6 +397,17 @@ export interface RulePack<S, P, C extends CaseContext = CaseContext> {
   /** Overlap relations this pack declares (§3.3); undeclared intersections are `alternative` at case opening (D145). */
   overlap: readonly OverlapDecl[];
   evaluate: Evaluator<S, P, C>;
+  /** M20 (D208): the facts-table adapter; required for every implemented pack except R01 v1. */
+  adapter?: PackAdapter<S>;
+  /** M20 (DA-A-9): the channel a scenario claim counts as submitted on (e.g. R03: postal unless designated). Default email. */
+  requiredChannel?: (result: EvaluationResult) => RequiredChannel;
+  /** M20 (DA-A-25): `track_automatic` when the refund is automatic by regulation. Default `request`. */
+  caseMode?: (result: EvaluationResult) => CaseMode;
+  /**
+   * M20 (DA-A-18, D204): the fact `claims.recordNonCashResolution` writes (user_confirmed, on the claim's transaction)
+   * when the user accepts a non-cash remedy on this pack's case — e.g. R02's `AIR_VOUCHER_ACCEPTANCE`.
+   */
+  nonCashAcceptance?: { subjectKey: string; key: string; value: FactValue };
 }
 
 /** A registered pack of any shape (the registries hold heterogeneous packs). */

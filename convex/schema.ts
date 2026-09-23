@@ -4,10 +4,13 @@ import { authTables } from "@convex-dev/auth/server";
 import { vOutboundId } from "@agentmail/convex";
 
 // Exported validators: single source of truth for enums (ARCHITECTURE_PATTERNS §Schema).
-export const claimType = v.union(v.literal("price_adjustment"), v.literal("return_credit"));
+/** M20 (wave 2): `scenario` — a claim opened from an opportunity of any scenario; it may have no purchase or item. */
+export const claimType = v.union(v.literal("price_adjustment"), v.literal("return_credit"), v.literal("scenario"));
 export const claimStatus = v.union(
   v.literal("detected"), v.literal("drafted"), v.literal("queued"), v.literal("sent"), v.literal("packet"),
   v.literal("promised"), v.literal("confirmed"), v.literal("reopened"), v.literal("dismissed"),
+  /** M20 (wave 2, §5): the counterparty refused (`claims.recordDenial`); closed for ask; money arriving reopens it. */
+  v.literal("denied"),
 );
 /**
  * Ledger event kinds; `lib/ledger.EVENT_KINDS` is the same set and every reader switches on it exhaustively
@@ -215,6 +218,12 @@ export const opportunityStatus = v.union(
 export const deadlineStatus = v.union(
   v.literal("open"), v.literal("passed"), v.literal("overdue"), v.literal("unknown_anchor"),
   v.literal("disputed_anchor"), v.literal("beyond_calendar"), v.literal("not_applicable"),
+  /**
+   * M20 (D212): a USER-obligor notice/act deadline that was satisfied in time (e.g. R03's billing-error notice
+   * received by the issuer before the 60-day mark). Set only through `lib/deadlines/engine.markMet`; never on a
+   * counterparty deadline, never extends or pauses a counterparty's clock, and is not an open deadline (no attention).
+   */
+  v.literal("met"),
 );
 export const obligor = v.union(v.literal("user"), v.literal("counterparty"));
 export const manualChannel = v.union(
@@ -314,6 +323,15 @@ export const nonCashKind = v.union(
  * hash (`lib/canonical.ts`) of every field below — VALUES, not row ids (DA-A-15). `attachments` ≤ 10 ([] in
  * Phase-1 email). `engineVersion` is populated from wave 2 (DA-A-23) and optional so wave 1 needs no migration.
  */
+// ===================== M20 (wave 2) — shared validators =====================
+/** DA-A-25: `request` asks the counterparty; `track_automatic` watches an automatic refund's counterparty deadline. */
+export const caseMode = v.union(v.literal("request"), v.literal("track_automatic"));
+/** §2.4: where a packet's recipient came from (a pack constant, a confirmed snapshot, or the user). */
+export const recipientSource = v.union(
+  v.literal("confirmed_policy_snapshot"), v.literal("rule_pack"), v.literal("user_entered_from_document"), v.literal("user_entered"),
+);
+export const packetStatus = v.union(v.literal("draft"), v.literal("approved"), v.literal("superseded"), v.literal("submission_recorded"));
+
 export const approvalBinding = v.object({
   contextHash: v.string(),
   claimVersion: v.number(),
@@ -511,7 +529,8 @@ export default defineSchema({
 
   /** Money the store owes on one item for one reason. Balance is derived from ledgerEvents, never stored. */
   claims: defineTable({
-    purchaseId: v.id("purchases"), itemId: v.id("items"), userId: v.id("users"), type: claimType, expectedCents: v.number(),
+    /** Optional from wave 2 (M20): a `scenario` claim on a non-retail transaction has no purchase or item (lib/legacyClaim). */
+    purchaseId: v.optional(v.id("purchases")), itemId: v.optional(v.id("items")), userId: v.id("users"), type: claimType, expectedCents: v.number(),
     status: claimStatus, windowEndsAt: v.optional(v.number()), policyId: v.optional(v.id("policies")), threadId: v.optional(v.string()),
     token: v.string(), version: v.number(), attentionAt: v.optional(v.number()), openedFromPriceCheckId: v.optional(v.id("priceChecks")),
     sendUnknown: v.optional(v.boolean()), isExample: v.optional(v.boolean()),
@@ -528,6 +547,11 @@ export default defineSchema({
     lossKeys: v.optional(v.array(v.string())),
     /** DA-A-9: submitted / Asked / expired are projected only from artifacts on this channel (`lib/claimState`). */
     requiredChannel: v.optional(requiredChannel),
+    // M20 (wave 2) addendum.
+    /** DA-A-25: `track_automatic` — the refund is automatic by regulation; no packet until escalation. */
+    caseMode: v.optional(caseMode),
+    /** DA-A-18: set by `claims.recordNonCashResolution`; the claim is closed for ask (`lib/claimState.isClosedForAsk`). */
+    nonCashResolvedAt: v.optional(v.number()),
   }).index("by_user", ["userId"]).index("by_item", ["itemId"]).index("by_token", ["token"]).index("by_thread", ["threadId"])
     .index("by_item_type_status", ["itemId", "type", "status"])
     /** F3 (D103): lets `tracking.overview` fetch every price_adjustment claim
@@ -565,6 +589,8 @@ export default defineSchema({
     binding: v.optional(approvalBinding),
     /** M10 (§6): the hash the user approved; a send re-derives it and refuses on a mismatch. */
     approvedHash: v.optional(v.string()),
+    /** M20 (wave 2, DA-A-9): `informal` outreach is correspondence only and never changes delivery. Absent = formal. */
+    purpose: v.optional(v.union(v.literal("formal"), v.literal("informal"))),
   }).index("by_claim", ["claimId"]).index("by_outbound", ["outboundId"]).index("by_message", ["agentmailMessageId"]),
 
   /** Classified merchant replies. promisedCents only when the reply states an amount (D21). */
@@ -757,11 +783,26 @@ export default defineSchema({
     lossKeys: v.array(v.string()),
     activeClaimId: v.optional(v.id("claims")),
     lastEvaluatedAt: v.number(), isExample: v.optional(v.boolean()),
+    /**
+     * M20 (wave 2, rev 5.2, D147(6)): for a `not_yet_due` result with `reevaluate.at`, UTC ms at the start of that
+     * date in UTC (no later than its start in any US zone) for M29's sweep; absent otherwise.
+     */
+    reevaluateAt: v.optional(v.number()),
+    /**
+     * M20 (D226): set by `claims.recordDenial` on the denied case's opportunity. While set, the opportunity is not
+     * Potential money on the same basis: `deniedResultHash` is the resultHash of its first evaluation after the denial
+     * (recorded by `evaluateRun`); until then, and while the current evaluation's resultHash still equals it,
+     * `recovery.summary` leaves it out of Potential. A material change (new facts, a lower price, another path) makes it
+     * count again. Money arriving on the denied claim clears both (`relinkAfterDenial`).
+     */
+    deniedAt: v.optional(v.number()),
+    deniedResultHash: v.optional(v.string()),
   }).index("by_user_and_dedupe_key", ["userId", "dedupeKey"])
     .index("by_transaction", ["transactionId"])
     .index("by_user_and_status", ["userId", "status"])
     .index("by_status_and_next_deadline_at", ["status", "nextDeadlineAt"])
-    .index("by_scenario_and_rule_version", ["scenarioId", "ruleVersion"]),
+    .index("by_scenario_and_rule_version", ["scenarioId", "ruleVersion"])
+    .index("by_status_and_reevaluate_at", ["status", "reevaluateAt"]),
 
   /**
    * Append-only evaluation history, one row per changed `resultHash` (§4, DA-A-32). `factSnapshotHash` is stored
@@ -792,7 +833,8 @@ export default defineSchema({
 
   /**
    * Non-cash remedies (vouchers, points, repairs, replacements…): append-only, never summed with cash
-   * (mission §6). `faceValue` is shown per item only, never in a total (SEC-MF-1, I5). Idempotency keys are
+   * (mission §6). `faceValue` is shown per item only, never in a total (SEC-MF-1, I5); it is ISO minor units of a
+   * TWO-DECIMAL currency only (DA-B-17, D160: any other currency is refused, never stored). Idempotency keys are
    * scoped per claim, like the ledger (D38).
    */
   nonCashRemedies: defineTable({
@@ -800,4 +842,38 @@ export default defineSchema({
     faceValue: v.optional(money), state: v.union(v.literal("promised"), v.literal("received")),
     idempotencyKey: v.string(), recordedAt: v.number(),
   }).index("by_claim_and_idempotency_key", ["claimId", "idempotencyKey"]).index("by_user", ["userId"]),
+
+  // ===================== M20 (wave 2) — manual channels (§6; DA-A-10) =====================
+
+  /**
+   * A versioned manual-channel packet (letter, web-form text, portal submission). Approval binds to the claim version
+   * and the evaluation's values (`binding`, §2.4), and to the rendered content (`approvedHash`). Recoup never sends a
+   * packet: the user records the submission (`submissions`). `evidenceIndex` ≤ 25.
+   */
+  packets: defineTable({
+    userId: v.id("users"), claimId: v.id("claims"), version: v.number(), channel: manualChannel,
+    recipient: v.object({ text: v.string(), source: recipientSource, evidenceId: v.optional(v.id("evidence")) }),
+    body: v.string(), requestedRemedy: v.string(),
+    evidenceIndex: v.array(v.object({ evidenceId: v.id("evidence"), contentHash: v.string(), label: v.string() })),
+    binding: approvalBinding,
+    status: packetStatus,
+    approvedAt: v.optional(v.number()), approvedHash: v.optional(v.string()),
+    supersededAt: v.optional(v.number()),
+    /** The template the text came from (`lib/packets`), kept across edits; absent for a user-written packet. */
+    templateId: v.optional(v.string()),
+  }).index("by_claim", ["claimId"]).index("by_user", ["userId"]),
+
+  /**
+   * The user's record that they submitted an approved packet (DA-A-10). Recoup never claims a manual submission was
+   * sent or delivered: `deliveryRecordedAt` is the user's own record, with evidence when they have it.
+   */
+  submissions: defineTable({
+    userId: v.id("users"), claimId: v.id("claims"), packetId: v.id("packets"), approvedHash: v.string(),
+    channel: manualChannel, submittedAt: v.number(),
+    confirmationRef: v.optional(v.string()), proofEvidenceId: v.optional(v.id("evidence")),
+    deliveryRecordedAt: v.optional(v.number()), deliveryEvidenceId: v.optional(v.id("evidence")),
+    /** DA-A-10: the binding drifted after approval; recorded anyway, with a claimNote and a review prompt. */
+    staleAtRecord: v.optional(v.boolean()),
+    note: v.optional(v.string()),
+  }).index("by_claim", ["claimId"]).index("by_user", ["userId"]).index("by_packet", ["packetId"]),
 });

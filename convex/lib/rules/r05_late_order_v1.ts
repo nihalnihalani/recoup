@@ -1035,4 +1035,5 @@ export const r05LateOrderV1: RulePack<OrderSnapshot, R05Params, CaseContext> = {
     "Unknown country, category and payment terms are assumed (US order, ordinary merchandise, paid at order) and cap the outcome at likely_eligible.",
   ],
   evaluate: evaluateR05V1,
+  adapter: { runs: r05AdapterRuns }, // M20 (D208), wired with M21's authorization
 };

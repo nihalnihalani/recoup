@@ -55,6 +55,7 @@ function manifest(lifecycle = "reviewed", extra: Record<string, unknown> = {}): 
         engineRoots: [PACK_FILE],
         engineClosureSha256: pinOf([[PACK_FILE, PACK_SRC]]),
         engineClosureDecision: "D170", // D197: the lead's re-pin decision
+        engineEpoch: 1, // D206(3): the runtime engine epoch
         ...extra,
       },
       { ruleId: "R08.draft", scenarioId: "R08", version: 1, lifecycle: "researched", fixtures: null, sources: [] },
@@ -86,9 +87,23 @@ function files(overrides: Record<string, string | null> = {}) {
   return (rel: string) => (map[rel] === null || map[rel] === undefined ? null : Buffer.from(map[rel] as string));
 }
 
+/** engineEpochs.ts text (D206(3)): by default the exact mirror of the manifest's epoch entries. */
+function epochsFile(entries: Array<Record<string, unknown>>): string {
+  return [
+    "export type EngineEpoch = { ruleId: string; version: number; engineEpoch: number; engineClosureSha256: string };",
+    `export const ENGINE_EPOCHS: readonly EngineEpoch[] = ${JSON.stringify(entries, null, 2)};`,
+    "",
+  ].join("\n");
+}
+const mirrorOf = (m: Manifest) =>
+  epochsFile(m.packs.filter((p) => p.engineEpoch !== undefined).map((p) => ({
+    ruleId: p.ruleId, version: p.version, engineEpoch: p.engineEpoch, engineClosureSha256: p.engineClosureSha256,
+  })));
+
 function run(opts: Partial<Parameters<typeof checkRulePacks>[0]> = {}) {
+  const m = (opts.manifest as Manifest | undefined) ?? manifest();
   return checkRulePacks({
-    manifest: manifest(),
+    manifest: m,
     baseManifest: null,
     activationSource: null,
     baseActivationSource: null,
@@ -96,7 +111,7 @@ function run(opts: Partial<Parameters<typeof checkRulePacks>[0]> = {}) {
     decisionsText: DECISIONS,
     readRepoFile: files(),
     today: "2026-09-23",
-    engineVersionPresent: false,
+    engineEpochsSource: mirrorOf(m),
     ...opts,
   });
 }
@@ -289,6 +304,41 @@ describe("check-rule-packs: engine pin (DA-B-6, D190/D193)", () => {
 
   it("a reviewed pack that is not active needs no pin", () => {
     expect(run({ manifest: manifest("reviewed", { engineRoots: undefined, engineClosureSha256: undefined }) }).errors).toEqual([]);
+  });
+});
+
+describe("check-rule-packs: engine epoch (D206(3), M20)", () => {
+  const PIN = pinOf([[PACK_FILE, PACK_SRC]]);
+  const activeRun = (m: Manifest, extra: Partial<Parameters<typeof checkRulePacks>[0]> = {}) =>
+    run({ manifest: m, activationSource: activation([ACTIVE]), ...extra });
+
+  it("an active pack records engineEpoch, and engineEpochs.ts mirrors the manifest exactly", () => {
+    expect(activeRun(manifest()).errors).toEqual([]);
+    expect(activeRun(manifest()).notes.join("\n")).toMatch(/engine epoch: R09\.example v1 e1/);
+    expect(activeRun(manifest("reviewed", { engineEpoch: undefined })).errors.join("\n")).toMatch(/is active but records no engineEpoch/);
+    expect(activeRun(manifest("reviewed", { engineEpoch: 0 })).errors.join("\n")).toMatch(/engineEpoch must be a positive integer/);
+  });
+
+  it("drift between engineEpochs.ts and the manifest fails: epoch, hash, a missing or an extra entry, a missing file", () => {
+    const m = manifest();
+    const bad = (entries: Array<Record<string, unknown>>) => activeRun(m, { engineEpochsSource: epochsFile(entries) }).errors.join("\n");
+    expect(bad([{ ruleId: "R09.example", version: 1, engineEpoch: 2, engineClosureSha256: PIN }])).toMatch(/engineEpoch 2 ≠ manifest 1/);
+    expect(bad([{ ruleId: "R09.example", version: 1, engineEpoch: 1, engineClosureSha256: "0".repeat(64) }])).toMatch(/engineClosureSha256 000000000000… ≠ manifest/);
+    expect(bad([])).toMatch(/records engineEpoch 1 but convex\/lib\/rules\/engineEpochs\.ts has no entry/);
+    expect(bad([
+      { ruleId: "R09.example", version: 1, engineEpoch: 1, engineClosureSha256: PIN },
+      { ruleId: "R08.draft", version: 1, engineEpoch: 1, engineClosureSha256: PIN },
+    ])).toMatch(/R08\.draft v1\) has no manifest entry recording an engineEpoch/);
+    expect(activeRun(m, { engineEpochsSource: null }).errors.join("\n")).toMatch(/engineEpochs\.ts is missing/);
+    expect(activeRun(m, { engineEpochsSource: "export const ENGINE_EPOCHS = makeEpochs();\n" }).errors.join("\n")).toMatch(/engine epoch:/);
+  });
+
+  it("against BASE: an epoch never decreases; a bump needs a new (behavioural) decision; a hash-only re-pin keeps it", () => {
+    const base = manifest("reviewed", { engineEpoch: 2 });
+    expect(activeRun(manifest("reviewed", { engineEpoch: 1 }), { baseManifest: base }).errors.join("\n")).toMatch(/engineEpoch decreased 2 → 1/);
+    expect(activeRun(manifest("reviewed", { engineEpoch: 3 }), { baseManifest: base }).errors.join("\n")).toMatch(/needs a new behavioural re-pin decision/);
+    expect(activeRun(manifest("reviewed", { engineEpoch: 3, engineClosureDecision: "D171" }), { baseManifest: base }).errors).toEqual([]);
+    expect(activeRun(manifest("reviewed", { engineEpoch: 2, engineClosureDecision: "D171" }), { baseManifest: base }).errors).toEqual([]);
   });
 });
 

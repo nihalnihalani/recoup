@@ -13,6 +13,7 @@ import schema, {
   approvalBinding,
   boundFactValue,
   cellStatus,
+  deadlineStatus,
   evaluationOutcome,
   factValue,
   missingFact,
@@ -58,9 +59,14 @@ const NEW_TABLES: Record<string, string[]> = {
     "by_user_and_status",
     "by_status_and_next_deadline_at",
     "by_scenario_and_rule_version",
+    // M20 (wave-2 addendum, rev 5.2): M29's reevaluateAt sweep.
+    "by_status_and_reevaluate_at",
   ],
   evaluations: ["by_opportunity", "by_user"],
   nonCashRemedies: ["by_claim_and_idempotency_key", "by_user"],
+  // M20 (wave 2, §2.4): the contract's two indexes each, plus `submissions.by_packet` (record idempotency, DA-A-10).
+  packets: ["by_claim", "by_user"],
+  submissions: ["by_claim", "by_user", "by_packet"],
 };
 
 describe("wave-1 schema block (contract §2.4)", () => {
@@ -305,5 +311,18 @@ describe("wave-1 schema block (contract §2.4)", () => {
   it("a local validator built from the shared one composes (money.extend)", () => {
     const withNote = money.extend({ note: v.string() });
     expect(Object.keys(withNote.fields).sort()).toEqual(["amountMinor", "currency", "note"]);
+  });
+});
+
+describe("M20 wave-2 addendum (contract §2.4)", () => {
+  it("scenario claims, denied, the new claim/draft fields and the met deadline status are additive", () => {
+    const claims = schema.tables.claims.validator.fields;
+    expect(claims.type.members.map((m) => m.value)).toEqual(["price_adjustment", "return_credit", "scenario"]);
+    expect(claims.status.members.map((m) => m.value)).toContain("denied");
+    expect([claims.purchaseId.isOptional, claims.itemId.isOptional]).toEqual(["optional", "optional"]);
+    expect([claims.caseMode.isOptional, claims.nonCashResolvedAt.isOptional]).toEqual(["optional", "optional"]);
+    expect(schema.tables.drafts.validator.fields.purpose.isOptional).toBe("optional");
+    expect(schema.tables.opportunities.validator.fields.reevaluateAt.isOptional).toBe("optional");
+    expect(deadlineStatus.members.map((m) => m.value)).toContain("met");
   });
 });

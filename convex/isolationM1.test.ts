@@ -136,7 +136,10 @@ type World = {
   /** B's own unattached upload (E-M24: B tries to attach it to A's transaction). */
   bEvidenceId: Id<"evidence">;
   pendingRefundEventId: Id<"processedEvents">;
-  missing: Record<"purchases" | "transactions" | "opportunities" | "claims" | "drafts" | "evidence" | "processedEvents", string>;
+  /** M20: A's approved manual packet on the return claim, and its recorded submission. */
+  packetId: Id<"packets">;
+  submissionId: Id<"submissions">;
+  missing: Record<"purchases" | "transactions" | "opportunities" | "claims" | "drafts" | "evidence" | "processedEvents" | "packets" | "submissions", string>;
   pdf: Uint8Array<ArrayBuffer>;
 };
 
@@ -217,6 +220,20 @@ async function buildWorld(t: T): Promise<World> {
   expect(bUp.status).toBe(200);
   const bEvidenceId = ((await bUp.json()) as { evidenceId: Id<"evidence"> }).evidenceId;
 
+  // M20: an approved manual packet on A's return claim, and its recorded submission.
+  const { packetId, submissionId } = await t.run(async (ctx) => {
+    const packetId = await ctx.db.insert("packets", {
+      userId: a.userId, claimId, version: 1, channel: "postal_mail", recipient: { text: "Owner A returns desk", source: "user_entered" },
+      body: `Letter about ${SECRET}`, requestedRemedy: "Refund ORD-A-SECRET", evidenceIndex: [],
+      binding: { contextHash: "ctx", claimVersion: 1, amount: { amountMinor: 8_000, currency: "USD" }, attachments: [] },
+      status: "approved", approvedAt: NOW - DAY, approvedHash: "approved-hash",
+    });
+    const submissionId = await ctx.db.insert("submissions", {
+      userId: a.userId, claimId, packetId, approvedHash: "approved-hash", channel: "postal_mail", submittedAt: NOW - DAY,
+    });
+    return { packetId, submissionId };
+  });
+
   // Missing ids: real rows of A's, deleted, so the id is well-formed and names nothing.
   const missing = await t.run(async (ctx) => {
     const del = async <N extends TableNames>(table: N, doc: Record<string, unknown>) => {
@@ -238,6 +255,10 @@ async function buildWorld(t: T): Promise<World> {
     const { _id: _e, _creationTime: _ec, storageId: _s, ...eFields } = ev;
     const pe = (await ctx.db.get(pendingRefundEventId))!;
     const { _id: _x, _creationTime: _xc, ...xFields } = pe;
+    const pk = (await ctx.db.get(packetId))!;
+    const { _id: _k, _creationTime: _kc, ...kFields } = pk;
+    const sb = (await ctx.db.get(submissionId))!;
+    const { _id: _b, _creationTime: _bc, ...bFields } = sb;
     return {
       purchases: await del("purchases", pFields),
       transactions: await del("transactions", { ...tFields, purchaseId: undefined, naturalKey: "deleted" }),
@@ -246,10 +267,12 @@ async function buildWorld(t: T): Promise<World> {
       drafts: await del("drafts", dFields),
       evidence: await del("evidence", { ...eFields, contentHash: "deleted" }),
       processedEvents: await del("processedEvents", { ...xFields, externalId: "deleted" }),
+      packets: await del("packets", kFields),
+      submissions: await del("submissions", bFields),
     };
   });
 
-  return { a, b, purchaseId, itemIds, transactionId, opportunityId, claimId, draftId, sentDraftId, evidenceId, bEvidenceId, pendingRefundEventId, missing, pdf };
+  return { a, b, purchaseId, itemIds, transactionId, opportunityId, claimId, draftId, sentDraftId, evidenceId, bEvidenceId, pendingRefundEventId, packetId, submissionId, missing, pdf };
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +293,7 @@ async function outcome(p: Promise<unknown>, id: string): Promise<string> {
 const OWNED_TABLES = [
   "purchases", "items", "transactions", "facts", "evidence", "opportunities", "evaluations", "claims", "ledgerEvents",
   "drafts", "claimNotes", "processedEvents", "nonCashRemedies", "policies", "priceChecks", "followUps",
+  "packets", "submissions",
 ] as const;
 
 /** Every row A owns, in every table a probe could touch. */
@@ -338,10 +362,29 @@ const PROBES: Probe[] = [
     fn: "claims.recordNonCashRemedy", table: "claims", ownerId: (w) => w.claimId,
     call: (as, id) => as.mutation(api.claims.recordNonCashRemedy, { claimId: id as Id<"claims">, kind: "voucher", description: "v", state: "received", idempotencyKey: "iso-nc" }),
   },
+  // M20 (wave 2): denial, non-cash resolution, packets and submissions.
+  { fn: "claims.recordDenial", table: "claims", ownerId: (w) => w.claimId, call: (as, id) => as.mutation(api.claims.recordDenial, { claimId: id as Id<"claims">, reason: "no" }) },
+  {
+    fn: "claims.recordNonCashResolution", table: "claims", ownerId: (w) => w.claimId,
+    call: (as, id) => as.mutation(api.claims.recordNonCashResolution, { claimId: id as Id<"claims">, kind: "voucher", description: "v", idempotencyKey: "iso-ncr" }),
+  },
+  { fn: "packets.prepare", table: "claims", ownerId: (w) => w.claimId, call: (as, id) => as.mutation(api.packets.prepare, { claimId: id as Id<"claims"> }) },
+  { fn: "packets.listForClaim", table: "claims", ownerId: (w) => w.claimId, call: (as, id) => as.query(api.packets.listForClaim, { claimId: id as Id<"claims"> }) },
+  { fn: "packets.get", table: "packets", ownerId: (w) => w.packetId, call: (as, id) => as.query(api.packets.get, { packetId: id as Id<"packets"> }) },
+  { fn: "packets.update", table: "packets", ownerId: (w) => w.packetId, call: (as, id) => as.mutation(api.packets.update, { packetId: id as Id<"packets">, body: "B's text" }) },
+  { fn: "packets.approve", table: "packets", ownerId: (w) => w.packetId, call: (as, id) => as.mutation(api.packets.approve, { packetId: id as Id<"packets">, approvedHash: "x" }) },
+  { fn: "submissions.record", table: "packets", ownerId: (w) => w.packetId, call: (as, id) => as.mutation(api.submissions.record, { packetId: id as Id<"packets">, submittedAt: NOW }) },
+  {
+    fn: "submissions.recordDelivery", table: "submissions", ownerId: (w) => w.submissionId,
+    call: (as, id) => as.mutation(api.submissions.recordDelivery, { submissionId: id as Id<"submissions">, deliveredAt: NOW }),
+  },
 ];
 
 /** Public functions that take no id: covered by the list/summary cases and the HTTP cases below. */
-const NO_ID_CASES = ["transactions.list", "transactions.createManual", "recovery.summary", "evidence.listRecent", "http:POST /evidence/upload", "http:GET /evidence/file"];
+const NO_ID_CASES = [
+  "transactions.list", "transactions.createManual", "recovery.summary", "evidence.listRecent", "opportunities.listMine",
+  "http:POST /evidence/upload", "http:GET /evidence/file",
+];
 
 // ---------------------------------------------------------------------------
 
@@ -368,6 +411,9 @@ describe("isolation: foreign id ≡ missing id for every new id-taking public fu
     expect(await w.a.as.query(api.facts.list, { transactionId: w.transactionId })).toBeInstanceOf(Array);
     const prepared = await w.a.as.mutation(api.drafts.prepareSend, draftSend(w.draftId));
     expect(prepared).toBeDefined();
+    // M20: the owner reads their packet (N6 view) and its submissions.
+    expect((await w.a.as.query(api.packets.get, { packetId: w.packetId })).submissions.map((s) => s._id)).toEqual([w.submissionId]);
+    expect((await w.a.as.query(api.packets.listForClaim, { claimId: w.claimId })).packets).toHaveLength(1);
   });
 });
 
@@ -387,6 +433,14 @@ describe("isolation: list-shaped queries never show another user's rows or money
     const aSummary = await w.a.as.query(api.recovery.summary, { now: NOW });
     expect(aSummary.currencies.length).toBeGreaterThan(0);
     expect(JSON.stringify(bSummary)).not.toContain(w.a.userId);
+  });
+
+  it("M20 (D220): opportunities.listMine for B lists nothing of A's; A sees A's own", async () => {
+    const t = setup();
+    const w = await buildWorld(t);
+    expect(await w.b.as.query(api.opportunities.listMine, {})).toEqual({ items: [], truncated: false });
+    const aItems = (await w.a.as.query(api.opportunities.listMine, {})).items;
+    expect(aItems.map((i) => i.opportunity._id)).toContain(w.opportunityId);
   });
 
   it("transactions.createManual (T-M24, no id argument): B's entry is B's alone, touches none of A's rows, and A never sees it", async () => {

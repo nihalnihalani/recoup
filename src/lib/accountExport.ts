@@ -55,6 +55,9 @@ export const EXPORT_TABLES = [
   "opportunities",
   "evaluations",
   "nonCashRemedies",
+  // M20 (wave 2): manual-channel packets and the user's recorded submissions.
+  "packets",
+  "submissions",
 ] as const;
 
 export type ExportTable = (typeof EXPORT_TABLES)[number];

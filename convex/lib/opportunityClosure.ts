@@ -16,8 +16,7 @@ export async function closurePatch(ctx: MutationCtx, opp: Doc<"opportunities">):
   if (!opp.activeClaimId) return {};
   const claim = await ctx.db.get(opp.activeClaimId);
   if (claim && !isClosedForAsk(claim)) return {};
-  // `nonCashResolvedAt` arrives with the wave-2 schema (M20, DA-A-18); read structurally until then.
-  if (claim && (claim.status === "confirmed" || (claim as { nonCashResolvedAt?: number }).nonCashResolvedAt !== undefined)) {
+  if (claim && (claim.status === "confirmed" || claim.nonCashResolvedAt !== undefined)) {
     return { status: "closed", activeClaimId: undefined };
   }
   return { status: "open", activeClaimId: undefined };
@@ -31,4 +30,21 @@ export async function syncOpportunityClosure(ctx: MutationCtx, claimId: Id<"clai
   if (!opp || opp.userId !== claim.userId || opp.activeClaimId !== claim._id) return;
   const patch = await closurePatch(ctx, opp);
   if (Object.keys(patch).length > 0) await ctx.db.patch(opp._id, patch);
+}
+
+/**
+ * M20 (§5, D206): money arrived on a DENIED claim (the ledger moved it to promised / reopened / confirmed). Its
+ * denial reopened the opportunity and cleared `activeClaimId`; now the case follows the money in the same mutation:
+ * an open claim is linked again (`case_open`), a settled one closes the opportunity. Only when the opportunity is
+ * still `open` with no other case — a newer case on the same opportunity is never displaced.
+ */
+export async function relinkAfterDenial(ctx: MutationCtx, claimId: Id<"claims">): Promise<void> {
+  const claim = await ctx.db.get(claimId);
+  if (!claim?.opportunityId || claim.status === "dismissed") return;
+  const opp = await ctx.db.get(claim.opportunityId);
+  if (!opp || opp.userId !== claim.userId || opp.status !== "open" || opp.activeClaimId !== undefined) return;
+  // D226: the denial was overturned by the money, so the denied-basis markers go.
+  const cleared = { deniedAt: undefined, deniedResultHash: undefined };
+  if (!isClosedForAsk(claim)) await ctx.db.patch(opp._id, { activeClaimId: claim._id, status: "case_open", ...cleared });
+  else if (claim.status === "confirmed" || claim.nonCashResolvedAt !== undefined) await ctx.db.patch(opp._id, { status: "closed", ...cleared });
 }

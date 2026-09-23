@@ -75,6 +75,11 @@ describe("DA-A-9: requiredChannel scopes delivery, submitted, Asked and expired"
     expect(isSubmitted({ status: "sent" }, { drafts: [informalEmail] })).toBe(true);
   });
 
+  it("D212: a `met` user deadline never expires the claim, even long after its due date", () => {
+    const met = [{ obligor: "user" as const, dueAt: T0 + 60 * DAY, status: "met" }];
+    expect(isExpired(postal, { drafts: [informalEmail] }, met, T0 + 90 * DAY)).toBe(false);
+  });
+
   it("requiredChannel postal + informal email sent → not submitted; day 59 not expired; day 61 → expired", () => {
     expect(delivery(postal, { drafts: [informalEmail] })).toBe("none");
     expect(isSubmitted(postal, { drafts: [informalEmail] })).toBe(false);

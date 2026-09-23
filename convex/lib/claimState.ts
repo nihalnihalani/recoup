@@ -50,7 +50,7 @@ export type ClaimArtifacts = {
   packets?: readonly PacketArtifact[];
   submissions?: readonly SubmissionArtifact[];
 };
-export type DeadlineLike = { obligor: "user" | "counterparty"; dueAt?: number };
+export type DeadlineLike = { obligor: "user" | "counterparty"; dueAt?: number; status?: string };
 
 /** §3.4 "asked": the claim reached its counterparty on its channel (or, legacy only, the user said so). */
 export const ASKED_DELIVERIES: ReadonlySet<Delivery> = new Set<Delivery>(["sent", "delivered", "submission_recorded", "user_reported"]);
@@ -142,5 +142,6 @@ export function isExpired(
   now: number,
 ): boolean {
   if (isClosedForAsk(claim) || isSubmitted(claim, artifacts)) return false;
-  return deadlines.some((d) => d.obligor === "user" && d.dueAt !== undefined && now > d.dueAt);
+  // D212: a `met` user deadline was satisfied in time; it never expires the claim.
+  return deadlines.some((d) => d.obligor === "user" && d.status !== "met" && d.dueAt !== undefined && now > d.dueAt);
 }

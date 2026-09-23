@@ -351,12 +351,26 @@ export function computeDeadline(spec: DeadlineSpec, cells: CellLookup, now: numb
 // Projections used by evaluators and the opportunity writer
 // ---------------------------------------------------------------------------
 
-/** The `windowOpen` dimension: USER deadlines only (DA-A-5). No user deadline → pass. */
+/**
+ * The `windowOpen` dimension: USER deadlines only (DA-A-5). No user deadline → pass. A `met` deadline (D212: the
+ * user's act was done in time) counts as satisfied, like an open one.
+ */
 export function userWindowOpen(deadlines: readonly Pick<DeadlineResult, "obligor" | "status">[]): Tri {
   const user = deadlines.filter((d) => d.obligor === "user" && d.status !== "not_applicable");
   if (user.some((d) => d.status === "passed")) return "fail";
-  if (user.some((d) => d.status !== "open")) return "unknown";
+  if (user.some((d) => d.status !== "open" && d.status !== "met")) return "unknown";
   return "pass";
+}
+
+/**
+ * M20 (D212): marks a computed USER-obligor deadline as satisfied (`met`) — e.g. the notice was received before its
+ * due instant. Keeps `dueAt` for display ("received in time"); only the status changes. A counterparty deadline can
+ * never be `met` (throws): the user's act never extends or pauses the counterparty's clock, which the pack computes
+ * independently. A `met` deadline is not open, so it is never the next user deadline and never needs attention.
+ */
+export function markMet(d: DeadlineResult, note: string): DeadlineResult {
+  if (d.obligor !== "user") throw new Error(`deadline ${d.id}: only a user-obligor deadline can be met`);
+  return { ...d, status: "met", basis: `${d.basis} ${note}`.trim() };
 }
 
 /** `opportunities.nextDeadlineAt`: the earliest OPEN user deadline (DA-A-5). */

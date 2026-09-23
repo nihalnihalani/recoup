@@ -60,6 +60,16 @@
 //     A lane whose change alters the closure runs the pack's fixtures
 //     unchanged, asks the lead for a re-pin decision id, and updates both the
 //     hash and the decision id in its own commit.
+//  8. Engine epoch (D206(3), M20): every effectively ACTIVE pack's entry
+//     records `engineEpoch`, a positive integer the lead controls; the runtime
+//     engine version is `${ruleId}@v${version}/e${engineEpoch}`. The runtime
+//     copy, `convex/lib/rules/engineEpochs.ts` (lead-controlled data, parsed
+//     as a pure literal), must EQUAL the manifest: one entry per manifest
+//     entry that records an epoch, with the same engineEpoch and
+//     engineClosureSha256, and nothing else. Against BASE an epoch never
+//     decreases, and an increase (a BEHAVIOURAL re-pin, which invalidates
+//     approvals) must come with a new engineClosureDecision; a hash-only
+//     re-pin keeps the epoch.
 //
 // BASE for check 6, first match wins:
 //   a. `--base <rev>` or env RULE_PACKS_BASE. CI sets it to the push's
@@ -98,7 +108,7 @@ export const PATHS = {
   manifest: "docs/rules/manifest.json",
   activation: "convex/lib/rules/activation.ts",
   verification: "convex/lib/rules/verification.ts",
-  engineVersion: "convex/lib/rules/engineVersion.ts",
+  engineEpochs: "convex/lib/rules/engineEpochs.ts",
   decisions: "docs/team/DECISIONS.md",
 };
 
@@ -270,7 +280,7 @@ function recordedHashes(entry, manifest) {
  * @param {string} input.decisionsText
  * @param {(rel: string) => Buffer|null} input.readRepoFile  null when the file does not exist
  * @param {string} input.today                        YYYY-MM-DD
- * @param {boolean} input.engineVersionPresent
+ * @param {string|null} [input.engineEpochsSource]   engineEpochs.ts text, or null if absent
  */
 export function checkRulePacks(input) {
   const { manifest, baseManifest, activationSource, baseActivationSource, verificationSource, decisionsText, readRepoFile, today } = input;
@@ -459,7 +469,66 @@ export function checkRulePacks(input) {
     }
   }
   notes.push(active.length === 0 ? "engine pin: no active pack to pin" : `engine pin: ${pinned}/${active.length} active pack(s) match their recorded engine closure`);
-  if (input.engineVersionPresent) notes.push(`${PATHS.engineVersion} exists; its ENGINE_VERSION is not compared (the closure pin above is the check)`);
+
+  // 8. engine epoch (D206(3))
+  const epochLabel = "engine epoch";
+  for (const a of active) {
+    const pack = packs.find((p) => p.key === `${a.ruleId}@${a.version}`);
+    if (pack && pack.entry.engineEpoch === undefined) {
+      errors.push(`${epochLabel}: ${pack.label} is active but records no engineEpoch (a positive integer; 1 for a first activation)`);
+    }
+  }
+  const withEpoch = packs.filter((p) => p.entry.engineEpoch !== undefined);
+  for (const p of withEpoch) {
+    if (!Number.isInteger(p.entry.engineEpoch) || p.entry.engineEpoch < 1) errors.push(`${epochLabel}: ${p.label} engineEpoch must be a positive integer`);
+  }
+  const epochsSource = input.engineEpochsSource ?? null;
+  let epochs = [];
+  if (epochsSource === null) {
+    if (withEpoch.length > 0) errors.push(`${epochLabel}: ${PATHS.engineEpochs} is missing but the manifest records ${withEpoch.length} epoch(s)`);
+  } else {
+    try {
+      const raw = readExportedLiteral(epochsSource, "ENGINE_EPOCHS", PATHS.engineEpochs);
+      if (!Array.isArray(raw)) errors.push(`${epochLabel}: ENGINE_EPOCHS must be an array`);
+      else epochs = raw;
+    } catch (err) {
+      errors.push(`${epochLabel}: ${err.message}`);
+    }
+  }
+  const seenEpochs = new Set();
+  epochs.forEach((e, i) => {
+    const where = `${epochLabel}: ENGINE_EPOCHS[${i}]`;
+    const extra = Object.keys(e ?? {}).filter((k) => !["ruleId", "version", "engineEpoch", "engineClosureSha256"].includes(k));
+    if (extra.length) errors.push(`${where} has unknown keys: ${extra.join(", ")}`);
+    const key = `${e?.ruleId}@${e?.version}`;
+    if (seenEpochs.has(key)) errors.push(`${where} repeats ${e?.ruleId} v${e?.version}`);
+    seenEpochs.add(key);
+    const p = withEpoch.find((x) => x.key === key);
+    if (!p) {
+      errors.push(`${where} (${e?.ruleId} v${e?.version}) has no manifest entry recording an engineEpoch`);
+      return;
+    }
+    if (e.engineEpoch !== p.entry.engineEpoch) errors.push(`${where}: engineEpoch ${e.engineEpoch} ≠ manifest ${p.entry.engineEpoch} for ${p.label}`);
+    if (e.engineClosureSha256 !== p.entry.engineClosureSha256) {
+      errors.push(`${where}: engineClosureSha256 ${String(e.engineClosureSha256).slice(0, 12)}… ≠ manifest ${String(p.entry.engineClosureSha256).slice(0, 12)}… for ${p.label} (update both together)`);
+    }
+  });
+  for (const p of withEpoch) {
+    if (!seenEpochs.has(p.key)) errors.push(`${epochLabel}: ${p.label} records engineEpoch ${p.entry.engineEpoch} but ${PATHS.engineEpochs} has no entry for it`);
+  }
+  if (baseManifest) {
+    const baseByKey = new Map(packEntries(baseManifest).map((b) => [b.key, b]));
+    for (const p of withEpoch) {
+      const b = baseByKey.get(p.key);
+      const before = b?.entry.engineEpoch;
+      if (before === undefined || !Number.isInteger(p.entry.engineEpoch)) continue;
+      if (p.entry.engineEpoch < before) errors.push(`${epochLabel}: ${p.label} engineEpoch decreased ${before} → ${p.entry.engineEpoch}`);
+      else if (p.entry.engineEpoch > before && p.entry.engineClosureDecision === b.entry.engineClosureDecision) {
+        errors.push(`${epochLabel}: ${p.label} engineEpoch ${before} → ${p.entry.engineEpoch} needs a new behavioural re-pin decision (engineClosureDecision is still ${b.entry.engineClosureDecision})`);
+      }
+    }
+  }
+  if (withEpoch.length) notes.push(`engine epoch: ${withEpoch.map((p) => `${p.entry.ruleId} v${p.entry.version} e${p.entry.engineEpoch}`).join(", ")}`);
 
   return { errors, notes, activeCount: active.length };
 }
@@ -541,7 +610,7 @@ function main() {
     decisionsText: readText(PATHS.decisions) ?? "",
     readRepoFile: (rel) => (existsSync(path.join(repoRoot, rel)) ? readFileSync(path.join(repoRoot, rel)) : null),
     today: localDate(),
-    engineVersionPresent: existsSync(path.join(repoRoot, PATHS.engineVersion)),
+    engineEpochsSource: readText(PATHS.engineEpochs),
   });
   errors.push(...result.errors);
 

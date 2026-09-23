@@ -64,7 +64,8 @@ async function expectedDomain(
     .take(20);
   const sent = drafts.find((d) => d.approvedAt !== undefined && d.to.length > 0);
   if (sent) return emailDomain(sent.to);
-  const purchase = await ctx.db.get(claim.purchaseId);
+  // M20 (D206): an item-less (scenario) claim has no purchase domain yet (M28): no expected domain, never a throw.
+  const purchase = claim.purchaseId !== undefined ? await ctx.db.get(claim.purchaseId) : null;
   return purchase ? purchase.merchantDomain.toLowerCase() : null;
 }
 

@@ -73,14 +73,23 @@ describe("module boundaries (grep tests)", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("rule and deadline modules are pure: no lib/ai, no ctx, no wall clock, no randomness", () => {
-    const pure = files.filter((f) => /convex\/lib\/(rules|deadlines)\/[^/]+\.ts$/.test(rel(f)) && !f.endsWith(".test.ts"));
+  it("rule, deadline and packet-template modules are pure: no lib/ai, no ctx, no wall clock, no randomness", () => {
+    // M20 (D208): pack adapters live in the pack files, and packet templates in lib/packets; both are covered here.
+    const pure = files.filter((f) => /convex\/lib\/(rules|deadlines|packets)\/[^/]+\.ts$/.test(rel(f)) && !f.endsWith(".test.ts"));
     expect(pure.length).toBeGreaterThanOrEqual(12);
     for (const f of pure) {
       const src = readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
       expect(src, rel(f)).not.toMatch(/lib\/ai["']|from\s+["']\.\.\/ai["']/);
       expect(src, rel(f)).not.toMatch(/Date\.now\(|new Date\(\s*\)|Math\.random|performance\.now/);
       expect(src, rel(f)).not.toMatch(/_generated\/server|\bctx\./);
+      // D208: only type imports from _generated (ids and docs), never a value (api, server, components).
+      expect(src, rel(f)).not.toMatch(/import\s+(?!type\b)[^;]*?from\s+["'][^"']*_generated\//);
     }
+  });
+
+  it("D208: every implemented pack other than R01 v1 has a facts adapter (a registered pack never silently evaluates nothing)", () => {
+    const others = prod.IMPLEMENTED_PACKS.filter((p) => !(p.ruleId === r01PriceAdjustmentV1.ruleId && p.version === r01PriceAdjustmentV1.version));
+    expect(others.length).toBeGreaterThan(0);
+    for (const p of others) expect(typeof p.adapter?.runs, `${p.ruleId} v${p.version}`).toBe("function");
   });
 });

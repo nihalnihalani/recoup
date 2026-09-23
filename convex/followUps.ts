@@ -20,7 +20,8 @@ export async function reminderFireAt(
   claim: Doc<"claims">,
   from: number = Date.now(),
 ): Promise<number> {
-  const purchase = await ctx.db.get(claim.purchaseId);
+  // M20 (D206): an item-less (scenario) claim has no retail returns window: the 7-day floor, never a throw.
+  const purchase = claim.purchaseId !== undefined ? await ctx.db.get(claim.purchaseId) : null;
   let days = MIN_REMINDER_DAYS;
   if (purchase) {
     const policy = await ctx.db

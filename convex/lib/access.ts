@@ -62,7 +62,9 @@ export async function ownedWatch(ctx: Ctx, watchId: Id<"watches">, userId: Id<"u
 // nothing about ids it does not own. A valid id is never authorization.
 // ---------------------------------------------------------------------------
 
-type OwnedTable = "transactions" | "evidence" | "facts" | "incidents" | "opportunities" | "evaluations" | "nonCashRemedies";
+type OwnedTable =
+  | "transactions" | "evidence" | "facts" | "incidents" | "opportunities" | "evaluations" | "nonCashRemedies"
+  | "packets" | "submissions";
 
 async function ownedRow<T extends OwnedTable>(
   ctx: Ctx,
@@ -105,6 +107,16 @@ export async function ownedEvaluation(ctx: Ctx, evaluationId: Id<"evaluations">,
 
 export async function ownedNonCashRemedy(ctx: Ctx, remedyId: Id<"nonCashRemedies">, userId: Id<"users">) {
   return await ownedRow(ctx, "nonCashRemedies", remedyId, userId, "Remedy not found");
+}
+
+/** M20 (wave 2, §6): a packet the caller owns, or the identical "Packet not found". */
+export async function ownedPacket(ctx: Ctx, packetId: Id<"packets">, userId: Id<"users">) {
+  return await ownedRow(ctx, "packets", packetId, userId, "Packet not found");
+}
+
+/** M20 (wave 2, DA-A-10): a recorded submission the caller owns, or the identical "Submission not found". */
+export async function ownedSubmission(ctx: Ctx, submissionId: Id<"submissions">, userId: Id<"users">) {
+  return await ownedRow(ctx, "submissions", submissionId, userId, "Submission not found");
 }
 
 /**

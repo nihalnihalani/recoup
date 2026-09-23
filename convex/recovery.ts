@@ -313,6 +313,9 @@ const summaryShape = v.object({
 const EVENTS_PER_CLAIM = 200;
 /** Drafts read per claim for the delivery projection. */
 const DRAFTS_PER_CLAIM = 20;
+/** Packets and submissions read per manual-channel claim for the delivery projection (M20; a few versions per case). */
+const PACKETS_PER_CLAIM = 20;
+const SUBMISSIONS_PER_CLAIM = 20;
 /** Replies read per open claim, newest first, to find the newest classified one (DA-B-13). */
 const REPLIES_PER_CLAIM = 20;
 const WEEK_MS = 7 * 86_400_000;
@@ -380,15 +383,27 @@ export const summary = query({
       return purchases.get(id)!;
     };
 
+    const txns = new Map<Id<"transactions">, Doc<"transactions"> | null>();
+    const txnOf = async (id: Id<"transactions">) => {
+      if (!txns.has(id)) txns.set(id, await ctx.db.get(id));
+      return txns.get(id)!;
+    };
+
     const realClaims = claimRows.slice(0, SUMMARY_MAX_CLAIMS).filter((c) => c.isExample !== true && c.status !== "dismissed");
     const byItem = new Map<Id<"items">, Doc<"claims">[]>();
-    for (const c of claimRows) byItem.set(c.itemId, [...(byItem.get(c.itemId) ?? []), c]);
+    for (const c of claimRows) if (c.itemId !== undefined) byItem.set(c.itemId, [...(byItem.get(c.itemId) ?? []), c]);
 
     const claims: SummaryClaim[] = [];
     const unsupported = new Map<string, number>();
     for (const c of realClaims) {
-      const purchase = await purchaseOf(c.purchaseId);
+      // M20: an item-less (scenario) claim is anchored on its transaction (its purchase when it has one, like the
+      // opportunities below), so the paid cap and loss components treat it exactly like its opportunity.
+      const txn = c.transactionId !== undefined ? await txnOf(c.transactionId) : null;
+      if (txn && (txn.userId !== userId || txn.isExample)) continue;
+      const purchaseId = c.purchaseId ?? txn?.purchaseId;
+      const purchase = purchaseId !== undefined ? await purchaseOf(purchaseId) : null;
       if (purchase?.isExample) continue;
+      const anchor = purchaseId !== undefined ? `purchase:${purchaseId}` : txn ? `txn:${txn._id}` : null;
       const currency = claimCurrency(c, purchase);
       if (currency === null) continue;
       if (!isTwoDecimalCurrency(currency)) {
@@ -400,6 +415,12 @@ export const summary = query({
       const ledger: LedgerEvent[] = events.map((e) => ({ kind: e.kind, cents: e.cents }));
       const b = balance(c.expectedCents, ledger);
       const drafts = await ctx.db.query("drafts").withIndex("by_claim", (q) => q.eq("claimId", c._id)).order("desc").take(DRAFTS_PER_CLAIM);
+      // DA-A-9: a manual-channel claim is submitted only through its packets and the user's recorded submissions.
+      const manual = c.requiredChannel !== undefined && c.requiredChannel !== "email";
+      const packets = manual ? await ctx.db.query("packets").withIndex("by_claim", (q) => q.eq("claimId", c._id)).order("desc").take(PACKETS_PER_CLAIM) : [];
+      const submissions = manual
+        ? await ctx.db.query("submissions").withIndex("by_claim", (q) => q.eq("claimId", c._id)).order("desc").take(SUBMISSIONS_PER_CLAIM)
+        : [];
       const closedForAsk = isClosedForAsk(c);
       let refused = false;
       if (!closedForAsk) {
@@ -412,19 +433,18 @@ export const summary = query({
         currency,
         status: c.status,
         expectedMinor: c.expectedCents,
-        lossKeys: legacyLossKeys(c, byItem.get(c.itemId) ?? [c]),
+        lossKeys: legacyLossKeys(c, (c.itemId !== undefined ? byItem.get(c.itemId) : undefined) ?? [c]),
         confirmedMinor: b.confirmed,
         debitedMinor: b.debited,
         promisedMinor: b.promised,
         provisionalMinor: provisionalOutstanding(ledger),
-        delivery: delivery(c, { drafts }),
+        delivery: delivery(c, { drafts, packets, submissions }),
         closedForAsk,
         refused,
-        anchor: `purchase:${c.purchaseId}`,
+        anchor,
       });
     }
 
-    const txns = new Map<Id<"transactions">, Doc<"transactions"> | null>();
     const opps: SummaryOpportunity[] = [];
     let notYetDue = 0;
     let needsAnswers = 0;
@@ -439,6 +459,12 @@ export const summary = query({
       if (o.nextDeadlineAt !== undefined && o.nextDeadlineAt >= now && o.nextDeadlineAt <= now + WEEK_MS) deadlinesThisWeek += 1;
       if (o.activeClaimId !== undefined || o.cashClass !== "cash" || o.estimate === undefined) continue;
       if (o.outcome !== "eligible" && o.outcome !== "likely_eligible") continue;
+      // D226: a denied loss is not Potential again on the same basis (not yet re-evaluated, or the same resultHash).
+      if (o.deniedAt !== undefined) {
+        if (o.deniedResultHash === undefined || !o.currentEvaluationId) continue;
+        const ev = await ctx.db.get(o.currentEvaluationId);
+        if (!ev || ev.resultHash === o.deniedResultHash) continue;
+      }
       if (!isTwoDecimalCurrency(o.estimate.currency)) continue; // never produced by an active pack; defence in depth
       opps.push({
         id: o._id,

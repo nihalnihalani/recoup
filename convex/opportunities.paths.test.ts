@@ -4,7 +4,7 @@
  *  - D147(6): a `not_yet_due` result → openCase refuses with nextAction wait; no auto-open; never a money tile.
  *  - a throwing pack → recorded through `ops.recordRuleEvaluationFailure`, never rethrown; the caller's writes survive.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./lib/rules/registry", async () => await import("./lib/rules/testRegistry"));
 const mode = vi.hoisted(() => ({ value: "normal" as "normal" | "not_yet_due" | "throw" }));
@@ -36,6 +36,10 @@ const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 8, 20, 14);
 type T = ReturnType<typeof setup>;
 
+import { resetTestRegistry, setTestActivations } from "./lib/rules/testRegistry";
+// M20 (D208): R05 (wave 2) now evaluates retail transactions through its adapter; these R01 tests narrow the C3 seam to R01 v1.
+beforeEach(() => setTestActivations([{ ruleId: "R01.retail_price_adjustment", version: 1, status: "active", decision: "TEST" }]));
+afterEach(() => resetTestRegistry());
 afterEach(() => {
   mode.value = "normal";
 });

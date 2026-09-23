@@ -7,7 +7,9 @@ export type ClaimStatus =
   | "promised"
   | "confirmed"
   | "reopened"
-  | "dismissed";
+  | "dismissed"
+  /** Wave 2 (M20, §5): the counterparty refused and the user recorded it. */
+  | "denied";
 
 /**
  * A claim status as a coloured dot in a bordered chip; the label stays in ink.
@@ -25,6 +27,7 @@ const CONFIG: Record<ClaimStatus, { label: string; dot: string; chip?: string; p
   confirmed: { label: "Back on card", dot: "bg-moss" },
   reopened: { label: "Charged again", dot: "bg-rust" },
   dismissed: { label: "Dismissed", dot: "bg-gray-300", chip: "border-gray-200 text-gray-400 line-through" },
+  denied: { label: "Denied", dot: "bg-rust" },
 };
 
 export function StatusPill({ status, className = "" }: { status: ClaimStatus; className?: string }) {
