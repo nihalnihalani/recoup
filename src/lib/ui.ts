@@ -29,19 +29,42 @@ export function centsToDollars(cents: number): string {
   return (cents / 100).toFixed(2);
 }
 
-/** `YYYY-MM-DD` for an `<input type="date">`, from epoch ms. */
+/**
+ * `YYYY-MM-DD` for an `<input type="date">`: the calendar day `ms` falls on in the viewer's own time zone, which is
+ * the day a date picker shows. A stored noon-UTC date (the convention below) is the same calendar day in every zone
+ * from UTC−11 to UTC+12, so older rows read back unchanged.
+ */
 export function toDateInput(ms: number | undefined): string {
   if (ms === undefined) return "";
   const d = new Date(ms);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toISOString().slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-/** Epoch ms from a `YYYY-MM-DD` value, or null when empty/invalid. */
-export function fromDateInput(value: string): number | null {
-  if (!value) return null;
-  const ms = Date.parse(`${value}T12:00:00Z`);
-  return Number.isNaN(ms) ? null : ms;
+/** Today's `YYYY-MM-DD` in the viewer's own time zone (a date picker's `max` for a purchase). */
+export function todayInput(now: number = Date.now()): string {
+  return toDateInput(now);
+}
+
+/**
+ * The instant a picked calendar day stands for, or null when the value is empty, malformed or not allowed.
+ *
+ * QA-M16-4 (D217): the old convention stored noon UTC of the picked day for every day, so "today" picked east of
+ * UTC before 12:00 UTC was a FUTURE instant, and a price-adjustment window counted from it ran up to ~12 h past the
+ * store's rule. Now:
+ *  - today (in the viewer's zone) → `now`, the moment it was entered;
+ *  - an earlier day → noon UTC of that day (the same calendar day from UTC−11 to UTC+12), never later than `now`;
+ *  - a later day → null, unless `allowFuture` (a promised date can be ahead; an event that happened cannot).
+ */
+export function fromDateInput(value: string, options: { now?: number; allowFuture?: boolean } = {}): number | null {
+  const now = options.now ?? Date.now();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const noon = Date.parse(`${value}T12:00:00Z`);
+  if (Number.isNaN(noon)) return null;
+  const today = todayInput(now);
+  if (value === today) return now;
+  if (value > today) return options.allowFuture ? noon : null;
+  return Math.min(noon, now);
 }
 
 /** Short absolute timestamp, e.g. "Sep 20, 2026, 3:04 PM". */
