@@ -42,7 +42,7 @@
  */
 import { currencyExponent, formatMinor } from "../money";
 import { alternatives, knownCell, withOverride, type Cell, type CellLookup as FactLookup } from "../facts/resolve";
-import { r02BoundFacts, type R02View } from "../facts/snapshot_air";
+import { AIR_TXN_SUBJECT, buildAirSnapshot, r02BoundFacts, r02View, type AirSnapshotInput, type R02View } from "../facts/snapshot_air";
 import { computeDeadlineDetailed, overdueCounterpartyDeadlines } from "../deadlines/engine";
 import { localParts, US_ZONES, zoneRule, type ZoneRule } from "../deadlines/usZones";
 import { addMissing, evaluateConditions } from "./conditions";
@@ -953,6 +953,17 @@ export function evaluateR02V1(input: EvaluationInput<R02View, R02Params>): Evalu
 export function r02V1BoundFacts(v: R02View): BoundFactValue[] {
   return r02BoundFacts(v);
 }
+
+/**
+ * D208 PackAdapter (M20's `RulePack.adapter`; standalone until that type is on main, then wired as `adapter`): live
+ * fact rows of one air transaction → the single R02 run (the ticket, subject `txn`). Pure.
+ */
+export const r02Adapter = Object.freeze({
+  runs(input: AirSnapshotInput): { subjectKey: string; snapshot: R02View; lookup: FactLookup }[] {
+    const s = buildAirSnapshot(input);
+    return [{ subjectKey: AIR_TXN_SUBJECT, snapshot: r02View(s), lookup: s.lookup }];
+  },
+});
 
 export const r02AirRefundV1: RulePack<R02View, R02Params, CaseContext> = {
   ruleId: R02_V1_RULE_ID,

@@ -33,6 +33,7 @@ import { buildAirSnapshot, r02View, R02_BOUND_KEYS, type CellRow, type R02View }
 import { resultHash } from "./outcome";
 import {
   evaluateR02V1,
+  r02Adapter,
   r02AirRefundV1,
   R02_AGENT_TIMER_ID,
   R02_CARRIER_TIMER_CREDIT_ID,
@@ -523,6 +524,14 @@ describe("R02 v1 pack invariants", () => {
     expect(d.status).toBe("disputed_anchor");
     expect(d.overdueSince).toBeUndefined();
     expect(disputed.nextAction).toEqual({ kind: "track" });
+  });
+
+  it("D208 adapter: live rows → one run on the ticket (txn), whose evaluation equals the direct one", () => {
+    const runs = r02Adapter.runs({ transactionId: TXN_ID, isExample: false, rows: rowsOf(R02_01.facts) });
+    expect(runs.map((r) => r.subjectKey)).toEqual([TXN]);
+    expect(runs[0].lookup.get(TXN, "air.fare_paid").status).toBe("confirmed");
+    expect(run(runs[0].snapshot, R02_01.now, verified)).toEqual(runCase(R02_01));
+    expect(r02Adapter.runs({ transactionId: TXN_ID, isExample: false, rows: [] })).toHaveLength(1);
   });
 
   it("the pack declares itself researched and cites only captured sources", () => {

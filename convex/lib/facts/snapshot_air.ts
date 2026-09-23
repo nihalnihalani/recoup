@@ -13,6 +13,7 @@
 import type { Id } from "../../_generated/dataModel";
 import { MAX_BOUND_FACTS } from "../../limits";
 import type { FactKey, ValueFor } from "./catalog";
+import { AIR_FACT_SPECS } from "./keys_air";
 import { cellLookup, resolveCell, typedCell, type Cell, type CellLookup, type ResolveRow } from "./resolve";
 import { boundFactValues, snapshotHash, type BoundFactValue, type CellRow, type FactRef } from "./snapshot_retail";
 import { parseSubjectKey } from "./subject";
@@ -140,6 +141,25 @@ export function r04View(
     expenseLines: s.expenseLines,
     propertyItems: s.propertyItems,
   };
+}
+
+/** Keys that describe one bag (keys_air `subject` includes "incident"): they sit on the bag's incident, or on `txn`. */
+export const R04_BAG_KEYS: ReadonlySet<string> = new Set(
+  (AIR_FACT_SPECS as readonly { key: string; subject: readonly string[] }[]).filter((s) => s.subject.includes("incident")).map((s) => s.key),
+);
+
+/**
+ * The bags of an air transaction: every `incident:<id>` subject holding a bag key, in subject-key order (ordinal 1, 2,
+ * …); with none, the transaction itself is the one bag. Pure and deterministic, so ordinals (and the loss keys
+ * `txn:<id>:bag_fee:<n>`) are stable across evaluations.
+ */
+export function r04BagSubjects(s: Pick<AirSnapshot, "lookup">): { subjectKey: string; ordinal: number }[] {
+  const incidents = new Set<string>();
+  for (const c of s.lookup.cells()) {
+    if (R04_BAG_KEYS.has(c.key) && parseSubjectKey(c.subjectKey)?.kind === "incident") incidents.add(c.subjectKey);
+  }
+  const keys = [...incidents].sort();
+  return keys.length === 0 ? [{ subjectKey: AIR_TXN_SUBJECT, ordinal: 1 }] : keys.map((subjectKey, i) => ({ subjectKey, ordinal: i + 1 }));
 }
 
 /** Itinerary-level keys every R04 path binds. */

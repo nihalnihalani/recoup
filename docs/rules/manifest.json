@@ -259,6 +259,7 @@
       "scenarioId": "R04",
       "version": 1,
       "lifecycle": "researched",
+      "packFile": "convex/lib/rules/r04_baggage_v1.ts",
       "spec": "docs/rules/R04-baggage.md",
       "fixtures": "docs/rules/fixtures/R04.json",
       "sources": [

@@ -75,6 +75,7 @@ import type * as lib_rules_coverage from "../lib/rules/coverage.js";
 import type * as lib_rules_outcome from "../lib/rules/outcome.js";
 import type * as lib_rules_r01_price_adjustment_v1 from "../lib/rules/r01_price_adjustment_v1.js";
 import type * as lib_rules_r02_air_refund_v1 from "../lib/rules/r02_air_refund_v1.js";
+import type * as lib_rules_r04_baggage_v1 from "../lib/rules/r04_baggage_v1.js";
 import type * as lib_rules_r05_late_order_v1 from "../lib/rules/r05_late_order_v1.js";
 import type * as lib_rules_registry from "../lib/rules/registry.js";
 import type * as lib_rules_testRegistry from "../lib/rules/testRegistry.js";
@@ -183,6 +184,7 @@ declare const fullApi: ApiFromModules<{
   "lib/rules/outcome": typeof lib_rules_outcome;
   "lib/rules/r01_price_adjustment_v1": typeof lib_rules_r01_price_adjustment_v1;
   "lib/rules/r02_air_refund_v1": typeof lib_rules_r02_air_refund_v1;
+  "lib/rules/r04_baggage_v1": typeof lib_rules_r04_baggage_v1;
   "lib/rules/r05_late_order_v1": typeof lib_rules_r05_late_order_v1;
   "lib/rules/registry": typeof lib_rules_registry;
   "lib/rules/testRegistry": typeof lib_rules_testRegistry;
