@@ -335,7 +335,11 @@ function buildMessage(row: Doc<"mailLog">, watch: Doc<"watches">): string {
  * send-time check is `alerts.cancelPendingDrops`: every change that closes
  * the gate (opt-out, one-click unsubscribe, bounce/complaint suppression,
  * deletion) cancels this user's still-pending component sends in its own
- * transaction. Whichever commits first, no POST starts after the gate closes.
+ * transaction, and pausing, archiving or buying the watch does the same for
+ * that watch (`cancelPendingWatchDrops`). A cancel that commits before the
+ * component's `performSend` reads the row stops the POST. One that commits
+ * after that read, with the POST in flight, cannot (D261 INFO-2), which is
+ * why the recorded copy says the alert "may already have gone out".
  */
 export const sendDrop = internalMutation({
   args: { mailLogId: v.id("mailLog") },

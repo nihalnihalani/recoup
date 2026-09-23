@@ -14,11 +14,12 @@
  *   A.4  `approveAndSend.to` is length-capped before any regex runs.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { applySendOutcome, BACKOFF_MS, isPermanentSendFailure } from "./drafts";
-import { MAX_SENDS_PER_CLAIM } from "./limits";
+import { MAIL_RECONCILE_STALL_MS, MAIL_SWEEP_PAGE, MAX_SENDS_PER_CLAIM } from "./limits";
+import { agentmail } from "./mail";
 
 type T = ReturnType<typeof setup>;
 
@@ -396,5 +397,213 @@ describe("applySendOutcome after a resend: the earlier attempt never overwrites 
     );
     expect(outcome).toBe("sent");
     expect((await t.run((ctx) => ctx.db.get(claimId)))?.status).toBe("sent");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P02-OW-1, P02-OW-2, P02-SK-1 (D244): the re-audit's repros, inverted.
+// ---------------------------------------------------------------------------
+
+const componentStatus = (t: T, outboundId: string) => t.run((ctx) => agentmail.status(ctx as never, outboundId as never));
+
+const resendArgsFor = (draftId: Id<"drafts">, acknowledgedOutboundId: string) => ({
+  draftId, acknowledgedOutboundId, to: CONTACT, subject: "Refund", body: "Please confirm the credit.",
+  claimVersion: 1, draftVersion: 1, recipientConfirmed: true,
+});
+
+async function cancelScheduled(t: T, fnName: string) {
+  await t.run(async (ctx) => {
+    const jobs = await ctx.db.system.query("_scheduled_functions").collect();
+    for (const job of jobs) {
+      if (job.name.includes(fnName) && job.state.kind === "pending") await ctx.scheduler.cancel(job._id);
+    }
+  });
+}
+
+describe("P02-OW-1: a resend cancels an earlier attempt still pending in the component (R4 inverted)", () => {
+  it("the 5-check chain ran out while the earlier row was pending: the resend cancels it, one POST in total, the claim ends sent", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const { claimId, draftId } = await seed(t, a.userId);
+    const posts = stubProvider((n) => okSend(`mid-${n}`));
+    const outboundId = await approve(a.as, draftId);
+
+    // A workpool backlog: the last scheduled check finds the component row still pending.
+    await t.mutation(internal.drafts.reconcileSend, { draftId, attempt: BACKOFF_MS.length });
+    expect((await t.run((ctx) => ctx.db.get(claimId)))?.sendUnknown).toBe(true);
+    expect((await componentStatus(t, outboundId))?.status).toBe("pending");
+
+    const res = await a.as.mutation(api.drafts.resendAfterUnknown, resendArgsFor(draftId, outboundId));
+    expect(res.ok).toBe(true);
+    const earlier = await componentStatus(t, outboundId);
+    expect(earlier?.status).toBe("failed");
+    expect(earlier?.errorMessage).toBe("Cancelled by user");
+
+    await drive(t, 60, 5_000);
+    expect(posts.length).toBe(1); // before: 2 (the backlogged earlier attempt was POSTed too)
+    expect((await t.run((ctx) => ctx.db.get(claimId)))?.status).toBe("sent");
+    const notes = await t.run((ctx) => ctx.db.query("claimNotes").withIndex("by_claim", (q) => q.eq("claimId", claimId)).collect());
+    // P02-SK-3 wording: a cancel is requested, never claimed to have stopped the earlier email.
+    expect(notes.some((n) => /asked for it to be cancelled, but it may already have reached the merchant/.test(n.text))).toBe(true);
+  });
+
+  it("a refused resend never cancels the earlier attempt", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const { claimId, draftId } = await seed(t, a.userId);
+    stubProvider((n) => okSend(`mid-${n}`));
+    const outboundId = await approve(a.as, draftId);
+    await t.mutation(internal.drafts.reconcileSend, { draftId, attempt: BACKOFF_MS.length });
+    await t.run((ctx) => ctx.db.patch(claimId, { version: 2 })); // a material change: the resend is refused
+
+    const res = await a.as.mutation(api.drafts.resendAfterUnknown, { ...resendArgsFor(draftId, outboundId), claimVersion: 2 });
+    expect(res).toMatchObject({ ok: false, code: "binding_changed" });
+    expect((await componentStatus(t, outboundId))?.status).toBe("pending");
+  });
+});
+
+describe("P02-OW-2: the claim-email sweep recovers a lost reconcile chain", () => {
+  it("R5 inverted: chain lost, the provider accepted → one hourly sweep leaves the claim sent with its reminder scheduled", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const { claimId, draftId } = await seed(t, a.userId);
+    const posts = stubProvider((n) => okSend(`mid-${n}`));
+    await approve(a.as, draftId);
+    await cancelScheduled(t, "reconcileSend"); // the chain is lost
+    await drive(t, 5, 1_000); // the workpool POSTs; the component records `sent`
+    expect(posts.length).toBe(1);
+    expect((await t.run((ctx) => ctx.db.get(claimId)))?.status).toBe("queued"); // before: stuck here for good
+
+    vi.setSystemTime(T0 + 3_600_000);
+    expect(await t.mutation(internal.drafts.sweepStalled, {})).toBe(1);
+    await drive(t, 2, 1_000);
+
+    const claim = await t.run((ctx) => ctx.db.get(claimId));
+    expect(claim?.status).toBe("sent");
+    expect(claim?.threadId).toBe("th-mid-1");
+    const reminders = await t.run((ctx) => ctx.db.query("followUps").withIndex("by_claim", (q) => q.eq("claimId", claimId)).collect());
+    expect(reminders.filter((r) => r.status === "pending")).toHaveLength(1);
+    const draft = await t.run((ctx) => ctx.db.get(draftId));
+    expect(draft?.agentmailMessageId).toBe("mid-1");
+    expect(draft?.nextCheckAt).toBeUndefined(); // a definite outcome leaves the sweep's index
+    expect(await t.mutation(internal.drafts.sweepStalled, {})).toBe(0);
+  });
+
+  it("S1b inverted: chain lost, the outcome is ambiguous → the sweep marks the claim sendUnknown, so a resend is possible", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const { claimId, draftId } = await seed(t, a.userId);
+    const posts = stubProvider((n) => {
+      if (n === 1) throw new TypeError("fetch failed: socket hang up");
+      return okSend(`mid-${n}`);
+    });
+    const outboundId = await approve(a.as, draftId);
+    await cancelScheduled(t, "reconcileSend");
+    await drive(t, 5, 1_000);
+    expect((await a.as.query(api.drafts.sendStatus, { draftId }))?.outcome).toBe("unknown");
+    // Before: sendStatus says unknown, yet the resend path refuses.
+    await expect(a.as.mutation(api.drafts.resendAfterUnknown, resendArgsFor(draftId, outboundId))).rejects.toThrow(/not unknown/);
+
+    vi.setSystemTime(T0 + 3_600_000);
+    expect(await t.mutation(internal.drafts.sweepStalled, {})).toBe(1);
+    await drive(t, 2, 1_000);
+    expect((await t.run((ctx) => ctx.db.get(claimId)))?.sendUnknown).toBe(true);
+    expect((await t.run((ctx) => ctx.db.get(draftId)))?.nextCheckAt).toBeUndefined(); // the component row is final
+
+    const res = await a.as.mutation(api.drafts.resendAfterUnknown, resendArgsFor(draftId, outboundId));
+    expect(res.ok).toBe(true);
+    await drive(t, 20, 5_000);
+    expect(posts.length).toBe(2);
+  });
+
+  it("a live chain is never swept: each hop keeps nextCheckAt ahead of it", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const { draftId } = await seed(t, a.userId);
+    stubProvider((n) => okSend(`mid-${n}`));
+    await approve(a.as, draftId);
+    const stamped = (await t.run((ctx) => ctx.db.get(draftId)))?.nextCheckAt;
+    expect(stamped).toBe(T0 + BACKOFF_MS[0] + 5 * 60_000);
+    vi.setSystemTime(T0 + BACKOFF_MS[0] + 60_000); // the first hop is a minute late: still within the grace
+    expect(await t.mutation(internal.drafts.sweepStalled, {})).toBe(0);
+  });
+
+  it("a still-pending attempt found by the sweep is checked once and pushed to the next sweep, never given a second chain", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const { draftId } = await seed(t, a.userId);
+    await t.run((ctx) => ctx.db.patch(draftId, { outboundId: "ob-stuck" as never, approvedAt: T0, nextCheckAt: T0 }));
+    vi.spyOn(agentmail, "status").mockResolvedValue({ status: "pending", agentmailMessageId: null, threadId: null, errorMessage: null } as never);
+
+    expect(await t.mutation(internal.drafts.sweepStalled, {})).toBe(1);
+    const job = (await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect())).find((j) => j.name.includes("reconcileSend"))!;
+    await t.mutation(internal.drafts.reconcileSend, job.args[0] as { draftId: Id<"drafts">; attempt: number; fromSweep?: boolean });
+    const pendingHops = (await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect())).filter(
+      (j) => j.name.includes("reconcileSend") && j.state.kind === "pending" && j._id !== job._id,
+    );
+    expect(pendingHops).toHaveLength(0);
+    expect((await t.run((ctx) => ctx.db.get(draftId)))?.nextCheckAt).toBe(T0 + MAIL_RECONCILE_STALL_MS + 5 * 60_000);
+  });
+
+  it(`bounded: one sweep schedules at most ${MAIL_SWEEP_PAGE} checks, the next picks up the rest`, async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const { claimId } = await seed(t, a.userId);
+    await t.run(async (ctx) => {
+      for (let i = 0; i < MAIL_SWEEP_PAGE + 5; i++) {
+        await ctx.db.insert("drafts", {
+          claimId, userId: a.userId, version: 10 + i, claimVersion: 1, to: CONTACT, subject: "x", body: "x",
+          approvedAt: T0, outboundId: `ob-${i}` as never, nextCheckAt: T0 - 1,
+        });
+      }
+    });
+    expect(await t.mutation(internal.drafts.sweepStalled, {})).toBe(MAIL_SWEEP_PAGE);
+    expect(await t.mutation(internal.drafts.sweepStalled, {})).toBe(5);
+    expect(await t.mutation(internal.drafts.sweepStalled, {})).toBe(0);
+  });
+
+  it("a tombstoned user's attempts leave the index without a check, so they never clog the page", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const { claimId, draftId } = await seed(t, a.userId);
+    await t.run(async (ctx) => {
+      await ctx.db.patch(draftId, { outboundId: "ob-t" as never, approvedAt: T0, nextCheckAt: T0 - 1 });
+      await ctx.db.insert("accountState", { userId: a.userId, status: "deleting", requestedAt: T0, attempts: 0 });
+    });
+    expect(await t.mutation(internal.drafts.sweepStalled, {})).toBe(0);
+    expect((await t.run((ctx) => ctx.db.get(draftId)))?.nextCheckAt).toBeUndefined();
+    const jobs = (await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect())).filter((j) => j.name.includes("reconcileSend"));
+    expect(jobs).toHaveLength(0);
+    expect(claimId).toBeDefined();
+  });
+});
+
+describe("P02-SK-1: after the component's 7-day cleanup, sendStatus falls back to the draft", () => {
+  it("a confirmed send still reads sent 8 days later, with its message id and thread", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const { claimId, draftId } = await seed(t, a.userId);
+    stubProvider((n) => okSend(`mid-${n}`));
+    const outboundId = await approve(a.as, draftId);
+    await drive(t, 20, 5_000);
+    expect((await t.run((ctx) => ctx.db.get(claimId)))?.status).toBe("sent");
+
+    vi.setSystemTime(T0 + 8 * 86_400_000);
+    await t.mutation(internal.mailPurge.cleanupFinalizedOutbound, {});
+    expect(await componentStatus(t, outboundId)).toBeNull(); // the component row is gone
+
+    const status = await a.as.query(api.drafts.sendStatus, { draftId });
+    expect(status).toEqual({ status: "sent", agentmailMessageId: "mid-1", threadId: "th-mid-1", errorMessage: null, outcome: "sent" });
+  });
+
+  it("with no recorded message id the outcome is unknown, never null (null reads as Sending…)", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const { draftId } = await seed(t, a.userId);
+    await t.run((ctx) => ctx.db.patch(draftId, { outboundId: "ob-gone" as never, approvedAt: T0 }));
+    vi.spyOn(agentmail, "status").mockResolvedValue(null as never);
+    expect((await a.as.query(api.drafts.sendStatus, { draftId }))?.outcome).toBe("unknown");
+    await t.run((ctx) => ctx.db.patch(draftId, { sendError: "The store's mail server refused the message." }));
+    expect(await a.as.query(api.drafts.sendStatus, { draftId })).toMatchObject({ outcome: "failed", errorMessage: "The store's mail server refused the message." });
   });
 });

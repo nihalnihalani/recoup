@@ -37,6 +37,13 @@ crons.interval("retry failed inbound", { hours: 1 }, internal.intake.retryFailed
 crons.interval("mail sweep", { hours: 1 }, internal.notify.sweepStalled, {});
 
 /**
+ * P02-OW-2 (D244): the same safety net for claim emails. `drafts.sweepStalled` re-checks attempts whose
+ * `reconcileSend` hop is overdue (`drafts.nextCheckAt`), so a lost chain can no longer leave a claim `queued`
+ * ("Sending…") for good. A tick with nothing due costs one bounded indexed read.
+ */
+crons.interval("claim email sweep", { hours: 1 }, internal.drafts.sweepStalled, {});
+
+/**
  * Data retention (D75, T16). `retention.sweep` self-reschedules through a
  * bounded page at a time until every rule has caught up for the day, then
  * stops; this daily firing starts the next cycle. See convex/retention.ts's

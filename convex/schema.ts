@@ -567,7 +567,9 @@ export default defineSchema({
     /** M10: the claim linked to an opportunity (evaluation retention, DA-A-32; link checks, DA-A-3). */
     .index("by_opportunity", ["opportunityId"])
     /** M10: active claims on one transaction (overlap guard, DA-A-4; evidence retention "has a case", DA-A-7). */
-    .index("by_transaction_and_status", ["transactionId", "status"]),
+    .index("by_transaction_and_status", ["transactionId", "status"])
+    /** D258: `account.requestDeletion` — every `queued` claim of one user, however old. */
+    .index("by_user_status", ["userId", "status"]),
 
   /**
    * Append-only facts about money. Idempotency keys are scoped per claim (D38). Only user confirmation creates
@@ -596,7 +598,17 @@ export default defineSchema({
     approvedHash: v.optional(v.string()),
     /** M20 (wave 2, DA-A-9): `informal` outreach is correspondence only and never changes delivery. Absent = formal. */
     purpose: v.optional(v.union(v.literal("formal"), v.literal("informal"))),
-  }).index("by_claim", ["claimId"]).index("by_outbound", ["outboundId"]).index("by_message", ["agentmailMessageId"]),
+    /**
+     * P02-OW-2 (D244): when the sweep should next look at this attempt's delivery. Set when the send is enqueued and
+     * on every reconcile hop, cleared once the outcome can no longer change (sent, failed, ambiguous-final, gone).
+     * Set means "this attempt's send may still be pending in the component".
+     */
+    nextCheckAt: v.optional(v.number()),
+  }).index("by_claim", ["claimId"]).index("by_outbound", ["outboundId"]).index("by_message", ["agentmailMessageId"])
+    /** P02-OW-2: `drafts.sweepStalled` — attempts whose reconcile chain is overdue. */
+    .index("by_nextCheck", ["nextCheckAt"])
+    /** D258: `account.requestDeletion` — every unresolved send of one user, formal or informal. */
+    .index("by_user_nextCheck", ["userId", "nextCheckAt"]),
 
   /** Classified merchant replies. promisedCents only when the reply states an amount (D21). */
   replies: defineTable({

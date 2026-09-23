@@ -277,6 +277,18 @@ async function guardedAuthorize(params: AuthorizeParams, ctx: Ctx): Promise<Auth
       }
     }
 
+    if (flow === "signIn") {
+      // D261 LOW-1: the Password provider's verify branch runs inside `authorize`, before
+      // `beforeSessionCreation`. So the correct password on a tombstoned, never-verified account used to mail it a
+      // verification code (D66's resend path) that no session could ever follow. Refused here with the same error a
+      // wrong password gets (byte-identical, a plain string), so it confirms nothing a wrong guess would not. A
+      // verified tombstoned account already got that same error from `beforeSessionCreation`.
+      const signInUserId = await resolveAccountUserId(ctx, email);
+      if (signInUserId && (await ctx.runQuery(internal.auth.isTombstonedUser, { userId: signInUserId }))) {
+        throw new ConvexError(WRONG_CREDENTIALS_MESSAGE);
+      }
+    }
+
     if (flow === "signUp") {
       // F5/N4: consumed before any users/authAccounts row is created.
       // Global and per-address are two distinct named limiters (N4, D99) so

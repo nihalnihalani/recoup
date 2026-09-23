@@ -26,7 +26,7 @@ import { parseSingleEmail } from "./lib/email";
 import { sanitizeError } from "./lib/errors";
 import { redact } from "./lib/log";
 import { clearPendingMailEvent, getPendingMailEvent } from "./mailEvents";
-import { MAIL_RECONCILE_STALL_MS, MAX_SENDS_PER_CLAIM } from "./limits";
+import { MAIL_RECONCILE_STALL_MS, MAIL_SWEEP_PAGE, MAX_SENDS_PER_CLAIM } from "./limits";
 import { claimCurrency, formatMinor, type Money } from "./lib/money";
 import { amountExceedsEstimate } from "./lib/amountReview";
 import { isPackActive } from "./lib/rules/registry";
@@ -298,6 +298,21 @@ function sendCtx(ctx: MutationCtx): Parameters<typeof agentmail.sendMessage>[0] 
 
 function statusCtx(ctx: QueryCtx | MutationCtx): Parameters<typeof agentmail.status>[0] {
   return ctx as unknown as Parameters<typeof agentmail.status>[0];
+}
+
+/** Same deviation as `sendCtx`, for `agentmail.cancel` (`claims.cancelCtx`). */
+function cancelCtx(ctx: MutationCtx): Parameters<typeof agentmail.cancel>[0] {
+  return ctx as unknown as Parameters<typeof agentmail.cancel>[0];
+}
+
+/**
+ * P02-OW-2: how late a scheduled reconcile hop may run before `sweepStalled` treats the chain as lost. Each hop
+ * stamps `drafts.nextCheckAt` at its successor's due time plus this grace, so a live chain is never swept.
+ */
+const RECONCILE_GRACE_MS = 5 * 60_000;
+
+function nextCheckAfter(delayMs: number): number {
+  return Date.now() + delayMs + RECONCILE_GRACE_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,6 +1231,8 @@ async function enqueueClaimEmail(
     recipientConfirmed,
     outboundId,
     sendError: undefined,
+    // P02-OW-2: the sweep's view of this attempt until reconciliation settles it.
+    nextCheckAt: nextCheckAfter(BACKOFF_MS[0]),
     ...(send.approvedHash !== undefined ? { approvedHash: send.approvedHash } : {}),
   });
   // Status only: the version is the money version, and bumping it here would strand this very draft (and every
@@ -1317,6 +1334,24 @@ export const resendAfterUnknown = mutation({
     const send = await checkSend(ctx, userId, draft, current, args, "resend");
     const bound = await liveLink(ctx, current);
 
+    // P02-OW-1: the earlier attempt can still be `pending` in the component (a workpool backlog outlasted the
+    // 5-check chain). Left alone, it would be POSTed as well and the merchant would get two emails. It is cancelled
+    // only here, after every refusal above, so a refused resend never cancels the user's earlier approved email.
+    // P02-SK-3: a cancel also succeeds while that POST is in flight, so the note never says it was not sent.
+    let earlierCancelRequested = false;
+    if (earlier?.status === "pending") {
+      try {
+        await agentmail.cancel(cancelCtx(ctx), draft.outboundId);
+      } catch {
+        // The status was read in this same transaction, so this is not a race with the send; refuse rather than risk
+        // a second email. Throwing rolls back everything above, the re-evaluation included.
+        throw new ConvexError("The earlier attempt is still being sent. Check again in a few minutes.");
+      }
+      earlierCancelRequested = true;
+      // The component row is final now: nothing more for the sweep to learn about the earlier attempt.
+      await ctx.db.patch(draft._id, { nextCheckAt: undefined });
+    }
+
     // 4. A new draft version for the new attempt; the earlier one keeps its outbound id.
     const resendDraftId = await ctx.db.insert("drafts", {
       claimId: claim._id,
@@ -1333,7 +1368,9 @@ export const resendAfterUnknown = mutation({
       claimId: claim._id,
       userId,
       kind: "status",
-      text: `Sent again after an unknown delivery outcome. The earlier attempt (${new Date(draft.approvedAt ?? draft._creationTime).toISOString().slice(0, 16).replace("T", " ")} UTC) may also have reached the merchant.`,
+      text: earlierCancelRequested
+        ? `Sent again after an unknown delivery outcome. The earlier attempt (${new Date(draft.approvedAt ?? draft._creationTime).toISOString().slice(0, 16).replace("T", " ")} UTC) was still waiting to be sent, so we asked for it to be cancelled, but it may already have reached the merchant.`
+        : `Sent again after an unknown delivery outcome. The earlier attempt (${new Date(draft.approvedAt ?? draft._creationTime).toISOString().slice(0, 16).replace("T", " ")} UTC) may also have reached the merchant.`,
     });
     const outboundId = await enqueueClaimEmail(ctx, current, resendDraftId, send, args.recipientConfirmed === true);
     return { ok: true as const, outboundId, draftId: resendDraftId };
@@ -1379,9 +1416,16 @@ export async function applySendOutcome(
   reschedule: boolean,
 ): Promise<SendOutcome> {
   const draft = await ctx.db.get(draftId);
-  if (!draft || !draft.outboundId) return "gone";
+  if (!draft) return "gone";
+  if (!draft.outboundId) {
+    if (draft.nextCheckAt !== undefined) await ctx.db.patch(draft._id, { nextCheckAt: undefined });
+    return "gone";
+  }
   const claim = await ctx.db.get(draft.claimId);
-  if (!claim) return "gone";
+  if (!claim) {
+    if (draft.nextCheckAt !== undefined) await ctx.db.patch(draft._id, { nextCheckAt: undefined });
+    return "gone";
+  }
   // An attempt is superseded once a newer draft of the claim carries its own outbound attempt (a resend).
   const superseded = (
     await ctx.db
@@ -1395,11 +1439,11 @@ export async function applySendOutcome(
     const sendError = ownerSafeSendError(status.status, status.errorMessage);
     if (superseded) {
       // The earlier attempt's own record only; its send still counted, and the current attempt is untouched.
-      await ctx.db.patch(draft._id, { sendError });
+      await ctx.db.patch(draft._id, { sendError, nextCheckAt: undefined });
       return "failed";
     }
     // Clear the outbound binding so the user can fix the address and retry; `sendError` keeps the reason visible.
-    await ctx.db.patch(draft._id, { sendError, outboundId: undefined, approvedAt: undefined });
+    await ctx.db.patch(draft._id, { sendError, outboundId: undefined, approvedAt: undefined, nextCheckAt: undefined });
     if (claim.status === "queued") {
       await ctx.db.patch(claim._id, { status: "drafted", sendUnknown: undefined });
     }
@@ -1415,9 +1459,9 @@ export async function applySendOutcome(
     if (pending?.reason === "bounced") {
       const sendError = `Merchant email ${pending.providerStatus} after it was marked sent.`.slice(0, MAX_ERROR_CHARS);
       if (superseded) {
-        await ctx.db.patch(draft._id, { sendError });
+        await ctx.db.patch(draft._id, { sendError, nextCheckAt: undefined });
       } else {
-        await ctx.db.patch(draft._id, { sendError, outboundId: undefined, approvedAt: undefined });
+        await ctx.db.patch(draft._id, { sendError, outboundId: undefined, approvedAt: undefined, nextCheckAt: undefined });
         if (claim.status === "queued") {
           await ctx.db.patch(claim._id, { status: "drafted", sendUnknown: undefined });
         }
@@ -1429,6 +1473,7 @@ export async function applySendOutcome(
     await ctx.db.patch(draft._id, {
       agentmailMessageId: status.agentmailMessageId,
       sendError: undefined,
+      nextCheckAt: undefined,
     });
     if (claim.status === "queued") {
       await ctx.db.patch(claim._id, {
@@ -1457,10 +1502,12 @@ export async function applySendOutcome(
   // polling it again can never resolve it: no reschedule (the owner can still `recheckSend`).
   if (status && isAmbiguousSendFailure(status)) {
     if (!superseded && claim.status === "queued") await ctx.db.patch(claim._id, { sendUnknown: true });
+    await ctx.db.patch(draft._id, { nextCheckAt: undefined });
     return "unknown";
   }
 
   if (attempt < BACKOFF_MS.length) {
+    await ctx.db.patch(draft._id, { nextCheckAt: nextCheckAfter(BACKOFF_MS[attempt]) });
     await ctx.scheduler.runAfter(BACKOFF_MS[attempt], internal.drafts.reconcileSend, {
       draftId: draft._id,
       attempt: attempt + 1,
@@ -1490,6 +1537,9 @@ export async function applySendOutcome(
       attempt: BACKOFF_MS.length,
     });
   }
+  // P02-OW-2: still pending → the sweep keeps looking (a lost chain, or a one-shot check that armed no hop); gone from
+  // the component (`null`) → nothing more can ever be learned, so the sweep stops.
+  await ctx.db.patch(draft._id, { nextCheckAt: status !== null ? nextCheckAfter(MAIL_RECONCILE_STALL_MS) : undefined });
   return "unknown";
 }
 
@@ -1499,23 +1549,61 @@ export async function applySendOutcome(
  * own claim/draft rows must not keep touching them.
  */
 export const reconcileSend = internalMutation({
-  args: { draftId: v.id("drafts"), attempt: v.number() },
+  args: { draftId: v.id("drafts"), attempt: v.number(), fromSweep: v.optional(v.boolean()) },
   returns: v.null(),
   handler: async (ctx, args) => {
     const draft = await ctx.db.get(args.draftId);
     if (!draft || !draft.outboundId) return null;
     if (await isTombstoned(ctx, draft.userId)) return null;
     const status = await agentmail.status(statusCtx(ctx), draft.outboundId);
-    // Scheduled path: may arm the next stall-interval hop if delivery is still unresolved (N2).
-    await applySendOutcome(ctx, args.draftId, args.attempt, status, true);
+    // Scheduled path: may arm the next stall-interval hop if delivery is still unresolved (N2). A sweep check is
+    // one-shot: the sweep itself re-checks the attempt next hour, so it never starts a second chain beside a live one.
+    await applySendOutcome(ctx, args.draftId, args.attempt, status, args.fromSweep !== true);
     return null;
   },
 });
 
 /**
+ * P02-OW-2 (D244): the claim-email half of the hourly mail safety net (`notify.sweepStalled` covers alerts). Picks up
+ * attempts whose `nextCheckAt` has passed, i.e. whose scheduled `reconcileSend` hop is overdue by more than
+ * `RECONCILE_GRACE_MS`: a lost chain would otherwise leave the claim `queued` ("Sending…") for good, even after the
+ * component knew the outcome. Each due attempt gets one `reconcileSend` check with the backoff spent, which records a
+ * definite outcome (sent → reminder set; failed; ambiguous → `sendUnknown`, so `resendAfterUnknown` becomes possible)
+ * or pushes `nextCheckAt` out for the next sweep. Bounded by `MAIL_SWEEP_PAGE`; a tombstoned user's attempts (D87) and
+ * attempts with no outbound id leave the index instead of clogging the page. Returns how many checks it scheduled.
+ */
+export const sweepStalled = internalMutation({
+  args: {},
+  returns: v.number(),
+  handler: async (ctx) => {
+    const now = Date.now();
+    const due = await ctx.db
+      .query("drafts")
+      .withIndex("by_nextCheck", (q) => q.gte("nextCheckAt", 0).lte("nextCheckAt", now))
+      .take(MAIL_SWEEP_PAGE);
+    let scheduled = 0;
+    for (const draft of due) {
+      if (!draft.outboundId || (await isTombstoned(ctx, draft.userId))) {
+        await ctx.db.patch(draft._id, { nextCheckAt: undefined });
+        continue;
+      }
+      await ctx.db.patch(draft._id, { nextCheckAt: now + MAIL_RECONCILE_STALL_MS + RECONCILE_GRACE_MS });
+      await ctx.scheduler.runAfter(0, internal.drafts.reconcileSend, {
+        draftId: draft._id,
+        attempt: BACKOFF_MS.length,
+        fromSweep: true,
+      });
+      scheduled++;
+    }
+    return scheduled;
+  },
+});
+
+/**
  * D56: lets the owner ask for one more delivery check on demand, e.g. after a draft has sat `sendUnknown` for a
- * while. Reuses `applySendOutcome` with the backoff exhausted so a still-pending result doesn't reschedule another
- * automatic check; it only updates `sendUnknown` (cleared on a definite outcome, otherwise left as-is).
+ * while. P02-OW-2: the Composer's "Check again" calls this whenever the claim is still `queued`. Reuses
+ * `applySendOutcome` with the backoff exhausted so a still-pending result doesn't reschedule another automatic check;
+ * it only updates `sendUnknown` (cleared on a definite outcome, otherwise left as-is).
  */
 export const recheckSend = mutation({
   args: { draftId: v.id("drafts") },
@@ -1556,7 +1644,20 @@ export const sendStatus = query({
     const draft = await ownedDraft(ctx, draftId, userId);
     if (!draft.outboundId) return null;
     const raw = await agentmail.status(statusCtx(ctx), draft.outboundId);
-    if (raw === null) return null;
+    if (raw === null) {
+      // P02-SK-1: the component deletes finalized rows about 7 days after they settle (`cleanupFinalizedOutbound`),
+      // so a missing row is normal for an old send. The draft keeps what reconciliation learned: a recorded message
+      // id is `sent`, a recorded failure is `failed`, and anything else is `unknown`. Never `null` (read as
+      // "Sending…"), because nothing can be sending once the component has no row.
+      if (draft.agentmailMessageId !== undefined) {
+        const claim = await ctx.db.get(draft.claimId);
+        return { status: "sent" as const, agentmailMessageId: draft.agentmailMessageId, threadId: claim?.threadId ?? null, errorMessage: null, outcome: "sent" as const };
+      }
+      if (draft.sendError !== undefined) {
+        return { status: "failed" as const, agentmailMessageId: null, threadId: null, errorMessage: draft.sendError, outcome: "failed" as const };
+      }
+      return { status: "pending" as const, agentmailMessageId: null, threadId: null, errorMessage: null, outcome: "unknown" as const };
+    }
     if (isAmbiguousSendFailure(raw)) {
       return { status: "pending" as const, agentmailMessageId: null, threadId: raw.threadId, errorMessage: null, outcome: "unknown" as const };
     }

@@ -780,6 +780,89 @@ describe("P02-OW-3: opt-out, unsubscribe, suppression and deletion cancel a send
     expect(claimSend?.errorMessage).toBe("Cancelled by user");
   });
 
+  it("D261 LOW-2: an alert reconciliation already moved to `unknown` while its send is still pending is cancelled too", async () => {
+    const t = setup();
+    const posts = stubProvider();
+    const { as, mailLogId } = await queuedAlert(t, "Lou");
+    // A workpool backlog: the backoff is spent while the component row is still pending.
+    await t.run((ctx) => applyDropOutcome(ctx, mailLogId, BACKOFF_MS.length, { status: "pending", agentmailMessageId: null, errorMessage: null }));
+    expect((await t.run((ctx) => ctx.db.get(mailLogId)))?.status).toBe("unknown");
+
+    await as.mutation(api.alerts.setAlerts, { enabled: false });
+    await drive(t, 60);
+
+    expect(posts()).toBe(0); // before: 1
+    await expectCancelled(t, mailLogId, "opted_out");
+  });
+
+  it("D261 INFO-1: pausing or archiving the watch cancels its pending alert (watch_inactive)", async () => {
+    for (const stop of ["pause", "archive"] as const) {
+      const t = setup();
+      const posts = stubProvider();
+      const { as, mailLogId } = await queuedAlert(t, `Wes${stop}`);
+      const watchId = (await t.run((ctx) => ctx.db.get(mailLogId)))!.watchId!;
+      if (stop === "pause") await as.mutation(api.watches.setStatus, { watchId, status: "paused" });
+      else await as.mutation(api.watches.archive, { watchId });
+      await drive(t, 60);
+      expect(posts(), stop).toBe(0);
+      const row = (await t.run((ctx) => ctx.db.get(mailLogId)))!;
+      expect(row.status, stop).toBe("suppressed");
+      expect(row.reason, stop).toBe("watch_inactive");
+      expect(row.error, stop).toMatch(/cancelled, but it may already have gone out/);
+    }
+  });
+
+  it("D261 INFO-1: marking the watched item bought cancels its pending alert", async () => {
+    const t = setup();
+    const posts = stubProvider();
+    const { as, mailLogId } = await queuedAlert(t, "Bo");
+    const watchId = (await t.run((ctx) => ctx.db.get(mailLogId)))!.watchId!;
+    await as.mutation(api.watches.markBought, { watchId, paidCents: 4_000, purchasedAt: T0 - 86_400_000 });
+    await drive(t, 60);
+    expect(posts()).toBe(0);
+    expect((await t.run((ctx) => ctx.db.get(mailLogId)))?.reason).toBe("watch_inactive");
+  });
+
+  it("D258: an informal claim email (it never moves the claim to queued) approved just before deletion is cancelled → 0 POSTs", async () => {
+    const t = setup();
+    const posts = stubProvider();
+    const { userId, as } = await verifiedUser(t, "Ivy");
+    await inboxFor(t, userId, "Ivy");
+    const { claimId, draftId } = await t.run(async (ctx) => {
+      const purchaseId = await ctx.db.insert("purchases", {
+        userId, merchant: "Acme", merchantDomain: "acme.example", orderRef: "AC-2",
+        purchasedAt: Date.UTC(2026, 0, 2), currency: "USD", status: "active",
+      });
+      const itemId = await ctx.db.insert("items", {
+        purchaseId, userId, name: "Lamp", unitCents: 4000, qty: 1, returned: true, returnedAt: Date.UTC(2026, 0, 9),
+      });
+      const claimId = await ctx.db.insert("claims", {
+        purchaseId, itemId, userId, type: "return_credit", expectedCents: 4000, status: "drafted", token: "IV12CD", version: 1,
+        requiredChannel: "web_form",
+      });
+      const draftId = await ctx.db.insert("drafts", {
+        claimId, userId, version: 1, claimVersion: 1, to: CONTACT, subject: "About my return [RC-IV12CD]", body: "Just checking in.",
+        purpose: "informal",
+      });
+      return { claimId, draftId };
+    });
+    const outboundId = await as.mutation(api.drafts.approveAndSend, {
+      draftId, to: CONTACT, subject: "About my return", body: "Just checking in.", claimVersion: 1, draftVersion: 1,
+      recipientConfirmed: true,
+    });
+    expect((await t.run((ctx) => ctx.db.get(claimId)))?.status).toBe("drafted"); // informal: the claim never queues
+    expect((await componentStatus(t, outboundId))?.status).toBe("pending");
+
+    const state = await requestDeletion(t, as, userId);
+    await t.run((ctx) => ctx.scheduler.cancel(state.activePurgeJobId!)); // hold the purge
+    await drive(t, 60);
+
+    expect(posts()).toBe(0);
+    const send = await componentStatus(t, outboundId);
+    expect(send?.status).toBe("failed");
+    expect(send?.errorMessage).toBe("Cancelled by user");
+  });
+
   it("requestDeletion with the purge left to run → still 0 POSTs, whichever of purge and workpool runs first", async () => {
     const t = setup();
     const posts = stubProvider();

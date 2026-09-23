@@ -33,13 +33,15 @@ const STEPS = ["Approved", "Queued", "Sent"] as const;
 function SendProgress({
   sendStatus,
   sendUnknown,
+  confirmedSent,
   approvedAt,
 }: {
   sendStatus: SendStatus | undefined;
   sendUnknown: boolean;
+  confirmedSent: boolean;
   approvedAt?: number;
 }) {
-  const delivery = deliveryOf(sendStatus, sendUnknown);
+  const delivery = deliveryOf(sendStatus, sendUnknown, confirmedSent);
   const headDot =
     delivery.tone === "done"
       ? "border-green-600 bg-green-600"
@@ -255,6 +257,7 @@ export function Composer({
   const prepareSend = useMutation(api.drafts.prepareSend);
   const approveAndSend = useMutation(api.drafts.approveAndSend);
   const resendAfterUnknown = useMutation(api.drafts.resendAfterUnknown);
+  const recheckSend = useMutation(api.drafts.recheckSend);
   const adjustExpected = useMutation(api.claims.adjustExpected);
   // The store's reply has to come back to this user, so a claim email goes out from their own Recoup
   // inbox. It is created on the first send rather than at sign-up (idempotent: returns the existing one).
@@ -285,6 +288,9 @@ export function Composer({
   const sent = draft.outboundId !== undefined;
   const locked = sent || closed;
   const unknownOutcome = sent && claim.sendUnknown === true && !closed;
+  // P02-OW-2: while the claim is still `queued` its delivery is unresolved, so the owner can ask for a fresh check at
+  // any time (`drafts.recheckSend`), not only after the automatic checks run out.
+  const canRecheck = sent && claim.status === "queued" && !closed;
   const mismatch =
     to.trim().length > 0 &&
     merchantDomain.length > 0 &&
@@ -472,8 +478,21 @@ export function Composer({
         <SendProgress
           sendStatus={sendStatus}
           sendUnknown={claim.sendUnknown === true}
+          confirmedSent={draft.agentmailMessageId !== undefined}
           approvedAt={draft.approvedAt}
         />
+      )}
+      {canRecheck && (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            disabled={busy}
+            className={secondaryButtonClass}
+            onClick={() => void run(() => recheckSend({ draftId: draft._id }))}
+          >
+            {busy ? "Checking…" : "Check again"}
+          </button>
+        </div>
       )}
 
       {pending && (

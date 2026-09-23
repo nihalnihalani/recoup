@@ -35,6 +35,12 @@ describe("deliveryOf (the Composer's rail, from sendStatus.outcome)", () => {
     expect(deliveryOf(undefined, false).note).toBe("Checking");
   });
 
+  it("P02-SK-1: a draft recorded as sent never reads as sending, even with no component status", () => {
+    expect(deliveryOf(null, false, true)).toEqual({ reached: 3, tone: "done", note: "Sent" });
+    expect(deliveryOf(null, true, true).note).toBe("Sent");
+    expect(deliveryOf(null, false).note).toBe("Sending…"); // no recorded send: unchanged
+  });
+
   it("a complaint after delivery is still delivered", () => {
     expect(deliveryOf(status({ status: "complained", agentmailMessageId: "m1", outcome: "sent" }), false).note).toBe("Delivered, marked as spam");
   });

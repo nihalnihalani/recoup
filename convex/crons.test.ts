@@ -24,3 +24,11 @@ describe("crons — M29 wiring", () => {
     expect(jobs["evidence extraction retry"]).toMatchObject({ name: "evidence:retryStalledExtractions", args: [{}], schedule: { type: "interval", minutes: 15 } });
   });
 });
+
+describe("crons — P02-OW-2 wiring", () => {
+  it("sweeps stalled claim emails hourly, beside the alert mail sweep", () => {
+    const jobs = (crons as unknown as { crons: Record<string, { name: string; args: unknown[]; schedule: Record<string, unknown> }> }).crons;
+    expect(jobs["claim email sweep"]).toMatchObject({ name: "drafts:sweepStalled", args: [{}], schedule: { type: "interval", hours: 1 } });
+    expect(jobs["mail sweep"]).toMatchObject({ name: "notify:sweepStalled", args: [{}], schedule: { type: "interval", hours: 1 } });
+  });
+});

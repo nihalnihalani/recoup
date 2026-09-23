@@ -18,6 +18,7 @@ const approveAndSend = vi.fn(async (_args: Call): Promise<unknown> => "outbound-
 const resendAfterUnknown = vi.fn(async (_args: Call): Promise<unknown> => ({ ok: true, outboundId: "outbound-2", draftId: "d2" }));
 const adjustExpected = vi.fn(async (_args: Call): Promise<unknown> => null);
 const ensureInbox = vi.fn(async () => null);
+const recheckSend = vi.fn(async (_args: Call): Promise<unknown> => null);
 let sendStatus: unknown = null;
 
 function tracked(name: string, fn: (args: Call) => Promise<unknown>) {
@@ -35,6 +36,7 @@ vi.mock("convex/react", () => ({
     if (name === "drafts:approveAndSend") return tracked("approveAndSend", approveAndSend);
     if (name === "drafts:resendAfterUnknown") return tracked("resendAfterUnknown", resendAfterUnknown);
     if (name === "claims:adjustExpected") return tracked("adjustExpected", adjustExpected);
+    if (name === "drafts:recheckSend") return tracked("recheckSend", recheckSend);
     return vi.fn(async () => null);
   },
   useAction: () => ensureInbox,
@@ -84,6 +86,8 @@ beforeEach(() => {
   resendAfterUnknown.mockImplementation(async () => ({ ok: true, outboundId: "outbound-2", draftId: "d2" }));
   adjustExpected.mockReset();
   adjustExpected.mockImplementation(async () => null);
+  recheckSend.mockReset();
+  recheckSend.mockImplementation(async () => null);
 });
 
 const approve = () => fireEvent.click(screen.getByRole("button", { name: "Approve & send" }));
@@ -356,5 +360,26 @@ describe("Composer: amount_exceeds_estimate (DA-B-2)", () => {
     expect(prepareSend.mock.calls[1][0]).not.toHaveProperty("acknowledgeAmountAboveEstimate");
     expect((await screen.findByRole("region", { name: "Nothing was sent: review the claim again" })).textContent).toContain("The claim changed");
     expect(approveAndSend).not.toHaveBeenCalled();
+  });
+});
+
+describe("Composer: delivery after the send (P02-OW-2, P02-SK-1)", () => {
+  it("OW-2: a queued claim offers Check again, which asks the server for a fresh delivery check", async () => {
+    renderComposer(draft({ outboundId: "outbound-1" as never, approvedAt: 1 }), claim({ status: "queued" }));
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(recheckSend).toHaveBeenCalledTimes(1));
+    expect(recheckSend.mock.calls[0][0]).toEqual({ draftId: "d1" });
+  });
+
+  it("OW-2: no Check again once the claim has a definite outcome, or for a closed claim", () => {
+    renderComposer(draft({ outboundId: "outbound-1" as never, agentmailMessageId: "mid-1" }), claim({ status: "sent" }));
+    expect(screen.queryByRole("button", { name: "Check again" })).toBeNull();
+  });
+
+  it("SK-1: a draft recorded as sent reads 'Delivery: Sent' even with no component status, never 'Sending…'", () => {
+    sendStatus = null;
+    renderComposer(draft({ outboundId: "outbound-1" as never, agentmailMessageId: "mid-1", approvedAt: 1 }), claim({ status: "sent" }));
+    expect(screen.getByRole("list", { name: "Delivery: Sent" })).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Delivery: Sending…" })).toBeNull();
   });
 });

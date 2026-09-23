@@ -8,7 +8,7 @@
  */
 import { v } from "convex/values";
 import { internalMutation, mutation, query } from "./_generated/server";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { suppressedReason as suppressedReasonValidator } from "./schema";
 import { requireUserId } from "./lib/access";
@@ -74,13 +74,14 @@ function cancelCtx(ctx: MutationCtx): Parameters<typeof agentmail.cancel>[0] {
 }
 
 /**
- * Newest `queued` rows read per call. The daily cap is MAX_DROP_EMAILS_PER_DAY (5) and
- * a row leaves `queued` once reconciled, so a pending send is always among the newest few.
+ * Newest rows read per status per call. A send still pending in the component was enqueued recently (alerts are
+ * capped at MAX_DROP_EMAILS_PER_DAY, 5), so its row is among the newest of its status even though ambiguous-final
+ * `unknown` rows accumulate.
  */
 const CANCEL_SCAN = 10;
 
 /** Why the gate closed on an alert already handed to the mail component. */
-export type CancelReason = "opted_out" | "deleted" | "address_suppressed";
+export type CancelReason = "opted_out" | "deleted" | "address_suppressed" | "watch_inactive";
 
 /**
  * P02-SK-3: a cancel also succeeds while the component's POST is already in
@@ -92,43 +93,20 @@ const CANCEL_REQUESTED_MESSAGES: Record<CancelReason, string> = {
   deleted: "This account is being deleted. We asked for this alert to be cancelled, but it may already have gone out.",
   address_suppressed:
     "Your email address stopped accepting alerts while this one was being sent. We asked for it to be cancelled, but it may already have gone out.",
+  watch_inactive:
+    "You stopped watching this item while this alert was being sent. We asked for it to be cancelled, but it may already have gone out.",
 };
 
 /**
- * Cancels this user's price-drop alerts that are still pending in the AgentMail
- * component. Called in the same transaction as every change that closes the alert
- * gate: `setAlerts({enabled:false})`, `unsubscribeByToken`, `suppressAddress`
- * (bounce/complaint) and `account.requestDeletion`.
- *
- * This is the send-time half of the gate. `notify.sendDrop` checks `alertGate` in
- * the same transaction that enqueues the send, so a gate that closes first is always
- * seen there. What it could not see is a gate that closes AFTER the enqueue and
- * before the component's workpool POSTs; the component skips a row that is `failed`
- * by the time it dispatches (`getOutboundForSend`), so cancelling here closes that
- * window. `claimed` rows need nothing: `sendDrop` re-runs the gate when it runs.
- *
- * Per row: `agentmail.cancel` succeeds only while the component row is `pending`
- * (`cancelSend` throws for any other status, or for an id it does not have). On
- * success the row becomes `suppressed` with `reason`; none of these reasons is ever
- * re-claimed (`notify.RECLAIMABLE_REASONS`), so a cancelled alert is never re-sent.
- * On failure the row is left `queued`: the send already finished one way or the
- * other, and `reconcileDrop` records what actually happened (a delivered alert ends
- * `sent`, never `suppressed`). Returns how many cancels were requested.
+ * Per row: `agentmail.cancel` succeeds only while the component row is `pending` (`cancelSend` throws for any other
+ * status, or for an id it does not have). On success the row becomes `suppressed` with `reason`. On failure the row
+ * is left as it was: the send already finished one way or the other, and reconciliation records what actually
+ * happened (a delivered alert ends `sent`, never `suppressed`).
  */
-export async function cancelPendingDrops(
-  ctx: MutationCtx,
-  userId: Id<"users">,
-  reason: CancelReason,
-  now: number = Date.now(),
-): Promise<number> {
-  const queued = await ctx.db
-    .query("mailLog")
-    .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", "queued"))
-    .order("desc")
-    .take(CANCEL_SCAN);
+async function cancelRows(ctx: MutationCtx, rows: Doc<"mailLog">[], reason: CancelReason, now: number): Promise<number> {
   let cancelled = 0;
-  for (const row of queued) {
-    if (!row.outboundId) continue;
+  for (const row of rows) {
+    if (!row.outboundId || (row.status !== "queued" && row.status !== "unknown")) continue;
     try {
       await agentmail.cancel(cancelCtx(ctx), row.outboundId);
     } catch {
@@ -144,6 +122,55 @@ export async function cancelPendingDrops(
     cancelled++;
   }
   return cancelled;
+}
+
+/**
+ * Cancels this user's price-drop alerts that may still be pending in the AgentMail component. Called in the same
+ * transaction as every change that closes the alert gate: `setAlerts({enabled:false})`, `unsubscribeByToken`,
+ * `suppressAddress` (bounce/complaint) and `account.requestDeletion`.
+ *
+ * `notify.sendDrop` checks `alertGate` in the transaction that enqueues the send, so a gate that closes first is always
+ * seen there. The component POSTs later, from its own workpool, and skips a row that is `failed` when it reads it
+ * (`getOutboundForSend`). A cancel that commits before that read therefore stops the POST. One that commits after it
+ * (the POST is already in flight) cannot, which is why the recorded copy says the alert may already have gone out.
+ * `claimed` rows need nothing here: `sendDrop` re-runs the gate when it runs.
+ *
+ * Both `queued` and `unknown` rows are read (security review LOW-2, D261): reconciliation moves a row to `unknown`
+ * once its backoff is spent even while the component send is still `pending` (a workpool backlog).
+ * `cancelRows` above says what happens per row. None of these reasons is ever re-claimed (`notify.RECLAIMABLE_REASONS`),
+ * so a cancelled alert is never re-sent. Returns how many cancels were requested.
+ */
+export async function cancelPendingDrops(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  reason: Exclude<CancelReason, "watch_inactive">,
+  now: number = Date.now(),
+): Promise<number> {
+  let cancelled = 0;
+  for (const status of ["queued", "unknown"] as const) {
+    const rows = await ctx.db
+      .query("mailLog")
+      .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", status))
+      .order("desc")
+      .take(CANCEL_SCAN);
+    cancelled += await cancelRows(ctx, rows, reason, now);
+  }
+  return cancelled;
+}
+
+/**
+ * Security review INFO-1 (D261): pausing, archiving or marking a watch bought cancels that watch's alert if it is
+ * still pending in the component, the same way `sendDrop` refuses a `claimed` one (`watch_inactive`). Reads the
+ * watch's newest rows (one per alerted price) and acts only on `queued`/`unknown` ones. `watch_inactive` stays
+ * re-claimable after 24 hours (D70), exactly as for a refused `claimed` row, so resuming the watch can alert again.
+ */
+export async function cancelPendingWatchDrops(ctx: MutationCtx, watchId: Id<"watches">, now: number = Date.now()): Promise<number> {
+  const rows = await ctx.db
+    .query("mailLog")
+    .withIndex("by_watch", (q) => q.eq("watchId", watchId))
+    .order("desc")
+    .take(CANCEL_SCAN);
+  return await cancelRows(ctx, rows, "watch_inactive", now);
 }
 
 export const settings = query({

@@ -32,6 +32,7 @@ import { logEvent } from "./lib/log";
 import { sanitizeError } from "./lib/errors";
 import { assertCurrency, assertNonEmpty, assertPositiveCents, assertQty, assertTimestamp } from "./lib/money";
 import { claimDrop } from "./notify";
+import { cancelPendingWatchDrops } from "./alerts";
 import { defaultWatchName, parseProductUrl } from "./lib/watchUrl";
 import { verdictWithQualifier, type QualifiedVerdict } from "./lib/verdict";
 import { imageUrlChange } from "./lib/imageUrl";
@@ -536,6 +537,7 @@ export const setStatus = mutation({
     if (watch.status === status) return null; // a retry is a no-op
     if (status === "paused") {
       await ctx.db.patch(watchId, { status });
+      await cancelPendingWatchDrops(ctx, watchId); // D261 INFO-1
       return null;
     }
     const now = Date.now();
@@ -553,7 +555,10 @@ export const archive = mutation({
   handler: async (ctx, { watchId }) => {
     const userId = await requireUserId(ctx);
     const watch = await ownedWatch(ctx, watchId, userId);
-    if (watch.status !== "archived") await ctx.db.patch(watchId, { status: "archived" });
+    if (watch.status !== "archived") {
+      await ctx.db.patch(watchId, { status: "archived" });
+      await cancelPendingWatchDrops(ctx, watchId); // D261 INFO-1
+    }
     return null;
   },
 });
@@ -657,6 +662,7 @@ export const markBought = mutation({
     // DA-A-35: this is a direct purchase insert, so it must create the transaction itself.
     await ensurePurchaseTransaction(ctx, purchaseId);
     await ctx.db.patch(watch._id, { status: "bought", purchaseId });
+    await cancelPendingWatchDrops(ctx, watch._id); // D261 INFO-1: a bought item is never alerted again
     // B4: same shared daily budget as `purchases.create`; over it the purchase is still made, without the research.
     await schedulePolicyFetch(ctx, userId, watch.merchantDomain);
     return purchaseId;

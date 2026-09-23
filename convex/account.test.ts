@@ -7,6 +7,7 @@ import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { inboxTransport } from "./account";
 import { EXPORT_EXEMPT, EXPORT_TABLE_NAMES, OUTSIDE_PURGE_STEPS, PURGE_STEPS } from "./account";
+import { DELETION_QUEUED_CLAIM_SCAN, DELETION_UNRESOLVED_DRAFT_SCAN } from "./account";
 import { chargeStoredBytes, storedBytes } from "./lib/blobRefs";
 import { WRONG_CREDENTIALS_MESSAGE } from "./auth";
 import { rateLimiter } from "./lib/rateLimits";
@@ -2045,5 +2046,147 @@ describe("M14c (D173) — purge and the lifetime stored-bytes counter", () => {
     const usageRows = await t.run((ctx) => ctx.db.query("usage").collect());
     expect(usageRows.filter((r) => r.userId === a.userId)).toEqual([]);
     expect(await t.run((ctx) => storedBytes(ctx, b.userId))).toBe(2_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D258 (P02-OW-3 residual closed): deletion cancels every unresolved claim
+// email through two index ranges -- `drafts.by_user_nextCheck` (every
+// unresolved send, formal or informal) and `claims.by_user_status` (queued
+// claims, for attempts enqueued before `drafts.nextCheckAt` existed). The
+// informal-email case is driven end to end, with provider POSTs counted, in
+// notify.fault.test.ts. None of these drive the scheduler: a real component
+// send here only needs to exist, `pending`, for the cancel to act on.
+// ---------------------------------------------------------------------------
+
+describe("D258: requestDeletion cancels every unresolved claim email", () => {
+  async function pendingSend(t: T, n: number) {
+    return (await t.mutation(components.agentmail.lib.enqueueSend, {
+      config: { retryAttempts: 1, initialBackoffMs: 10 },
+      inboxId: "inbox-user",
+      kind: "send" as const,
+      payload: { to: "support@acme.example", subject: `Refund ${n}`, text: "Please confirm the credit." },
+    })) as string;
+  }
+
+  async function sendState(t: T, outboundId: string) {
+    return await t.query(components.agentmail.lib.getOutboundStatus, { outboundId: outboundId as never });
+  }
+
+  /** A claim of `status` with one draft; `outboundId`/`nextCheckAt` make that draft an attempt. */
+  async function claimWithDraft(
+    t: T,
+    userId: Id<"users">,
+    status: "queued" | "sent" | "drafted",
+    over: { outboundId?: string; nextCheckAt?: number; requiredChannel?: "web_form" } = {},
+  ) {
+    return await t.run(async (ctx) => {
+      const purchaseId = await ctx.db.insert("purchases", {
+        userId, merchant: "Acme", merchantDomain: "acme.example", purchasedAt: T0 - 86_400_000, currency: "USD", status: "active",
+      });
+      const claimId = await ctx.db.insert("claims", {
+        purchaseId, userId, type: "return_credit", expectedCents: 4000, status, token: `T${Math.random().toString(36).slice(2, 10)}`, version: 1,
+        ...(over.requiredChannel ? { requiredChannel: over.requiredChannel } : {}),
+      });
+      const draftId = await ctx.db.insert("drafts", {
+        claimId, userId, version: 1, claimVersion: 1, to: "support@acme.example", subject: "Refund", body: "Please confirm the credit.",
+        ...(over.outboundId ? { outboundId: over.outboundId as never, approvedAt: T0 } : {}),
+        ...(over.nextCheckAt !== undefined ? { nextCheckAt: over.nextCheckAt } : {}),
+      });
+      return { claimId, draftId };
+    });
+  }
+
+  it("a pre-deploy formal attempt (no nextCheckAt) on a queued claim is cancelled through the claims index", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const outboundId = await pendingSend(t, 1);
+    await claimWithDraft(t, a.userId, "queued", { outboundId });
+
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+
+    const state = await sendState(t, outboundId);
+    expect(state?.status).toBe("failed");
+    expect(state?.errorMessage).toBe("Cancelled by user");
+  });
+
+  it("a queued claim older than 200 newer claims is still covered, by both ranges", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    const legacy = await pendingSend(t, 1);
+    const current = await pendingSend(t, 2);
+    const informal = await pendingSend(t, 3);
+    // The oldest claims: one legacy attempt, one current attempt, one informal (never-queued) attempt.
+    await claimWithDraft(t, a.userId, "queued", { outboundId: legacy });
+    await claimWithDraft(t, a.userId, "queued", { outboundId: current, nextCheckAt: T0 + 60_000 });
+    await claimWithDraft(t, a.userId, "drafted", { outboundId: informal, nextCheckAt: T0 + 60_000, requiredChannel: "web_form" });
+    // 200 newer claims: before D258, deletion read only the newest 200 claims and missed all three above.
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 200; i++) {
+        const purchaseId = await ctx.db.insert("purchases", {
+          userId: a.userId, merchant: "Acme", merchantDomain: "acme.example", purchasedAt: T0 - 86_400_000, currency: "USD", status: "active",
+        });
+        await ctx.db.insert("claims", {
+          purchaseId, userId: a.userId, type: "return_credit", expectedCents: 100, status: "sent", token: `N${i}`, version: 1,
+        });
+      }
+    });
+
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+
+    for (const outboundId of [legacy, current, informal]) {
+      expect((await sendState(t, outboundId))?.errorMessage, outboundId).toBe("Cancelled by user");
+    }
+  });
+
+  it(`read budget: both ranges at their bounds (${DELETION_QUEUED_CLAIM_SCAN} queued claims x 10 drafts, ${DELETION_UNRESOLVED_DRAFT_SCAN} unresolved drafts) fit one requestDeletion`, async () => {
+    const t = setupWithLimits();
+    const a = await signedIn(t, "A");
+    const body = "x".repeat(1_200); // MAX_BODY_CHARS: the largest draft body a user can save
+    const real = await pendingSend(t, 1);
+    // Queued claims at the bound, each with 10 drafts of which 3 are attempts (MAX_SENDS_PER_CLAIM).
+    for (let batch = 0; batch < DELETION_QUEUED_CLAIM_SCAN / 20; batch++) {
+      await t.run(async (ctx) => {
+        for (let i = 0; i < 20; i++) {
+          const n = batch * 20 + i;
+          const purchaseId = await ctx.db.insert("purchases", {
+            userId: a.userId, merchant: "Acme", merchantDomain: "acme.example", purchasedAt: T0 - 86_400_000, currency: "USD", status: "active",
+          });
+          const claimId = await ctx.db.insert("claims", {
+            purchaseId, userId: a.userId, type: "return_credit", expectedCents: 4000, status: "queued", token: `Q${n}`, version: 1,
+          });
+          for (let v = 1; v <= 10; v++) {
+            const attempt = v > 7;
+            await ctx.db.insert("drafts", {
+              claimId, userId: a.userId, version: v, claimVersion: 1, to: "support@acme.example", subject: "Refund", body,
+              ...(attempt ? { outboundId: (n === 0 && v === 10 ? real : `ob-legacy-${n}-${v}`) as never, approvedAt: T0 } : {}),
+            });
+          }
+        }
+      });
+    }
+    // Unresolved drafts at the bound.
+    for (let batch = 0; batch < DELETION_UNRESOLVED_DRAFT_SCAN / 50; batch++) {
+      await t.run(async (ctx) => {
+        const purchaseId = await ctx.db.insert("purchases", {
+          userId: a.userId, merchant: "Acme", merchantDomain: "acme.example", purchasedAt: T0 - 86_400_000, currency: "USD", status: "active",
+        });
+        const claimId = await ctx.db.insert("claims", {
+          purchaseId, userId: a.userId, type: "return_credit", expectedCents: 4000, status: "drafted", token: `U${batch}`, version: 1,
+          requiredChannel: "web_form",
+        });
+        for (let i = 0; i < 50; i++) {
+          await ctx.db.insert("drafts", {
+            claimId, userId: a.userId, version: i + 1, claimVersion: 1, to: "support@acme.example", subject: "Hello", body,
+            outboundId: `ob-open-${batch}-${i}` as never, approvedAt: T0, nextCheckAt: T0 + 60_000,
+          });
+        }
+      });
+    }
+
+    await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+
+    expect(await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", a.userId)).first())).not.toBeNull();
+    expect((await sendState(t, real))?.errorMessage).toBe("Cancelled by user");
   });
 });

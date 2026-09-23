@@ -552,45 +552,62 @@ function cancelCtx(ctx: MutationCtx): Parameters<typeof agentmail.cancel>[0] {
 }
 
 /**
- * Newest claims read at deletion time for a claim email still pending in the
- * component. A claim is `queued` only while its send is unresolved, and a send is
- * pending for seconds, so the pending one is among the user's newest claims.
- * Residual, accepted: a claim created before this many newer ones, approved in the
- * same moment the account is deleted, is left to the purge (which deletes the
- * user's inbox rows from the component, `mailPurge.purgeInboxData`).
+ * D258: read bounds for cancelling claim emails at deletion. Both reads are index ranges over only the rows that can
+ * still hold a pending send, never over the user's whole history, and each bound is far above what a user can reach:
+ * claim emails are capped at 10 a day per user (`limits.claim_email`), and a send leaves both ranges once its outcome
+ * settles. `account.test.ts` pins the transaction read budget with both ranges at their bounds.
  */
-const DELETION_CLAIM_SCAN = RETENTION_PAGE;
+export const DELETION_QUEUED_CLAIM_SCAN = RETENTION_PAGE;
+export const DELETION_UNRESOLVED_DRAFT_SCAN = RETENTION_PAGE;
 /** Newest drafts read per queued claim: at most MAX_SENDS_PER_CLAIM (3) drafts ever carry an outbound attempt. */
 const DELETION_DRAFT_SCAN = 10;
 
 /**
- * P02-OW-3 (D244): cancels the user's claim emails that are still pending in the
- * component, in the same transaction as the tombstone. Every attempt on a queued
- * claim is tried, not only the newest (P02-SK-3). `agentmail.cancel` succeeds only
- * for a `pending` row; anything else was already sent or has already failed, and
- * `drafts.reconcileSend` records it. The claim itself is not relabelled: the purge
- * deletes it, and nobody can sign in to see it meanwhile.
+ * P02-OW-3 / D258: cancels every claim email of this user that may still be pending in the component, in the same
+ * transaction as the tombstone. `agentmail.cancel` succeeds only for a `pending` component row (anything else was
+ * already sent, has already failed, or is gone), so a failure is expected and ignored. The claims and drafts are not
+ * relabelled: the purge deletes them, and nobody can sign in to see them meanwhile.
+ *
+ * Two index ranges, no residual:
+ * - `drafts.by_user_nextCheck`: every attempt whose outcome is unresolved (`nextCheckAt` set), formal or informal.
+ *   An informal email (DA-A-9) never moves its claim to `queued`, so only this range finds it.
+ * - `claims.by_user_status` = `queued`: every attempt on a queued claim that has no `nextCheckAt`, i.e. one enqueued
+ *   before that field existed. Every attempt, not only the newest (P02-SK-3).
  */
 async function cancelPendingClaimSends(ctx: MutationCtx, userId: Id<"users">): Promise<void> {
-  const claims = await ctx.db
+  const tried = new Set<string>();
+  const tryCancel = async (outboundId: NonNullable<Doc<"drafts">["outboundId"]>) => {
+    if (tried.has(outboundId)) return;
+    tried.add(outboundId);
+    try {
+      await agentmail.cancel(cancelCtx(ctx), outboundId);
+    } catch {
+      // Not pending any more: sent, failed, or already gone.
+    }
+  };
+
+  const unresolved = await ctx.db
+    .query("drafts")
+    .withIndex("by_user_nextCheck", (q) => q.eq("userId", userId).gte("nextCheckAt", 0))
+    .take(DELETION_UNRESOLVED_DRAFT_SCAN);
+  for (const draft of unresolved) {
+    if (draft.outboundId) await tryCancel(draft.outboundId);
+  }
+
+  const queuedClaims = await ctx.db
     .query("claims")
-    .withIndex("by_user", (q) => q.eq("userId", userId))
-    .order("desc")
-    .take(DELETION_CLAIM_SCAN);
-  for (const claim of claims) {
-    if (claim.status !== "queued") continue;
+    .withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", "queued"))
+    .take(DELETION_QUEUED_CLAIM_SCAN);
+  for (const claim of queuedClaims) {
     const drafts = await ctx.db
       .query("drafts")
       .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
       .order("desc")
       .take(DELETION_DRAFT_SCAN);
     for (const draft of drafts) {
-      if (!draft.outboundId) continue;
-      try {
-        await agentmail.cancel(cancelCtx(ctx), draft.outboundId);
-      } catch {
-        // Not pending any more: sent, failed, or already gone.
-      }
+      // Settled attempts (a message id or a recorded failure) have nothing pending; unresolved ones were tried above.
+      if (!draft.outboundId || draft.agentmailMessageId !== undefined || draft.sendError !== undefined) continue;
+      await tryCancel(draft.outboundId);
     }
   }
 }

@@ -951,6 +951,39 @@ describe("P01-1 (D244) — the two code flows refuse a request with no code befo
     },
   );
 
+  it("D261 LOW-1: signIn with the correct password on a tombstoned never-verified account mails nothing and reads as a wrong password", async () => {
+    const t = setup();
+    const send = vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
+    const email = "p011-tombstoned-unverified@example.com";
+    await signIn(t, { flow: "signUp", email, password: PASSWORD });
+    await t.run(async (ctx) => {
+      const user = await ctx.db
+        .query("users")
+        .withIndex("email", (q) => q.eq("email", email))
+        .unique();
+      await ctx.db.insert("accountState", { userId: user!._id, status: "deleting", requestedAt: Date.now(), attempts: 0 });
+    });
+    send.mockClear();
+
+    let tombstonedErr: unknown;
+    try {
+      await signIn(t, { flow: "signIn", email, password: PASSWORD });
+    } catch (err) {
+      tombstonedErr = err;
+    }
+    let wrongPasswordErr: unknown;
+    try {
+      await signIn(t, { flow: "signIn", email: "p011-never-signed-up@example.com", password: PASSWORD });
+    } catch (err) {
+      wrongPasswordErr = err;
+    }
+
+    expect(send).not.toHaveBeenCalled(); // before: a fresh verification code was mailed (D66's resend path)
+    expect(tombstonedErr).toBeInstanceOf(ConvexError);
+    expect((tombstonedErr as ConvexError<string>).data).toBe(WRONG_CREDENTIALS_MESSAGE);
+    expect((tombstonedErr as ConvexError<string>).data).toBe((wrongPasswordErr as ConvexError<string>).data);
+  });
+
   it("an empty-string code is refused exactly like a missing one", async () => {
     const t = setup();
     const send = vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
