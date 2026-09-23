@@ -77,3 +77,24 @@ describe("the Node runtime pdf.js runs on (P2)", () => {
     expect((json("package.json") as { engines: { node: string } }).engines.node).toBe(">=22.13 <23");
   });
 });
+
+describe("the advisory gate live extraction depends on (P5, D227)", () => {
+  /** The `advisories` job's block of ci.yml: from its key to the next job key at the same indent. */
+  function advisoriesJob(ci: string): string | null {
+    const m = /\n {2}advisories:\n([\s\S]*?)(?=\n {2}[A-Za-z0-9_-]+:\n|$)/.exec(ci);
+    return m ? m[1] : null;
+  }
+
+  it("CI has an `advisories` job that fails on high or critical advisories in production dependencies", () => {
+    const job = advisoriesJob(readFileSync(path.join(REPO, ".github/workflows/ci.yml"), "utf8"));
+    expect(job, "ci.yml has no `advisories` job").not.toBeNull();
+    const executable = (job ?? "").split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+    expect(executable).toMatch(/^\s+run: npm audit --omit=dev --audit-level=high\s*$/m);
+    // It must be able to fail the run: no continue-on-error, no `|| true`, no conditional skip.
+    expect(executable).not.toMatch(/continue-on-error|\|\|\s*true|^\s+if:/m);
+  });
+
+  it("the guard itself fails on a workflow without the job", () => {
+    expect(advisoriesJob("jobs:\n  checks:\n    runs-on: ubuntu-latest\n")).toBeNull();
+  });
+});

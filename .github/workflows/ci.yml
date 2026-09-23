@@ -170,6 +170,27 @@ jobs:
       - name: test:ci under de_DE
         run: npm run test:ci
 
+  # D227 / security baseline §7 P5: a precondition for ever enabling live document extraction (D145, D203). Fails on
+  # any HIGH or CRITICAL advisory in a PRODUCTION dependency (what Convex bundles and runs: pdfjs-dist and the rest of
+  # `dependencies`, transitively). `npm audit` reads only package.json and package-lock.json and asks the npm
+  # registry's advisory endpoint (the GitHub Advisory Database), so no install is needed. devDependencies are out of
+  # scope here (they never reach a deployment). A finding is fixed by upgrading the dependency, never by suppressing
+  # it. For a pdf.js advisory the RUNBOOK's 7-day rule applies: patch within 7 days or switch live extraction off.
+  # If the registry cannot be reached, npm audit exits non-zero and the job fails: an audit that did not run never
+  # passes.
+  advisories:
+    name: advisories (production dependencies, high+)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: npm audit --omit=dev --audit-level=high
+        run: npm audit --omit=dev --audit-level=high
+
   # P10 browser acceptance suite (T20). Runs only when the E2E_CONVEX_URL and
   # E2E_DEPLOY_KEY repo secrets exist. They must point at a DEDICATED E2E
   # deployment: never the shared dev deployment adorable-lion-138 and never

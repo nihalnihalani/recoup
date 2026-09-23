@@ -504,3 +504,58 @@ A worktree that symlinks `node_modules` from the main checkout shares that
 checkout's install. After re-installing in one of them, check that the other
 still resolves the pinned versions, for example with
 `npm ls pdfjs-dist`.
+
+## 14. pdf.js security releases: patch within 7 days or switch live extraction off (D227, P5)
+
+`convex/lib/pdfText.ts` runs Mozilla pdf.js (`pdfjs-dist`, pinned exactly in
+`package.json`) on untrusted uploaded PDFs. While the `live_document_extraction`
+flag is ON, the rule is:
+
+**Within 7 days of a security release or advisory affecting the pinned
+`pdfjs-dist` version, either land the patched pin or switch live extraction
+off.** The clock starts at publication, not discovery. The rule covers any
+severity for pdf.js itself.
+
+How it is detected:
+
+- **The `advisories` CI job** (`.github/workflows/ci.yml`) runs
+  `npm audit --omit=dev --audit-level=high` on every push and pull request. It
+  fails on any HIGH or CRITICAL advisory in a production dependency. A red
+  `advisories` job is never waived or suppressed. You fix it by upgrading.
+- **Lower severities and quiet weeks.** The job runs only when something is
+  pushed, and it ignores moderate and low. While the flag is ON, an operator
+  also runs `npm audit --omit=dev` (every level) at least weekly, and watches
+  pdf.js's release notes and GitHub advisories for `pdfjs-dist`.
+
+Check the flag (internal functions; `--deployment <name>` as in §1):
+
+- `ops:getFlag` with `{"name":"live_document_extraction"}` returns the current
+  state and the `approvalRef` it was enabled under.
+- `ops:backlog` includes the same state in its `flags` field.
+- `ops:flagAudit` with `{"name":"live_document_extraction"}` gives the history.
+
+Switch it off (no approval reference is needed to turn a flag OFF):
+
+- `ops:setFlag` with `{"name":"live_document_extraction","on":false,"reason":"pdf.js advisory <GHSA id>, 7-day rule"}`.
+  Also switch `live_statement_extraction` off if it is on; it needs
+  `live_document_extraction` anyway.
+- Confirm with `ops:getFlag`. From then on, new uploads get `store_only` and
+  an `extraction_refused` log event (a `logEvent` kind in `convex/lib/log.ts`).
+
+Patch (the other way out):
+
+1. `npm install --save-exact pdfjs-dist@<fixed version>`, then `npm ci` in
+   every checkout (§13).
+2. Update the reviewed pin in `convex/lib/pdfText.static.test.ts`
+   (`PDFJS_VERSION`, `PDFJS_INTEGRITY`). That test fails on purpose until
+   someone records the new version.
+3. Add the new version and advisory to
+   `docs/reviews/2026-09-23-M23-pdf-library.md`, and get the security
+   re-review.
+4. Run the gates. Then `npm run deploy:dev` and
+   `npx convex run testingPdf:extractSyntheticPdf '{}'` on the dev deployment.
+   Expect `status: "ok"` and `canvasLoaded: false`.
+
+Turning the flag back ON afterwards follows the normal approval path.
+`ops:setFlag` refuses without an `approvalRef` naming the DECISIONS entry.
+Only do it when the `advisories` job is green on the deployed commit.
