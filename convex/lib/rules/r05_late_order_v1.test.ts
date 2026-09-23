@@ -359,9 +359,19 @@ describe("contract §10 R05 rows (M21)", () => {
     expect(R05_V1_PARAMS.creditApplicationShipDays).toBe(50);
     expect(runCase(byId("R05-05c")).conditions.find((x) => x.id === R05_V1_TIMING_ID)?.note).toContain("30 days after the properly completed order");
     expect(runCase(byId("R05-07")).conditions.find((x) => x.id === R05_V1_TIMING_ID)?.note).toContain("50 days after the properly completed order");
-    for (const [param, ids] of Object.entries(R05_V1_PARAM_SOURCES)) {
-      expect(ids.length, param).toBeGreaterThan(0);
-      for (const id of ids) expect(SPEC_TEXT, `${param} cites ${id}`).toContain(id);
+    // M27 R05-11: every param's citation resolves to a passage (spec §13 block, the spec header row, or the captured FR
+    // DATES line), and that passage states the value in the quoted words.
+    const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    for (const [param, src] of Object.entries(R05_V1_PARAM_SOURCES)) {
+      expect(src.passages.length, param).toBeGreaterThan(0);
+      const text = src.passages.map(passageText).join("\n");
+      expect(text, `${param}: ${src.quote}`).toContain(src.quote);
+      const value = R05_V1_PARAMS[param as keyof typeof R05_V1_PARAMS];
+      if (typeof value === "number") expect(src.quote, param).toMatch(new RegExp(`\\b\\(?${value}\\)?\\b`));
+      else {
+        const [y, m, d] = value.split("-").map(Number);
+        expect(src.quote, param).toContain(`${MONTHS[m - 1]} ${d}, ${y}`);
+      }
     }
     expect(Object.keys(R05_V1_PARAM_SOURCES).sort()).toEqual(Object.keys(R05_V1_PARAMS).sort());
     expect(Object.isFrozen(R05_V1_PARAMS)).toBe(true);
@@ -420,6 +430,29 @@ describe("contract §10 R05 rows (M21)", () => {
 });
 
 const FIXTURE_EXCERPTS = readFileSync(path.join(REPO_ROOT, "docs/rules/sources/federal-web-pages-excerpts.md"), "utf8");
+const FR_NOTICES = readFileSync(path.join(REPO_ROOT, "docs/rules/sources/federal-register-notices.txt"), "utf8");
+
+/** The text of a cited passage: a spec §13 block, a spec header row, or a captured Federal Register DATES block. */
+function passageText(id: string): string {
+  const block = (text: string, start: number, stop: RegExp) => {
+    const rest = text.slice(start);
+    const end = rest.slice(1).search(stop);
+    return end < 0 ? rest : rest.slice(0, end + 1);
+  };
+  if (id.startsWith("P-")) {
+    const at = SPEC_TEXT.indexOf(`**${id}**`);
+    if (at < 0) throw new Error(`no spec passage ${id}`);
+    return block(SPEC_TEXT, at, /\n\*\*P-|\n## /);
+  }
+  if (id.startsWith("FR-")) {
+    const at = FR_NOTICES.indexOf(`## ${id}`);
+    if (at < 0) throw new Error(`no captured notice ${id}`);
+    return block(FR_NOTICES, at, /\n## /);
+  }
+  const row = SPEC_TEXT.split("\n").find((line) => line.startsWith(`| ${id} |`));
+  if (!row) throw new Error(`no spec header row ${id}`);
+  return row;
+}
 
 describe("R05 v1 pack invariants beyond the fixtures", () => {
   const base = byId("R05-01");
@@ -548,5 +581,313 @@ describe("R05 v1 pack invariants beyond the fixtures", () => {
     const hasUndefined = (v: unknown): boolean =>
       v === undefined || (typeof v === "object" && v !== null && Object.values(v as Record<string, unknown>).some(hasUndefined));
     for (const c of FILE.cases) expect(hasUndefined(runCase(c)), c.id).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M27 review fixes (M21b, D234): each test fails on the reviewed revision 3d5cb7f
+// ---------------------------------------------------------------------------
+
+/** Rows for a case with no zone row at all (the production default: nothing writes `order.ship_to_time_zone`). */
+function snapNoZone(c: RuleFixtureCase, extra: CellRow[] = []): OrderSnapshot {
+  const rows = Object.entries(c.facts).filter(([n]) => !NOT_READ.has(n) && n !== "ship_to_timezone").flatMap(([n, f]) => rowsOf(n, f));
+  return buildOrderSnapshot({ transactionId: TXN_ID, rows: [...rows, ...extra] });
+}
+const fact = (type: string, value: unknown, state = "user_confirmed"): Partial<FixtureFact> => ({ type, value, state } as Partial<FixtureFact>);
+const allText = (r: EvaluationResult) => `${r.explanation.join(" ")} ${r.nextAction.kind === "none" || r.nextAction.kind === "manual_review" ? r.nextAction.reason : ""}`;
+
+describe("M27 R05-01 (high): excluded, out-of-scope and unverified results never say a refund right vested", () => {
+  const base = byId("R05-01"); // full vesting facts: not shipped, no notice, T = 2026-09-04
+  const cases: [string, RuleFixtureCase, string][] = [
+    ["C.O.D.", withFacts(base, { payment_terms: fact("enum", "cod") }), "not_eligible"],
+    ["in store", withFacts(base, { order_channel: fact("enum", "in_store") }), "not_eligible"],
+    ["seeds", withFacts(base, { merchandise_category: fact("enum", "seeds_or_growing_plants") }), "not_eligible"],
+    ["Canada", withFacts(base, { ship_to_country: fact("string", "CA") }), "unsupported"],
+    ["R05-11 stale source", byId("R05-11"), "source_unverified"],
+    ["R05-11b no source record", byId("R05-11b"), "source_unverified"],
+  ];
+  it.each(cases)("%s → %s, with no vesting or refund conclusion in any text", (_label, c, outcome) => {
+    const r = runCase(c);
+    expect(r.outcome).toBe(outcome);
+    expect(allText(r)).not.toMatch(/refund you|vested/);
+    expect(r.deadlines).toEqual([]);
+    expect(r.overlap).toEqual([]);
+  });
+
+  it("the C.O.D. result names its failed condition and cites 435.3(a)", () => {
+    const r = runCase(withFacts(base, { payment_terms: fact("enum", "cod") }));
+    expect(r.nextAction).toEqual({ kind: "none", reason: "The FTC shipping rule does not cover C.O.D. (cash on delivery) orders (435.3(a)(3))." });
+    expect(r.explanation[0]).toContain("435.3(a)");
+  });
+});
+
+describe("M27 R05-02 (high): with the ship-to zone unknown, one zone's verdict never stands; the zone is asked", () => {
+  const base = byId("R05-01"); // "Ships within 3 days", no notice
+  const shippedAt = (order: string, shipped: string) =>
+    withFacts(base, { properly_completed_order_at: fact("datetime", order), shipped_at: fact("datetime", shipped) });
+
+  it.each([
+    ["New York on time, Guam late", "2026-09-01T05:00:00-04:00", "2026-09-04T20:00:00-04:00", "2026-09-10T12:00:00-04:00"],
+    ["winter: New York on time, Puerto Rico late", "2026-12-01T10:00:00-05:00", "2026-12-04T23:30:00-05:00", "2026-12-10T12:00:00-05:00"],
+    ["New York on time, Los Angeles late", "2026-09-02T01:00:00-04:00", "2026-09-05T08:00:00-04:00", "2026-09-23T12:00:00-04:00"],
+  ])("%s → needs_facts asking the zone, no 'within the applicable time' text", (_label, order, shipped, clock) => {
+    const r = run(snapNoZone(shippedAt(order, shipped)), Date.parse(clock));
+    expect(r.outcome).toBe("needs_facts");
+    expect(r.missingFacts.map((m) => [m.key, m.reason])).toEqual([["order.ship_to_time_zone", "missing"]]);
+    expect(r.nextAction).toEqual({ kind: "answer_questions", keys: [{ subjectKey: "txn", key: "order.ship_to_time_zone" }] });
+    expect(r.explanation.join(" ")).not.toContain("within the applicable time");
+  });
+
+  it("two confirmed zones that disagree, where the zone decides → manual_review", () => {
+    const c = shippedAt("2026-09-01T05:00:00-04:00", "2026-09-04T20:00:00-04:00");
+    const zones = [row("order.ship_to_time_zone", code("America/New_York"), "user_confirmed", 1), row("order.ship_to_time_zone", code("Pacific/Guam"), "user_confirmed", 2)];
+    const r = run(snapNoZone(c, zones), Date.parse("2026-09-10T12:00:00-04:00"));
+    expect(r.outcome).toBe("manual_review");
+    expect(r.nextAction.kind).toBe("manual_review");
+  });
+
+  it("an extracted zone is listed to confirm, never used for a negative verdict", () => {
+    const c = shippedAt("2026-09-01T05:00:00-04:00", "2026-09-04T20:00:00-04:00");
+    const r = run(snapNoZone(c, [row("order.ship_to_time_zone", code("America/New_York"), "extracted_candidate", 1)]), Date.parse("2026-09-10T12:00:00-04:00"));
+    expect(r.outcome).toBe("needs_facts");
+    expect(r.missingFacts.map((m) => [m.key, m.reason])).toEqual([["order.ship_to_time_zone", "candidate_unconfirmed"]]);
+  });
+});
+
+describe("M27 R05-03 (medium): same-answer candidates (5c) never give a negative, not-yet-due or review verdict", () => {
+  const base = byId("R05-01");
+  const dateRep = { shipping_representation: fact("object", { text: "Ships by Sep 3", unit: "date", value: "2026-09-03" }) };
+  const candShipped = (a: string, b: string) => ({
+    shipped_at: { type: "datetime", value: null, state: "conflicting", conflict_kind: "candidates", candidates: [{ value: a, evidence: "email A" }, { value: b, evidence: "email B" }] } as unknown as Partial<FixtureFact>,
+  });
+
+  it("(i) two extracted shipment scans, both on time → needs_facts with the scan conflicting (not not_eligible)", () => {
+    const r = run(snapshotOf(withFacts(base, { ...dateRep, ...candShipped("2026-09-02T10:00:00-04:00", "2026-09-03T10:00:00-04:00") })), Date.parse("2026-09-23T12:00:00-04:00"));
+    expect(r.outcome).toBe("needs_facts");
+    expect(r.missingFacts.filter((m) => m.reason === "conflicting").map((m) => m.key)).toContain("order.shipped_at");
+    expect(r.explanation.join(" ")).not.toContain("The seller shipped on");
+  });
+
+  it("(ii) two extracted shipping times, both not yet due → needs_facts, never not_yet_due", () => {
+    const shipping = { shipping_representation: { type: "object", value: null, state: "conflicting", conflict_kind: "candidates", candidates: [
+      { value: { text: "Ships in 2 days", unit: "calendar_days", value: 2 }, evidence: "checkout" },
+      { value: { text: "Ships by Sep 5", unit: "date", value: "2026-09-05" }, evidence: "confirmation" },
+    ] } as unknown as Partial<FixtureFact> };
+    const r = run(snapshotOf(withFacts(base, shipping)), Date.parse("2026-09-02T12:00:00-04:00"));
+    expect(r.outcome).toBe("needs_facts");
+    expect(r.reevaluate).toBeUndefined();
+    expect(r.missingFacts.find((m) => m.key === "order.ship_time_kind")?.reason).toBe("conflicting");
+  });
+
+  it("(iii) two extracted scans, both after T → needs_facts, never manual_review", () => {
+    const r = run(snapshotOf(withFacts(base, candShipped("2026-09-06T10:00:00-04:00", "2026-09-07T10:00:00-04:00"))), Date.parse("2026-09-23T12:00:00-04:00"));
+    expect(r.outcome).toBe("needs_facts");
+    expect(r.flags.manualReviewReason).toBeUndefined();
+  });
+
+  it("R05-10b (positive 5c) still stands, capped, with a disputed anchor, and states no candidate's date (R05-19)", () => {
+    const r = runCase(byId("R05-10b"));
+    expect(r.outcome).toBe("likely_eligible");
+    expect(refund(r)?.status).toBe("disputed_anchor");
+    expect(r.explanation.join(" ")).not.toMatch(/vested on 2026-|ended on 2026-/);
+  });
+});
+
+describe("M27 R05-04 (medium) + D234(14): a confirmed 'not shipped' against a carrier scan", () => {
+  const base = byId("R05-01"); // shipped_at confirmed null → order.shipped = false (user_confirmed)
+  const scan = (state: ResolveRow["state"]) => row("order.shipped_at", instant("2026-09-03T17:40:00-04:00"), state, 2);
+
+  it("an OBSERVED scan → manual_review, disputed anchor, and the explanation names the scan", () => {
+    const r = runCase(base, [scan("observed")]);
+    expect(r.outcome).toBe("manual_review");
+    expect(refund(r)?.status).toBe("disputed_anchor");
+    expect(r.explanation.join(" ")).toContain("accepted on 2026-09-03");
+    expect(r.flags.conflicts.map((c) => [c.key, c.kind])).toEqual([["order.shipped", "confirmed_vs_observed"]]);
+  });
+
+  it("a CONFIRMED scan → manual_review (confirmed vs confirmed)", () => {
+    const r = runCase(base, [scan("user_confirmed")]);
+    expect(r.outcome).toBe("manual_review");
+    expect(r.flags.conflicts.map((c) => c.kind)).toEqual(["confirmed_vs_confirmed"]);
+  });
+
+  it("a CANDIDATE scan → the confirmation stands (eligible), and the scan is shown as information", () => {
+    const r = runCase(base, [scan("extracted_candidate")]);
+    expect(r.outcome).toBe("eligible");
+    expect(r.explanation.join(" ")).toContain("shows a carrier scan on 2026-09-03");
+  });
+
+  it("R05-13 (both keys from the observation) is unchanged: manual_review", () => {
+    expect(runCase(byId("R05-13")).outcome).toBe("manual_review");
+  });
+});
+
+describe("M27 R05-05 (medium) + D234(8): no firm seller date from an assumption; the timer waits for the latest zone", () => {
+  const openClaim = { settledMinorByLossKey: {}, activeClaimId: "claim5" as Id<"claims"> };
+
+  it("no stated time, payment terms unknown (R05.A-credit), day 45 with an open claim → unknown_anchor, no overdue, no escalate", () => {
+    const c = withFacts(byId("R05-05c"), { payment_terms: null });
+    const r = run(snapshotOf(c), Date.parse("2026-09-15T12:00:00-04:00"), { cc: openClaim });
+    expect(r.outcome).toBe("likely_eligible");
+    expect(r.assumptions.map((a) => a.id)).toContain("R05.A-credit");
+    expect(refund(r)?.status).toBe("unknown_anchor");
+    expect(refund(r)?.overdueSince).toBeUndefined();
+    expect(r.nextAction.kind).not.toBe("escalate");
+  });
+
+  it("a renewed-option assumption (case 2, not shipped by R) → unknown_anchor", () => {
+    const c = withFacts(byId("R05-03"), {
+      shipped_at: fact("datetime", null), buyer_response: fact("enum", "no_response"), amount_tendered: fact("money", { amount_minor: 5000, currency: "USD" }),
+    });
+    const r = run(snapshotOf(c), Date.parse("2026-09-26T12:00:00-04:00"));
+    expect(r.assumptions.map((a) => a.id)).toContain("R05.A-renewed");
+    expect(refund(r)?.status).toBe("unknown_anchor");
+  });
+
+  it("confirmed payment terms still give firm dates (R05-05c, R05-07b → 2026-09-11)", () => {
+    expect(refund(runCase(byId("R05-05c")))?.dueLocalDate).toBe("2026-09-11");
+    expect(refund(runCase(byId("R05-07b")))?.dueLocalDate).toBe("2026-09-11");
+  });
+
+  it("D235(A): zone unknown and the zones' dates differ → the date is shown as a range; status uses the latest", () => {
+    // Ordered Fri 2026-09-11 11:00 New York = Sat 01:00 in Guam: "ships within 3 days" ends 09-14 there vs 09-15 in Guam.
+    const c = withFacts(byId("R05-01"), { properly_completed_order_at: fact("datetime", "2026-09-11T11:00:00-04:00") });
+    const r = run(snapNoZone(c), Date.parse("2026-09-20T12:00:00-04:00"));
+    expect(r.outcome).toBe("eligible");
+    expect(refund(r)?.basis).toContain("Due on or about 2026-09-24 – 2026-09-25");
+    expect(refund(r)?.dueLocalDate).toBe("2026-09-25");
+    expect(r.explanation.join(" ")).toContain("on or about 2026-09-24 – 2026-09-25");
+  });
+
+  it("zone unknown: the seller is overdue only once the latest-ending US zone's deadline has passed", () => {
+    const c = byId("R05-01"); // due 2026-09-16 in every zone
+    const between = run(snapNoZone(c), Date.parse("2026-09-17T06:00:00Z"), { cc: openClaim }); // past New York's end, not Samoa's
+    expect(refund(between)?.status).toBe("open");
+    expect(between.nextAction.kind).toBe("continue_case");
+    const after = run(snapNoZone(c), Date.parse("2026-09-17T12:00:00Z"), { cc: openClaim });
+    expect(refund(after)?.status).toBe("overdue");
+    expect(after.nextAction.kind).toBe("escalate");
+  });
+});
+
+describe("M27 R05-06 (medium) + D234(15): §8 case 6 — the seller decides not to ship (435.2(c)(4)), implemented", () => {
+  it("a seller notice on 2026-09-02 with T = 2026-09-04, now 09-03 → eligible, vested 09-02, refund due 09-14", () => {
+    const r = runCase(withFacts(byId("R05-01"), {}), [row("order.seller_cancelled_at", instant("2026-09-02T09:00:00-04:00"))]);
+    const at = run(snapshotOf(byId("R05-01"), [row("order.seller_cancelled_at", instant("2026-09-02T09:00:00-04:00"))]), Date.parse("2026-09-03T12:00:00-04:00"));
+    expect(at.outcome).toBe("eligible");
+    expect(at.explanation.join(" ")).toContain("vested on 2026-09-02");
+    expect(at.explanation.join(" ")).toContain("435.2(c)(4)");
+    expect(refund(at)?.dueLocalDate).toBe("2026-09-14");
+    expect(r.outcome).toBe("eligible");
+  });
+
+  it("an extracted seller notice caps the outcome and gives no firm seller date", () => {
+    const r = run(snapshotOf(byId("R05-01"), [row("order.seller_cancelled_at", instant("2026-09-02T09:00:00-04:00"), "extracted_candidate")]), Date.parse("2026-09-03T12:00:00-04:00"));
+    expect(r.outcome).toBe("likely_eligible");
+    expect(r.missingFacts.map((m) => [m.key, m.reason])).toEqual([["order.seller_cancelled_at", "candidate_unconfirmed"]]);
+    expect(refund(r)?.status).toBe("unknown_anchor");
+  });
+});
+
+describe("M27 R05-07 (medium): a partial shipment with an on-time first scan leaves the remainder to the unshipped analysis", () => {
+  it("shipped = true, first scan inside T, partially shipped, past T, no notice → eligible, amount to review", () => {
+    const c = withFacts(byId("R05-01"), { shipped_at: fact("datetime", "2026-09-03T15:00:00-04:00") });
+    const r = runCase(c, [row("order.partially_shipped", bool(true))]);
+    expect(r.outcome).toBe("eligible");
+    expect(r.amount).toBeNull();
+    expect(r.dimensions.readyForApproval).toBe("fail");
+    expect(r.explanation.join(" ")).toContain("The unshipped part of the order did not ship by 2026-09-04");
+  });
+});
+
+describe("M27 R05-08 (medium): a cancellation under a valid option, before or after the shipment", () => {
+  const notice = (respAt: string) => ({
+    delay_notices: fact("array", [{ received_at: "2026-09-01T12:00:00-04:00", revised_ship_date: "2026-09-20", offers_cancel_and_refund: true }]),
+    delay_notice_offers_cancel_and_refund: fact("boolean", true),
+    buyer_response: fact("enum", "cancelled"),
+    respAt: fact("datetime", respAt),
+  });
+  const build = (respAt: string, shipped: string) => {
+    const { respAt: _r, ...facts } = notice(respAt);
+    void _r;
+    return snapshotOf(withFacts(byId("R05-01"), { ...facts, shipped_at: fact("datetime", shipped) }), [row("order.buyer_response_at", instant(respAt))]);
+  };
+
+  it("(A) cancelled 09-02 under the notice, then shipped inside T on 09-03 → manual_review, never not_eligible", () => {
+    const r = run(build("2026-09-02T10:00:00-04:00", "2026-09-03T15:00:00-04:00"), Date.parse("2026-09-10T12:00:00-04:00"));
+    expect(r.outcome).toBe("manual_review");
+    expect(r.flags.manualReviewReason).toContain("435.2(c)(1)");
+  });
+
+  it("(B) shipped 09-10 (after T, before R), cancelled 09-12 after the shipment → not_eligible (deemed consent covers it)", () => {
+    const r = run(build("2026-09-12T10:00:00-04:00", "2026-09-10T10:00:00-04:00"), Date.parse("2026-09-14T12:00:00-04:00"));
+    expect(r.outcome).toBe("not_eligible");
+  });
+
+  it("the cancellation time unknown → needs_facts asking for it", () => {
+    const facts = notice("2026-09-02T10:00:00-04:00");
+    const { respAt: _r, ...rest } = facts;
+    void _r;
+    const r = run(snapshotOf(withFacts(byId("R05-01"), { ...rest, shipped_at: fact("datetime", "2026-09-03T15:00:00-04:00") })), Date.parse("2026-09-10T12:00:00-04:00"));
+    expect(r.outcome).toBe("needs_facts");
+    expect(r.missingFacts.map((m) => m.key)).toContain("order.buyer_response_at");
+  });
+});
+
+describe("M27 R05-09 + D234(16): refunds received are ledger credits; the estimate stays the order total", () => {
+  it("settled money on the loss key never nets the estimate; the limitation is recorded", () => {
+    const r = run(snapshotOf(byId("R05-01")), byId("R05-01").now, { cc: { settledMinorByLossKey: { [`txn:${TXN_ID}:paid`]: 999 } } });
+    expect(r.amount?.estimate).toEqual({ amountMinor: 15000, currency: "USD" });
+    expect(r05LateOrderV1.knownLimitations.join(" ")).toContain("recorded as a confirmed credit on the R05 case");
+  });
+});
+
+describe("M27 lows fixed with the mediums (R05-10, 15, 16, 17, 18, 20)", () => {
+  it("R05-10: two extracted categories on a late shipment → needs_facts on the category, no 'assumes ordinary merchandise' text", () => {
+    const c = withFacts(byId("R05-01"), {
+      shipped_at: fact("datetime", "2026-09-06T10:00:00-04:00"),
+      merchandise_category: { type: "enum", value: null, state: "conflicting", conflict_kind: "candidates", candidates: [{ value: "general_merchandise" }, { value: "seeds_or_growing_plants" }] } as unknown as Partial<FixtureFact>,
+    });
+    const r = runCase(c);
+    expect(r.outcome).toBe("needs_facts");
+    expect(r.missingFacts.find((m) => m.key === "order.merchandise_category")?.reason).toBe("conflicting");
+    expect(r.explanation.join(" ")).not.toContain("assumes you ordered ordinary merchandise");
+  });
+
+  it("R05-15: a Canadian buyer with vested timing and no order total → unsupported, nothing asked", () => {
+    const r = runCase(withFacts(byId("R05-01"), { buyer_country: fact("string", "CA"), amount_tendered: null }));
+    expect(r.outcome).toBe("unsupported");
+    expect(r.missingFacts).toEqual([]);
+  });
+
+  it("R05-16: before T, a cancellation under a notice whose adequacy is unknown → needs_facts, never not_yet_due", () => {
+    const c = withFacts(byId("R05-01"), {
+      delay_notices: fact("array", [{ received_at: "2026-09-02T10:00:00-04:00", revised_ship_date: "2026-09-20" }]),
+      buyer_response: fact("enum", "cancelled"),
+    });
+    const r = run(snapshotOf(c, [row("order.buyer_response_at", instant("2026-09-03T10:00:00-04:00"))]), Date.parse("2026-09-03T12:00:00-04:00"));
+    expect(r.outcome).toBe("needs_facts");
+    expect(r.missingFacts.map((m) => m.key)).toContain("order.delay_notice_offers_cancel");
+  });
+
+  it("R05-17: an extracted 'not partially shipped' caps the outcome and is listed", () => {
+    const r = runCase(byId("R05-01"), [row("order.partially_shipped", bool(false), "extracted_candidate")]);
+    expect(r.outcome).toBe("likely_eligible");
+    expect(r.missingFacts.map((m) => [m.key, m.reason])).toEqual([["order.partially_shipped", "candidate_unconfirmed"]]);
+  });
+
+  it("R05-18: an order total of zero → no amount and nothing approvable to send", () => {
+    const r = runCase(withFacts(byId("R05-01"), { amount_tendered: fact("money", { amount_minor: 0, currency: "USD" }) }));
+    expect(r.amount).toBeNull();
+    expect(r.dimensions.readyForApproval).toBe("fail");
+  });
+
+  it("R05-20: a known Canadian order with dates past the verified calendar → unsupported, not manual_review", () => {
+    const c = withFacts(byId("R05-01"), {
+      ship_to_country: fact("string", "CA"),
+      properly_completed_order_at: fact("datetime", "2031-02-03T10:00:00-05:00"),
+      shipping_representation: fact("object", { text: "Ships in 5 business days", unit: "business_days", value: 5 }),
+    });
+    expect(run(snapshotOf(c), Date.parse("2031-03-01T12:00:00-05:00")).outcome).toBe("unsupported");
   });
 });

@@ -12,7 +12,8 @@
  *     scan, never "label created", spec L3);
  *   - `delay_notices` (the FIRST delay-option notice) → `order.delay_notice_received`, `…_received_at`,
  *     `order.delay_revised_ship_kind` (+ `order.delay_revised_ship_date`) and `order.delay_notice_offers_cancel`;
- *   - `buyer_response` → `order.buyer_response` (+ `order.buyer_response_at`).
+ *   - `buyer_response` → `order.buyer_response` (+ `order.buyer_response_at`);
+ *   - `seller_cancelled_at` → `order.seller_cancelled_at` (§8 case 6: the seller's notice that it will not ship).
  * "I don't know" is the fact layer's `user_unknown`, so the spec's `unknown` enum members are not codes here.
  *
  * `order.refund_vests_on` is catalogued so a pack can name it (the anchor of the seller's prompt-refund deadline);
@@ -333,6 +334,19 @@ export const ORDER_FACT_SPECS = [
     value: "instant",
     question: { prompt: "When did you send that answer?", why: "Consent to a long delay counts only within 30 days of the shipping time." },
     evidenceHint: ["merchant_correspondence"],
+    userAssertable: true,
+  },
+  {
+    key: "order.seller_cancelled_at",
+    domain: "order",
+    categories: RETAIL,
+    subject: TXN,
+    value: "instant",
+    question: {
+      prompt: "When did the seller tell you it will not ship the order?",
+      why: "Once the seller says it will not ship, a prompt refund is due from that notice.",
+    },
+    evidenceHint: ["merchant_correspondence", "cancellation_notice"],
     userAssertable: true,
   },
   {

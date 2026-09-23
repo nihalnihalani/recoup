@@ -3,8 +3,10 @@
  * M22: R02/R04), the same way packs join `IMPLEMENTED_PACKS`. A template renders only for its exact pack version.
  */
 import type { PacketTemplate } from "./common";
+import { r03V1Letter } from "./r03_v1";
+import { r05V1Letter } from "./r05_v1";
 
-export const PACKET_TEMPLATES: readonly PacketTemplate[] = Object.freeze([]);
+export const PACKET_TEMPLATES: readonly PacketTemplate[] = Object.freeze([r05V1Letter, r03V1Letter]);
 
 /** The template for a pack version: the named one, else the pack's first registered template; null when none. */
 export function templateFor(ruleId: string, version: number, templateId?: string): PacketTemplate | null {

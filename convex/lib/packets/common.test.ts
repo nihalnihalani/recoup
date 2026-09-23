@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { factReader, fill, formatLocalDate, formatMoney, packetFindings, PacketRenderError } from "./common";
 import type { BoundFactValue } from "../rules/types";
 import { PACKET_TEMPLATES, templateById, templateFor } from "./index";
+import { IMPLEMENTED_PACKS } from "../rules/applicable";
 
 const bound: BoundFactValue[] = [
   { subjectKey: "txn", key: "order.total", status: "confirmed", value: { kind: "money", amountMinor: 64_950, currency: "USD" } },
@@ -88,9 +89,17 @@ describe("packetFindings (SEC-AI-4 for packets)", () => {
 });
 
 describe("the template registry", () => {
-  it("starts empty (each pack lane registers its own); lookups return null", () => {
-    expect(PACKET_TEMPLATES).toEqual([]);
-    expect(templateFor("R05.mitor_shipment.us_ftc", 1)).toBeNull();
-    expect(templateById("r05_v1.letter")).toBeNull();
+  it("each registered template belongs to an implemented pack version and has a unique id; unknown lookups return null", () => {
+    // Each pack lane registers its own templates (M21: R05/R03 — the first registrations replaced "starts empty").
+    const ids = PACKET_TEMPLATES.map((t) => t.templateId);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const t of PACKET_TEMPLATES) {
+      expect(IMPLEMENTED_PACKS.some((p) => p.ruleId === t.ruleId && p.version === t.version), t.templateId).toBe(true);
+      expect(templateById(t.templateId)).toBe(t);
+      expect(t.channels.length, t.templateId).toBeGreaterThan(0);
+    }
+    expect(templateFor("R05.mitor_shipment.us_ftc", 1)?.templateId).toBe("r05_v1.letter");
+    expect(templateFor("R05.mitor_shipment.us_ftc", 2)).toBeNull();
+    expect(templateById("no_such.letter")).toBeNull();
   });
 });

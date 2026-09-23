@@ -51,8 +51,8 @@ export function txnCell<K extends FactKey>(snapshot: { lookup: CellLookup }, key
 
 /**
  * R05 v1's bound facts (rev 5 N6, DA-A-15): every fact the evaluation decides on or a packet may interpolate — the
- * order, its shipping promise and shipment, the first delay notice and the buyer's answer, scope and the amount. 27
- * keys (≤ MAX_BOUND_FACTS = 32). The derived vesting date is not bound: it is a function of these.
+ * order, its shipping promise and shipment, the first delay notice and the buyer's answer, a seller's decision not to
+ * ship, scope and the amount. 28 keys (≤ MAX_BOUND_FACTS = 32). The derived vesting date is not bound: it is a function of these.
  */
 export const R05_BOUND_KEYS = [
   "retail.order_ref",
@@ -80,6 +80,7 @@ export const R05_BOUND_KEYS = [
   "order.delay_notice_offers_cancel",
   "order.buyer_response",
   "order.buyer_response_at",
+  "order.seller_cancelled_at",
   "order.ship_to_time_zone",
   "retail.merchant",
 ] as const satisfies readonly FactKey[];
