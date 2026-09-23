@@ -391,6 +391,25 @@ describe("DA-A-8: a document type is declared before anything is extracted", () 
     expect(again.extractionStatus).toBe("store_only");
   });
 
+  it("P08-W1: an UNDECLARED upload whose bytes show a card number stays store_only when the user later declares a type — never queued", async () => {
+    const t = setup();
+    const a = await signedIn(t, "A");
+    await flagOn(t);
+    const r = await uploadJson(a.as, pdf("BT (Paid with 4111 1111 1111 1111) Tj ET"));
+    expect(r.extractionStatus).toBe("store_only");
+    const transactionId = await t.run((ctx) =>
+      ctx.db.insert("transactions", { userId: a.userId, category: "retail_order", status: "active", counterpartyName: "Shop", currency: "USD", liveFactCount: 0 }),
+    );
+    await a.as.mutation(api.evidence.attachToTransaction, { evidenceId: r.evidenceId, transactionId });
+    for (const docType of ["receipt", "card_statement", "order_confirmation"] as const) {
+      expect((await a.as.mutation(api.evidence.declareDocType, { evidenceId: r.evidenceId, docType })).extractionStatus).toBe("store_only");
+    }
+    const row = (await t.run((ctx) => ctx.db.get(r.evidenceId)))!;
+    expect(row).toMatchObject({ extractionStatus: "store_only", extractionSummary: STATUS_SUMMARY.pan, docType: "order_confirmation" });
+    const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    expect(scheduled.filter((s) => s.name.startsWith("evidenceExtract"))).toEqual([]);
+  });
+
   it("live extraction off (D145, the default): a declared receipt is store_only and extraction_refused is logged", async () => {
     const t = setup();
     const a = await signedIn(t, "A");
@@ -450,8 +469,11 @@ describe("DA-A-8: a document type is declared before anything is extracted", () 
     expect(uploadExtractionStatus(base).status).toBe("not_requested");
     expect(uploadExtractionStatus({ ...base, liveExtractionOn: false })).toMatchObject({ status: "store_only", refusedByFlag: true });
     expect(uploadExtractionStatus({ ...base, panDetected: true, liveExtractionOn: false })).toMatchObject({ status: "store_only", refusedByFlag: false });
-    expect(uploadExtractionStatus({ ...base, declaredDocType: "card_statement", panDetected: true }).summary).toBe(STATUS_SUMMARY.statement);
-    expect(uploadExtractionStatus({ ...base, declaredDocType: undefined, panDetected: true }).status).toBe("awaiting_doc_type");
+    // P08-W1 (D-re-audit): a card number outranks the declaration, so the sticky marker is recorded at once.
+    expect(uploadExtractionStatus({ ...base, declaredDocType: "card_statement", panDetected: true }).summary).toBe(STATUS_SUMMARY.pan);
+    expect(uploadExtractionStatus({ ...base, declaredDocType: "card_statement" }).summary).toBe(STATUS_SUMMARY.statement);
+    expect(uploadExtractionStatus({ ...base, declaredDocType: undefined, panDetected: true })).toMatchObject({ status: "store_only", summary: STATUS_SUMMARY.pan });
+    expect(uploadExtractionStatus({ ...base, declaredDocType: undefined }).status).toBe("awaiting_doc_type");
     expect(uploadExtractionStatus({ ...base, mime: "application/pdf", encrypted: true, declaredDocType: undefined }).status).toBe("needs_unlocked_copy");
     expect(uploadExtractionStatus({ ...base, mime: "image/heif", encrypted: true }).status).toBe("unreadable");
   });

@@ -32,6 +32,7 @@ import { MAX_LIVE_FACTS_PER_TRANSACTION, MAX_LOCATOR_QUOTE_CHARS } from "../../l
 import { assertSameTransaction, ownedEvidence, ownedFact, ownedIncident, ownedTransaction } from "../access";
 import { isTombstoned } from "../accountState";
 import { maskPans } from "../pan";
+import { countsTowardEvidence } from "../quote";
 import { getFactSpec, type FactSpec, type FactValue } from "./catalog";
 import { parseSubjectKey } from "./subject";
 import { sameFactValue, validateFactValue } from "./values";
@@ -173,6 +174,12 @@ async function checkSource(
       // SEC-AI-6: content from an unverified sender never becomes more than a candidate.
       if (ev.provenance === "unverified_sender" && state !== "extracted_candidate") {
         refuse("A fact from an unverified sender can only be a candidate");
+      }
+      // DA-A-6 (M23): an `observed` fact satisfies rule conditions (SEC-AI-3), so a document may back one only through
+      // a VERIFIED quote. An unverified or unverifiable citation (an image, an image-only PDF, a quote not found at its
+      // locator) stays a candidate and never counts toward a rule's evidenceSupports.
+      if (state === "observed" && !countsTowardEvidence(source.quoteStatus)) {
+        refuse("A document can back an observed fact only through a verified quote");
       }
       const extractorVersion = source.extractorVersion.trim();
       if (extractorVersion.length === 0 || extractorVersion.length > MAX_TAG_CHARS) refuse("Invalid extractor version");

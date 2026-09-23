@@ -30,7 +30,10 @@ import { maskPans } from "./lib/pan";
 import { putFact, type PutFactInput } from "./lib/facts/write";
 import { subjectKey } from "./lib/facts/subject";
 import { ensurePurchaseTransaction } from "./transactions";
-import { recordTextEvidence, TEXT_EXTRACTOR_VERSION, type EvidenceProvenance } from "./evidence";
+import { queueTextSecondStage, recordTextEvidence, STATUS_SUMMARY, TEXT_EXTRACTOR_VERSION, type EvidenceProvenance } from "./evidence";
+import { candidatesFromDoc, type DocCandidate } from "./lib/docFacts";
+import { CLASSIFIER_SYSTEM, DocClassification, DOC_SCHEMAS, DOC_SYSTEMS, type ExtractableDocType } from "./lib/schemas_docs";
+import { textLayerHasPan } from "./lib/sniff";
 import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS, MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER } from "./limits";
 
 /**
@@ -901,6 +904,9 @@ export const applyExtraction = internalMutation({
 
     if (parsed.kind === "order" && parsed.order) {
       await applyOrder(ctx, args.processedEventId, row.userId, orderSourceId, parsed.order, source);
+      // M23: the second stage reads the message again with a per-type schema and verifiable quotes, once the first
+      // stage has linked it to a transaction — only while live extraction is on (D145).
+      if (evidenceId !== null) await queueTextSecondStage(ctx, evidenceId);
       return null;
     }
     if (parsed.kind === "refund" && parsed.refund) {
@@ -913,6 +919,7 @@ export const applyExtraction = internalMutation({
         parsed.refund,
         { verified: provenance !== "unverified_sender", fromAccountAddress },
       );
+      if (evidenceId !== null) await queueTextSecondStage(ctx, evidenceId);
       return null;
     }
     await finish(
@@ -921,6 +928,81 @@ export const applyExtraction = internalMutation({
       "needs_review",
       "This email did not read as an order confirmation or a refund notice.",
     );
+    return null;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Second stage (M23): classify, then read with the type's schema and verifiable quotes
+// ---------------------------------------------------------------------------
+
+/** SEC-AI-1: the classifier's constant system prompt (`lib/schemas_docs`), bound here as a module constant. */
+const DOC_CLASSIFIER_SYSTEM = CLASSIFIER_SYSTEM;
+/** SEC-AI-1: a closed enum selects among the constant per-type prompts. */
+const TEXT_DOC_SYSTEM = (docType: ExtractableDocType): string => DOC_SYSTEMS[docType];
+/** A classification below this confidence is not recorded, and nothing is read with a guessed type. */
+export const MIN_CLASSIFIER_CONFIDENCE = 0.6;
+
+function readableType(docType: string): docType is ExtractableDocType {
+  // A statement is never read automatically here (the statement gate, SEC-SD-4 / SEC-AI-5).
+  return docType !== "card_statement" && Object.prototype.hasOwnProperty.call(DOC_SCHEMAS, docType);
+}
+
+/**
+ * M23 second stage for a forwarded or pasted message already linked to a transaction (`evidence.queueTextSecondStage`,
+ * behind `live_document_extraction`). The lease (`evidence.claimExtraction`) re-checks the flag, the tombstone and the
+ * budget. The masked text is the deterministic text layer (DA-A-6), so every quote is verifiable. A message whose text
+ * still shows a card number after KS2's normalization is not sent to the model again (DA-A-8). An undeclared message
+ * is classified first (`docTypeDeclaredBy: "classifier"`, never overriding the user's own declaration); then the type's
+ * schema is read and its values become candidates through `evidence.completeExtraction`.
+ */
+export const extractTextEvidence = internalAction({
+  args: { evidenceId: v.id("evidence") },
+  returns: v.null(),
+  handler: async (ctx, { evidenceId }) => {
+    const lease = await ctx.runMutation(internal.evidence.claimExtraction, { evidenceId });
+    if (lease === null) return null;
+    try {
+      const layer = { text: lease.text ?? "" };
+      if (layer.text.trim().length === 0) {
+        await ctx.runMutation(internal.evidence.completeExtraction, { evidenceId, startedAt: lease.startedAt, status: "succeeded", candidates: [] });
+        return null;
+      }
+      if (textLayerHasPan(layer.text)) {
+        await ctx.runMutation(internal.evidence.completeExtraction, {
+          evidenceId, startedAt: lease.startedAt, status: "store_only", summary: STATUS_SUMMARY.pan, hasTextLayer: true, candidates: [],
+        });
+        return null;
+      }
+      let docType: string = lease.docType;
+      let classifiedDocType: Doc<"evidence">["docType"] | undefined;
+      if (lease.docTypeDeclaredBy !== "user") {
+        const c = await extract("document_classification", DocClassification, DOC_CLASSIFIER_SYSTEM, layer.text);
+        if (c.confidence >= MIN_CLASSIFIER_CONFIDENCE) {
+          docType = c.docType;
+          classifiedDocType = c.docType;
+        }
+      }
+      let candidates: DocCandidate[] = [];
+      if (readableType(docType)) {
+        const doc: unknown = await extract(`document_${docType}`, DOC_SCHEMAS[docType], TEXT_DOC_SYSTEM(docType), layer.text);
+        candidates = candidatesFromDoc(docType, doc, lease.category, layer);
+      }
+      await ctx.runMutation(internal.evidence.completeExtraction, {
+        evidenceId,
+        startedAt: lease.startedAt,
+        status: "succeeded",
+        hasTextLayer: true,
+        ...(classifiedDocType !== undefined ? { classifiedDocType } : {}),
+        candidates,
+      });
+    } catch (err) {
+      await ctx.runMutation(internal.evidence.failExtraction, {
+        evidenceId,
+        startedAt: lease.startedAt,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     return null;
   },
 });

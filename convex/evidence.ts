@@ -10,19 +10,21 @@
  * **One download path.** `GET /evidence/file?id=` (owner-checked, rate-limited, `attachment` + `nosniff`). Nothing
  * here ever calls `ctx.storage.getUrl`: a Convex file URL is a bearer credential (SEC-UP-5).
  *
- * **Extraction is gated before it exists (DA-A-8, D145).** Wave 1 stores documents; it never extracts them. The
- * status a new upload gets says why it will or will not be read automatically, in this order: HEIC/HEIF →
- * `unreadable` (the model provider cannot read them, DA-A-28e); an encrypted PDF → `needs_unlocked_copy` (no
- * password is ever asked for); no user-declared document type → `awaiting_doc_type`; a card statement →
- * `store_only`; a card number found in the file's text → `store_only`; live extraction switched off
- * (`live_document_extraction`, D145) → `store_only` and an `extraction_refused` log line; otherwise
- * `not_requested` (M23 picks those up once extraction exists).
+ * **Extraction is gated (DA-A-8, D145).** The status a new upload gets says why it will or will not be read
+ * automatically, in this order: HEIC/HEIF → `unreadable` (the model provider cannot read them, DA-A-28e); an encrypted
+ * PDF → `needs_unlocked_copy` (no password is ever asked for); a card number found in the file's bytes → `store_only`,
+ * whatever is declared now or later (P08-W1); no user-declared document type → `awaiting_doc_type`; a card statement
+ * → `store_only`; live extraction switched off (`live_document_extraction`, D145) → `store_only` and an
+ * `extraction_refused` log line; otherwise `not_requested`, and M23's extraction (below) queues it once it is linked
+ * to a transaction.
  */
 import { ConvexError, v, type Infer } from "convex/values";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { evidenceDocType, extractionStatus as extractionStatusValidator } from "./schema";
+import { internal } from "./_generated/api";
+import { evidenceDocType, evidenceLocator, extractionStatus as extractionStatusValidator, factValue, quoteStatus as quoteStatusValidator } from "./schema";
+import { putFact } from "./lib/facts/write";
 import { isTombstoned } from "./lib/accountState";
 import { assertSameTransaction, ownedEvidence, ownedTransaction, requireUserId } from "./lib/access";
 import { rateLimiter } from "./lib/rateLimits";
@@ -34,6 +36,7 @@ import { maskPans } from "./lib/pan";
 import { chargeStoredBytes, storedBytes } from "./lib/blobRefs";
 import { sha256Hex } from "./lib/canonical";
 import {
+  DAILY_BUDGETS,
   EVIDENCE_BYTES_PER_USER_PER_DAY,
   EVIDENCE_UPLOADS_PER_DAY,
   GLOBAL_DAILY_BUDGETS,
@@ -144,11 +147,13 @@ export function uploadExtractionStatus(input: {
 }): StatusDecision {
   if (isHeicFamily(input.mime)) return { status: "unreadable", summary: STATUS_SUMMARY.heic, refusedByFlag: false };
   if (input.encrypted) return { status: "needs_unlocked_copy", summary: STATUS_SUMMARY.encrypted, refusedByFlag: false };
+  // P08-W1: a card number outranks the declaration (and its absence), so the sticky marker is recorded at once and a
+  // type declared later never unlocks the file (`isStickyBlock`).
+  if (input.panDetected) return { status: "store_only", summary: STATUS_SUMMARY.pan, refusedByFlag: false };
   if (input.declaredDocType === undefined || UNDECLARED.has(input.declaredDocType)) {
     return { status: "awaiting_doc_type", summary: STATUS_SUMMARY.awaitingDocType, refusedByFlag: false };
   }
   if (input.declaredDocType === "card_statement") return { status: "store_only", summary: STATUS_SUMMARY.statement, refusedByFlag: false };
-  if (input.panDetected) return { status: "store_only", summary: STATUS_SUMMARY.pan, refusedByFlag: false };
   if (!input.liveExtractionOn) return { status: "store_only", summary: STATUS_SUMMARY.extractionOff, refusedByFlag: true };
   return { status: "not_requested", refusedByFlag: false };
 }
@@ -513,7 +518,9 @@ export const finalizeUpload = internalMutation({
     if (decision.refusedByFlag) {
       logEvent("extraction_refused", { evidenceId, flag: "live_document_extraction" });
     }
-    return { outcome: "stored" as const, evidenceId, duplicate: false, extractionStatus: decision.status };
+    // M23: a revived row may already be linked to a transaction; a new upload is linked later (attachToTransaction).
+    const queued = await queueUploadIfEligible(ctx, evidenceId);
+    return { outcome: "stored" as const, evidenceId, duplicate: false, extractionStatus: queued ? ("queued" as const) : decision.status };
   },
 });
 
@@ -682,6 +689,7 @@ export const attachToTransaction = mutation({
     if (link === "same") return { changed: false };
     if (row.retention !== "active") throw new ConvexError(CONTENT_CLEARED);
     await ctx.db.patch(row._id, { transactionId });
+    await queueUploadIfEligible(ctx, row._id);
     return { changed: true };
   },
 });
@@ -742,6 +750,7 @@ export const declareDocType = mutation({
       }
     }
     await ctx.db.patch(row._id, patch);
+    if (await queueUploadIfEligible(ctx, row._id)) status = "queued";
     return { extractionStatus: status };
   },
 });
@@ -758,5 +767,321 @@ export const setPinned = mutation({
     const row = await ownedEvidence(ctx, evidenceId, userId);
     await ctx.db.patch(row._id, { pinnedAt: pinned ? (row.pinnedAt ?? Date.now()) : undefined });
     return null;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Extraction (M23; D145, DA-A-6, DA-A-8, SEC-AI-1/2, SEC-UP-4, SEC-DEL-4; security baseline §7 P4)
+// ---------------------------------------------------------------------------
+//
+// An upload is read only when ALL of these hold, re-checked at every step (queue, claim, completion):
+//   - the server flag `live_document_extraction` is on (D145: off on every deployment until the user approves);
+//   - the user declared what the document is (DA-A-8) and it is a type with a schema, but never a card statement;
+//   - it is linked to one of the user's transactions (facts are always about a transaction);
+//   - its content is still stored, and the account is not being deleted (SEC-DEL-4).
+// The node action `evidenceExtract.extractUpload` does the reading: `lib/pdfText` for the text layer (the text-layer
+// card-number pre-scan forces `store_only` before any model call), one `lib/ai.extract` call with the type's constant
+// system prompt, then `lib/docFacts` locates and verifies every quote (DA-A-6). Photos and image-only PDFs have no
+// deterministic text layer and are never sent to the model (SEC-SD-4: no document images to a provider before the
+// Privacy disclosure says so). Email and paste text is read the same way by `intake.extractTextEvidence` (the
+// second-stage classifier). Every extracted value becomes an `extracted_candidate` fact (SEC-AI-2).
+//
+// Each run holds a lease (`running` + `extractionStartedAt`). A run that does not finish within
+// `EXTRACTION_LEASE_MS` is abandoned; `retryStalledExtractions` (the sweep M29 schedules) re-queues it, and after
+// `MAX_EXTRACTION_ATTEMPTS` attempts the document ends `unreadable` (P4).
+
+/** Tags every fact the M23 document extraction writes. */
+export const DOCUMENT_EXTRACTOR_VERSION = "doc_extract_v1";
+/** Attempts before a document that keeps failing (or timing out) is given up on (security baseline §7 P4). */
+export const MAX_EXTRACTION_ATTEMPTS = 3;
+/** A run older than this has lost its lease (the node action times out at 10 minutes). */
+export const EXTRACTION_LEASE_MS = 15 * 60_000;
+/** Rows the stall sweep looks at per status per run. */
+const RETRY_SWEEP_LIMIT = 50;
+
+/** Document types extraction reads (a schema exists in `lib/schemas_docs`); card statements never, here. */
+const EXTRACTABLE: ReadonlySet<EvidenceDocType> = new Set<EvidenceDocType>([
+  "order_confirmation", "receipt", "expense_receipt", "refund_notice", "shipping_notice", "delivery_notice",
+  "delay_notice", "e_ticket", "itinerary_change_notice", "cancellation_notice", "baggage_report", "submission_proof",
+]);
+
+export const EXTRACTION_SUMMARY = {
+  queued: "Queued to be read.",
+  paused: "Paused: today's document-reading limit is reached. Recoup will try again.",
+  retry: "Reading this document failed. Recoup will try again.",
+  gaveUp: "Recoup could not read this document. You can still enter the details yourself.",
+  photo: "Photos are stored and can be downloaded, but Recoup reads text only from PDFs. Enter the details yourself.",
+  noTextLayer: "This PDF has no text Recoup can read (it looks like a scan). Enter the details yourself.",
+  gone: "The file is no longer stored.",
+} as const;
+
+/** The completion summary: how many candidates now wait for the user's confirmation. */
+export function readSummary(written: number): string {
+  return written === 0
+    ? "Read. Nothing in it answers one of this transaction's questions yet."
+    : `Read. ${written} detail${written === 1 ? "" : "s"} from it ${written === 1 ? "waits" : "wait"} for you to confirm.`;
+}
+
+/** Why an upload row cannot be queued, or null when it can. Reads only. */
+function uploadIneligible(row: Doc<"evidence">): string | null {
+  if (row.kind !== "upload") return "not an upload";
+  if (row.retention !== "active" || row.storageId === undefined) return "content cleared";
+  if (row.transactionId === undefined) return "not linked to a transaction";
+  if (row.docTypeDeclaredBy !== "user" || !EXTRACTABLE.has(row.docType)) return "no declared, readable type";
+  return null;
+}
+
+async function scheduleRun(ctx: MutationCtx, row: Doc<"evidence">, delayMs = 0): Promise<void> {
+  if (row.kind === "upload") await ctx.scheduler.runAfter(delayMs, internal.evidenceExtract.extractUpload, { evidenceId: row._id });
+  else await ctx.scheduler.runAfter(delayMs, internal.intake.extractTextEvidence, { evidenceId: row._id });
+}
+
+/**
+ * Queues an upload that is now eligible (called after finalize, `declareDocType` and `attachToTransaction`). Only a
+ * row still `not_requested` is queued, and only while the flag is on; returns whether it was.
+ */
+export async function queueUploadIfEligible(ctx: MutationCtx, evidenceId: Id<"evidence">): Promise<boolean> {
+  const row = await ctx.db.get(evidenceId);
+  if (row === null || row.extractionStatus !== "not_requested" || uploadIneligible(row) !== null) return false;
+  if (await isTombstoned(ctx, row.userId)) return false;
+  if (!(await isFlagOn(ctx, "live_document_extraction"))) return false;
+  await ctx.db.patch(row._id, { extractionStatus: "queued", extractionSummary: EXTRACTION_SUMMARY.queued });
+  await scheduleRun(ctx, row);
+  return true;
+}
+
+/**
+ * Queues the second stage for a forwarded or pasted message (`intake.applyExtraction` calls it once the first stage
+ * has linked the evidence to a transaction). Only while the flag is on; returns whether it was queued.
+ */
+export async function queueTextSecondStage(ctx: MutationCtx, evidenceId: Id<"evidence">): Promise<boolean> {
+  const row = await ctx.db.get(evidenceId);
+  if (row === null || (row.kind !== "email" && row.kind !== "paste")) return false;
+  if (row.retention !== "active" || row.text === undefined || row.transactionId === undefined) return false;
+  if (row.extractionStatus === "queued" || row.extractionStatus === "running") return false;
+  if (row.extractorVersion === DOCUMENT_EXTRACTOR_VERSION) return false; // read by the second stage already
+  if (await isTombstoned(ctx, row.userId)) return false;
+  if (!(await isFlagOn(ctx, "live_document_extraction"))) return false;
+  await ctx.db.patch(row._id, { extractionStatus: "queued", extractionSummary: EXTRACTION_SUMMARY.queued, extractionAttempts: 0 });
+  await scheduleRun(ctx, row);
+  return true;
+}
+
+
+/** How a run that can no longer finish ends: uploads `unreadable` (P4), messages `failed` (their first stage stands). */
+function gaveUpStatus(row: Doc<"evidence">): ExtractionStatus {
+  return row.kind === "upload" ? "unreadable" : "failed";
+}
+
+/**
+ * Takes the lease on one queued row (or on a run whose lease expired), after re-checking everything: the flag, the
+ * tombstone, the content, the link, the attempt count and the daily reading budget (`inbound_extract`, per user then
+ * deployment-wide). Returns null — having written why — when the row must not be read now.
+ */
+export const claimExtraction = internalMutation({
+  args: { evidenceId: v.id("evidence") },
+  // The lease (never returned to a client: this is internal, SEC-UP-1).
+  returns: v.union(
+    v.object({
+      userId: v.id("users"),
+      transactionId: v.id("transactions"),
+      category: v.union(v.literal("retail_order"), v.literal("air_travel"), v.literal("card_charge")),
+      kind: v.union(v.literal("upload"), v.literal("email"), v.literal("paste")),
+      docType: evidenceDocType,
+      docTypeDeclaredBy: v.union(v.literal("user"), v.literal("classifier"), v.null()),
+      storageId: v.union(v.id("_storage"), v.null()),
+      mimeType: v.union(v.string(), v.null()),
+      text: v.union(v.string(), v.null()),
+      startedAt: v.number(),
+      attempt: v.number(),
+    }),
+    v.null(),
+  ),
+  handler: async (ctx, { evidenceId }) => {
+    const row = await ctx.db.get(evidenceId);
+    if (row === null) return null;
+    const now = Date.now();
+    const stale = row.extractionStatus === "running" && (row.extractionStartedAt ?? 0) < now - EXTRACTION_LEASE_MS;
+    if (row.extractionStatus !== "queued" && !stale) return null;
+    if (row.kind !== "upload" && row.kind !== "email" && row.kind !== "paste") return null;
+    if (await isTombstoned(ctx, row.userId)) return null; // SEC-DEL-4: the purge removes the row and its blob
+    if (!(await isFlagOn(ctx, "live_document_extraction"))) {
+      await ctx.db.patch(row._id, { extractionStatus: row.kind === "upload" ? "store_only" : "succeeded", extractionSummary: row.kind === "upload" ? STATUS_SUMMARY.extractionOff : undefined });
+      logEvent("extraction_refused", { evidenceId, flag: "live_document_extraction" });
+      return null;
+    }
+    const unusable =
+      row.kind === "upload" ? uploadIneligible(row) : row.retention !== "active" || row.text === undefined || row.transactionId === undefined ? "not readable" : null;
+    const txn = row.transactionId === undefined ? null : await ctx.db.get(row.transactionId);
+    if (unusable !== null || txn === null || txn.userId !== row.userId) {
+      await ctx.db.patch(row._id, { extractionStatus: row.kind === "upload" ? "not_requested" : "succeeded", extractionSummary: undefined });
+      return null;
+    }
+    if (row.extractionAttempts >= MAX_EXTRACTION_ATTEMPTS) {
+      await ctx.db.patch(row._id, { extractionStatus: gaveUpStatus(row), extractionSummary: EXTRACTION_SUMMARY.gaveUp });
+      return null;
+    }
+    const perUser = await tryConsumeBudget(ctx, row.userId, "inbound_extract", DAILY_BUDGETS.inbound_extract.max, now);
+    const global = perUser && (await tryConsumeGlobalBudget(ctx, "inbound_extract", GLOBAL_DAILY_BUDGETS.inbound_extract.max, 1, now));
+    if (!global) {
+      await ctx.db.patch(row._id, { extractionStatus: "queued", extractionSummary: EXTRACTION_SUMMARY.paused });
+      return null;
+    }
+    const attempt = row.extractionAttempts + 1;
+    await ctx.db.patch(row._id, {
+      extractionStatus: "running",
+      extractionAttempts: attempt,
+      extractionStartedAt: now,
+      extractorVersion: DOCUMENT_EXTRACTOR_VERSION,
+    });
+    return {
+      userId: row.userId,
+      transactionId: txn._id,
+      category: txn.category,
+      kind: row.kind as "upload" | "email" | "paste",
+      docType: row.docType,
+      docTypeDeclaredBy: row.docTypeDeclaredBy ?? null,
+      storageId: row.storageId ?? null,
+      mimeType: row.mimeType ?? null,
+      text: row.text ?? null,
+      startedAt: now,
+      attempt,
+    };
+  },
+});
+
+const candidateValidator = v.object({ key: v.string(), value: factValue, locator: evidenceLocator, quoteStatus: quoteStatusValidator });
+
+/**
+ * Ends a run that still holds its lease: writes the candidates as `extracted_candidate` facts through the single fact
+ * writer, and the final status. Writes NOTHING when the lease was lost, the account is being deleted (SEC-DEL-4: the
+ * purge then removes the row and its blob), the content was cleared, or the flag was switched off while the document
+ * was being read (the operator's kill switch, RUNBOOK §14). A candidate the catalogue refuses is skipped.
+ */
+export const completeExtraction = internalMutation({
+  args: {
+    evidenceId: v.id("evidence"),
+    startedAt: v.number(),
+    status: v.union(
+      v.literal("succeeded"), v.literal("store_only"), v.literal("needs_unlocked_copy"), v.literal("over_page_cap"),
+      v.literal("unreadable"),
+    ),
+    summary: v.optional(v.string()),
+    hasTextLayer: v.optional(v.boolean()),
+    pageCount: v.optional(v.number()),
+    /** The second-stage classifier's type for an undeclared message (never overrides the user's declaration). */
+    classifiedDocType: v.optional(evidenceDocType),
+    candidates: v.array(candidateValidator),
+  },
+  returns: v.object({ applied: v.boolean(), written: v.number() }),
+  handler: async (ctx, args) => {
+    const row = await ctx.db.get(args.evidenceId);
+    if (row === null || row.extractionStatus !== "running" || row.extractionStartedAt !== args.startedAt) return { applied: false, written: 0 };
+    if (await isTombstoned(ctx, row.userId)) return { applied: false, written: 0 };
+    if (!(await isFlagOn(ctx, "live_document_extraction"))) {
+      await ctx.db.patch(row._id, { extractionStatus: row.kind === "upload" ? "store_only" : "succeeded", extractionSummary: row.kind === "upload" ? STATUS_SUMMARY.extractionOff : undefined });
+      logEvent("extraction_refused", { evidenceId: row._id, flag: "live_document_extraction" });
+      return { applied: false, written: 0 };
+    }
+    if (row.retention !== "active") {
+      await ctx.db.patch(row._id, { extractionStatus: row.kind === "upload" ? "not_requested" : "succeeded", extractionSummary: undefined });
+      return { applied: false, written: 0 };
+    }
+    const patch: Partial<Doc<"evidence">> = {};
+    if (args.classifiedDocType !== undefined && row.docTypeDeclaredBy !== "user") {
+      patch.docType = args.classifiedDocType;
+      patch.docTypeDeclaredBy = UNDECLARED.has(args.classifiedDocType) ? undefined : "classifier";
+    }
+    let written = 0;
+    if (args.status === "succeeded" && row.transactionId !== undefined) {
+      for (const c of args.candidates) {
+        try {
+          const res = await putFact(ctx, row.userId, {
+            transactionId: row.transactionId,
+            subjectKey: "txn",
+            key: c.key,
+            state: "extracted_candidate",
+            value: c.value,
+            source: { kind: "evidence", evidenceId: row._id, locator: c.locator, quoteStatus: c.quoteStatus, extractorVersion: DOCUMENT_EXTRACTOR_VERSION },
+          });
+          if (res.outcome === "inserted") written++;
+        } catch (err) {
+          if (!(err instanceof ConvexError)) throw err;
+        }
+      }
+    }
+    await ctx.db.patch(row._id, {
+      ...patch,
+      extractionStatus: args.status,
+      extractionSummary: args.status === "succeeded" ? readSummary(written) : args.summary,
+      ...(args.hasTextLayer !== undefined ? { hasTextLayer: args.hasTextLayer } : {}),
+      ...(args.pageCount !== undefined ? { pageCount: args.pageCount } : {}),
+    });
+    return { applied: true, written };
+  },
+});
+
+/**
+ * A run that threw: re-queued with a growing delay while attempts remain, else given up (`unreadable` for an upload,
+ * P4). Nothing is retried for an account being deleted.
+ */
+export const failExtraction = internalMutation({
+  args: { evidenceId: v.id("evidence"), startedAt: v.number(), error: v.string() },
+  returns: v.null(),
+  handler: async (ctx, { evidenceId, startedAt, error }) => {
+    const row = await ctx.db.get(evidenceId);
+    if (row === null || row.extractionStatus !== "running" || row.extractionStartedAt !== startedAt) return null;
+    logEvent("extraction_failed", { evidenceId, attempt: row.extractionAttempts, error: error.slice(0, 300) });
+    if (await isTombstoned(ctx, row.userId)) return null;
+    if (row.extractionAttempts >= MAX_EXTRACTION_ATTEMPTS) {
+      await ctx.db.patch(row._id, { extractionStatus: gaveUpStatus(row), extractionSummary: EXTRACTION_SUMMARY.gaveUp });
+      return null;
+    }
+    await ctx.db.patch(row._id, { extractionStatus: "queued", extractionSummary: EXTRACTION_SUMMARY.retry });
+    await scheduleRun(ctx, row, row.extractionAttempts * 60_000);
+    return null;
+  },
+});
+
+/**
+ * The stall sweep (M29 wires it into `crons.ts`): re-queues runs whose lease expired (or gives them up after
+ * `MAX_EXTRACTION_ATTEMPTS`, P4) and re-schedules queued rows (a budget pause, or a lost schedule; the claim makes a
+ * duplicate run a no-op). Bounded per status; skips accounts being deleted.
+ */
+export const retryStalledExtractions = internalMutation({
+  args: {},
+  returns: v.object({ requeued: v.number(), gaveUp: v.number(), rescheduled: v.number() }),
+  handler: async (ctx) => {
+    const now = Date.now();
+    let requeued = 0;
+    let gaveUp = 0;
+    let rescheduled = 0;
+    const stalled = await ctx.db
+      .query("evidence")
+      .withIndex("by_extraction_status_and_extraction_started_at", (q) =>
+        q.eq("extractionStatus", "running").lt("extractionStartedAt", now - EXTRACTION_LEASE_MS),
+      )
+      .take(RETRY_SWEEP_LIMIT);
+    for (const row of stalled) {
+      if (await isTombstoned(ctx, row.userId)) continue;
+      if (row.extractionAttempts >= MAX_EXTRACTION_ATTEMPTS) {
+        await ctx.db.patch(row._id, { extractionStatus: gaveUpStatus(row), extractionSummary: EXTRACTION_SUMMARY.gaveUp });
+        gaveUp++;
+      } else {
+        await ctx.db.patch(row._id, { extractionStatus: "queued", extractionSummary: EXTRACTION_SUMMARY.retry });
+        await scheduleRun(ctx, row);
+        requeued++;
+      }
+    }
+    const queued = await ctx.db
+      .query("evidence")
+      .withIndex("by_extraction_status_and_extraction_started_at", (q) => q.eq("extractionStatus", "queued"))
+      .take(RETRY_SWEEP_LIMIT);
+    for (const row of queued) {
+      if (await isTombstoned(ctx, row.userId)) continue;
+      await scheduleRun(ctx, row);
+      rescheduled++;
+    }
+    return { requeued, gaveUp, rescheduled };
   },
 });

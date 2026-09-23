@@ -262,7 +262,8 @@ describe("putFact — supersede rules and the live count", () => {
     const r = await retail(t);
     const ev = await evidence(t, r.userId);
     const base = { transactionId: r.transactionId, subjectKey: r.item, key: "retail.quantity" };
-    await put(t, r.userId, { ...base, state: "observed", value: { kind: "count", n: 3 }, source: cite(ev) });
+    // M23 (DA-A-6): a document backs an observed fact only through a verified quote.
+    await put(t, r.userId, { ...base, state: "observed", value: { kind: "count", n: 3 }, source: { ...cite(ev), quoteStatus: "verified" } });
     await put(t, r.userId, { ...base, state: "user_confirmed", value: { kind: "count", n: 2 }, source: user, overridesObserved: true });
     const live = await t.run((ctx) => readCellRows(ctx, r.transactionId, r.item, "retail.quantity"));
     expect(live.map((x) => [x.state, x.value])).toEqual([["user_confirmed", { kind: "count", n: 2 }]]);
