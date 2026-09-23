@@ -880,6 +880,9 @@ async function c4Seed(t: T, c: C4Case, index: number): Promise<Id<"users">> {
 }
 
 describe("C4. every status × delivery × promised ≶ net × provisional × refusal × linked opportunity: tiles disjoint and exhaustive", () => {
+  // The generated R01 opportunities count in Potential only while R01 v1 is ACTIVE in the registry in use (mission §12,
+  // recovery.summary's active-pack filter): activate it through the C3 seam (the file's default is "no active pack").
+  beforeEach(() => setTestActivations([{ ruleId: "R01.retail_price_adjustment", version: 1, status: "active", decision: "TEST" }]));
   it("the generator covers every value of every dimension, and every tile and both excess lines are exercised", () => {
     const cases = c4Cases();
     const claims = cases.flatMap((c) => c.claims);

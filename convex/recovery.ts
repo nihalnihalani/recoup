@@ -49,6 +49,7 @@ import { balance, provisionalOutstanding, type LedgerEvent } from "./lib/ledger"
 import { claimCurrency, isTwoDecimalCurrency } from "./lib/money";
 import { MAX_ITEMS_PER_PURCHASE, SUMMARY_MAX_CLAIMS, SUMMARY_MAX_OPEN_OPPORTUNITIES } from "./limits";
 import { legacyLossKeys } from "./opportunities";
+import { isPackActive } from "./lib/rules/registry";
 
 export const TILES = ["potential", "ready", "sendingOrUnknown", "asked", "refused", "promised"] as const;
 export type Tile = (typeof TILES)[number];
@@ -487,6 +488,9 @@ export const summary = query({
       if (o.outcome !== "eligible" && o.outcome !== "likely_eligible") continue;
       // D247: not money found while the purchase is unconfirmed or a decisive fact is only a candidate.
       if (txn.status === "needs_review" || o.decisiveUnconfirmed === true) continue;
+      // Mission §12: nothing theoretical enters Potential — only an estimate of a pack ACTIVE in the registry in use counts
+      // (a withdrawn pack's stale open row is superseded at its next evaluation; until then it is not money found).
+      if (!isPackActive(o.ruleId, o.ruleVersion)) continue;
       // D226: a denied loss is not Potential again on the same basis (not yet re-evaluated, or the same resultHash).
       if (o.deniedAt !== undefined) {
         if (o.deniedResultHash === undefined || !o.currentEvaluationId) continue;

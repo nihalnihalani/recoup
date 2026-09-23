@@ -3,8 +3,13 @@
  * keys_order.ts (M21): the online-order keys R05 v1 reads and `retail.order_total`, the confirmed order total that is
  * both R05's refund amount and the retail paid-total cap of `recovery.summary` (contract §3.4, D148 wave-2 note).
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Potential counts only a pack ACTIVE in the registry in use (mission §12); R05 is activated through the C3 seam.
+vi.mock("../rules/registry", async () => await import("../rules/testRegistry"));
+
 import { api } from "../../_generated/api";
+import { resetTestRegistry, setTestActivations } from "../rules/testRegistry";
 import { setup, signedIn } from "../../test.setup";
 import { US_ZONES } from "../deadlines/usZones";
 import { getFactSpec, type FactSpec } from "./catalog";
@@ -52,6 +57,8 @@ describe("keys_order (catalogue)", () => {
 });
 
 describe("retail.order_total as the paid-total cap through the public mutations (contract §3.4 wave-2 note)", () => {
+  beforeEach(() => setTestActivations([{ ruleId: "R05.mitor_shipment.us_ftc", version: 1, status: "active", decision: "TEST" }]));
+  afterEach(() => resetTestRegistry());
   async function order(withTotal: boolean) {
     const t = setup();
     const { as, userId } = await signedIn(t);
