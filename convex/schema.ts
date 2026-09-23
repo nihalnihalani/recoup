@@ -808,6 +808,14 @@ export default defineSchema({
      * Potential until the user confirms. Written by `evaluateRun` with the rest of the projection.
      */
     decisiveUnconfirmed: v.optional(v.boolean()),
+    /**
+     * M29 (C50, D158, D241): in-app deadline attention, written ONLY by `deadlines.ts` (reminder-only, D03: never an
+     * email). Set while a USER-obligor deadline (`nextDeadlineAt`, never `met`, D212) is running inside the attention
+     * window and the work is still the user's to do — incl. `manual_review` (D158); cleared when the deadline passes,
+     * the work is done or closed. Current only while `dueAt === nextDeadlineAt` and `now < dueAt`
+     * (`deadlines.deadlineAttentionActive`); `evaluateRun` clears it when `nextDeadlineAt` moves, never sets it.
+     */
+    deadlineAttention: v.optional(v.object({ setAt: v.number(), dueAt: v.number(), deadlineId: v.string() })),
   }).index("by_user_and_dedupe_key", ["userId", "dedupeKey"])
     .index("by_transaction", ["transactionId"])
     .index("by_user_and_status", ["userId", "status"])

@@ -14,6 +14,7 @@ import type * as auth from "../auth.js";
 import type * as budget from "../budget.js";
 import type * as claims from "../claims.js";
 import type * as crons from "../crons.js";
+import type * as deadlines from "../deadlines.js";
 import type * as drafts from "../drafts.js";
 import type * as evidence from "../evidence.js";
 import type * as evidenceExtract from "../evidenceExtract.js";
@@ -144,6 +145,7 @@ declare const fullApi: ApiFromModules<{
   budget: typeof budget;
   claims: typeof claims;
   crons: typeof crons;
+  deadlines: typeof deadlines;
   drafts: typeof drafts;
   evidence: typeof evidence;
   evidenceExtract: typeof evidenceExtract;

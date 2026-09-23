@@ -609,11 +609,14 @@ async function evaluateRun(
     }
     // D226: the first evaluation of a denied loss without its case records the denied basis (its resultHash).
     const denialBasis = existing.deniedAt !== undefined && existing.deniedResultHash === undefined && activeClaimId === null;
+    // M29 (D241): attention bound to a user deadline that moved is stale — cleared here, never set (deadlines.ts sets it).
+    const attentionMoved = existing.deadlineAttention !== undefined && existing.deadlineAttention.dueAt !== projection.nextDeadlineAt;
     await ctx.db.patch(existing._id, {
       ...projection,
       status,
       activeClaimId: activeClaimId ?? undefined,
       ...(denialBasis ? { deniedResultHash: rh } : {}),
+      ...(attentionMoved ? { deadlineAttention: undefined } : {}),
     });
     opp = { ...opp, ...projection, status, activeClaimId: activeClaimId ?? undefined };
   }

@@ -94,4 +94,21 @@ crons.interval("recovery retention sweep", { hours: 24 }, internal.retention.swe
  */
 crons.interval("orphan blob sweep", { hours: 24 }, internal.retention.sweepOrphanBlobs, {});
 
+/**
+ * Deadline sweep (M29; C50, D158, SEC-CH-6; rev 5.2). Hourly: re-evaluates `not_yet_due` opportunities whose
+ * `reevaluateAt` has passed (M20's `opportunities.sweepReevaluateDue`, one bounded page), then scans running USER
+ * deadlines and schedules one state-re-reading `deadlines.remind` per opportunity whose in-app attention must be set
+ * or cleared. In-app only; nothing is ever sent (D03). A tick with nothing due costs two bounded index reads plus the
+ * re-evaluation page. See convex/deadlines.ts.
+ */
+crons.interval("deadline sweep", { hours: 1 }, internal.deadlines.sweep, {});
+
+/**
+ * Evidence extraction safety net (M23 provides it, M29 schedules it; D246): re-queues extraction runs whose
+ * `EXTRACTION_LEASE_MS` (15 min) lease expired, gives up after `MAX_EXTRACTION_ATTEMPTS`, and re-schedules queued rows
+ * (a budget pause or a lost schedule). Every 15 minutes, the lease length. With live extraction OFF nothing is ever
+ * queued, so a tick costs two bounded index reads.
+ */
+crons.interval("evidence extraction retry", { minutes: 15 }, internal.evidence.retryStalledExtractions, {});
+
 export default crons;

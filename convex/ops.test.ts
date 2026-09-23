@@ -802,10 +802,12 @@ describe("M1B: ops.backlog additions", () => {
     });
   });
 
-  it("stale sources: honest about being unwired until the registry and verification.ts exist", async () => {
+  it("stale sources (M29): wired to the production registry + verification.ts; R01 v1 has no refresh window, so nothing is checked and it says so", async () => {
     const t = setup();
     const result = await t.query(internal.ops.backlog, { now: NOW + 42 * 60_000 });
-    expect(result.staleSources).toEqual({ asOf: NOW, inputsWired: false, checkedPacks: 0, packs: [] });
+    expect(result.staleSources).toEqual({
+      asOf: NOW, inputsWired: true, checkedPacks: 0, packs: [], withoutRefreshWindow: ["R01.retail_price_adjustment@v1"],
+    });
   });
 
   it("counts awaiting_doc_type and pending/failed extraction, bounded by scanLimit", async () => {

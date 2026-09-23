@@ -17,6 +17,17 @@
  *  - `backlog` fields `asOf`, `flags`, `ruleEvaluationFailures`,
  *    `staleSources`, `extraction`, `orphanSweep` and `recoveryRetention`,
  *    all computed at the `now` argument.
+ *
+ * M29 (C58) adds:
+ *  - `ruleSourceInputs()` is WIRED: the production registry's active packs,
+ *    their sources' refresh windows and mandatory review dates (the manifest's
+ *    `refreshDays` / `mandatoryReviewBy`, mirrored in each pack's `sources` and
+ *    checked equal by ops.m29.test.ts) against the lead-owned
+ *    `lib/rules/verification.ts`, at the coarse `asOf`.
+ *  - `backlog` fields `deadlineSweep` (the M29 cron's last page and its age),
+ *    `reevaluateDue` (not-yet-due paths waiting for their re-evaluation date)
+ *    and `userDeadlinesSoon` (running user deadlines inside the attention
+ *    window), each bounded by `scanLimit`.
  */
 import { ConvexError, v } from "convex/values";
 import { internalMutation, internalQuery, type MutationCtx, type QueryCtx } from "./_generated/server";
@@ -39,6 +50,10 @@ import {
   readFlag,
 } from "./lib/flags";
 import { logEvent } from "./lib/log";
+import { activePacks } from "./lib/rules/registry";
+import { VERIFICATION } from "./lib/rules/verification";
+import type { AnyRulePack } from "./lib/rules/types";
+import { DEADLINE_ATTENTION_LEAD_MS, DEADLINE_SWEEP_OPS_KEY, parseSweepRecord } from "./deadlines";
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
@@ -114,6 +129,8 @@ export const resumeKind = internalMutation({
 
 /** Rows one indexed count reads before giving up and reporting `truncated: true`. Overridable per call (mainly for tests) via `args.scanLimit`. */
 const DEFAULT_SCAN_LIMIT = 2000;
+/** M29: the backlog's opportunity counts (`reevaluateDue`, `userDeadlinesSoon`) read at most this many rows per range. */
+export const OPPORTUNITY_SCAN_CAP = 500;
 
 const countShape = v.object({
   /** Capped at the scan limit; see `truncated`. */
@@ -320,6 +337,12 @@ export type RuleSourceWindow = {
   version: number;
   refreshDays: number;
   sourceIds: readonly string[];
+  /**
+   * M29 (D234 E5, as `lib/rules/outcome.sourceStale`): per source, the manifest's mandatory review date
+   * "YYYY-MM-DD". From that date (UTC) a source is stale until a verification dated on or after it; an unreadable date
+   * fails closed (stale).
+   */
+  mandatoryReviewBy?: Readonly<Record<string, string>>;
 };
 
 /**
@@ -408,6 +431,20 @@ export function staleSourcePacks(
         windowEndsAt = windowEndsAt === null ? end : Math.min(windowEndsAt, end);
         status = now > end ? "stale" : now > end - dueSoonMs ? "due_soon" : "fresh";
       }
+      // M29 (D234 E5): a mandatory review date not yet covered by a verification on or after it.
+      const reviewRaw = pack.mandatoryReviewBy && Object.prototype.hasOwnProperty.call(pack.mandatoryReviewBy, sourceId)
+        ? pack.mandatoryReviewBy[sourceId]
+        : undefined;
+      if (reviewRaw !== undefined && status !== "never_verified") {
+        const reviewBy = Date.parse(`${reviewRaw}T00:00:00Z`);
+        if (!Number.isFinite(reviewBy)) {
+          status = "stale";
+        } else if (!(verifiedAt !== null && verifiedAt >= reviewBy)) {
+          windowEndsAt = windowEndsAt === null ? reviewBy : Math.min(windowEndsAt, reviewBy);
+          const reviewStatus: StaleSourceStatus | "fresh" = now >= reviewBy ? "stale" : now > reviewBy - dueSoonMs ? "due_soon" : "fresh";
+          if (SEVERITY[reviewStatus] > SEVERITY[status]) status = reviewStatus;
+        }
+      }
       if (status !== "fresh") lapsed.push(sourceId);
       if (SEVERITY[status] > SEVERITY[worst]) worst = status;
     }
@@ -419,19 +456,48 @@ export function staleSourcePacks(
 }
 
 /**
- * The stale-source diagnostic's inputs. Wave 1 has neither the production
- * registry (`lib/rules/registry.ts`, M12) nor `lib/rules/verification.ts`
- * (lead), and R01 v1, the only wave-1 pack, has no refresh window (§2.7
- * "Reconciliation for R01 v1"). So there is nothing to check, and
- * `backlog.staleSources.inputsWired` reports `false`.
- *
- * **Wiring (whoever holds ops.ts once those modules land; C58 is
- * M1B/M29):** return `wired: true` and build `packs` from the active packs
- * (ruleId, version, manifest `refreshDays`, `sources`) and `verification`
- * from `verification.ts`. Add a backlog test with one pack past its window.
+ * Pure (M29, C58): the refresh windows of `packs` as `staleSourcePacks` reads them — one entry per (pack, refresh
+ * window), from each source's `refreshWindowDays` and `mandatoryReviewBy` (the manifest's `refreshDays` /
+ * `mandatoryReviewBy`, which every pack mirrors; ops.m29.test.ts checks them equal). A pack with no windowed source
+ * (R01 v1: its parameter source is the per-purchase policy snapshot, D145 d) is listed in `withoutWindow` instead —
+ * it can never go stale here, exactly as `lib/rules/outcome.sourceStale` never makes it `source_unverified`.
  */
-function ruleSourceInputs(): { wired: boolean; packs: RuleSourceWindow[]; verification: SourceVerification } {
-  return { wired: false, packs: [], verification: {} };
+export function ruleSourceWindows(
+  packs: readonly Pick<AnyRulePack, "ruleId" | "version" | "sources">[],
+): { windows: RuleSourceWindow[]; withoutWindow: string[] } {
+  const windows: RuleSourceWindow[] = [];
+  const withoutWindow: string[] = [];
+  for (const pack of packs) {
+    const byDays = new Map<number, { sourceIds: string[]; mandatoryReviewBy: Record<string, string> }>();
+    for (const s of pack.sources) {
+      if (s.refreshWindowDays === undefined) continue;
+      const group = byDays.get(s.refreshWindowDays) ?? { sourceIds: [], mandatoryReviewBy: {} };
+      if (!group.sourceIds.includes(s.sourceId)) group.sourceIds.push(s.sourceId);
+      if (s.mandatoryReviewBy !== undefined) group.mandatoryReviewBy[s.sourceId] = s.mandatoryReviewBy;
+      byDays.set(s.refreshWindowDays, group);
+    }
+    if (byDays.size === 0) {
+      withoutWindow.push(`${pack.ruleId}@v${pack.version}`);
+      continue;
+    }
+    for (const [refreshDays, g] of [...byDays.entries()].sort((a, b) => a[0] - b[0])) {
+      windows.push({
+        ruleId: pack.ruleId, version: pack.version, refreshDays, sourceIds: g.sourceIds,
+        ...(Object.keys(g.mandatoryReviewBy).length > 0 ? { mandatoryReviewBy: g.mandatoryReviewBy } : {}),
+      });
+    }
+  }
+  return { windows, withoutWindow };
+}
+
+/**
+ * The stale-source diagnostic's inputs (M29 wires them; the wave-1 acceptance, D237, flagged `wired: false`): the
+ * PRODUCTION registry's active packs (`activation.ts`) and the lead-owned `verification.ts`. `backlog` evaluates them at
+ * its coarse `asOf`.
+ */
+function ruleSourceInputs(): { wired: boolean; packs: RuleSourceWindow[]; withoutWindow: string[]; verification: SourceVerification } {
+  const { windows, withoutWindow } = ruleSourceWindows(activePacks());
+  return { wired: true, packs: windows, withoutWindow, verification: VERIFICATION };
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +634,8 @@ export const backlog = internalQuery({
       inputsWired: v.boolean(),
       checkedPacks: v.number(),
       packs: v.array(staleSourcePackShape),
+      /** M29: active packs with no refresh-windowed source (`ruleId@vN`, e.g. R01 v1) — never stale by design, listed so "not checked" is visible. */
+      withoutRefreshWindow: v.array(v.string()),
     }),
     /**
      * M1B (DA-A-8, D145): evidence waiting on the user (`awaiting_doc_type`, which is never extracted),
@@ -578,6 +646,25 @@ export const backlog = internalQuery({
     orphanSweep: v.object({ ageMs: v.union(v.number(), v.null()) }),
     /** M1B (DA-A-7): age of the evidence/evaluation retention sweep's `opsState` row (`RECOVERY_RETENTION_OPS_KEY`), `null` before its first run. The older `retention` field above is the pre-wave-1 sweep. */
     recoveryRetention: v.object({ ageMs: v.union(v.number(), v.null()) }),
+    /**
+     * M29 (C50/C58): the hourly deadline sweep's `opsState` row (`deadlines.DEADLINE_SWEEP_OPS_KEY`). `ageMs` is `null`
+     * before its first run; a value well past an hour means the cron is not running. `lastCycle` is the latest cycle's
+     * running totals (`reevaluated` null and `reevaluateFailed` true when the re-evaluation page rolled back).
+     */
+    deadlineSweep: v.object({
+      ageMs: v.union(v.number(), v.null()),
+      lastCycle: v.union(
+        v.null(),
+        v.object({
+          cycleNow: v.number(), status: v.union(v.literal("open"), v.literal("case_open")), scanned: v.number(), scheduled: v.number(),
+          reevaluated: v.union(v.number(), v.null()), reevaluateFailed: v.boolean(), done: v.boolean(),
+        }),
+      ),
+    }),
+    /** M29 (rev 5.2): `open` not-yet-due opportunities whose `reevaluateAt` ≤ `now` (waiting for the sweep's re-evaluation page). Capped at `min(scanLimit, OPPORTUNITY_SCAN_CAP)`. */
+    reevaluateDue: countShape,
+    /** M29 (C50): `open` + `case_open` opportunities whose next USER deadline falls in (now, now + the attention window]. Each status capped at `min(scanLimit, OPPORTUNITY_SCAN_CAP)`. */
+    userDeadlinesSoon: countShape,
   }),
   handler: async (ctx, { scanLimit, now: nowArg }) => {
     const limit = scanLimit !== undefined && scanLimit > 0 ? Math.floor(scanLimit) : DEFAULT_SCAN_LIMIT;
@@ -645,6 +732,7 @@ export const backlog = internalQuery({
       inputsWired: sourceInputs.wired,
       checkedPacks: sourceInputs.packs.length,
       packs: staleSourcePacks(sourceInputs.packs, sourceInputs.verification, asOf),
+      withoutRefreshWindow: sourceInputs.withoutWindow,
     };
 
     const countExtraction = async (status: "awaiting_doc_type" | "queued" | "running" | "failed") => {
@@ -671,6 +759,35 @@ export const backlog = internalQuery({
     const orphanSweep = await sweepAge(ORPHAN_SWEEP_OPS_KEY);
     const recoveryRetention = await sweepAge(RECOVERY_RETENTION_OPS_KEY);
 
+    // ---- M29 ---- (opportunity counts capped at OPPORTUNITY_SCAN_CAP, below `limit`: the rows are larger than the
+    // other sections' and three ranges are read; measured at the caps in ops.m29.test.ts)
+    const oppLimit = Math.min(limit, OPPORTUNITY_SCAN_CAP);
+    const deadlineSweepRow = await ctx.db
+      .query("opsState")
+      .withIndex("by_key", (q) => q.eq("key", DEADLINE_SWEEP_OPS_KEY))
+      .first();
+    const deadlineSweep = {
+      ageMs: deadlineSweepRow ? now - deadlineSweepRow.updatedAt : null,
+      lastCycle: parseSweepRecord(deadlineSweepRow?.cursor),
+    };
+    const reevaluateDueRows = await ctx.db
+      .query("opportunities")
+      .withIndex("by_status_and_reevaluate_at", (q) => q.eq("status", "open").gt("reevaluateAt", 0).lte("reevaluateAt", now))
+      .take(oppLimit + 1);
+    let deadlinesSoon = 0;
+    let deadlinesSoonTruncated = false;
+    for (const status of ["open", "case_open"] as const) {
+      const rows = await ctx.db
+        .query("opportunities")
+        .withIndex("by_status_and_next_deadline_at", (q) =>
+          q.eq("status", status).gt("nextDeadlineAt", now).lte("nextDeadlineAt", now + DEADLINE_ATTENTION_LEAD_MS),
+        )
+        .take(oppLimit + 1);
+      const s = summarize(rows.length, oppLimit);
+      deadlinesSoon += s.count;
+      if (s.truncated) deadlinesSoonTruncated = true;
+    }
+
     return {
       now,
       asOf,
@@ -692,6 +809,9 @@ export const backlog = internalQuery({
       extraction,
       orphanSweep,
       recoveryRetention,
+      deadlineSweep,
+      reevaluateDue: summarize(reevaluateDueRows.length, oppLimit),
+      userDeadlinesSoon: { count: deadlinesSoon, truncated: deadlinesSoonTruncated },
     };
   },
 });

@@ -16,3 +16,11 @@ describe("crons — M14 retention wiring", () => {
     expect(jobs["retention sweep"]).toMatchObject({ name: "retention:sweep", schedule: { type: "interval", hours: 24 } });
   });
 });
+
+describe("crons — M29 wiring", () => {
+  it("runs the deadline sweep hourly and the evidence extraction retry every 15 minutes, with no arguments", () => {
+    const jobs = (crons as unknown as { crons: Record<string, { name: string; args: unknown[]; schedule: Record<string, unknown> }> }).crons;
+    expect(jobs["deadline sweep"]).toMatchObject({ name: "deadlines:sweep", args: [{}], schedule: { type: "interval", hours: 1 } });
+    expect(jobs["evidence extraction retry"]).toMatchObject({ name: "evidence:retryStalledExtractions", args: [{}], schedule: { type: "interval", minutes: 15 } });
+  });
+});
