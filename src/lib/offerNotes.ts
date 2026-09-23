@@ -22,3 +22,9 @@ export const NEEDS_RECONFIRM_NOTE =
  * flag lands and this file's matching can be deleted.
  */
 export const OUT_OF_STOCK_NOTE = "Out of stock according to ShopSavvy; confirm it is the same item";
+
+/**
+ * P04-OW1: mirrors the EXPORTED `CONDITION_NOTE` in `convex/market.ts` (a ShopSavvy candidate not listed as new is
+ * never priced). Keep the two literally equal; `convex/market.quality.test.ts` checks it.
+ */
+export const CONDITION_NOTE = "Not listed as new by ShopSavvy (used, refurbished, open-box or a bundle); price not compared";

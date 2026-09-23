@@ -99,11 +99,14 @@ function epoch(value: unknown, now: number): number | null {
   return ms;
 }
 
-/** A condition string naming a used, refurbished, opened, renewed, bundled, or accessory listing — never the product itself at full retail. */
-const EXCLUDED_CONDITION_RE = /used|refurb|open.?box|renewed|bundle|accessor(?:y|ies)/i;
-
-function isExcludedCondition(condition: string | null): boolean {
-  return condition !== null && EXCLUDED_CONDITION_RE.test(condition);
+/**
+ * P04-MW1: an ALLOWLIST. Only a listing ShopSavvy calls "new" (in any case) — or one that states no condition at all
+ * — is the product itself at retail. Every other condition string, named or not (used, refurbished, pre-owned,
+ * remanufactured, like new, grade B, open-box, bundle, for parts…), is excluded. The denylist this replaces kept any
+ * non-new condition it did not happen to name. Exported for the store-candidate gate in `market.recordSnapshot`.
+ */
+export function isNewCondition(condition: string | null | undefined): boolean {
+  return condition === null || condition === undefined || /^\s*new\s*$/i.test(condition);
 }
 
 /** `null` and the literal "in" both mean in stock; anything else the provider states is out of stock. */
@@ -282,7 +285,14 @@ function readProduct(p: Record<string, unknown>, now: number): MarketSnapshot {
  * so the series is returned unfiltered — callers that need to know whether filtering actually ran
  * (i.e. `verdict.ts`'s market fallback) check `points.length >= MIN_OUTLIER_POINTS` themselves.
  */
-export function withoutOutliers(points: MarketPoint[]): MarketPoint[] {
+export function withoutOutliers(points: MarketPoint[], anchorCents?: number): MarketPoint[] {
+  // P04-OW2: outlier filtering must not stand in for product matching. ShopSavvy's matches for a URL can be mostly
+  // another variant, pack size or accessory, and then the MEDIAN is theirs, not the product's. When Recoup knows the
+  // watched product's own current price, the band is centred on that instead — a trusted reference that needs no
+  // distribution, so it applies to a short series too.
+  if (anchorCents !== undefined && Number.isFinite(anchorCents) && anchorCents > 0) {
+    return points.filter((p) => p.cents >= anchorCents * 0.4 && p.cents <= anchorCents * 1.75);
+  }
   if (points.length < MIN_OUTLIER_POINTS) return points;
   const sorted = points.map((p) => p.cents).sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
@@ -300,17 +310,17 @@ export function withoutOutliers(points: MarketPoint[]): MarketPoint[] {
  *
  * Exclusions, all silent (the offer or point simply never joins history):
  *  - a marketplace seller's listing (not the store's own price)
- *  - a used/refurbished/open-box/renewed/bundle/accessory listing (condition)
+ *  - any listing whose stated condition is not "new" (P04-MW1 allowlist)
  *  - a point whose currency does not exactly match `currency` — including a
  *    point with no currency at all, which is never assumed to be this one
  *
  * Not excluded: an out-of-stock point stays in history (a shopper could have
  * paid that price when it was in stock) but is flagged `inStock: false`.
  */
-export function flattenHistory(snapshot: MarketSnapshot, currency: string): MarketPoint[] {
+export function flattenHistory(snapshot: MarketSnapshot, currency: string, anchorCents?: number): MarketPoint[] {
   const byKey = new Map<string, MarketPoint>();
   for (const offer of snapshot.offers) {
-    if (offer.seller !== null || isExcludedCondition(offer.condition)) continue;
+    if (offer.seller !== null || !isNewCondition(offer.condition)) continue;
     const candidates: MarketPoint[] = [...offer.history];
     if (offer.cents !== null && offer.observedAt !== null) {
       candidates.push({
@@ -332,60 +342,6 @@ export function flattenHistory(snapshot: MarketSnapshot, currency: string): Mark
       }
     }
   }
-  return withoutOutliers([...byKey.values()]).sort((a, b) => a.observedAt - b.observedAt);
+  return withoutOutliers([...byKey.values()], anchorCents).sort((a, b) => a.observedAt - b.observedAt);
 }
 
-/** What the day-one verdict needs: the range a shopper has actually seen. */
-export type MarketStats = {
-  lowestCents: number;
-  highestCents: number;
-  points: number;
-  /** Oldest point, so the UI can say how far back the evidence goes. */
-  since: number;
-  /** Cheapest current listing from a store other than the watched one. */
-  best: { retailer: string; storeDomain: string | null; cents: number; productUrl: string | null } | null;
-};
-
-/**
- * @deprecated Nothing outside this file's own tests calls this: `convex/market.ts` re-exports it
- * (`export { marketStats };`) but nothing imports that re-export either, and the watch summary's
- * market block (`convex/watches.ts`) is built from `flattenHistory` directly. Left in place,
- * hardened to the same currency/condition/availability/URL rules as `flattenHistory`, because
- * deleting it would remove `market.ts`'s import and re-export — a file this task does not own
- * (see the task report's "known gaps" for the one-line caller change that finishes the removal).
- */
-export function marketStats(
-  snapshot: MarketSnapshot,
-  currency: string,
-  ownDomain: string | null,
-): MarketStats | null {
-  const points = withoutOutliers(flattenHistory(snapshot, currency));
-  if (points.length === 0) return null;
-
-  let best: MarketStats["best"] = null;
-  for (const offer of snapshot.offers) {
-    if (offer.cents === null || offer.seller !== null) continue;
-    // No default: an offer with no currency of its own is excluded, never assumed to match.
-    if (offer.currency === null || offer.currency !== currency) continue;
-    if (isExcludedCondition(offer.condition)) continue;
-    if (!isInStock(offer.availability)) continue;
-    if (offer.storeDomain !== null && ownDomain !== null && offer.storeDomain === ownDomain) continue;
-    if (!best || offer.cents < best.cents) {
-      best = {
-        retailer: offer.retailer,
-        storeDomain: offer.storeDomain,
-        cents: offer.cents,
-        productUrl: offer.productUrl,
-      };
-    }
-  }
-
-  const prices = points.map((p) => p.cents);
-  return {
-    lowestCents: Math.min(...prices),
-    highestCents: Math.max(...prices),
-    points: points.length,
-    since: points[0].observedAt,
-    best,
-  };
-}

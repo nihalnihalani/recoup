@@ -40,7 +40,7 @@ import { sanitizeError } from "./lib/errors";
 import { tryCharge, tryConsumeGlobalBudget } from "./lib/budget";
 import { cleanStoreUrl, FIND_MARKER, registrableHost, sameStore } from "./lib/offerMatch";
 import { WATCH_ROWS } from "./offers";
-import { parseEnvelope, flattenHistory, hostOf, type MarketSnapshot } from "./lib/shopsavvy";
+import { parseEnvelope, flattenHistory, hostOf, isNewCondition, type MarketSnapshot } from "./lib/shopsavvy";
 import { marketState } from "./schema";
 import {
   DAILY_BUDGETS,
@@ -169,10 +169,15 @@ export async function fetchSnapshot(productUrl: string, now: number): Promise<Fe
   return envelope;
 }
 
-/** 400/401/403/malformed -> give up; 429/5xx/timeout/network -> worth another attempt. */
-function classifyFetchError(err: unknown): "retryable_failure" | "terminal_failure" {
+/**
+ * 400/malformed -> give up on this product; 429/5xx/timeout/network -> worth another attempt; 401/402/403 -> `auth`:
+ * the deployment's key or plan (a wrong, expired or rotated key, or no credits left), never this product's fault
+ * (P03-C). An `auth` failure is recorded as `not_configured` and pauses every lookup for `MARKET_AUTH_COOLDOWN_MS`.
+ */
+function classifyFetchError(err: unknown): "retryable_failure" | "terminal_failure" | "auth" {
   if (err instanceof MalformedResponseError) return "terminal_failure";
   if (err instanceof ShopSavvyHttpError) {
+    if (err.status === 401 || err.status === 402 || err.status === 403) return "auth";
     return err.status === 429 || err.status >= 500 ? "retryable_failure" : "terminal_failure";
   }
   // Timeouts (AbortSignal.timeout -> DOMException) and network failures (TypeError) land here.
@@ -196,6 +201,8 @@ export const watchForMarket = internalQuery({
       merchantDomain: v.string(),
       /** `marketAttempts` before this run, so `lookup` can compute the next backoff step. */
       attempts: v.number(),
+      /** P04-OW2: Recoup's own latest accepted price for the product, the anchor of the market band; null when none. */
+      anchorCents: v.union(v.number(), v.null()),
     }),
     v.null(),
   ),
@@ -207,6 +214,7 @@ export const watchForMarket = internalQuery({
       currency: watch.currency ?? "USD",
       merchantDomain: watch.merchantDomain,
       attempts: watch.marketAttempts ?? 0,
+      anchorCents: watch.lastCents ?? null,
     };
   },
 });
@@ -229,6 +237,8 @@ const storeArg = v.object({
   observedAt: v.optional(v.number()),
   /** From T04's `MarketOffer.availability` (T13): undefined when the provider did not state one, treated as in stock. */
   inStock: v.optional(v.boolean()),
+  /** P04-OW1: the listing's condition as ShopSavvy states it; anything but "new" (or unstated) is never priced. */
+  condition: v.optional(v.string()),
 });
 
 /**
@@ -246,6 +256,24 @@ export const OUT_OF_STOCK_NOTE = "Out of stock according to ShopSavvy; confirm i
  * numbers happen to differ; still shown, qualified, the same shape as an out-of-stock row.
  */
 export const CURRENCY_MISMATCH_NOTE = "Listed by ShopSavvy in a different currency; price not shown here";
+
+/**
+ * P04-OW1: fixed note on a ShopSavvy-sourced candidate whose stated condition is not "new" (used, refurbished,
+ * open-box, pre-owned, a bundle…). Never priced, so it can never become "best" or "Cheapest"; still shown, qualified.
+ * `src/lib/offerNotes.ts` keeps a literal copy, verified by a test.
+ */
+export const CONDITION_NOTE = "Not listed as new by ShopSavvy (used, refurbished, open-box or a bundle); price not compared";
+
+/** P03-C: how long every lookup pauses after ShopSavvy refuses the deployment's key or plan (401/402/403). */
+export const MARKET_AUTH_COOLDOWN_MS = 60 * 60_000;
+const MARKET_AUTH_KEY = "market.authBlockedUntil";
+
+/** P03-C: when the key/plan cooldown ends, or null when none is in force. */
+async function authBlockedUntil(ctx: QueryCtx | MutationCtx, now: number): Promise<number | null> {
+  const row = await ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", MARKET_AUTH_KEY)).unique();
+  const until = row?.cursor !== undefined ? Number(row.cursor) : NaN;
+  return Number.isFinite(until) && now < until ? until : null;
+}
 
 /**
  * C5 (D107, Opus checkpoint-5 recheck): charges the per-user `market_lookup`
@@ -305,6 +333,14 @@ export const requestLookup = internalMutation({
       // Never set marketFetchedAt for this branch: it is not a retrieval, and a key added later must be
       // able to run the very first lookup rather than being blocked by a stale "already looked up" mark.
       if (current !== "not_configured") await ctx.db.patch(watchId, { marketState: "not_configured" });
+      return { scheduled: false, state: "not_configured", reason: "not_configured" };
+    }
+    // P03-C: ShopSavvy recently refused the deployment's key or plan. Until the cooldown ends nothing is charged or
+    // fetched; afterwards the next accepted check (or a manual refresh) asks again, so fixing the key recovers.
+    if ((await authBlockedUntil(ctx, now)) !== null) {
+      if (current !== "not_configured" && current !== "queued" && current !== "running") {
+        await ctx.db.patch(watchId, { marketState: "not_configured", marketNote: MARKET_NOTE.not_configured });
+      }
       return { scheduled: false, state: "not_configured", reason: "not_configured" };
     }
 
@@ -473,7 +509,9 @@ export const recordSnapshot = internalMutation({
         // (a different file) happened to exclude it from ranking -- never shown as an unpriced,
         // qualified candidate the way an out-of-stock one already is (DA-11).
         const currencyMismatch = store.currency !== undefined && store.currency !== watchCurrency;
-        const priced = store.inStock !== false && !currencyMismatch;
+        // P04-OW1: the authoritative condition gate (the same allowlist as the market series): not new → never priced.
+        const notNew = !isNewCondition(store.condition);
+        const priced = store.inStock !== false && !currencyMismatch && !notNew;
         await ctx.db.insert("offers", {
           watchId,
           userId: watch.userId,
@@ -485,7 +523,7 @@ export const recordSnapshot = internalMutation({
           lastCents: priced ? store.cents : undefined,
           currency: priced ? store.currency : undefined,
           lastCheckedAt: store.observedAt,
-          note: priced ? "Listed by ShopSavvy; confirm it is the same item" : currencyMismatch ? CURRENCY_MISMATCH_NOTE : OUT_OF_STOCK_NOTE,
+          note: priced ? "Listed by ShopSavvy; confirm it is the same item" : notNew ? CONDITION_NOTE : currencyMismatch ? CURRENCY_MISMATCH_NOTE : OUT_OF_STOCK_NOTE,
         });
         added++;
         total++;
@@ -516,6 +554,28 @@ export const recordSnapshot = internalMutation({
 });
 
 /**
+ * P03-C: ShopSavvy refused the deployment's key or plan (401/402/403) during this watch's lookup. The watch goes back
+ * to `not_configured` — no `marketFetchedAt` (nothing was retrieved), attempts unchanged, no retry scheduled — and
+ * every lookup pauses until `MARKET_AUTH_COOLDOWN_MS` from now (`requestLookup` reads it), with no charge.
+ */
+export const recordAuthFailure = internalMutation({
+  args: { watchId: v.id("watches") },
+  returns: v.null(),
+  handler: async (ctx, { watchId }) => {
+    const now = Date.now();
+    const until = String(now + MARKET_AUTH_COOLDOWN_MS);
+    const row = await ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", MARKET_AUTH_KEY)).unique();
+    if (row) await ctx.db.patch(row._id, { cursor: until, updatedAt: now });
+    else await ctx.db.insert("opsState", { key: MARKET_AUTH_KEY, cursor: until, updatedAt: now });
+    const watch = await ctx.db.get(watchId);
+    if (watch && watch.marketState === "running") {
+      await ctx.db.patch(watchId, { marketState: "not_configured", marketNote: MARKET_NOTE.not_configured, marketNextRetryAt: undefined });
+    }
+    return null;
+  },
+});
+
+/**
  * Asks ShopSavvy about one watched product. Never throws past the scheduler:
  * every outcome, including a malformed response or a network failure, ends
  * as a classified state on the watch via `recordSnapshot`. A retryable
@@ -538,7 +598,7 @@ export const lookup = internalAction({
     }
 
     const now = Date.now();
-    let fetched: FetchOutcome | { kind: "failed"; failure: "retryable_failure" | "terminal_failure" };
+    let fetched: FetchOutcome | { kind: "failed"; failure: "retryable_failure" | "terminal_failure" | "auth" };
     try {
       fetched = await fetchSnapshot(watch.productUrl, now);
     } catch (err) {
@@ -548,9 +608,18 @@ export const lookup = internalAction({
       logEvent("market_failed", { watchId, error: sanitizeError(err instanceof Error ? err.message : String(err)) });
     }
 
+    if (fetched.kind === "failed" && fetched.failure === "auth") {
+      // P03-C: the key or plan, not this product. Recorded as `not_configured` (no retrieval timestamp, attempts
+      // unchanged) and every lookup pauses for the cooldown; fixing the key or plan then recovers every watch.
+      // (The catch above already logged `market_failed`; this names the deployment-level cause for the operator.)
+      logEvent("market_failed", { watchId, failure: "auth", cooldownMs: MARKET_AUTH_COOLDOWN_MS });
+      await ctx.runMutation(internal.market.recordAuthFailure, { watchId });
+      return null;
+    }
+
     if (fetched.kind === "failed") {
       const nextAttempts = watch.attempts + 1;
-      const outcome = fetched.failure === "retryable_failure" && nextAttempts < MARKET_MAX_ATTEMPTS ? "retryable_failure" : "terminal_failure";
+      const outcome: "retryable_failure" | "terminal_failure" = fetched.failure === "retryable_failure" && nextAttempts < MARKET_MAX_ATTEMPTS ? "retryable_failure" : "terminal_failure";
       // F9 (D103) / D105: MARKET_MAX_ATTEMPTS is 4, so the 1st, 2nd and 3rd failures read
       // MARKET_RETRY_BACKOFF_MS[0..2] (10m/1h/6h, D71) and the 4th goes straight to terminal_failure.
       const nextRetryAt = outcome === "retryable_failure" ? now + MARKET_RETRY_BACKOFF_MS[watch.attempts] : undefined;
@@ -596,7 +665,8 @@ export const lookup = internalAction({
     // re-applies this same exclusion as the authoritative gate; this pass just avoids fetching a
     // needless own-store candidate in the common case.
     const ownDomain = registrableHost(hostOf(watch.productUrl) ?? watch.merchantDomain) ?? watch.merchantDomain;
-    const points = flattenHistory(snapshot, watch.currency)
+    // P04-OW2: banded around Recoup's own current price when it has one, so other variants cannot take over.
+    const points = flattenHistory(snapshot, watch.currency, watch.anchorCents ?? undefined)
       .slice(-MARKET_MAX_POINTS)
       .map((p) => {
         const day = new Date(p.observedAt).toISOString().slice(0, 10);
@@ -620,6 +690,7 @@ export const lookup = internalAction({
       currency?: string;
       observedAt?: number;
       inStock?: boolean;
+      condition?: string;
     }> = [];
     for (const offer of snapshot.offers) {
       // A marketplace seller's listing is not the store's own price.
@@ -635,6 +706,7 @@ export const lookup = internalAction({
         observedAt: offer.observedAt ?? undefined,
         // `null`/"in" both mean in stock (shopsavvy.ts's own convention); anything else stated is out of stock.
         inStock: offer.availability === null || offer.availability === "in",
+        ...(offer.condition !== null ? { condition: offer.condition } : {}),
       });
     }
 

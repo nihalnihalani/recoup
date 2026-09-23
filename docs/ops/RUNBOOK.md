@@ -221,7 +221,7 @@ raw secret ever reaches the log — see the module doc comment in
 | `budget_exhausted` | A deployment-wide global budget refused a call (a symptom, not a bug — check whether it was paused deliberately via §1 first) | anywhere `charge`/`tryCharge`/`consumeGlobalBudget` is on the call path |
 | `webhook_rejected` | An inbound webhook failed signature verification or malformed-body validation | `http.ts` |
 | `scheduler_backlog` | A cron/sweep noticed it is behind (see §4's `backlog` fields for the same signal on demand) | crons/sweeps |
-| `market_failed` | A ShopSavvy lookup failed (`retryable_failure`/`terminal_failure`) | `market.ts` |
+| `market_failed` | A ShopSavvy lookup failed (`retryable_failure`/`terminal_failure`). With `failure: "auth"`, ShopSavvy refused the deployment's key or plan (401/402/403): every lookup pauses for an hour (opsState `market.authBlockedUntil`) and recovers on its own once the key or plan is fixed (P03-C) | `market.ts` |
 | `migration_progress` | A resumable migration page ran (§3) | `lib/authMigrate.ts`, `market.ts` |
 
 As of this writing, `logEvent` is a primitive with tests

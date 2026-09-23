@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  isNewCondition,
   flattenHistory,
   hostOf,
   MARKET_PARSE_MAX_OFFERS,
   MARKET_PARSE_MAX_POINTS_PER_OFFER,
-  marketStats,
   MIN_OUTLIER_POINTS,
   parseEnvelope,
   parseSnapshot,
@@ -483,75 +483,66 @@ describe("withoutOutliers", () => {
   });
 });
 
-describe("marketStats", () => {
-  it("reports the range and the cheapest other store, never the watched one", () => {
-    const snap = parseSnapshot(LIVE, NOW)!;
-    const stats = marketStats(snap, "USD", "target.com")!;
-    expect(stats.lowestCents).toBeLessThanOrEqual(stats.highestCents);
-    expect(stats.points).toBeGreaterThan(0);
-    expect(stats.best?.storeDomain).not.toBe("target.com");
-    // The marketplace seller is not a store price, so Amazon is not the best offer.
-    expect(stats.best?.storeDomain).not.toBe("amazon.com");
+// ---------------------------------------------------------------------------
+// P04-MW1 / P04-OW2 (P01–P12 re-audit)
+// ---------------------------------------------------------------------------
+
+const oneOffer = (condition: string | null, price = 400) =>
+  parseSnapshot({
+    data: [
+      {
+        offers: [
+          { retailer: "Shop", URL: "https://shop.example/p", price, currency: "USD", ...(condition !== null ? { condition } : {}), timestamp: "2026-09-01T00:00:00Z" },
+        ],
+      },
+    ],
+  }, NOW)!;
+
+describe("P04-MW1: the condition filter is an allowlist (new only)", () => {
+  it.each([
+    "Pre-Owned", "Certified Pre-Owned", "Remanufactured", "Reconditioned", "Like New", "Damaged", "For parts", "Second-hand",
+    "Grade B", "Scratch and dent",
+  ])("%s → excluded from history", (condition) => {
+    expect(flattenHistory(oneOffer(condition), "USD")).toEqual([]);
+    expect(isNewCondition(condition)).toBe(false);
   });
 
-  it("is null when nothing dated came back", () => {
-    const snap = parseSnapshot({ data: [{ offers: [] }] }, NOW)!;
-    expect(marketStats(snap, "USD", "target.com")).toBeNull();
+  it("keeps an offer whose condition is new (any case) or not stated", () => {
+    for (const condition of ["new", "New", "NEW", null]) {
+      expect(flattenHistory(oneOffer(condition), "USD"), String(condition)).toHaveLength(1);
+      expect(isNewCondition(condition)).toBe(true);
+    }
   });
+});
 
-  it("excludes a no-currency offer from the best-store comparison, never defaulting its currency", () => {
-    const snap = parseSnapshot({
+describe("P04-OW2: outlier filtering is pinned, and the band is anchored on Recoup's own price", () => {
+  const offers = (prices: number[]) =>
+    parseSnapshot({
       data: [
         {
-          offers: [
-            // Enough same-currency points elsewhere to clear the outlier-and-stats bar.
-            { retailer: "A", URL: "https://a.example/p", price: 10, currency: "USD", timestamp: "2026-08-01T00:00:00Z" },
-            { retailer: "B", URL: "https://b.example/p", price: 11, currency: "USD", timestamp: "2026-08-05T00:00:00Z" },
-            { retailer: "C", URL: "https://c.example/p", price: 9, currency: "USD", timestamp: "2026-08-10T00:00:00Z" },
-            { retailer: "D", URL: "https://d.example/p", price: 12, currency: "USD", timestamp: "2026-08-15T00:00:00Z" },
-            // No currency at all, and cheaper than every USD offer: must never win "best".
-            { retailer: "NoCurrency", URL: "https://e.example/p", price: 1, timestamp: "2026-08-16T00:00:00Z" },
-          ],
+          offers: prices.map((price, i) => ({
+            retailer: `S${i}`, URL: `https://s${i}.example/p`, price, currency: "USD", condition: "new", timestamp: `2026-09-${String(i + 1).padStart(2, "0")}T00:00:00Z`,
+          })),
         },
       ],
     }, NOW)!;
-    const stats = marketStats(snap, "USD", null)!;
-    expect(stats.best?.retailer).not.toBe("NoCurrency");
+
+  it("flattenHistory applies withoutOutliers: an accessory at 0.15x the median never becomes history", () => {
+    const prices = flattenHistory(offers([450, 460, 440, 455, 67.5]), "USD").map((p) => p.cents);
+    expect(prices).not.toContain(6_750);
+    expect(prices).toHaveLength(4);
   });
 
-  it("excludes a used/refurbished offer from the best-store comparison even when cheapest", () => {
-    const snap = parseSnapshot({
-      data: [
-        {
-          offers: [
-            { retailer: "A", URL: "https://a.example/p", price: 10, currency: "USD", condition: "new", timestamp: "2026-08-01T00:00:00Z" },
-            { retailer: "B", URL: "https://b.example/p", price: 11, currency: "USD", condition: "new", timestamp: "2026-08-05T00:00:00Z" },
-            { retailer: "C", URL: "https://c.example/p", price: 9, currency: "USD", condition: "new", timestamp: "2026-08-10T00:00:00Z" },
-            { retailer: "D", URL: "https://d.example/p", price: 12, currency: "USD", condition: "new", timestamp: "2026-08-15T00:00:00Z" },
-            { retailer: "Cheapo", URL: "https://e.example/p", price: 1, currency: "USD", condition: "Used - Good", timestamp: "2026-08-16T00:00:00Z" },
-          ],
-        },
-      ],
-    }, NOW)!;
-    const stats = marketStats(snap, "USD", null)!;
-    expect(stats.best?.retailer).not.toBe("Cheapo");
+  it("with Recoup's own current price, a majority of another variant can no longer take over the band", () => {
+    // Most matched listings are a cheaper variant (~$120); the watched product is ~$450 (Recoup's own price).
+    const all = offers([119, 121, 125, 118, 449, 455]);
+    const medianOnly = flattenHistory(all, "USD").map((p) => p.cents).sort((a, b) => a - b);
+    expect(medianOnly).toEqual([11_800, 11_900, 12_100, 12_500]); // the other variant drove the band; the product was cut
+    const anchored = flattenHistory(all, "USD", 45_000).map((p) => p.cents).sort((a, b) => a - b);
+    expect(anchored).toEqual([44_900, 45_500]);
   });
 
-  it("excludes an out-of-stock offer from the best-store comparison even when cheapest", () => {
-    const snap = parseSnapshot({
-      data: [
-        {
-          offers: [
-            { retailer: "A", URL: "https://a.example/p", price: 10, currency: "USD", availability: "in", timestamp: "2026-08-01T00:00:00Z" },
-            { retailer: "B", URL: "https://b.example/p", price: 11, currency: "USD", availability: "in", timestamp: "2026-08-05T00:00:00Z" },
-            { retailer: "C", URL: "https://c.example/p", price: 9, currency: "USD", availability: "in", timestamp: "2026-08-10T00:00:00Z" },
-            { retailer: "D", URL: "https://d.example/p", price: 12, currency: "USD", availability: "in", timestamp: "2026-08-15T00:00:00Z" },
-            { retailer: "OOS", URL: "https://e.example/p", price: 1, currency: "USD", availability: "out", timestamp: "2026-08-16T00:00:00Z" },
-          ],
-        },
-      ],
-    }, NOW)!;
-    const stats = marketStats(snap, "USD", null)!;
-    expect(stats.best?.retailer).not.toBe("OOS");
+  it("the anchor also applies to a short series (a trusted reference needs no distribution)", () => {
+    expect(flattenHistory(offers([100, 450]), "USD", 45_000).map((p) => p.cents)).toEqual([45_000]);
   });
 });

@@ -489,15 +489,15 @@ describe("classification of the remaining transport outcomes (P03 coverage gaps 
     ["a JSON body that is not an envelope", () => jsonResponse("not an envelope")],
     ["an envelope whose data is not a product", () => jsonResponse({ success: true, data: "nope" })],
     ["a small invalid-JSON body", () => new Response("{not json", { status: 200 })],
+    // P03-C: 401/402/403 are the deployment's key or plan, not this product (market.quality.test.ts).
     ["HTTP 400", () => jsonResponse({}, 400)],
-    ["HTTP 401", () => jsonResponse({}, 401)],
-    ["HTTP 403", () => jsonResponse({}, 403)],
   ])("%s -> terminal_failure, never not_configured, with no automatic retry", async (_label, respond) => {
     const t = setup();
     const { userId } = await signedIn(t);
     const watchId = await seedWatch(t, userId);
     process.env.SHOPSAVVY_API_KEY = "test-key";
-    vi.stubGlobal("fetch", vi.fn(async () => respond()));
+    const fetchSpy = vi.fn(async () => respond());
+    vi.stubGlobal("fetch", fetchSpy);
 
     await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
     await t.finishAllScheduledFunctions(vi.runAllTimers); // drains the claimed lookup job
@@ -505,6 +505,8 @@ describe("classification of the remaining transport outcomes (P03 coverage gaps 
     const row = await watchRow(t, watchId);
     expect(row.marketState).toBe("terminal_failure");
     expect(row.marketNote).toBe("Market history is unavailable for this product");
+    expect(row.marketAttempts).toBe(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(await scheduled(t)).toHaveLength(0);
     const auto = await t.mutation(internal.market.requestLookup, { watchId, trigger: "auto" });
     expect(auto).toEqual({ scheduled: false, state: "terminal_failure", reason: "terminal_failure" });
