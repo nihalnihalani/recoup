@@ -37,6 +37,8 @@ export interface PacketContext {
   claimToken: string;
   /** The claim's required channel (never "email" for a packet). */
   channel: ManualChannel;
+  /** D249: the pack remedy the claim pursues (e.g. R04's bag-fee, expense or property path); always set by the server. */
+  remedyKey?: string;
 }
 
 export interface PacketDraft {
@@ -54,6 +56,11 @@ export interface PacketTemplate {
   version: number;
   /** e.g. "r05_v1.letter"; a pack may register several (an escalation packet is its own template). */
   templateId: string;
+  /**
+   * D249: the pack remedy this template writes for. Required when one pack version registers several templates for
+   * different remedies (R04's paths a, b and c share a ruleId and version); `templateFor` selects by it.
+   */
+  remedyKey?: string;
   channels: readonly ManualChannel[];
   /** Verbatim fixed pack text; anything inside is exempt from SEC-AI-4. */
   textBlocks: readonly string[];

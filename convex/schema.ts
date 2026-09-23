@@ -802,6 +802,12 @@ export default defineSchema({
      */
     deniedAt: v.optional(v.number()),
     deniedResultHash: v.optional(v.string()),
+    /**
+     * D247: the current evaluation rests on at least one decisive fact that is only an unconfirmed candidate
+     * (`candidate_unconfirmed` / `conflict_capped`). `openCase` refuses and `recovery.summary` leaves it out of
+     * Potential until the user confirms. Written by `evaluateRun` with the rest of the projection.
+     */
+    decisiveUnconfirmed: v.optional(v.boolean()),
   }).index("by_user_and_dedupe_key", ["userId", "dedupeKey"])
     .index("by_transaction", ["transactionId"])
     .index("by_user_and_status", ["userId", "status"])

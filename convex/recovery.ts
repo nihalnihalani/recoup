@@ -485,6 +485,8 @@ export const summary = query({
       if (o.nextDeadlineAt !== undefined && o.nextDeadlineAt >= now && o.nextDeadlineAt <= now + WEEK_MS) deadlinesThisWeek += 1;
       if (o.activeClaimId !== undefined || o.cashClass !== "cash" || o.estimate === undefined) continue;
       if (o.outcome !== "eligible" && o.outcome !== "likely_eligible") continue;
+      // D247: not money found while the purchase is unconfirmed or a decisive fact is only a candidate.
+      if (txn.status === "needs_review" || o.decisiveUnconfirmed === true) continue;
       // D226: a denied loss is not Potential again on the same basis (not yet re-evaluated, or the same resultHash).
       if (o.deniedAt !== undefined) {
         if (o.deniedResultHash === undefined || !o.currentEvaluationId) continue;

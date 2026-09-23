@@ -185,9 +185,9 @@ export const FAKE_TEMPLATE: PacketTemplate = {
 };
 
 export const PACKET_TEMPLATES: readonly PacketTemplate[] = [FAKE_TEMPLATE];
-export function templateFor(ruleId: string, version: number, templateId?: string): PacketTemplate | null {
+export function templateFor(ruleId: string, version: number, opts: { remedyKey?: string; templateId?: string } = {}): PacketTemplate | null {
   const mine = PACKET_TEMPLATES.filter((t) => t.ruleId === ruleId && t.version === version);
-  return (templateId !== undefined ? mine.find((t) => t.templateId === templateId) : mine[0]) ?? null;
+  return (opts.templateId !== undefined ? mine.find((t) => t.templateId === opts.templateId) : mine[0]) ?? null;
 }
 export function templateById(templateId: string): PacketTemplate | null {
   return PACKET_TEMPLATES.find((t) => t.templateId === templateId) ?? null;

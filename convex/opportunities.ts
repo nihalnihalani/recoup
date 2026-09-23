@@ -413,6 +413,27 @@ async function supersedeWithdrawn(ctx: MutationCtx, txn: Doc<"transactions">, no
   }
 }
 
+/** D247: an unconfirmed candidate is decisive for this result (it was used, or it caps the outcome). */
+const UNCONFIRMED_REASONS: ReadonlySet<string> = new Set(["candidate_unconfirmed", "conflict_capped"]);
+export function hasUnconfirmedDecisive(result: Pick<EvaluationResult, "missingFacts">): boolean {
+  return result.missingFacts.some((m) => UNCONFIRMED_REASONS.has(m.reason));
+}
+
+/**
+ * D247 (DA note): the stored missing facts are unique per (subject, key, reason), `neededFor` merged — a pack may list
+ * the same fact from two of its lists (R01 v1 lists a candidate purchase date from both the window's unknowns and the
+ * decisive candidates). Applied before hashing, so the stored evaluation is what the card shows.
+ */
+function withUniqueMissingFacts(result: EvaluationResult): EvaluationResult {
+  const out: EvaluationResult["missingFacts"] = [];
+  for (const m of result.missingFacts) {
+    const hit = out.find((x) => x.subjectKey === m.subjectKey && x.key === m.key && x.reason === m.reason);
+    if (!hit) out.push({ ...m, neededFor: [...m.neededFor] });
+    else for (const n of m.neededFor) if (!hit.neededFor.includes(n)) hit.neededFor.push(n);
+  }
+  return out.length === result.missingFacts.length ? result : { ...result, missingFacts: out };
+}
+
 /**
  * M20 (rev 5.2, D147(6)): `opportunities.reevaluateAt` for M29's sweep — for a `not_yet_due` result with
  * `reevaluate.at` ("YYYY-MM-DD"), the start of that date in UTC, which is no later than its start in any US zone (the
@@ -529,7 +550,7 @@ async function evaluateRun(
   const linking = run.openClaim !== null && run.openClaim._id !== priorActive;
   const activeClaimId: Id<"claims"> | null = run.openClaim?._id ?? null;
 
-  const result: EvaluationResult = withAmountReview(run, pack.evaluate({
+  const result: EvaluationResult = withUniqueMissingFacts(withAmountReview(run, pack.evaluate({
     snapshot: run.snapshot,
     snapshotHash: run.factSnapshotHash,
     pack: { ruleId: pack.ruleId, scenarioId: pack.scenarioId, version: pack.version, params: pack.params, sources: pack.sources },
@@ -539,7 +560,7 @@ async function evaluateRun(
     subjectKey: run.subjectKey,
     caseContext: run.caseContext,
     now,
-  }));
+  })));
   assertEvaluationBounds(result);
   const bfh = await boundFactsHash(result.boundFacts);
   const rh = await resultHash(result, bfh);
@@ -559,6 +580,7 @@ async function evaluateRun(
     lossKeys,
     lastEvaluatedAt: now,
     reevaluateAt: reevaluateAtOf(result),
+    decisiveUnconfirmed: hasUnconfirmedDecisive(result) ? true : undefined,
   };
 
   let opp: Doc<"opportunities">;
@@ -664,7 +686,7 @@ export async function evaluatePurchase(
 
 export type OpenCaseResult =
   | { ok: true; claimId: Id<"claims">; created: boolean; notice?: string }
-  | { ok: false; code: "not_approvable" | "not_yet_due" | "overlap" | "unsupported_scenario" | "closed" | "no_amount" | "example"; message: string; nextAction?: NextAction };
+  | { ok: false; code: "not_approvable" | "not_yet_due" | "overlap" | "unsupported_scenario" | "closed" | "no_amount" | "example" | "unconfirmed_facts"; message: string; nextAction?: NextAction };
 
 /**
  * DA-A-4 / DA-A-29 overlap guard: the user's own active claims on this transaction and on its server-set related
@@ -765,6 +787,18 @@ async function openFromEvaluation(
   }
   if (e.pack.scenarioId !== "R01" && !e.pack.adapter) {
     return { ok: false, code: "unsupported_scenario", message: "This kind of case cannot be opened yet." };
+  }
+  // D247: never a claim on facts the user has not confirmed (the legacy D25 invariant, for every pack): a decisive
+  // unconfirmed candidate refuses, and an R01 case also needs a confirmed (active) purchase.
+  if (hasUnconfirmedDecisive(e.result)) {
+    const keys = [...new Set(e.result.missingFacts.filter((m) => UNCONFIRMED_REASONS.has(m.reason)).map((m) => m.key))];
+    return { ok: false, code: "unconfirmed_facts", message: `Confirm these details first: ${keys.join(", ")}.`, nextAction: e.result.nextAction };
+  }
+  if (e.retail) {
+    const purchase = await ctx.db.get(e.retail.purchaseId);
+    if (!purchase || purchase.status !== "active") {
+      return { ok: false, code: "unconfirmed_facts", message: "Confirm the purchase first; a claim is opened only on a purchase you have reviewed." };
+    }
   }
   let amount: number;
   if (e.result.amount?.basis === "user_claimed") {
@@ -880,7 +914,7 @@ const openCaseResult = v.union(
     ok: v.literal(false),
     code: v.union(
       v.literal("not_approvable"), v.literal("not_yet_due"), v.literal("overlap"), v.literal("unsupported_scenario"),
-      v.literal("closed"), v.literal("no_amount"), v.literal("example"),
+      v.literal("closed"), v.literal("no_amount"), v.literal("example"), v.literal("unconfirmed_facts"),
     ),
     message: v.string(),
     nextAction: v.optional(schema.tables.evaluations.validator.fields.nextAction),

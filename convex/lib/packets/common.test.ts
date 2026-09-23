@@ -6,7 +6,9 @@
 import { describe, expect, it } from "vitest";
 import { factReader, fill, formatLocalDate, formatMoney, packetFindings, PacketRenderError } from "./common";
 import type { BoundFactValue } from "../rules/types";
-import { PACKET_TEMPLATES, templateById, templateFor } from "./index";
+import { PACKET_TEMPLATES, selectTemplate, templateById, templateFor } from "./index";
+import { R04_REMEDY_KEYS } from "../rules/r04_baggage_v1";
+import type { PacketTemplate } from "./common";
 import { IMPLEMENTED_PACKS } from "../rules/applicable";
 
 const bound: BoundFactValue[] = [
@@ -101,5 +103,36 @@ describe("the template registry", () => {
     expect(templateFor("R05.mitor_shipment.us_ftc", 1)?.templateId).toBe("r05_v1.letter");
     expect(templateFor("R05.mitor_shipment.us_ftc", 2)).toBeNull();
     expect(templateById("no_such.letter")).toBeNull();
+  });
+});
+
+describe("D249: templates are selected by (ruleId, version, remedyKey), deterministically", () => {
+  const R04 = "R04.baggage.us_dot";
+  const tpl = (templateId: string, remedyKey?: string): PacketTemplate => ({
+    ruleId: R04, version: 1, templateId, channels: ["web_form"], textBlocks: [], ...(remedyKey !== undefined ? { remedyKey } : {}),
+    compose: () => ({ recipient: null, body: templateId, requestedRemedy: templateId }),
+  });
+  const three = [tpl("r04.a", R04_REMEDY_KEYS.a), tpl("r04.b", R04_REMEDY_KEYS.b), tpl("r04.c", R04_REMEDY_KEYS.c)];
+
+  it("three R04 remedy keys → three distinct templates, the same one every time", () => {
+    const picked = (["a", "b", "c"] as const).map((p) => selectTemplate(three, R04, 1, { remedyKey: R04_REMEDY_KEYS[p] })?.templateId);
+    expect(picked).toEqual(["r04.a", "r04.b", "r04.c"]);
+    expect(selectTemplate([...three].reverse(), R04, 1, { remedyKey: R04_REMEDY_KEYS.b })?.templateId).toBe("r04.b");
+  });
+
+  it("a pack with ONE template falls back to it for any remedy; several and no match → null (never a guess)", () => {
+    expect(selectTemplate([tpl("r04.letter")], R04, 1, { remedyKey: R04_REMEDY_KEYS.c })?.templateId).toBe("r04.letter");
+    expect(selectTemplate(three, R04, 1, { remedyKey: "unknown_remedy" })).toBeNull();
+    expect(selectTemplate(three, R04, 1)).toBeNull();
+    expect(selectTemplate(three, R04, 1, { templateId: "r04.c" })?.templateId).toBe("r04.c");
+    expect(selectTemplate(three, R04, 2, { remedyKey: R04_REMEDY_KEYS.a })).toBeNull();
+  });
+
+  it("the shipped registry resolves every registered template for its own remedy (or the pack's only template)", () => {
+    for (const t of PACKET_TEMPLATES) {
+      const got = templateFor(t.ruleId, t.version, t.remedyKey !== undefined ? { remedyKey: t.remedyKey } : {});
+      const siblings = PACKET_TEMPLATES.filter((x) => x.ruleId === t.ruleId && x.version === t.version);
+      if (t.remedyKey !== undefined || siblings.length === 1) expect(got?.templateId, t.templateId).toBe(t.templateId);
+    }
   });
 });

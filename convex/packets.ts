@@ -254,7 +254,13 @@ export const prepare = mutation({
       return { ok: false, code: "outcome_not_approvable", message: `A packet cannot be prepared while the result is ${link.evaluation.outcome}.` };
     }
     const source = await renderSource(ctx, fresh, link);
-    const template = source ? templateFor(source.ruleId, source.ruleVersion, args.templateId) : null;
+    const remedyKey = link?.opportunity.remedyKey ?? fresh.remedyKey;
+    const template = source
+      ? templateFor(source.ruleId, source.ruleVersion, {
+          ...(remedyKey !== undefined ? { remedyKey } : {}),
+          ...(args.templateId !== undefined ? { templateId: args.templateId } : {}),
+        })
+      : null;
     if (!source || !template || !template.channels.includes(channel)) {
       return { ok: false, code: "no_template", message: "Recoup has no letter for this claim yet; write it yourself." };
     }
@@ -267,6 +273,7 @@ export const prepare = mutation({
       deadlines: source.deadlines,
       claimToken: fresh.token,
       channel,
+      ...(remedyKey !== undefined ? { remedyKey } : {}),
     };
     let draft;
     try {
