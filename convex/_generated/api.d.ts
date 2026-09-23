@@ -81,6 +81,7 @@ import type * as lib_rules_types from "../lib/rules/types.js";
 import type * as lib_rules_verification from "../lib/rules/verification.js";
 import type * as lib_schedule from "../lib/schedule.js";
 import type * as lib_schemas from "../lib/schemas.js";
+import type * as lib_schemas_docs from "../lib/schemas_docs.js";
 import type * as lib_shopsavvy from "../lib/shopsavvy.js";
 import type * as lib_sniff from "../lib/sniff.js";
 import type * as lib_text from "../lib/text.js";
@@ -189,6 +190,7 @@ declare const fullApi: ApiFromModules<{
   "lib/rules/verification": typeof lib_rules_verification;
   "lib/schedule": typeof lib_schedule;
   "lib/schemas": typeof lib_schemas;
+  "lib/schemas_docs": typeof lib_schemas_docs;
   "lib/shopsavvy": typeof lib_shopsavvy;
   "lib/sniff": typeof lib_sniff;
   "lib/text": typeof lib_text;
