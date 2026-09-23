@@ -11,17 +11,21 @@
  * none of A's rows or money. The HTTP evidence routes are covered the same way (identical 404; upload dedupe is
  * owner-scoped, so identical bytes never reveal that another user holds them).
  *
- * A reflective guard enumerates the public functions of every convex module and compares them with the public
- * surface at `5cc326d` (the Mission 2 start, D134): every function added since must have an isolation case here.
- * A function added by a later lane after this file shows up as an `it.todo` naming it (visible in the test output)
- * instead of turning main red; M25 (wave 2 QA) folds those in.
+ * A reflective guard enumerates the public surface (every client-callable function of every convex module, and every
+ * route of the HTTP router) and compares it with the surface at `5cc326d` (the Mission 2 start, D134). Everything
+ * added since must have a two-user case here or a REVIEWED entry in `ISOLATION_EXEMPT`, with its reason; otherwise the
+ * guard FAILS (DA-B-15, D223: it used to add an `it.todo`, which never fails CI). The lane that adds a public function
+ * adds its probe here in the same commit, or asks QA/security for an exemption. The DA's throwaway leak
+ * (`zzLeak.peek`, any user's claim by id) is kept below as a synthetic module, proving the guard fails on it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./lib/rules/registry", async () => await import("./lib/rules/testRegistry"));
 
-import { ConvexError } from "convex/values";
+import { ConvexError, v } from "convex/values";
+import { httpRouter } from "convex/server";
 import { api, internal } from "./_generated/api";
+import { httpAction, internalQuery, query } from "./_generated/server";
 import type { Doc, Id, TableNames } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { resetTestRegistry, setTestActivations } from "./lib/rules/testRegistry";
@@ -62,10 +66,18 @@ const PUBLIC_AT_5CC326D = new Set(
   ).split(" "),
 );
 
+/** The HTTP routes at 5cc326d: Convex Auth's two, the AgentMail webhook, unsubscribe, and the static-site catch-all. */
+const HTTP_AT_5CC326D = new Set([
+  "http:GET /.well-known/jwks.json", "http:GET /.well-known/openid-configuration", "http:POST /agentmail/webhook",
+  "http:GET /alerts/unsubscribe", "http:POST /alerts/unsubscribe", "http:GET /*",
+]);
+
+type ModuleMap = Record<string, Record<string, unknown>>;
+// Multi-dot files (tests, test.setup, convex.config, auth.config) are never Convex function modules (bundler rule).
+const MODULES = import.meta.glob(["./*.ts", "!./*.*.ts"], { eager: true }) as ModuleMap;
+
 /** Every public (client-callable) function exported by a top-level convex module, as `module.name`. */
-function currentPublicFunctions(): string[] {
-  // Multi-dot files (tests, test.setup, convex.config, auth.config) are never Convex function modules (bundler rule).
-  const modules = import.meta.glob(["./*.ts", "!./*.*.ts"], { eager: true }) as Record<string, Record<string, unknown>>;
+function publicFunctionsOf(modules: ModuleMap): string[] {
   const out: string[] = [];
   for (const [file, mod] of Object.entries(modules)) {
     const name = file.replace(/^\.\//, "").replace(/\.ts$/, "");
@@ -78,6 +90,33 @@ function currentPublicFunctions(): string[] {
   }
   return out.sort();
 }
+
+/** Every route of the deployed HTTP router (`http.ts`'s default export), as `http:METHOD path`. */
+function httpRoutesOf(modules: ModuleMap): string[] {
+  const router = modules["./http.ts"]?.default as { getRoutes?: () => ReadonlyArray<readonly [string, string, unknown]> } | undefined;
+  if (typeof router?.getRoutes !== "function") throw new Error("http.ts has no router default export: the HTTP half of the guard would be vacuous");
+  return router.getRoutes().map(([path, method]) => `http:${method} ${path}`).sort();
+}
+
+const currentPublicFunctions = () => publicFunctionsOf(MODULES);
+
+/** The public surface added since 5cc326d that has neither a case in this file nor a reviewed exemption. */
+function uncoveredOf(modules: ModuleMap, covered: ReadonlySet<string>, exempt: Readonly<Record<string, string>>): string[] {
+  const surface = [...publicFunctionsOf(modules), ...httpRoutesOf(modules)];
+  return surface.filter((f) => !PUBLIC_AT_5CC326D.has(f) && !HTTP_AT_5CC326D.has(f) && !f.startsWith("auth.") && !covered.has(f) && !(f in exempt));
+}
+
+/**
+ * Reviewed exemptions (DA-B-15, D223): public surface added since 5cc326d that needs no two-user case, each with the
+ * reason it cannot leak. An entry is added only with a QA/security review of the handler; the guard below also fails
+ * on a stale entry (no longer public, or also probed) and on an entry without a reason.
+ */
+const ISOLATION_EXEMPT: Readonly<Record<string, string>> = {
+  "http:OPTIONS /evidence/upload":
+    "CORS preflight (evidencePreflight): never reads ctx, the database or a caller identity; 204, no body, CORS headers only for an allowed origin (checked below)",
+  "http:OPTIONS /evidence/file":
+    "CORS preflight (evidencePreflight): never reads ctx, the database or a caller identity; 204, no body, CORS headers only for an allowed origin (checked below)",
+};
 
 // ---------------------------------------------------------------------------
 // A's world (built through public mutations, plus the data boundaries named in ledgerFixtures.test.ts)
@@ -401,20 +440,71 @@ describe("isolation: the HTTP evidence routes", () => {
   });
 });
 
-describe("isolation: every public function added since 5cc326d has a case here (reflective)", () => {
+describe("isolation: every public function and HTTP route added since 5cc326d has a case here (reflective, DA-B-15)", () => {
   const covered = new Set([...PROBES.map((p) => p.fn.replace(/\(.*\)$/, "")), ...NO_ID_CASES]);
-  const added = currentPublicFunctions().filter((f) => !PUBLIC_AT_5CC326D.has(f) && !f.startsWith("auth."));
-  const uncovered = added.filter((f) => !covered.has(f));
+  const added = [...currentPublicFunctions(), ...httpRoutesOf(MODULES)].filter(
+    (f) => !PUBLIC_AT_5CC326D.has(f) && !HTTP_AT_5CC326D.has(f) && !f.startsWith("auth."),
+  );
 
   it("the enumeration sees the wave-1 surface (not vacuous)", () => {
     expect(added).toEqual(expect.arrayContaining(["transactions.get", "opportunities.openCase", "recovery.summary", "intake.confirmRefundEmail", "drafts.prepareSend"]));
+    expect(added).toEqual(expect.arrayContaining(["http:POST /evidence/upload", "http:GET /evidence/file"]));
     expect(currentPublicFunctions()).toEqual(expect.arrayContaining(["claims.confirmCredit", "purchases.create"]));
   });
 
-  it("no function public at 5cc326d has disappeared without the list being updated", () => {
-    const now = new Set(currentPublicFunctions());
-    expect([...PUBLIC_AT_5CC326D].filter((f) => !now.has(f))).toEqual([]);
+  it("no function or route public at 5cc326d has disappeared without the baseline being updated", () => {
+    const now = new Set([...currentPublicFunctions(), ...httpRoutesOf(MODULES)]);
+    expect([...PUBLIC_AT_5CC326D, ...HTTP_AT_5CC326D].filter((f) => !now.has(f))).toEqual([]);
   });
 
-  for (const f of uncovered) it.todo(`isolation case for ${f} (public since 5cc326d, not yet probed here)`);
+  it("FAILS for any public function or route added since 5cc326d with no two-user case and no reviewed exemption", () => {
+    const uncovered = uncoveredOf(MODULES, covered, ISOLATION_EXEMPT);
+    expect(
+      uncovered,
+      `Add a two-user probe to convex/isolationM1.test.ts (PROBES, or a list/HTTP case) for each of these, or a reviewed ISOLATION_EXEMPT entry with its reason: ${uncovered.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("every exemption is live, new since 5cc326d, not also probed, and gives its reason", () => {
+    const surface = new Set(added);
+    for (const [name, reason] of Object.entries(ISOLATION_EXEMPT)) {
+      expect(surface.has(name), `${name}: exempt but not part of the surface added since 5cc326d (stale)`).toBe(true);
+      expect(covered.has(name), `${name}: both probed and exempt`).toBe(false);
+      expect(reason.trim().length, `${name}: an exemption needs its reason`).toBeGreaterThanOrEqual(40);
+    }
+  });
+
+  it("the exempt preflights really are data-free: 204, empty body, for A, B and an anonymous caller alike", async () => {
+    const t = setup();
+    const w = await buildWorld(t);
+    for (const path of ["/evidence/upload", "/evidence/file"]) {
+      const results = [];
+      for (const who of [w.a.as, w.b.as, t]) {
+        const res = await who.fetch(path, { method: "OPTIONS", headers: { Origin: "https://evil.example" } });
+        results.push({ status: res.status, body: await res.text(), allowOrigin: res.headers.get("Access-Control-Allow-Origin") });
+      }
+      expect(results).toEqual(Array(3).fill({ status: 204, body: "", allowOrigin: null }));
+    }
+  });
+
+  it("DA-B-15 repro: the DA's throwaway `zzLeak.peek` (any user's claim by id) makes the guard fail; an internal function does not", () => {
+    // Built here, never exported from a module: a test file is not bundled or deployed (multi-dot name).
+    const zzLeak = {
+      peek: query({ args: { claimId: v.id("claims") }, handler: async (ctx, a) => await ctx.db.get(a.claimId) }),
+      peekInternal: internalQuery({ args: { claimId: v.id("claims") }, handler: async (ctx, a) => await ctx.db.get(a.claimId) }),
+    };
+    expect(uncoveredOf({ ...MODULES, "./zzLeak.ts": zzLeak }, covered, ISOLATION_EXEMPT)).toEqual(["zzLeak.peek"]);
+
+    // The same for a new HTTP route on the deployed router.
+    const router = httpRouter();
+    for (const [path, method] of (MODULES["./http.ts"].default as { getRoutes: () => ReadonlyArray<readonly [string, string, unknown]> }).getRoutes()) {
+      if (!path.endsWith("*")) router.route({ path, method: method as "GET", handler: httpAction(async () => new Response(null)) });
+    }
+    router.route({ path: "/zz/leak", method: "GET", handler: httpAction(async () => new Response(null)) });
+    router.route({ pathPrefix: "/", method: "GET", handler: httpAction(async () => new Response(null)) });
+    expect(uncoveredOf({ ...MODULES, "./http.ts": { default: router } }, covered, ISOLATION_EXEMPT)).toEqual(["http:GET /zz/leak"]);
+
+    // And a reviewed exemption is the only other way through.
+    expect(uncoveredOf({ ...MODULES, "./zzLeak.ts": zzLeak }, covered, { ...ISOLATION_EXEMPT, "zzLeak.peek": "review stand-in" })).toEqual([]);
+  });
 });
