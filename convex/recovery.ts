@@ -22,7 +22,8 @@
  *               counts as refused, not promised, even if an earlier promise exists (D223)
  *   provisional(K) = min(outstanding(K), Σ provisional) — shown "of which provisional" inside tile(K)
  *   per-transaction cap (D145, D188), per transaction per currency, against its confirmed paid total P (retail: a
- *               confirmed `retail.order_total`, else Σ unit × qty labelled `paidTotalPartial`):
+ *               confirmed `retail.order_total`, else Σ unit × qty labelled `paidTotalPartial`; air (M20b): a confirmed
+ *               `air.total_paid`, no fallback):
  *               1. Recovered: Σ recovered ≤ P — confirmed money above what was paid moves off Recovered (visible,
  *                  never dropped; mission §6). It is RED when P is a confirmed order total, or when ≥ 2 credited
  *                  claims on the transaction exceed an item-only P; otherwise (one credited claim over an item-only
@@ -321,6 +322,31 @@ const REPLIES_PER_CLAIM = 20;
 const WEEK_MS = 7 * 86_400_000;
 const COARSE_MS = 300_000;
 
+/** The transaction-level money fact that states what was paid, per category (card charges: M21, later). */
+const TOTAL_PAID_KEY: Partial<Record<Doc<"transactions">["category"], string>> = { air_travel: "air.total_paid" };
+
+/**
+ * M20b: the confirmed paid total of a transaction with no purchase (§3.4): its category's total-paid fact, confirmed by
+ * the user or derived from confirmed facts, never a candidate. Not partial (it includes taxes and fees). Null when
+ * none is confirmed, so nothing is capped.
+ */
+async function confirmedTotalPaid(ctx: QueryCtx, txn: Doc<"transactions">): Promise<PaidTotal | null> {
+  const key = TOTAL_PAID_KEY[txn.category];
+  if (!key) return null;
+  for (const state of ["user_confirmed", "derived"] as const) {
+    const fact = await ctx.db
+      .query("facts")
+      .withIndex("by_transaction_and_state_and_subject_key_and_key", (q) =>
+        q.eq("transactionId", txn._id).eq("state", state).eq("subjectKey", "txn").eq("key", key))
+      .order("desc")
+      .first();
+    if (fact && fact.userId === txn.userId && fact.value.kind === "money") {
+      return { amountMinor: fact.value.amountMinor, currency: fact.value.currency, partial: false };
+    }
+  }
+  return null;
+}
+
 /** The confirmed paid total of a purchase-backed transaction (§3.4 retail rule) or null. */
 async function retailPaidTotal(ctx: QueryCtx, purchase: Doc<"purchases">): Promise<PaidTotal | null> {
   const txn = await ctx.db.query("transactions").withIndex("by_purchase", (q) => q.eq("purchaseId", purchase._id)).first();
@@ -479,7 +505,16 @@ export const summary = query({
     const paid = new Map<string, PaidTotal>();
     const anchors = new Set([...claims.map((c) => c.anchor), ...opps.map((o) => o.anchor)].filter((a): a is string => a !== null));
     for (const anchor of anchors) {
-      if (!anchor.startsWith("purchase:")) continue; // wave 2: air.total_paid / card.charge_amount
+      if (anchor.startsWith("txn:")) {
+        // M20b (D234, cross-pack observation 5): an air ticket's confirmed total paid caps its transaction.
+        const txn = await txnOf(anchor.slice("txn:".length) as Id<"transactions">);
+        if (txn && txn.userId === userId) {
+          const p = await confirmedTotalPaid(ctx, txn);
+          if (p) paid.set(anchor, p);
+        }
+        continue;
+      }
+      if (!anchor.startsWith("purchase:")) continue;
       const purchase = await purchaseOf(anchor.slice("purchase:".length) as Id<"purchases">);
       if (!purchase) continue;
       const p = await retailPaidTotal(ctx, purchase);

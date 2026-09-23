@@ -290,6 +290,11 @@ export interface RuleSourceMeta {
   effective: string;
   /** README rule 3: evaluating past this window after the last verification → `source_unverified`. */
   refreshWindowDays?: number;
+  /**
+   * M20b (D234 E5): the manifest's `mandatoryReviewBy` ("YYYY-MM-DD", e.g. R02's DOT enforcement pause). From that
+   * date on the source is stale (`source_unverified`) until a verification record dated on or after it exists.
+   */
+  mandatoryReviewBy?: string;
 }
 
 /** What the evaluator knows about existing cases on this opportunity (contract §4 `caseContext`). */

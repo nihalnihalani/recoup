@@ -468,6 +468,35 @@ describe("recovery.summary (query)", () => {
     });
   }
 
+  it("M20b (D234): an air transaction's confirmed air.total_paid caps its credits; without it nothing is capped", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const seedAir = async (totalPaid: number | null) => await t.run(async (ctx) => {
+      const transactionId = await ctx.db.insert("transactions", {
+        userId, category: "air_travel", status: "active", counterpartyName: "Example Air", currency: "USD", liveFactCount: totalPaid === null ? 0 : 1,
+      });
+      if (totalPaid !== null) {
+        await ctx.db.insert("facts", {
+          userId, transactionId, subjectKey: "txn", key: "air.total_paid", state: "user_confirmed",
+          value: { kind: "money", amountMinor: totalPaid, currency: "USD" }, source: { kind: "user" }, recordedAt: NOW,
+        });
+      }
+      for (const [i, key] of ["fare", "bag"].entries()) {
+        const claimId = await ctx.db.insert("claims", {
+          userId, type: "scenario", expectedCents: 30_000, status: "confirmed", token: `AIR${totalPaid ?? "x"}${i}`, version: 1, transactionId,
+          scenarioId: "R02", remedyKey: key, currency: "USD", lossKeys: [`txn:${transactionId}:${key}`],
+        });
+        await ctx.db.insert("ledgerEvents", { claimId, userId, kind: "confirmed_credit", cents: 30_000, evidence: "posted", currency: "USD" });
+      }
+    });
+    await seedAir(41_220);
+    let usd = (await as.query(api.recovery.summary, { now: NOW })).currencies.find((c) => c.currency === "USD")!;
+    expect([usd.recoveredMinor, usd.overCreditMinor, usd.cappedAtPaidTotal, usd.paidTotalPartial]).toEqual([41_220, 18_780, true, false]);
+    await seedAir(null);
+    usd = (await as.query(api.recovery.summary, { now: NOW })).currencies.find((c) => c.currency === "USD")!;
+    expect(usd.recoveredMinor).toBe(41_220 + 60_000); // the second trip has no confirmed total: not capped
+  });
+
   it("DA-A-34 (A.7 inverted): an earlier confirmed claim's 2,000 is counted alongside a newer open claim on the same item", async () => {
     const t = setup();
     const { userId, as } = await signedIn(t);

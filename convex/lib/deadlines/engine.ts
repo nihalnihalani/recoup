@@ -29,8 +29,13 @@
  * "overdue" (overdueSince = dueAt) and the pack's next action is `escalate`.
  *
  * Time zone: `spec.timeZone` (fixed, or from a fact), else the anchor value's own zone. When a local-day computation
- * has no known zone, the deadline is computed in every US zone and the EARLIEST due instant is used, with an
- * assumption naming that zone (conservative for the user).
+ * has no known zone, the deadline is computed in every US zone and the fallback depends on who must act (D234 E1,
+ * D235 A):
+ *   user obligor         → the EARLIEST due instant (conservative for the user), with an assumption naming that zone;
+ *   counterparty obligor → the LATEST due instant decides status/overdue/escalate (never a firm overdue before the
+ *                          latest plausible zone has passed), and the date is shown as a range
+ *                          (`dueLocalDateRange` earliest – latest), with an assumption saying so.
+ * Selector (`appliesWhen`, E4): a selector that rests on an unconfirmed candidate is `unknown_anchor` — no timer.
  */
 import { evaluateConditions } from "../rules/conditions";
 import {
@@ -133,21 +138,23 @@ function dueInZone(spec: DeadlineSpec, point: AnchorPoint, zone: ZoneRule | null
 }
 
 /**
- * The due instant for one anchor value. With no known zone for a local computation, every US zone is tried and the
- * earliest due instant wins (reported through `fallbackZone`).
+ * The due instant for one anchor value. With no known zone for a local computation, every US zone is tried (E1):
+ * a user deadline takes the EARLIEST due instant; a counterparty deadline the LATEST, with the range of local due
+ * dates across the zones (reported through `fallbackZone` and `range`).
  */
 function computeDue(
   spec: DeadlineSpec,
   point: AnchorPoint,
   zone: ZoneRule | null,
-): Due & { fallbackZone?: ZoneRule } {
+): Due & { fallbackZone?: ZoneRule; range?: { earliest: string; latest: string } } {
   if (zone || !usesLocalCalendar(spec, point)) return dueInZone(spec, point, zone);
-  let best: (Due & { fallbackZone: ZoneRule }) | null = null;
-  for (const z of US_ZONES) {
-    const d = dueInZone(spec, point, z);
-    if (best === null || d.dueAt < best.dueAt) best = { ...d, fallbackZone: z };
-  }
-  return best!;
+  const all = US_ZONES.map((z) => ({ ...dueInZone(spec, point, z), fallbackZone: z }));
+  const pick = spec.obligor === "counterparty"
+    ? all.reduce((a, b) => (b.dueAt > a.dueAt ? b : a))
+    : all.reduce((a, b) => (b.dueAt < a.dueAt ? b : a));
+  if (spec.obligor !== "counterparty") return pick;
+  const dates = all.map((d) => d.dueLocalDate).filter((d): d is string => d !== undefined).sort();
+  return dates.length > 0 ? { ...pick, range: { earliest: dates[0], latest: dates[dates.length - 1] } } : pick;
 }
 
 function isLocalDaySpec(spec: DeadlineSpec): boolean {
@@ -203,6 +210,14 @@ function base(spec: DeadlineSpec, subject: string): Pick<DeadlineResult, "id" | 
 }
 
 function tzAssumption(spec: DeadlineSpec, zone: ZoneRule): Assumption {
+  if (spec.obligor === "counterparty") {
+    // E1: the benefit of the doubt goes to the counterparty — never "overdue" while it may still be on time somewhere.
+    return {
+      id: `${spec.id}.time_zone`,
+      text: `Your time zone is not known, so this deadline is treated as passed only once it has passed in the latest-ending US time zone (${zone.label}, ${zone.id}).`,
+      changesOutcomeIf: "your local time zone ends the day earlier, which makes the deadline pass sooner",
+    };
+  }
   return {
     id: `${spec.id}.time_zone`,
     text: `Your time zone is not known, so this deadline uses the earliest-ending US time zone (${zone.label}, ${zone.id}).`,
@@ -249,6 +264,14 @@ export function computeDeadlineDetailed(
 
   if (spec.appliesWhen) {
     const w = evaluateConditions(spec.appliesWhen, cells);
+    // E4 (D234/D235 A): which timer applies must not rest on an unconfirmed candidate (e.g. the payment class).
+    if (w.decisiveUnconfirmed.length > 0) {
+      const keys = w.decisiveUnconfirmed.map((m) => m.key).join(", ");
+      return {
+        result: { ...b, status: "unknown_anchor", basis: `Which timer applies depends on an unconfirmed fact (${keys}); confirm it. (${rule})` },
+        assumptions: [],
+      };
+    }
     if (w.result === "fail") {
       return { result: { ...b, status: "not_applicable", basis: `Does not apply to this case. (${rule})` }, assumptions: [] };
     }
@@ -318,7 +341,7 @@ export function computeDeadlineDetailed(
     return { result: { ...b, status: "unknown_anchor", basis: `The start date has an unusable value. (${rule})` }, assumptions: [] };
   }
   const zone = specZone(spec, cells, subject, point);
-  let due: Due & { fallbackZone?: ZoneRule };
+  let due: ReturnType<typeof computeDue>;
   try {
     due = computeDue(spec, point, zone);
   } catch (err) {
@@ -329,15 +352,23 @@ export function computeDeadlineDetailed(
     };
   }
   const st = statusFor(spec, due.dueAt, now);
+  // E1: a counterparty fallback claims no single zone; a range is shown only when the local dates really differ.
+  const fallbackRange = due.range;
+  const range = fallbackRange && fallbackRange.earliest !== fallbackRange.latest ? fallbackRange : undefined;
   return {
     result: {
       ...b,
       ...st,
       dueAt: due.dueAt,
-      // A UTC reference zone (exact-instant specs) has no user-facing local date.
-      ...(due.dueLocalDate !== undefined && due.zoneId !== "UTC" ? { dueLocalDate: due.dueLocalDate } : {}),
-      ...(due.zoneId !== undefined && due.zoneId !== "UTC" ? { timeZone: due.zoneId } : {}),
-      basis: rule,
+      // A UTC reference zone (exact-instant specs) has no user-facing local date. With a range (E1: counterparty, zone
+      // unknown) the shown date is the range's first day and no single zone is claimed; dueAt is the latest instant.
+      ...(fallbackRange
+        ? { dueLocalDate: fallbackRange.earliest, ...(range ? { dueLocalDateRange: range } : {}) }
+        : {
+            ...(due.dueLocalDate !== undefined && due.zoneId !== "UTC" ? { dueLocalDate: due.dueLocalDate } : {}),
+            ...(due.zoneId !== undefined && due.zoneId !== "UTC" ? { timeZone: due.zoneId } : {}),
+          }),
+      basis: range ? `${rule}; on or about ${range.earliest} – ${range.latest}, depending on your time zone` : rule,
     },
     assumptions: due.fallbackZone ? [tzAssumption(spec, due.fallbackZone)] : [],
   };

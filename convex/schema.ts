@@ -282,6 +282,11 @@ export const deadlineResult = v.object({
   overdueSince: v.optional(v.number()),
   /** D143.3: labelled "conservative act-by", NEVER dueAt. */
   advisoryActBy: v.optional(v.string()),
+  /**
+   * M20b (D234 E1, D235 A): a COUNTERPARTY local-day deadline computed without a known time zone is shown as a range
+   * "on or about <earliest> – <latest>" (local dates across the US zones); `dueAt`/status/overdue use the LATEST zone.
+   */
+  dueLocalDateRange: v.optional(v.object({ earliest: v.string(), latest: v.string() })),
   basis: v.string(), anchor: v.optional(factRef), sourcePassageId: v.optional(v.string()),
 });
 export const dimensions = v.object({

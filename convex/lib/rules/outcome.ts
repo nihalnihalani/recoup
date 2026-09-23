@@ -140,9 +140,17 @@ export function sourceStale(
 ): { stale: boolean; staleSourceIds: string[] } {
   const staleSourceIds: string[] = [];
   for (const s of sources) {
-    if (s.refreshWindowDays === undefined) continue;
     const v = verification[s.sourceId];
     const at = v ? Date.parse(`${v.lastVerifiedAt}T00:00:00Z`) : Number.NaN;
+    // D234 E5: past a mandatory review date, stale until a verification dated on or after that date.
+    if (s.mandatoryReviewBy !== undefined) {
+      const reviewBy = Date.parse(`${s.mandatoryReviewBy}T00:00:00Z`);
+      if (!Number.isFinite(reviewBy) || (now >= reviewBy && !(Number.isFinite(at) && at >= reviewBy))) {
+        staleSourceIds.push(s.sourceId);
+        continue;
+      }
+    }
+    if (s.refreshWindowDays === undefined) continue;
     if (!Number.isFinite(at) || now > at + s.refreshWindowDays * DAY_MS) staleSourceIds.push(s.sourceId);
   }
   return { stale: staleSourceIds.length > 0, staleSourceIds: [...new Set(staleSourceIds)] };
@@ -164,7 +172,14 @@ export function resultHashInput(r: EvaluationResult, boundFactsHashValue: string
     conditions: r.conditions.map((c) => ({ id: c.id, result: c.result })),
     missingFacts: r.missingFacts.map((m) => ({ subjectKey: m.subjectKey, key: m.key, reason: m.reason, class: m.class })),
     assumptions: r.assumptions.map((a) => a.id),
-    amount: r.amount === null ? null : { estimate: r.amount.estimate, basis: r.amount.basis },
+    // D234 E2: the cap (a LIMIT, never the estimate) joins only when present, so every existing hash is unchanged.
+    amount: r.amount === null
+      ? null
+      : {
+          estimate: r.amount.estimate,
+          basis: r.amount.basis,
+          ...(r.amount.cap ? { cap: { amount: r.amount.cap.amount, sourcePassageId: r.amount.cap.sourcePassageId } } : {}),
+        },
     deadlines: r.deadlines.map((d) => ({
       id: d.id, status: d.status, dueAt: d.dueAt ?? null, overdueSince: d.overdueSince ?? null, advisoryActBy: d.advisoryActBy ?? null,
     })),

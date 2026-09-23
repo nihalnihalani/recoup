@@ -12,6 +12,7 @@ import {
   leavesApprovableSet,
   notYetDueAction,
   resultHash,
+  resultHashInput,
   sameAnswer,
   sourceStale,
   withSameAnswer,
@@ -212,6 +213,17 @@ describe("source freshness (README rule 3)", () => {
     expect(sourceStale([src], {}, now).stale).toBe(true);
     expect(sourceStale([{ ...src, refreshWindowDays: undefined }], {}, now).stale).toBe(false);
   });
+
+  it("D234 E5: from the manifest's mandatoryReviewBy date on, stale until a verification dated on or after it", () => {
+    const pause = { ...src, mandatoryReviewBy: "2027-07-07" };
+    const fresh = { "ecfr-260": { lastVerifiedAt: "2027-07-01" } };
+    expect(sourceStale([pause], fresh, Date.parse("2027-07-06T23:59:59Z")).stale).toBe(false);
+    expect(sourceStale([pause], fresh, Date.parse("2027-07-07T00:00:00Z"))).toEqual({ stale: true, staleSourceIds: ["ecfr-260"] });
+    expect(sourceStale([pause], { "ecfr-260": { lastVerifiedAt: "2027-07-07" } }, Date.parse("2027-07-10T00:00:00Z")).stale).toBe(false);
+    // With no refresh window the review date still applies; an unreadable date is stale (fails closed).
+    expect(sourceStale([{ ...pause, refreshWindowDays: undefined }], {}, Date.parse("2027-08-01T00:00:00Z")).stale).toBe(true);
+    expect(sourceStale([{ ...pause, mandatoryReviewBy: "July 2027" }], fresh, Date.parse("2027-07-02T00:00:00Z")).stale).toBe(true);
+  });
 });
 
 describe("approvable set and resultHash (DA-A-32, N6)", () => {
@@ -235,5 +247,18 @@ describe("approvable set and resultHash (DA-A-32, N6)", () => {
     expect(await resultHash({ ...base, snapshotHash: "s2", explanation: ["two"], conditions: [{ ...base.conditions[0], label: "other" }] }, "b1")).toBe(h);
     expect(await resultHash({ ...base, amount: { ...base.amount!, estimate: { amountMinor: 4000, currency: "USD" } } }, "b1")).not.toBe(h);
     expect(await resultHash(base, "b2")).not.toBe(h);
+  });
+
+  it("D234 E2: amount.cap joins the hash only when present — no cap keeps today's hash; a cap or a changed cap changes it", async () => {
+    const { canonicalHash } = await import("../canonical");
+    // Today's hash (the pre-E2 projection, computed by hand) is unchanged for every capless result.
+    const input = resultHashInput(base, "b1");
+    expect(input.amount).toEqual({ estimate: base.amount!.estimate, basis: "exact_formula" });
+    expect(await resultHash(base, "b1")).toBe(await canonicalHash(input));
+    const capped = { ...base, amount: { ...base.amount!, cap: { amount: { amountMinor: 470_000, currency: "USD" }, sourcePassageId: "P-254.4", note: "limit" } } };
+    const h = await resultHash(capped, "b1");
+    expect(h).not.toBe(await resultHash(base, "b1"));
+    expect(await resultHash({ ...capped, amount: { ...capped.amount, cap: { ...capped.amount.cap, note: "other words" } } }, "b1")).toBe(h);
+    expect(await resultHash({ ...capped, amount: { ...capped.amount, cap: { ...capped.amount.cap, amount: { amountMinor: 380_000, currency: "USD" } } } }, "b1")).not.toBe(h);
   });
 });

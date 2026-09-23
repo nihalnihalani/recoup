@@ -137,6 +137,74 @@ describe("time zone unknown: earliest-ending US zone + assumption", () => {
   });
 });
 
+describe("D234 E1 (D235 A): zone unknown — the fallback depends on who must act", () => {
+  const anchor = lookupFrom([cell("x.anchor", "confirmed", localDate("2026-09-10"))]);
+  const five = { offset: { amount: 5, unit: "calendar_days" as const } };
+
+  it("a USER window keeps the earliest-ending zone (Guam, unchanged)", () => {
+    const r = computeDeadline(spec(five), anchor, 0);
+    expect(r).toMatchObject({ dueLocalDate: "2026-09-15", dueAt: T("2026-09-15T14:00:00Z") - 1, timeZone: "Pacific/Guam" });
+    expect(r.dueLocalDateRange).toBeUndefined();
+  });
+
+  it("a COUNTERPARTY timer waits for the latest-ending zone (Pago Pago)", () => {
+    const s = spec({ ...five, obligor: "counterparty" });
+    const { result, assumptions } = computeDeadlineDetailed(s, anchor, 0);
+    // End of 2026-09-15 in Pago Pago (UTC−11) = 2026-09-16T11:00Z − 1 ms: the last instant it can still be on time.
+    expect(result).toMatchObject({ dueAt: T("2026-09-16T11:00:00Z") - 1, dueLocalDate: "2026-09-15" });
+    // The same local date everywhere: no range to show, and no single zone is claimed.
+    expect([result.dueLocalDateRange, result.timeZone]).toEqual([undefined, undefined]);
+    expect(assumptions[0].text).toMatch(/latest-ending US time zone/);
+    // Never overdue while it may still be on time somewhere: open at the latest instant, overdue one ms after.
+    expect(computeDeadline(s, anchor, T("2026-09-16T11:00:00Z") - 1).status).toBe("open");
+    expect(computeDeadline(s, anchor, T("2026-09-16T11:00:00Z"))).toMatchObject({ status: "overdue", overdueSince: T("2026-09-16T11:00:00Z") - 1 });
+  });
+
+  it("an instant anchor that falls on different local days gives a real range; status uses the latest instant", () => {
+    const s = spec({ obligor: "counterparty", offset: { amount: 20, unit: "calendar_days" } });
+    const c = lookupFrom([cell("x.anchor", "confirmed", instant("2026-09-23T20:00:00Z"))]);
+    const r = computeDeadline(s, c, 0);
+    expect(r.dueLocalDateRange).toEqual({ earliest: "2026-10-13", latest: "2026-10-14" });
+    expect(r.dueLocalDate).toBe("2026-10-13");
+    expect(r.basis).toMatch(/on or about 2026-10-13 – 2026-10-14/);
+    const user = computeDeadline(spec({ offset: { amount: 20, unit: "calendar_days" } }), c, 0);
+    expect(r.dueAt!).toBeGreaterThan(user.dueAt!);
+  });
+
+  it("a known zone gives no range and no fallback for either obligor", () => {
+    const c = lookupFrom([cell("x.anchor", "confirmed", localDate("2026-09-10")), cell("x.tz", "confirmed", NY)]);
+    const r = computeDeadline(spec({ ...five, obligor: "counterparty" }), c, 0);
+    expect([r.dueLocalDateRange, r.timeZone]).toEqual([undefined, "America/New_York"]);
+  });
+});
+
+describe("D234 E4: a selector (appliesWhen) resting on an unconfirmed candidate → unknown_anchor", () => {
+  const creditCardTimer = spec({
+    obligor: "counterparty",
+    appliesWhen: {
+      op: "fact", id: "paid_by_credit_card", label: "Paid by credit card", kind: "applicability",
+      fact: { subjectKey: "txn", key: "air.payment_class" },
+      test: (v) => v.kind === "code" && v.code === "credit_card",
+    },
+  });
+  const withClass = (status: EngineCell["status"], code: string) =>
+    lookupFrom([cell("x.anchor", "confirmed", localDate("2026-09-14")), cell("x.tz", "confirmed", NY), cell("air.payment_class", status, { kind: "code", code })]);
+
+  it("candidate credit card → no timer (unknown_anchor, no dueAt); candidate debit → not not_applicable either", () => {
+    for (const code of ["credit_card", "debit_card"]) {
+      const r = computeDeadline(creditCardTimer, withClass("candidate", code), 0);
+      expect(r.status, code).toBe("unknown_anchor");
+      expect(r.dueAt).toBeUndefined();
+      expect(r.basis).toMatch(/unconfirmed fact \(air\.payment_class\)/);
+    }
+  });
+
+  it("the confirmed selector decides as before (a firm timer, or not_applicable)", () => {
+    expect(computeDeadline(creditCardTimer, withClass("confirmed", "credit_card"), 0).status).toBe("open");
+    expect(computeDeadline(creditCardTimer, withClass("confirmed", "debit_card"), 0).status).toBe("not_applicable");
+  });
+});
+
 describe("unknown and disputed anchors (D143.3, D154): never a firm dueAt", () => {
   const r03 = spec({
     id: "r03.notice",
