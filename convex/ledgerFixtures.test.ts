@@ -23,6 +23,12 @@
  *   (I2) Recovered + Over-credit = Σ net over the claims,
  *   (I3) every component with an open member is in exactly one tile (the tile component counts add up to the number
  *        of open components, and each tile holds exactly the components expected there).
+ *
+ * The last block is C4 (contract rev 5 §3.4 I3): an INDEPENDENT property sweep over the generator the contract names
+ * (every claim status × delivery state × promised ≶ net × provisional 0/>0 × a linked opportunity or not), plus the
+ * M12e refused tile and the D195/D196 split of the excess (neutral `extraCredited`, red `possibleDoubleCredit`). Its
+ * oracle is written from §3.4 and D195/D196 only, not from M12's generator or helpers. Its rows are inserted directly,
+ * because most combinations (a promise on a detected claim, a refusal after a credit) have no single public path.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -33,10 +39,12 @@ import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { resetTestRegistry, setTestActivations } from "./lib/rules/testRegistry";
+import { ensurePurchaseTransaction } from "./transactions";
 
 const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 8, 22, 15);
-const TILE_NAMES = ["potential", "ready", "sendingOrUnknown", "asked", "promised"] as const;
+// D196 (M12e) adds `refused` between asked and promised, inside the same disjoint, exhaustive set.
+const TILE_NAMES = ["potential", "ready", "sendingOrUnknown", "asked", "refused", "promised"] as const;
 type TileName = (typeof TILE_NAMES)[number];
 
 type T = ReturnType<typeof setup>;
@@ -646,4 +654,265 @@ describe.each(MODES)("G. R01 price drop, mode %s (C3: legacy fallback and v1 for
     expect(await priceClaims(t, itemId)).toHaveLength(0);
     expect((await as.query(api.recovery.summary, { now: NOW })).currencies).toEqual([]);
   });
+});
+
+// ---------------------------------------------------------------------------
+// C4. Independent tile-exhaustiveness property (contract §3.4 I1–I3, rev 5 C4; D195, D196)
+// ---------------------------------------------------------------------------
+
+const C4_STATUSES = ["detected", "drafted", "queued", "sent", "packet", "promised", "reopened", "confirmed", "dismissed"] as const;
+/** What the claim's newest draft shows: nothing, a draft, an approval, handed to the provider (outcome pending or
+ * unknown), a permanent failure, or a provider message id (sent). */
+const C4_DELIVERIES = ["none", "draft", "approved", "queued", "unknown", "failed", "sent"] as const;
+/** none; a refusal is the newest reply; a refusal answered by a newer (question) reply; a refusal after which the
+ * claim's promise/credit money was recorded. */
+const C4_REFUSALS = ["none", "newest", "answered", "moneyAfter"] as const;
+/** no linked opportunity; one in `case_open` pointing at the claim; one still `open` but carrying `activeClaimId`. */
+const C4_LINKS = ["none", "caseOpen", "openWithActiveClaim"] as const;
+
+type C4Claim = {
+  status: (typeof C4_STATUSES)[number];
+  delivery: (typeof C4_DELIVERIES)[number];
+  expected: number;
+  credit: number;
+  debit: number;
+  /** The latest promised_credit (D21), or none. */
+  promise: number | null;
+  provisional: number;
+  refusal: (typeof C4_REFUSALS)[number];
+  link: (typeof C4_LINKS)[number];
+};
+/** `alt`: an open, unlinked cash opportunity on the same loss (an alternative), with this estimate. */
+type C4Case = { id: string; claims: C4Claim[]; alt: number | null };
+
+const C4_PROMISES = [null, 1_000, 9_000] as const; // 9,000 is above every net below; 1,000 is below most
+const C4_PROVISIONALS = [0, 1_500] as const;
+const C4_ALTS = [null, 3_000, 7_000] as const;
+const C4_CREDITS = [0, 2_000, 5_000, 6_000] as const; // 6,000 is above the 5,000 ask: extraCredited
+const C4_DEBITS = [0, 1_000] as const;
+const C4_LINKED_ESTIMATE = 9_999; // were a linked opportunity ever counted, lossAll would move to it
+
+/** A fixed-seed generator (mulberry32), so a failure names a reproducible case. */
+function c4Random(seed: number) {
+  let a = seed >>> 0;
+  return <V,>(values: readonly V[]): V => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let x = Math.imul(a ^ (a >>> 15), 1 | a);
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+    return values[((x ^ (x >>> 14)) >>> 0) % values.length];
+  };
+}
+
+function c4Cases(): C4Case[] {
+  const cases: C4Case[] = [];
+  for (let pass = 0; pass < 3; pass++) {
+    const pick = c4Random(20260923 + pass);
+    for (const status of C4_STATUSES) {
+      for (const delivery of C4_DELIVERIES) {
+        const claim: C4Claim = {
+          status, delivery, expected: 5_000, credit: pick(C4_CREDITS), debit: pick(C4_DEBITS), promise: pick(C4_PROMISES),
+          provisional: pick(C4_PROVISIONALS), refusal: pick(C4_REFUSALS), link: pick(C4_LINKS),
+        };
+        cases.push({ id: `p${pass}:${status}/${delivery}`, claims: [claim], alt: pick(C4_ALTS) });
+      }
+    }
+  }
+  const base: C4Claim = { status: "detected", delivery: "none", expected: 5_000, credit: 0, debit: 0, promise: null, provisional: 0, refusal: "none", link: "none" };
+  // Two claims on one loss (alternatives): the D195/D196 split, and components that must not double count.
+  cases.push(
+    { id: "m:two-credited-exceed", alt: null, claims: [{ ...base, status: "confirmed", expected: 3_000, credit: 3_000 }, { ...base, status: "confirmed", expected: 2_500, credit: 2_500 }] },
+    { id: "m:open-sent+confirmed", alt: null, claims: [{ ...base, status: "sent", credit: 2_000 }, { ...base, status: "confirmed", credit: 5_000 }] },
+    { id: "m:two-credited-within", alt: null, claims: [{ ...base, status: "sent", credit: 3_000 }, { ...base, status: "promised", credit: 1_000, promise: 4_000 }] },
+    { id: "m:open+dismissed-credited", alt: null, claims: [{ ...base, status: "drafted" }, { ...base, status: "dismissed", credit: 5_000 }] },
+    { id: "m:two-open-alternatives", alt: null, claims: [{ ...base, expected: 4_000 }, { ...base, expected: 3_000, status: "queued" }] },
+    { id: "m:confirmed+alt-opp", alt: 7_000, claims: [{ ...base, status: "confirmed", expected: 3_000, credit: 3_000 }] },
+    { id: "m:refused+promised-member", alt: null, claims: [{ ...base, status: "sent", refusal: "newest" }, { ...base, status: "promised", promise: 9_000 }] },
+    { id: "m:refused+asked-member", alt: 3_000, claims: [{ ...base, status: "sent" }, { ...base, status: "drafted", refusal: "newest" }] },
+  );
+  return cases;
+}
+
+type C4Tile = (typeof TILE_NAMES)[number];
+type C4Expected = { tile: C4Tile | null; outstanding: number; provisional: number; recovered: number; extra: number; red: number; hasNodes: boolean };
+
+const C4_RANK: Record<C4Tile, number> = { potential: 0, ready: 1, sendingOrUnknown: 2, asked: 3, refused: 4, promised: 5 };
+
+/** §3.4 + D195/D196, by hand: one loss component per case (every claim and the alternative share one loss key). */
+function c4Oracle(c: C4Case): C4Expected {
+  const net = (x: C4Claim) => Math.max(0, x.credit - x.debit);
+  const nodes = c.claims.filter((x) => x.status !== "dismissed"); // nodes(c): claims not dismissed
+  const isOpen = (x: C4Claim) => x.status !== "confirmed" && x.status !== "dismissed"; // not closed-for-ask
+  const openClaims = nodes.filter(isOpen);
+  const hasOpen = openClaims.length > 0 || c.alt !== null;
+  const lossAll = Math.max(0, ...nodes.map((x) => x.expected), c.alt ?? 0);
+  const lossOpen = Math.max(0, ...openClaims.map((x) => x.expected), c.alt ?? 0);
+  const sumNet = nodes.reduce((a, x) => a + net(x), 0);
+  const recovered = Math.min(sumNet, lossAll);
+  const excess = sumNet - recovered;
+  // D196: red only for ≥ 2 credited claims in one loss component (no confirmed order total here); else neutral.
+  const credited = nodes.filter((x) => net(x) > 0).length;
+  const outstanding = hasOpen ? Math.max(0, lossOpen - recovered) : 0;
+  const hasMoneyEvent = (x: C4Claim) => x.promise !== null || x.credit > 0;
+  const claimTile = (x: C4Claim): C4Tile => {
+    if (x.status === "promised" && (x.promise ?? 0) > net(x)) return "promised";
+    // D196: the newest classified reply is a refusal, with no promise or credit recorded after it.
+    if (x.refusal === "newest" || (x.refusal === "moneyAfter" && !hasMoneyEvent(x))) return "refused";
+    const asked = x.delivery === "sent" || x.status === "sent" || x.status === "packet"; // legacy: sent / user_reported
+    if (asked) return "asked";
+    if (x.status === "queued" || x.delivery === "queued" || x.delivery === "unknown") return "sendingOrUnknown";
+    return "ready"; // the catch-all (C4): detected, drafted, approved, failed, reopened, promised ≤ net
+  };
+  let tile: C4Tile | null = null;
+  if (hasOpen) {
+    tile = c.alt !== null ? "potential" : null;
+    for (const x of openClaims) {
+      const next = claimTile(x);
+      if (tile === null || C4_RANK[next] > C4_RANK[tile]) tile = next;
+    }
+  }
+  const provisionalSum = nodes.reduce((a, x) => a + x.provisional, 0);
+  return {
+    tile, outstanding, provisional: hasOpen ? Math.min(outstanding, provisionalSum) : 0, recovered,
+    extra: credited >= 2 ? 0 : excess, red: credited >= 2 ? excess : 0, hasNodes: nodes.length > 0 || c.alt !== null,
+  };
+}
+
+/** One user per case: purchase, item, transaction, the claims and their artifacts, the opportunities. */
+async function c4Seed(t: T, c: C4Case, index: number): Promise<Id<"users">> {
+  vi.setSystemTime(NOW);
+  const ids = await t.run(async (ctx) => {
+    const userId = await ctx.db.insert("users", { name: `C4 ${c.id}`, email: `c4.${index}@example.com` });
+    const purchaseId = await ctx.db.insert("purchases", {
+      userId, merchant: "C4 Store", merchantDomain: "c4.example", orderRef: `C4-${index}`, purchasedAt: NOW - 3 * DAY, currency: "USD", status: "active",
+    });
+    // Paid 100,000: the per-transaction cap (D145/D188) never binds in this sweep (fixtures H/H2 cover it).
+    const itemId = await ctx.db.insert("items", { purchaseId, userId, name: "C4 item", unitCents: 100_000, qty: 1, returned: false, productUrl: "https://c4.example/p/item" });
+    const transactionId = await ensurePurchaseTransaction(ctx, purchaseId);
+    const lossKeys = [`item:${itemId}:price_diff:1`];
+    const opp = (dedupe: string, fields: Partial<Doc<"opportunities">>) =>
+      ctx.db.insert("opportunities", {
+        userId, transactionId, scenarioId: "R01", remedyKey: "price_difference", subjectKey: `item:${itemId}`, dedupeKey: dedupe, status: "open",
+        ruleId: "R01.retail_price_adjustment", ruleVersion: 1, outcome: "likely_eligible", authorityClass: "merchant_promise",
+        remedyType: "price_difference", cashClass: "cash", lossKeys, lastEvaluatedAt: NOW, ...fields,
+      });
+    if (c.alt !== null) await opp(`c4:${index}:alt`, { estimate: { amountMinor: c.alt, currency: "USD" } });
+    const claimIds: Id<"claims">[] = [];
+    for (const [n, x] of c.claims.entries()) {
+      const claimId = await ctx.db.insert("claims", {
+        purchaseId, itemId, userId, transactionId, type: "price_adjustment", expectedCents: x.expected, status: x.status, token: `c4-${index}-${n}`,
+        version: 1, currency: "USD", lossKeys, windowEndsAt: NOW + 11 * DAY, ...(x.delivery === "unknown" ? { sendUnknown: true } : {}),
+      });
+      claimIds.push(claimId);
+      if (x.link !== "none") {
+        const linked = await opp(`c4:${index}:linked:${n}`, {
+          status: x.link === "caseOpen" ? "case_open" : "open", activeClaimId: claimId, estimate: { amountMinor: C4_LINKED_ESTIMATE, currency: "USD" },
+        });
+        await ctx.db.patch(claimId, { opportunityId: linked });
+      }
+      if (x.delivery !== "none") {
+        const outboundId = `c4-outbound-${index}-${n}` as NonNullable<Doc<"drafts">["outboundId"]>;
+        const handedOver = x.delivery === "queued" || x.delivery === "unknown" || x.delivery === "failed" || x.delivery === "sent";
+        await ctx.db.insert("drafts", {
+          claimId, userId, version: 1, claimVersion: 1, to: "care@c4.example", subject: "C4", body: "C4",
+          ...(x.delivery !== "draft" ? { approvedAt: NOW } : {}),
+          ...(handedOver ? { outboundId } : {}),
+          ...(x.delivery === "failed" ? { sendError: "550 mailbox unavailable" } : {}),
+          ...(x.delivery === "sent" ? { agentmailMessageId: `c4-msg-${index}-${n}` } : {}),
+        });
+      }
+      const event = (kind: Doc<"ledgerEvents">["kind"], cents: number, key: string) =>
+        ctx.db.insert("ledgerEvents", { claimId, userId, kind, cents, evidence: "C4", idempotencyKey: `c4-${key}`, currency: "USD" });
+      if (x.debit > 0) await event("later_debit", x.debit, "debit");
+      if (x.provisional > 0) await event("provisional_credit", x.provisional, "prov");
+      if (x.refusal !== "moneyAfter") {
+        if (x.promise !== null) await event("promised_credit", x.promise, "promise");
+        if (x.credit > 0) await event("confirmed_credit", x.credit, "credit");
+      }
+    }
+    return { userId, claimIds };
+  });
+  for (const [n, x] of c.claims.entries()) {
+    if (x.refusal === "none") continue;
+    const claimId = ids.claimIds[n];
+    const reply = async (at: number, classification: Doc<"replies">["classification"], tag: string) => {
+      vi.setSystemTime(at);
+      await t.run(async (ctx) =>
+        await ctx.db.insert("replies", {
+          claimId, userId: ids.userId, messageId: `c4-${index}-${n}-${tag}`, from: "care@c4.example", classification, summary: `C4 ${tag}`,
+          senderMismatch: false, receivedAt: at,
+        }),
+      );
+    };
+    await reply(NOW + 60_000, "refusal", "refusal");
+    if (x.refusal === "answered") await reply(NOW + 120_000, "question", "question");
+    if (x.refusal === "moneyAfter") {
+      vi.setSystemTime(NOW + 120_000);
+      await t.run(async (ctx) => {
+        const event = (kind: Doc<"ledgerEvents">["kind"], cents: number, key: string) =>
+          ctx.db.insert("ledgerEvents", { claimId, userId: ids.userId, kind, cents, evidence: "C4", idempotencyKey: `c4-${key}`, currency: "USD" });
+        if (x.promise !== null) await event("promised_credit", x.promise, "promise");
+        if (x.credit > 0) await event("confirmed_credit", x.credit, "credit");
+      });
+    }
+  }
+  vi.setSystemTime(NOW);
+  return ids.userId;
+}
+
+describe("C4. every status × delivery × promised ≶ net × provisional × refusal × linked opportunity: tiles disjoint and exhaustive", () => {
+  it("the generator covers every value of every dimension, and every tile and both excess lines are exercised", () => {
+    const cases = c4Cases();
+    const claims = cases.flatMap((c) => c.claims);
+    for (const status of C4_STATUSES) expect(claims.some((x) => x.status === status), status).toBe(true);
+    for (const delivery of C4_DELIVERIES) expect(claims.some((x) => x.delivery === delivery), delivery).toBe(true);
+    for (const refusal of C4_REFUSALS) expect(claims.some((x) => x.refusal === refusal), refusal).toBe(true);
+    for (const link of C4_LINKS) expect(claims.some((x) => x.link === link), link).toBe(true);
+    for (const p of C4_PROMISES) expect(claims.some((x) => x.promise === p), String(p)).toBe(true);
+    for (const p of C4_PROVISIONALS) expect(claims.some((x) => x.provisional === p), String(p)).toBe(true);
+    for (const a of C4_ALTS) expect(cases.some((c) => c.alt === a), String(a)).toBe(true);
+    const oracles = cases.map(c4Oracle);
+    // promised ≶ net on promised-status claims, both sides
+    const promisedClaims = claims.filter((x) => x.status === "promised" && x.promise !== null);
+    expect(promisedClaims.some((x) => x.promise! > Math.max(0, x.credit - x.debit))).toBe(true);
+    expect(promisedClaims.some((x) => x.promise! <= Math.max(0, x.credit - x.debit))).toBe(true);
+    for (const tile of TILE_NAMES) expect(oracles.filter((o) => o.tile === tile).length, `cases expected in ${tile}`).toBeGreaterThanOrEqual(3);
+    expect(oracles.some((o) => o.tile === null && o.hasNodes)).toBe(true); // closed components: in no tile
+    expect(oracles.some((o) => o.extra > 0)).toBe(true);
+    expect(oracles.some((o) => o.red > 0)).toBe(true);
+    expect(oracles.some((o) => o.provisional > 0)).toBe(true);
+    expect(oracles.some((o) => o.tile !== null && o.outstanding === 0)).toBe(true); // an open member, nothing outstanding
+  });
+
+  it("recovery.summary equals the §3.4 oracle for every generated case (I1, I2, I3 and the D196 excess split)", async () => {
+    const t = setup();
+    const cases = c4Cases();
+    const mismatches: string[] = [];
+    for (const [index, c] of cases.entries()) {
+      const userId = await c4Seed(t, c, index);
+      const e = c4Oracle(c);
+      const s = await t.withIdentity({ subject: `${userId}|session` }).query(api.recovery.summary, { now: NOW + DAY });
+      const row = s.currencies.find((r: { currency: string }) => r.currency === "USD");
+      if (!e.hasNodes) {
+        if (row !== undefined) mismatches.push(`${c.id}: expected no USD row, got one`);
+        continue;
+      }
+      if (row === undefined) {
+        mismatches.push(`${c.id}: no USD row`);
+        continue;
+      }
+      const tiles = row.tiles as Record<C4Tile, { amountMinor: number; provisionalMinor: number; components: number }>;
+      const actual = {
+        tiles: Object.fromEntries(TILE_NAMES.map((n) => [n, [tiles[n].amountMinor, tiles[n].provisionalMinor, tiles[n].components]])),
+        recovered: row.recoveredMinor, extra: row.extraCreditedMinor, red: row.possibleDoubleCreditMinor, over: row.overCreditMinor, capped: row.cappedAtPaidTotal,
+      };
+      const expected = {
+        tiles: Object.fromEntries(TILE_NAMES.map((n) => [n, n === e.tile ? [e.outstanding, e.provisional, 1] : [0, 0, 0]])),
+        recovered: e.recovered, extra: e.extra, red: e.red, over: e.extra + e.red, capped: false,
+      };
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+        mismatches.push(`${c.id} ${JSON.stringify(c.claims)} alt=${c.alt}\n    expected ${JSON.stringify(expected)}\n    actual   ${JSON.stringify(actual)}`);
+      }
+    }
+    expect(mismatches, mismatches.join("\n")).toEqual([]);
+  }, 120_000);
 });

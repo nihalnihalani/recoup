@@ -1,0 +1,79 @@
+// @vitest-environment node
+/**
+ * P1/P2 static guards for the PDF text layer (security baseline §7): one exact-pinned pdf.js, imported only as its
+ * legacy build and worker, only by `lib/pdfText`, and nothing in `convex/` that renders, reads annotations, loads the
+ * scripting build or hands pdf.js a location to fetch or read.
+ */
+import { readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const PDFJS_VERSION = "6.3.289";
+const PDFJS_INTEGRITY = "sha512-ZHjSVpDa3D6izMq8/04lvkhkATUmL9px6ChPaXc1k6nU2Mrhlg1/7F0bdUqCwUjw3NsPTfPZsMDUU6ZIcRaeQw==";
+const ALLOWED_IMPORTS = new Set(["pdfjs-dist/legacy/build/pdf.mjs", "pdfjs-dist/legacy/build/pdf.worker.mjs"]);
+
+/** Every non-test source file under convex/ (not `_generated`), with its text. */
+function convexSources(): Array<{ rel: string; text: string }> {
+  const entries = readdirSync(path.join(REPO, "convex"), { recursive: true, encoding: "utf8" });
+  return entries
+    .map((rel) => path.posix.join("convex", rel.split(path.sep).join("/")))
+    .filter((rel) => /\.(ts|tsx|js|mjs)$/.test(rel) && !rel.includes("/_generated/") && !/\.(test|spec)\.[a-z]+$/.test(rel))
+    .map((rel) => ({ rel, text: readFileSync(path.join(REPO, rel), "utf8") }));
+}
+
+/** Source without block and line comments (a comment may name an API; only code is checked). */
+function withoutComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+}
+
+function json(rel: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(path.join(REPO, rel), "utf8")) as Record<string, unknown>;
+}
+
+describe("pdf.js pin and imports (P1)", () => {
+  it(`pins pdfjs-dist exactly at ${PDFJS_VERSION} as a runtime dependency, with the reviewed lockfile integrity`, () => {
+    const pkg = json("package.json") as { dependencies: Record<string, string>; devDependencies?: Record<string, string> };
+    expect(pkg.dependencies["pdfjs-dist"]).toBe(PDFJS_VERSION);
+    expect(pkg.devDependencies?.["pdfjs-dist"]).toBeUndefined();
+    const lock = json("package-lock.json") as { packages: Record<string, { version?: string; integrity?: string }> };
+    expect(lock.packages["node_modules/pdfjs-dist"]).toMatchObject({ version: PDFJS_VERSION, integrity: PDFJS_INTEGRITY });
+    const pdfjsCopies = Object.keys(lock.packages).filter((k) => k.endsWith("node_modules/pdfjs-dist"));
+    expect(pdfjsCopies).toEqual(["node_modules/pdfjs-dist"]);
+  });
+
+  it("imports pdf.js only in lib/pdfText, only as the legacy build and its worker", () => {
+    const importers: string[] = [];
+    for (const { rel, text } of convexSources()) {
+      for (const m of text.matchAll(/(?:from\s+|import\s*\(\s*|require\s*\(\s*)["'](pdfjs-dist[^"']*)["']/g)) {
+        importers.push(rel);
+        expect(ALLOWED_IMPORTS.has(m[1]), `${rel} imports ${m[1]}`).toBe(true);
+      }
+      expect(/pdfjs-dist(?!\/legacy\/build\/pdf(?:\.worker)?\.mjs["'])/.test(withoutComments(text)), `${rel} names another pdf.js entry`).toBe(false);
+    }
+    expect([...new Set(importers)]).toEqual(["convex/lib/pdfText.ts"]);
+  });
+
+  it("nothing in convex/ renders, reads annotations, loads scripting, or gives pdf.js a location", () => {
+    const FORBIDDEN = [/\brender\s*\(/, /getOperatorList/, /getAnnotations/, /pdf\.scripting/, /cMapUrl/, /standardFontDataUrl/, /wasmUrl/, /iccUrl/];
+    for (const { rel, text } of convexSources()) {
+      const code = withoutComments(text);
+      for (const re of FORBIDDEN) expect(re.test(code), `${rel} matches ${re}`).toBe(false);
+    }
+    const pdfText = readFileSync(path.join(REPO, "convex/lib/pdfText.ts"), "utf8");
+    expect(/\burl\s*:/i.test(withoutComments(pdfText)), "lib/pdfText passes a url option").toBe(false);
+    expect(/\bpassword\s*:/i.test(withoutComments(pdfText)), "lib/pdfText passes a password").toBe(false);
+    expect(/\bgetTextContent\b/.test(pdfText)).toBe(true);
+  });
+});
+
+describe("the Node runtime pdf.js runs on (P2)", () => {
+  it("convex.json pins Node 22 for actions and bundles pdf.js (no externalPackages)", () => {
+    expect(json("convex.json")).toEqual({ node: { nodeVersion: "22" } });
+  });
+
+  it("engines.node allows only the Node 22 releases pdf.js supports", () => {
+    expect((json("package.json") as { engines: { node: string } }).engines.node).toBe(">=22.13 <23");
+  });
+});

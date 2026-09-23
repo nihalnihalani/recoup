@@ -10,6 +10,7 @@
  * do anything but return `null`. PDF structure is examined only by bounded byte searches (`pdfLooksEncrypted`); the
  * real text layer arrives with M23's pinned PDF library.
  */
+import { containsPan } from "./pan";
 
 export type SniffedMime = "application/pdf" | "image/jpeg" | "image/png" | "image/webp" | "image/heic" | "image/heif";
 
@@ -120,4 +121,32 @@ export function pdfRawText(bytes: Uint8Array): string {
     out += String.fromCharCode(...bytes.subarray(i, Math.min(bytes.length, i + CHUNK)));
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Text-layer card-number pre-scan (DA-A-8; KS2, D165)
+// ---------------------------------------------------------------------------
+
+/** Horizontal whitespace a PDF text layer can put between digit groups (spaces, tabs, NBSP, thin/figure spaces). */
+const DIGIT_GAP = /(?<=\d)[ \t\u00A0\u2000-\u200A\u202F\u205F\u3000]{2,}(?=\d)|(?<=\d)[\t\u00A0\u2000-\u200A\u202F\u205F\u3000](?=\d)/g;
+/** Dash-like separators a text layer can emit between digit groups (hyphen variants, figure dash, minus). */
+const DIGIT_DASH = /(?<=\d)[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D](?=\d)/g;
+
+/**
+ * KS2 (D165): PDF text extraction can put runs of spaces, tabs or non-breaking spaces — or a typographic dash —
+ * between the digit groups of a card number, and `lib/pan` (single space or hyphen separators only, rule c) would
+ * then miss it. This folds each such gap between two digits into ONE ASCII space, and each dash-like character
+ * between two digits into an ASCII hyphen, leaving everything else as it was. Line breaks are kept: two numbers on
+ * separate lines are never joined. `lib/pan` itself is unchanged (it is inside R01's pinned engine closure, D197).
+ */
+export function normalizeDigitSeparators(text: string): string {
+  return text.replace(DIGIT_GAP, " ").replace(DIGIT_DASH, "-");
+}
+
+/**
+ * DA-A-8: does this text layer hold a card number? Uses `lib/pan`'s rules (Luhn + issuer prefix at that brand's
+ * length + single separators) after KS2's normalization. A hit forces `store_only`, whatever type the user declared.
+ */
+export function textLayerHasPan(text: string): boolean {
+  return containsPan(normalizeDigitSeparators(text));
 }
