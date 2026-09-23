@@ -417,6 +417,18 @@ export const AIR_FACT_SPECS = [
     userAssertable: true,
   },
   {
+    // D221: the ticket's total as paid (fare + taxes + fees), e.g. from manual entry (`transactions.createManual`).
+    // Contract §3.4's per-transaction paid cap for air. Read by no R02/R04 v1 logic.
+    key: "air.total_paid",
+    domain: "air",
+    categories: AIR,
+    subject: TXN,
+    value: "money",
+    question: { prompt: "What did you pay in total for this ticket, including taxes and fees?", why: "Recovered money on this trip is never shown as more than you paid." },
+    evidenceHint: ["receipt", "card_statement"],
+    userAssertable: true,
+  },
+  {
     key: "air.partly_flown",
     domain: "air",
     categories: AIR,

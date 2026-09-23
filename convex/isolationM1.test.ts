@@ -326,7 +326,7 @@ const PROBES: Probe[] = [
 ];
 
 /** Public functions that take no id: covered by the list/summary cases and the HTTP cases below. */
-const NO_ID_CASES = ["transactions.list", "recovery.summary", "http:POST /evidence/upload", "http:GET /evidence/file"];
+const NO_ID_CASES = ["transactions.list", "transactions.createManual", "recovery.summary", "http:POST /evidence/upload", "http:GET /evidence/file"];
 
 // ---------------------------------------------------------------------------
 
@@ -371,6 +371,26 @@ describe("isolation: list-shaped queries never show another user's rows or money
     const aSummary = await w.a.as.query(api.recovery.summary, { now: NOW });
     expect(aSummary.currencies.length).toBeGreaterThan(0);
     expect(JSON.stringify(bSummary)).not.toContain(w.a.userId);
+  });
+
+  it("transactions.createManual (T-M24, no id argument): B's entry is B's alone, touches none of A's rows, and A never sees it", async () => {
+    const t = setup();
+    const w = await buildWorld(t);
+    const before = await snapshotOf(t, w.a.userId);
+    const id = await w.b.as.mutation(api.transactions.createManual, { category: "card_charge", counterpartyName: "B SHOP", currency: "USD", totalMinor: 1_234, transactedOn: "2026-09-01" });
+    expect(await snapshotOf(t, w.a.userId)).toEqual(before);
+    const created = await t.run(async (ctx) => ({
+      txn: await ctx.db.get(id),
+      facts: await ctx.db.query("facts").withIndex("by_transaction_and_subject_key_and_key", (q) => q.eq("transactionId", id)).collect(),
+    }));
+    expect(created.txn?.userId).toBe(w.b.userId);
+    expect(created.facts.length).toBeGreaterThan(0);
+    for (const f of created.facts) expect([f.userId, f.state, f.source.kind]).toEqual([w.b.userId, "user_confirmed", "user"]);
+    const aList = await w.a.as.query(api.transactions.list, {});
+    expect(aList.transactions.map((x: Doc<"transactions">) => x._id)).not.toContain(id);
+    const aRead = await w.a.as.query(api.transactions.get, { transactionId: id }).catch((e: Error) => e.message);
+    const aMissing = await w.a.as.query(api.transactions.get, { transactionId: w.missing.transactions as Id<"transactions"> }).catch((e: Error) => e.message);
+    expect(aRead).toBe(aMissing);
   });
 
   it("intake.needsAttention for B does not list A's held refund email", async () => {
