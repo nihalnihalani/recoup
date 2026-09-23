@@ -2,7 +2,7 @@ import { useId, useState, type FormEvent, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { getFactSpec, type FactSpec, type FactValue } from "../../../convex/lib/facts/catalog";
 import { parseDecimalToMinor } from "../../../convex/lib/money";
-import { errorText, inputClass, secondaryButtonClass } from "../../lib/ui";
+import { errorText, fromDateInput, inputClass, secondaryButtonClass } from "../../lib/ui";
 import { describeFactValue, humanizeKeys, type FactCell, type MissingFact } from "./model";
 
 export type FactAnswer = { subjectKey: string; key: string; value: FactValue };
@@ -302,8 +302,10 @@ function ValueForm({
       case "local_date":
         return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? { kind: "local_date", date: raw } : "Pick a date.";
       case "instant": {
-        const ms = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? Date.parse(`${raw}T12:00:00Z`) : Number.NaN;
-        return Number.isNaN(ms) ? "Pick a date." : { kind: "instant", epochMs: ms };
+        // QA-M16-4: an event on today's date is "now", never noon UTC ahead of it; a later date stays allowed here
+        // (a promised date can be ahead), an earlier one is never later than now.
+        const ms = fromDateInput(raw, { allowFuture: true });
+        return ms === null ? "Pick a date." : { kind: "instant", epochMs: ms };
       }
       case "local_datetime":
         return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw) ? { kind: "local_datetime", dateTime: raw } : "Pick a date and time.";

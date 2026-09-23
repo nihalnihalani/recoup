@@ -22,6 +22,7 @@ import {
   dollarsToCents,
   errorText,
   fromDateInput,
+  todayInput,
   inputClass,
   labelClass,
   percent,
@@ -231,11 +232,8 @@ function BoughtForm({ watch, onDone }: { watch: Watch; onDone: () => void }) {
   const markBought = useMutation(api.watches.markBought);
   const navigate = useNavigate();
   const [paid, setPaid] = useState(watch.lastCents === null ? "" : centsToDollars(watch.lastCents));
-  const [date, setDate] = useState(() => {
-    // Today in the shopper's own timezone; an ISO (UTC) date is tomorrow for evening shoppers in the Americas.
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  });
+  // Today in the shopper's own timezone; an ISO (UTC) date is tomorrow for evening shoppers in the Americas.
+  const [date, setDate] = useState(() => todayInput());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -243,8 +241,11 @@ function BoughtForm({ watch, onDone }: { watch: Watch; onDone: () => void }) {
     event.preventDefault();
     setError(null);
     const paidCents = dollarsToCents(paid);
-    const purchasedAt = fromDateInput(date);
+    // QA-M16-4: today is "now", an earlier day is never later than now, a later day is refused.
+    const now = Date.now();
+    const purchasedAt = fromDateInput(date, { now });
     if (paidCents === null || paidCents <= 0) return setError("Enter what you paid, like 89.99");
+    if (date > todayInput(now)) return setError("The day you bought it can't be in the future");
     if (purchasedAt === null) return setError("Pick the day you bought it");
     setBusy(true);
     try {
@@ -284,6 +285,7 @@ function BoughtForm({ watch, onDone }: { watch: Watch; onDone: () => void }) {
             id={`date-${watch._id}`}
             className={inputClass}
             type="date"
+            max={todayInput()}
             value={date}
             onChange={(e) => setDate(e.target.value)}
           />

@@ -13,7 +13,7 @@ import { parseProductUrl } from "./lib/watchUrl";
 import { boundedLine } from "./lib/text";
 import { clearItemSchedule } from "./lib/schedule";
 import { schedulePolicyFetch } from "./policies";
-import { assertCoarseNow } from "./watches";
+import { assertCoarseNow, purchasedAtNotAfterNow } from "./watches";
 import { ensurePurchaseTransaction } from "./transactions";
 import { putFact } from "./lib/facts/write";
 import { evaluateTransaction } from "./opportunities";
@@ -99,7 +99,9 @@ export const create = mutation({
   returns: v.id("purchases"),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
-    const { items, status, purchasedAt } = args;
+    const { items, status } = args;
+    // QA-M16-4: never a future instant (clamped to now; see `purchasedAtNotAfterNow`).
+    const purchasedAt = args.purchasedAt === undefined ? undefined : purchasedAtNotAfterNow(args.purchasedAt);
     const resolvedStatus = status ?? "active";
     if (resolvedStatus === "active" && purchasedAt === undefined) {
       throw new ConvexError("purchasedAt is required for an active purchase");
@@ -113,7 +115,6 @@ export const create = mutation({
     if (items.length > MAX_ITEMS_PER_PURCHASE) {
       throw new ConvexError(`A purchase can have at most ${MAX_ITEMS_PER_PURCHASE} items`);
     }
-    if (purchasedAt !== undefined) assertTimestamp(purchasedAt, "purchasedAt");
     const merchant = boundedLine(args.merchant, "merchant", MAX_MERCHANT_CHARS);
     const orderRef = cleanOrderRef(args.orderRef);
     const sourceMessageId =
@@ -200,7 +201,8 @@ export const confirm = mutation({
     if (args.items.length > MAX_ITEMS_PER_PURCHASE) {
       throw new ConvexError(`A purchase can have at most ${MAX_ITEMS_PER_PURCHASE} items`);
     }
-    assertTimestamp(args.purchasedAt, "purchasedAt");
+    // QA-M16-4: never a future instant (clamped to now; see `purchasedAtNotAfterNow`).
+    const purchasedAt = purchasedAtNotAfterNow(args.purchasedAt);
     const merchant = boundedLine(args.merchant, "merchant", MAX_MERCHANT_CHARS);
     const orderRef = cleanOrderRef(args.orderRef);
     const currency = args.currency === undefined ? undefined : assertCurrency(args.currency);
@@ -238,13 +240,13 @@ export const confirm = mutation({
       purchase.merchant !== merchant ||
       purchase.merchantDomain !== merchantDomain ||
       purchase.orderRef !== orderRef ||
-      purchase.purchasedAt !== args.purchasedAt ||
+      purchase.purchasedAt !== purchasedAt ||
       (currency !== undefined && currency !== purchase.currency);
     await ctx.db.patch(args.purchaseId, {
       merchant,
       merchantDomain,
       orderRef,
-      purchasedAt: args.purchasedAt,
+      purchasedAt,
       ...(currency !== undefined ? { currency } : {}),
       status: "active",
     });
