@@ -120,3 +120,21 @@ tightening CI further).
    written — this mission runs several concurrent agent lanes against the
    same working tree by design (see `docs/reviews/endpoint-inventory.md`'s
    own header), so `origin/main` can advance between sessions.
+
+## Mission 2 handoff — 2026-09-23 13:15 IST (lead)
+
+Main: `158ab1f`. Active pack: R01 v1 only (epoch 2). R02–R05 implemented, not active (M27/M27b/M27c reviews; activation needs re-review approval + VERIFICATION source records + coverageCopy/README update per D232). Live extraction flag OFF. Production never deployed (D136). Dev deployment adorable-lion-138 last deployed at `7e6001a`.
+
+**Paused lanes (durable worktrees; resume one batch at a time, D267):**
+| Lane | Worktree / branch | State |
+|---|---|---|
+| Retention + privacy batch (this run) | `recoup-wt-batch1` / batch1 | Sonnet integrating backend batch B (from `recoup-wt-m2c` land-b, staged) + P09-F2 (from `recoup-wt-m30ui`); Opus audit reserved |
+| M21c R03/R05 fixes (D260, D264) | `recoup-wt-m21` / m21c-wip | uncommitted, mid-way (keys_card/catalog/values) — lands with the R03 errata |
+| R03 spec errata (D260) | `recoup-wt-errata-r03` / errata-r03 | workflow failed at start (usage limit); re-run |
+| E6–E9 engine (D260, D264, D265) | `recoup-wt-e678` / eng678 | 2 dirty files, early |
+| QA follow-up (QA-M25-1 real timers, KX3 widening, offline api.d.ts test, P10-OW-12 isolation…) | `recoup-wt-m16` / m25b | 19 dirty files, near landing |
+| Ingestion re-audit batches (P07-W1/SK-1, P10-MW-2, P11-W3, P09-F1 sweep, …) | `recoup-wt-ra1` / ra2 | 3 dirty files, early (batch 1 market quality landed `d5db6b1`) |
+| Frontend batch remainder (held-promise UI, deadline attention, P02-OW-4, P03-A, P05-OW3, P06 display, P09-SK-2 UI, P10-MW-1, P12-W6) | `recoup-wt-m30ui` / m30ui | WIP commits + 11 dirty files |
+| M27c re-review of R02/R04 + templates | `recoup-wt-m27c` | workflow failed at start; re-run after the batch |
+| R06–R25 research | `recoup-wt-rules3` / rules3 | 113 files written; 21 review/revise steps failed on the limit; resume workflow `wf_6997236e-e9c` |
+Lead decisions not yet on main: D248–D262 and D266–D267 (in `docs/team/DECISIONS.pending-lead.md` in this worktree). D263 is on main (M22c). D264 and D265 were issued to M21c and E6–E9 but their lanes have not landed; each lane appends its own line when it lands.

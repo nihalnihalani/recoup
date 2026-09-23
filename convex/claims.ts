@@ -1,5 +1,4 @@
 import { ConvexError, v } from "convex/values";
-import { components } from "./_generated/api";
 import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { ownedClaim, ownedEvidence, ownedItem, requireUserId } from "./lib/access";
@@ -882,10 +881,9 @@ export const get = query({
     followUps: v.array(schema.doc("followUps")),
     notes: v.array(schema.doc("claimNotes")),
     policy: v.union(schema.doc("policies"), v.null()),
-    // Opaque component data (`@agentmail/convex`'s own `listInboundMessages`
-    // query declares no `returns` validator of its own); nothing in this app
-    // has a schema for it.
-    messages: v.any(),
+    // P07-W3 (re-audit): no `messages` field. It returned every inbound message of the claim's thread (text, html and
+    // the raw webhook JSON) through an unbounded component `.collect()`; nothing read it, the counterparty controlled
+    // its size (40+ replies of 200 KB broke the page), and `replies` already holds the classified summaries.
     balance: balanceValidator,
     /** Outstanding provisional credit (§3.2): shown as "of which provisional", never in `balance`. */
     provisionalMinor: v.number(),
@@ -928,9 +926,6 @@ export const get = query({
         .take(MAX_NON_CASH_READ)
     ).sort((a, b) => a.recordedAt - b.recordedAt || a._creationTime - b._creationTime);
     const policy = claim.policyId ? await ctx.db.get(claim.policyId) : null;
-    const messages = claim.threadId
-      ? await ctx.runQuery(components.agentmail.lib.listInboundMessages, { threadId: claim.threadId })
-      : [];
     return {
       claim,
       item,
@@ -942,7 +937,6 @@ export const get = query({
       followUps,
       notes,
       policy,
-      messages,
       balance: balance(claim.expectedCents, events),
       provisionalMinor: provisionalOutstanding(events),
       nonCashRemedies,

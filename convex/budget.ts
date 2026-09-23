@@ -8,7 +8,7 @@
  */
 import { ConvexError, v } from "convex/values";
 import { internalMutation, query } from "./_generated/server";
-import { charge, isBudgetKind, takeGlobalBudget, utcDay } from "./lib/budget";
+import { charge, isBudgetKind, isGlobalKindPaused, takeGlobalBudget, utcDay } from "./lib/budget";
 import { requireUserId } from "./lib/access";
 import { assertCoarseNow } from "./watches";
 import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS, type Budget, type GlobalBudgetKind } from "./limits";
@@ -48,8 +48,14 @@ const kindStatus = v.object({
   /** The deployment-wide switch this kind draws from, when it has one (0/0 otherwise -- see `paused`). */
   globalUsed: v.number(),
   globalMax: v.number(),
-  /** True only when this kind draws from a global switch AND that switch is at/over its max today. A kind with no global switch is never paused by this field. */
+  /** True only when this kind draws from a global switch AND that switch is at/over its max today, or an operator pause of it is in force (P12-W4). A kind with no global switch is never paused by this field. */
   paused: v.boolean(),
+  /**
+   * F2 (D266 audit): present only when `paused` is true. "operator" is a durable `ops.pauseKind` pause (P12-W4;
+   * outlives UTC midnight, only `ops.resumeKind` lifts it -- "back tomorrow" is false for it). "cap" is the ordinary
+   * daily/monthly usage counter at its max (does reset at midnight UTC, or next month for a monthly-capped kind).
+   */
+  pauseReason: v.optional(v.union(v.literal("operator"), v.literal("cap"))),
 });
 
 /**
@@ -77,6 +83,7 @@ export const status = query({
         let globalUsed = 0;
         let globalMax = 0;
         let paused = false;
+        let pauseReason: "operator" | "cap" | undefined;
         if (budget.global) {
           const globalKind: GlobalBudgetKind = budget.global.kind;
           const globalRow = await ctx.db
@@ -85,9 +92,15 @@ export const status = query({
             .first();
           globalUsed = globalRow?.count ?? 0;
           globalMax = GLOBAL_DAILY_BUDGETS[globalKind].max;
-          paused = globalUsed >= globalMax;
+          // P12-W4: an operator pause is durable (it outlives the UTC day), so it reports as paused on any day.
+          const operatorPaused = await isGlobalKindPaused(ctx, globalKind);
+          const capExhausted = globalUsed >= globalMax;
+          paused = operatorPaused || capExhausted;
+          // F2: an operator pause wins the label even when the cap also happens to be exhausted -- it is the
+          // reason the switch will still refuse tomorrow, which the cap alone would not be.
+          pauseReason = paused ? (operatorPaused ? "operator" : "cap") : undefined;
         }
-        return { kind, userUsed: userRow?.count ?? 0, userMax: budget.max, globalUsed, globalMax, paused };
+        return { kind, userUsed: userRow?.count ?? 0, userMax: budget.max, globalUsed, globalMax, paused, pauseReason };
       }),
     );
     return { day, kinds };

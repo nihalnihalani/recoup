@@ -122,13 +122,16 @@ export const PRIVACY_STATEMENTS = {
   evaluations:
     `Rule-check history older than ${EVALUATION_RETENTION_DAYS} days is pruned, except the latest check for each ` +
     `recovery opportunity and every check behind a claim or a message you approved.`,
+  // P09-F2 (X2/X5): the purge can be left unfinished, so the copy promises the purge and the record, not the result.
   mailComponentCopy:
     `Recoup masks card numbers in the email text it stores, but the mail system inside Recoup's backend also keeps ` +
     `its own copy of every email sent to your Recoup inbox, and Recoup cannot mask that copy. It is kept until you ` +
-    `delete your account; deleting your account purges it.`,
+    `delete your account. Deleting your account starts a purge of it; if the purge does not finish, that is ` +
+    `recorded on the account's deletion record for Recoup's operator.`,
   inboundPayload:
-    `The raw content of a processed inbound email is cleared ${RETENTION_PAYLOAD_DAYS} days after Recoup finishes ` +
-    `handling it.`,
+    `The raw content of a processed inbound email is cleared ${RETENTION_PAYLOAD_DAYS} days after Recoup receives ` +
+    `it, including an email still waiting for your review. Only its message ID is kept, and, while a refund it ` +
+    `announced is waiting for your confirmation, that refund's details and the sender's address.`,
   observations:
     `Individual price-check and offer-check observations older than ${RETENTION_OBSERVATION_DAYS} days are pruned, ` +
     `always keeping at least the newest ${RETENTION_KEEP_NEWEST} per item. Market price history from ShopSavvy keeps ` +
@@ -140,3 +143,116 @@ export const PRIVACY_STATEMENTS = {
     `Purchases, transactions, claims, the ledger, drafts, replies and recorded facts are never pruned ` +
     `automatically; only deleting your account removes them.`,
 } as const;
+
+// --- Providers (P09-F2, D244e, SEC-DEL-5) -------------------------------------
+
+/**
+ * P09-SK-1 / M28: `lib/ai.extract` sends every OpenAI Responses request with `store: false` (the API stores requests
+ * and responses by default). `privacyFacts.test.ts` checks `lib/ai.ts` really passes it; kept here as data so this
+ * module stays importable by the browser (its only import is `limits.ts`).
+ */
+export const OPENAI_STORE_REQUESTS = false;
+
+/**
+ * What OpenAI is sent, one entry per `extract()` purpose. `calls` are the `extract("<name>", …)` names (a trailing
+ * `_` covers a templated family such as `document_${docType}`); `privacyFacts.test.ts` fails when a call site's name
+ * is not listed here.
+ */
+export const OPENAI_PURPOSES = [
+  {
+    calls: ["inbound_email"],
+    text:
+      "The sender, subject and text of an email you forward to your Recoup inbox, or text you paste in, to find the " +
+      "order or refund details in it.",
+  },
+  {
+    calls: ["reply"],
+    text:
+      "A reply to one of your claims (its sender, subject and text), with what the claim asks for, the company's name " +
+      "and the amount you asked for, to tell whether it is a promise, a refusal or a question.",
+  },
+  {
+    calls: ["draft"],
+    text:
+      "When Recoup writes a claim message for you to review: your name (or the part of your email address before the " +
+      "@ when no name is set); for an item-linked claim, the store, order reference, purchase date, item, prices, " +
+      "product link, and the store's policy passage together with the page it came from; for any claim, summaries of " +
+      "earlier replies and the confirmed, observed and derived facts your rule check bound — not only facts you typed " +
+      "in yourself.",
+  },
+  {
+    calls: ["price"],
+    text: "The text of a product page Recoup read, with the product's name, to find its current price.",
+  },
+  {
+    calls: ["policy"],
+    text:
+      "The text of a store's policy page — its price-adjustment page or its returns page, whichever Recoup is " +
+      "researching — to find its terms (the window, how to ask, a published contact address).",
+  },
+  {
+    calls: ["document_classification", "document_"],
+    text:
+      "Only when document reading is switched on (it is off by default): the text of a document you upload (a PDF's " +
+      "text layer), or of an email or pasted text you link to a transaction as a document, to tell what kind of " +
+      "document it is and pull out its details.",
+  },
+] as const;
+
+/**
+ * One entry per outside provider, rendered verbatim by the Privacy page: what it is for, what it receives, and what
+ * Recoup can say about what it keeps. Each sentence must stay literally true of the code (security reviews changes).
+ */
+export const PROVIDER_DISCLOSURES = [
+  {
+    name: "Convex",
+    role: "Hosts Recoup's database and runs its server-side code, including sign-in.",
+    receives:
+      "Your account (email address and a salted password hash) and every row the app creates for you: purchases, " +
+      "items, claims, the ledger, drafts, replies, watches, price history, the mail log, and for recovery checks your " +
+      "transactions, the facts recorded about them, the evidence you forward, paste or upload, recovery opportunities " +
+      "and the rule-check history behind them.",
+    retention: "Kept as described under Retention below.",
+  },
+  {
+    name: "OpenAI",
+    role:
+      "Reads text and returns structured details. Everything it is sent is treated as untrusted data, never as " +
+      "instructions to follow.",
+    receives: "Recoup sends it:",
+    retention:
+      `Recoup sends every request with OpenAI's storage option turned off (store: ${String(OPENAI_STORE_REQUESTS)}), so ` +
+      "OpenAI does not keep the request or its answer for later retrieval. Anything else OpenAI keeps is governed by " +
+      "OpenAI's own API data policies, which Recoup does not control.",
+  },
+  {
+    name: "Firecrawl",
+    role: "Fetches public web pages for Recoup, so price and policy information stays current.",
+    receives:
+      "The address of each product or store-policy page Recoup reads, and web searches built from a watched product's " +
+      "name (to find other stores selling it) or a store's web address (to find its policy page). Nothing about your " +
+      "account.",
+    retention: "Recoup does not control what Firecrawl keeps from these requests.",
+  },
+  {
+    name: "AgentMail",
+    role: "Runs your Recoup inbox address and sends Recoup's email.",
+    receives:
+      "Every email sent to your Recoup inbox; the claim messages you approve, sent from that inbox; and, from one " +
+      "shared Recoup mailbox, your sign-in and password-reset codes and (normally) your price alerts.",
+    retention:
+      "Recoup's Retention section below covers only the AgentMail component's copy inside Recoup's own backend, " +
+      "masked and purged (attempted) on account deletion. Your AgentMail inbox itself is a separate resource, held " +
+      "by AgentMail, not Recoup: deleting your account asks AgentMail to delete it, and it stays with AgentMail " +
+      "until that delete succeeds — indefinitely, if it never does. AgentMail also keeps copies of what the shared " +
+      "sign-in/alerts mailbox sends, such as codes and alerts; deleting your account does not remove those.",
+  },
+  {
+    name: "ShopSavvy",
+    role:
+      "A market-data service Recoup asks for a product's price history and the other stores selling it. Its prices " +
+      "are always labelled as ShopSavvy's and never open a claim or send an alert.",
+    receives: "The address of the product page you watch. Nothing about your account.",
+    retention: "Recoup does not control what ShopSavvy keeps from these requests.",
+  },
+] as const;

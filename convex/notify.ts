@@ -47,6 +47,7 @@ import { alertGate, isTombstoned, type MailReason } from "./lib/accountState";
 import { requireUserId } from "./lib/access";
 import { rateLimiter } from "./lib/rateLimits";
 import { sanitizeError } from "./lib/errors";
+import { logEvent } from "./lib/log";
 import { BACKOFF_MS, isAmbiguousSendFailure, isTerminalSendFailure } from "./drafts";
 import { clearPendingMailEvent, getPendingMailEvent } from "./mailEvents";
 import {
@@ -407,14 +408,16 @@ export const sendDrop = internalMutation({
         ...(headers ? { headers } : {}),
       });
     } catch (err) {
+      const error = sanitizeError(err instanceof Error ? err.message : String(err));
       await ctx.db.patch(mailLogId, {
         status: "failed",
         reason: "send_failed",
         // F12b: never let the component/provider's own error text reach
         // `mailLog.error` (and from there, the `drops` view) verbatim.
-        error: sanitizeError(err instanceof Error ? err.message : String(err)),
+        error,
         lastCheckedAt: now,
       });
+      logNotification("notification_failed", { mailLogId, stage: "enqueue", error });
       return null;
     }
 
@@ -529,6 +532,7 @@ export async function applyDropOutcome(
       lastCheckedAt: now,
     });
     if (status.status === "bounced") await suppressUnlessTombstoned(ctx, row.userId, "bounced");
+    logNotification("notification_failed", { mailLogId, stage: "delivery", providerStatus: status.status });
     return "failed";
   }
 
@@ -543,6 +547,7 @@ export async function applyDropOutcome(
       nextCheckAt: now + MAIL_RECONCILE_STALL_MS,
       lastCheckedAt: now,
     });
+    logNotification("notification_stalled", { mailLogId, stage: "ambiguous_failure" });
     return "unknown";
   }
 
@@ -564,6 +569,7 @@ export async function applyDropOutcome(
       });
       await suppressUnlessTombstoned(ctx, row.userId, "bounced");
       await clearPendingMailEvent(ctx, status.agentmailMessageId);
+      logNotification("notification_failed", { mailLogId, stage: "bounced_after_delivery", providerStatus: pending.providerStatus });
       return "failed";
     }
     await ctx.db.patch(mailLogId, {
@@ -590,7 +596,20 @@ export async function applyDropOutcome(
   }
 
   await ctx.db.patch(mailLogId, { status: "unknown", nextCheckAt: now + MAIL_RECONCILE_STALL_MS, lastCheckedAt: now });
+  logNotification("notification_stalled", { mailLogId, stage: "reconcile_exhausted", attempts: attempt });
   return "unknown";
+}
+
+/**
+ * P12-W7 (re-audit): one structured, redacted line for every drop-alert send that failed or went unknown, so an
+ * operator sees mail trouble without reading `mailLog` by hand (RUNBOOK §5). Never throws.
+ */
+function logNotification(kind: "notification_failed" | "notification_stalled", fields: Record<string, unknown>): void {
+  try {
+    logEvent(kind, { channel: "drop_alert", ...fields });
+  } catch {
+    // A log line never changes the send outcome.
+  }
 }
 
 /** The scheduled delivery check (F3, same backoff as `drafts.reconcileSend`). */

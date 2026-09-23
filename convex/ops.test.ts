@@ -73,7 +73,9 @@ describe("ops.pauseKind (D79 kill switch)", () => {
   it("throws ConvexError for a kind that is not a global budget", async () => {
     const t = setup();
     await expect(t.mutation(internal.ops.pauseKind, { kind: "not_a_real_kind" })).rejects.toThrow(ConvexError);
-    await expect(t.mutation(internal.ops.pauseKind, { kind: "draft_generate" })).rejects.toThrow(ConvexError); // a per-user-only kind, not global
+    await expect(t.mutation(internal.ops.pauseKind, { kind: "paste" })).rejects.toThrow(ConvexError); // a per-user-only kind, not global
+    // P12-W4: `draft_generate` draws on a global switch now, so it can be paused.
+    await expect(t.mutation(internal.ops.pauseKind, { kind: "draft_generate" })).resolves.toMatchObject({ kind: "draft_generate" });
   });
 });
 
@@ -337,10 +339,10 @@ describe("T18.5 (D124 B6): ops.backlog wires in account.stuckDeletions as `delet
     );
 
     const result = await t.query(internal.ops.backlog, {});
-    expect((result as any).deletions).toEqual({ stuck: 1, deletingTotal: 1 });
+    expect((result as any).deletions).toEqual({ stuck: 1, deletingTotal: 1, deletedWithFailures: { count: 0, truncated: false } });
 
     const direct = await t.query(internal.account.stuckDeletions, {});
-    expect((result as any).deletions).toEqual({ stuck: direct.stuck, deletingTotal: direct.deleting });
+    expect((result as any).deletions).toEqual({ stuck: direct.stuck, deletingTotal: direct.deleting, deletedWithFailures: { count: 0, truncated: false } });
   });
 
   it("a live (non-stuck) deleting row counts toward deletingTotal but not stuck", async () => {
@@ -350,13 +352,13 @@ describe("T18.5 (D124 B6): ops.backlog wires in account.stuckDeletions as `delet
       ctx.db.insert("accountState", { userId, status: "deleting", requestedAt: NOW, attempts: 0 }),
     );
     const result = await t.query(internal.ops.backlog, {});
-    expect((result as any).deletions).toEqual({ stuck: 0, deletingTotal: 1 });
+    expect((result as any).deletions).toEqual({ stuck: 0, deletingTotal: 1, deletedWithFailures: { count: 0, truncated: false } });
   });
 
   it("reports all zeros on an empty deployment", async () => {
     const t = setup();
     const result = await t.query(internal.ops.backlog, {});
-    expect((result as any).deletions).toEqual({ stuck: 0, deletingTotal: 0 });
+    expect((result as any).deletions).toEqual({ stuck: 0, deletingTotal: 0, deletedWithFailures: { count: 0, truncated: false } });
   });
 });
 

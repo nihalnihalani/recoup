@@ -3,8 +3,10 @@ import { Link } from "react-router-dom";
 import {
   EVALUATION_RETENTION_DAYS,
   EVIDENCE_RETENTION_DAYS,
+  OPENAI_PURPOSES,
   ORPHAN_BLOB_MIN_AGE_HOURS,
   PRIVACY_STATEMENTS,
+  PROVIDER_DISCLOSURES,
 } from "../../convex/lib/privacyFacts";
 import {
   RETENTION_KEEP_NEWEST,
@@ -68,40 +70,32 @@ export default function Privacy() {
         <div className="mt-10 space-y-8">
           <Section id="providers" title="Providers">
             <p className={bodyClass}>
-              Recoup is built on a handful of outside services. Each one sees only what it needs to do its one job —
-              none of them sees your password, and none of them is handed your data for any purpose beyond the one
-              described here.
+              Recoup is built on a handful of outside services. Each is listed with what it receives from Recoup and
+              what Recoup can say about what it keeps. Your password goes only to Convex, which runs sign-in and stores a
+              salted hash of it, never the password itself.
             </p>
-            <dl className="mt-4 space-y-4">
-              <Provider name="Convex">
-                Hosts the database and runs Recoup's server-side code, including sign-in. It stores your account
-                (email address, a salted password hash) and every row the app creates on your behalf — purchases,
-                items, claims, the ledger, drafts, replies, watches, price history, the mail log, and for recovery
-                checks your transactions, the facts recorded about them, the evidence you forward, paste or upload,
-                recovery opportunities and the rule-check history behind them.
-              </Provider>
-              <Provider name="OpenAI">
-                Reads the text of order confirmations and merchant replies you paste or forward, and extracts
-                structured details from it — item names, prices, order numbers — so Recoup can log them. It receives
-                only that one message's text for that one extraction; the content is treated as untrusted data, never
-                as instructions to follow.
-              </Provider>
-              <Provider name="Firecrawl">
-                Fetches the public product and store-policy pages Recoup checks on your behalf, so price and policy
-                information stays current. It receives the store URL being checked — nothing about your account.
-              </Provider>
-              <Provider name="AgentMail">
-                Gives you a dedicated Recoup inbox address to forward order confirmations and merchant replies to,
-                and sends the price-alert emails and the merchant/claim messages you review and approve. It handles
-                the email content you forward and the messages Recoup sends for you. Its own stored copy of your
-                inbound email is described under Retention below.
-              </Provider>
-              <Provider name="ShopSavvy">
-                A paid market-data API Recoup queries for a product's price history and the other stores selling it,
-                so a newly watched item has something to compare today's price against. It receives only the product
-                being looked up — Recoup's own price reads are always labelled separately from ShopSavvy's, and
-                ShopSavvy data never opens a claim or sends an alert by itself.
-              </Provider>
+            {/* P09-F2 (D244e): each provider's sentences are `PROVIDER_DISCLOSURES`, rendered verbatim. */}
+            <dl className="mt-4 space-y-5">
+              {PROVIDER_DISCLOSURES.map((provider) => (
+                <Provider key={provider.name} name={provider.name}>
+                  <p>{provider.role}</p>
+                  <p className="mt-1.5">
+                    <span className="font-semibold text-gray-900">What it receives: </span>
+                    {provider.receives}
+                  </p>
+                  {provider.name === "OpenAI" && (
+                    <ul className="mt-1.5 list-disc space-y-1 pl-5">
+                      {OPENAI_PURPOSES.map((purpose) => (
+                        <li key={purpose.calls[0]}>{purpose.text}</li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="mt-1.5">
+                    <span className="font-semibold text-gray-900">What it keeps: </span>
+                    {provider.retention}
+                  </p>
+                </Provider>
+              ))}
             </dl>
           </Section>
 

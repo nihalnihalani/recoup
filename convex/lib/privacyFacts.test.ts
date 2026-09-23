@@ -6,7 +6,7 @@
  * an unimplemented or mistyped reason has no seeder and fails. Each
  * statement must contain its numbers.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,7 @@ import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import { setup, signedIn } from "../test.setup";
 import { evidenceKind } from "../schema";
+import { REPO_ROOT } from "../testing/ruleFixtures.loader";
 import {
   MARKET_MAX_POINTS,
   MAX_LOCATOR_QUOTE_CHARS,
@@ -33,8 +34,11 @@ import {
   EVIDENCE_TEXT_KINDS,
   FACT_QUOTE_MAX_CHARS,
   MAIL_COMPONENT_RAW_COPY,
+  OPENAI_PURPOSES,
+  OPENAI_STORE_REQUESTS,
   ORPHAN_BLOB_MIN_AGE_HOURS,
   PRIVACY_STATEMENTS,
+  PROVIDER_DISCLOSURES,
   UPLOAD_KEEP_REASONS,
 } from "./privacyFacts";
 
@@ -243,5 +247,161 @@ describe("lib/privacyFacts — the published copy matches the code", () => {
     // The purge half of the promise: `account.purge` calls the component drain (behaviour covered by account.test.ts's T18.4 block).
     const account = readFileSync(path.join(HERE, "..", "account.ts"), "utf8");
     expect(account).toContain("internal.mailPurge.purgeInboxData");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P09-F2 (D244e): `PROVIDER_DISCLOSURES` and `OPENAI_PURPOSES` are what the
+// Privacy page's "Providers" section renders verbatim. These tests tie them
+// to the actual wiring, statically, so a disclosure cannot silently go stale:
+// a new `extract()` call site with an undisclosed purpose fails here, and so
+// does a disclosed purpose whose call site was removed or renamed.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every production `.ts` file under `convex/`, excluding generated code, tests, `lib/ai.ts` (the callee, not a call
+ * site) and `privacyFacts.ts` itself (its own doc comment writes `extract("<name>", …)` as a literal example, which
+ * would otherwise misparse as a call site named `<name>`).
+ */
+function walkConvexSources(dir: string, out: string[] = []): string[] {
+  for (const name of readdirSync(dir)) {
+    const full = path.join(dir, name);
+    if (name === "_generated" || name === "node_modules") continue;
+    if (statSync(full).isDirectory()) walkConvexSources(full, out);
+    else if (name.endsWith(".ts") && !name.endsWith(".test.ts") && !name.includes(".d.") && name !== "ai.ts" && name !== "privacyFacts.ts") out.push(full);
+  }
+  return out;
+}
+
+/**
+ * The purpose `name` of every `extract("<name>", …)` / `extract(\`<prefix>${…}\`, …)` call site in production code
+ * (direct or through a `deps.extract` indirection, e.g. `policies.ts`), by a static regex over the source text —
+ * deliberately not an import-and-introspect approach, so it also catches a call site whose module cannot be
+ * imported standalone in this test (actions, Node-only files).
+ */
+function extractCallNames(): string[] {
+  const re = /\bextract\(\s*(?:"([^"]+)"|`([^`$]*)\$\{)/g;
+  const names: string[] = [];
+  for (const file of walkConvexSources(path.join(REPO_ROOT, "convex"))) {
+    const src = readFileSync(file, "utf8");
+    for (const m of src.matchAll(re)) names.push((m[1] ?? m[2])!);
+  }
+  return names;
+}
+
+/** True when `name` is exactly one of `OPENAI_PURPOSES`' `calls`, or a templated family whose listed prefix ends in `_`. */
+function isDisclosedPurpose(name: string): boolean {
+  return OPENAI_PURPOSES.some((p) => p.calls.some((c) => c === name || (c.endsWith("_") && name.startsWith(c))));
+}
+
+describe("OPENAI_PURPOSES (P09-F2) — every OpenAI call site is disclosed, and every disclosure is a real call site", () => {
+  it("finds real extract() call sites to check (the static scan itself works)", () => {
+    expect(extractCallNames().length).toBeGreaterThan(0);
+  });
+
+  it("every extract() call site's purpose name is covered by an OPENAI_PURPOSES entry", () => {
+    for (const name of extractCallNames()) expect(isDisclosedPurpose(name), name).toBe(true);
+  });
+
+  it("every OPENAI_PURPOSES call name corresponds to an actual call site (no stale disclosure)", () => {
+    const found = new Set(extractCallNames());
+    for (const purpose of OPENAI_PURPOSES) {
+      for (const call of purpose.calls) {
+        const present = call.endsWith("_") ? [...found].some((n) => n.startsWith(call)) : found.has(call);
+        expect(present, `OPENAI_PURPOSES call "${call}" (${purpose.text.slice(0, 40)}…)`).toBe(true);
+      }
+    }
+  });
+
+  it("OPENAI_STORE_REQUESTS matches what lib/ai.ts actually sends OpenAI", () => {
+    expect(OPENAI_STORE_REQUESTS).toBe(false);
+    const ai = readFileSync(path.join(HERE, "ai.ts"), "utf8");
+    expect(ai).toContain(`store: ${String(OPENAI_STORE_REQUESTS)},`);
+  });
+});
+
+describe("PROVIDER_DISCLOSURES (P09-F2) — matches the outside services actually wired into the backend", () => {
+  it("lists exactly the wired providers", () => {
+    expect(PROVIDER_DISCLOSURES.map((p) => p.name)).toEqual(["Convex", "OpenAI", "Firecrawl", "AgentMail", "ShopSavvy"]);
+  });
+
+  it("AgentMail: the component handles both inbound and outbound mail", () => {
+    const mail = readFileSync(path.join(HERE, "..", "mail.ts"), "utf8");
+    expect(mail).toContain("components.agentmail");
+    expect(mail).toContain("onMessageReceived"); // inbound
+    // Outbound: claim messages (drafts.ts) and drop alerts / sign-in / reset codes (notify.ts) both send through it.
+    const drafts = readFileSync(path.join(HERE, "..", "drafts.ts"), "utf8");
+    const notify = readFileSync(path.join(HERE, "..", "notify.ts"), "utf8");
+    expect(drafts).toContain("agentmail.sendMessage");
+    expect(notify).toContain("agentmail.sendMessage");
+  });
+
+  it("Firecrawl: scrapes product pages and searches for policy pages / other stores, never carries account data", () => {
+    const priceWatch = readFileSync(path.join(HERE, "..", "priceWatch.ts"), "utf8");
+    expect(priceWatch).toContain("firecrawl.scrape");
+    const policies = readFileSync(path.join(HERE, "..", "policies.ts"), "utf8");
+    expect(policies).toContain("firecrawl.search");
+    const offers = readFileSync(path.join(HERE, "..", "offers.ts"), "utf8");
+    expect(offers).toContain("firecrawl.search");
+  });
+
+  it("ShopSavvy: only asked when SHOPSAVVY_API_KEY is configured (market.ts)", () => {
+    const market = readFileSync(path.join(HERE, "..", "market.ts"), "utf8");
+    expect(market).toContain("process.env.SHOPSAVVY_API_KEY");
+  });
+
+  // F3 (D266 audit): four disclosure strings that undersold or mis-scoped what the code actually does.
+  describe("F3: four disclosure strings tied to the code they describe", () => {
+    function purposeText(name: string): string {
+      const p = OPENAI_PURPOSES.find((x) => x.calls.includes(name as never));
+      if (!p) throw new Error(`no OPENAI_PURPOSES entry lists "${name}"`);
+      return p.text;
+    }
+
+    it("policy: covers BOTH price-adjustment and returns pages, not price-adjustment only (policies.ts SYSTEM/QUERIES)", () => {
+      const text = purposeText("policy");
+      expect(text).toMatch(/price-adjustment/i);
+      expect(text).toMatch(/returns/i);
+      const policies = readFileSync(path.join(HERE, "..", "policies.ts"), "utf8");
+      // Both PolicyKind branches feed the same "policy" extract() purpose (policies.ts:69-72's SYSTEM, :144's call).
+      expect(policies).toMatch(/type PolicyKind = "price_adjustment" \| "returns"/);
+      expect(policies).toContain('deps.extract("policy"');
+    });
+
+    it("draft: sends confirmed, observed AND derived bound facts, plus the policy source URL — not only \"facts you confirmed\" (drafts.ts)", () => {
+      const text = purposeText("draft");
+      expect(text).toMatch(/confirmed, observed and derived facts/i);
+      const drafts = readFileSync(path.join(HERE, "..", "drafts.ts"), "utf8");
+      // boundFactLines (feeds writeScenario's facts block) accepts these three statuses, not "confirmed" alone.
+      expect(drafts).toContain('f.status !== "confirmed" && f.status !== "observed" && f.status !== "derived"');
+      // writeRetail's policy line sends the passage's SOURCE URL too, not just the quoted text.
+      expect(drafts).toContain("Policy passage from ${c.policy.sourceUrl}");
+    });
+
+    it("document_: forwarded/pasted email text is ALSO sent when the flag is on, not only an uploaded file (intake.ts extractTextEvidence)", () => {
+      const text = purposeText("document_");
+      expect(text).toMatch(/document you upload/i);
+      expect(text).toMatch(/email or pasted text/i);
+      const intake = readFileSync(path.join(HERE, "..", "intake.ts"), "utf8");
+      // extractTextEvidence: "M23 second stage for a forwarded or pasted message already linked to a transaction
+      // (`evidence.queueTextSecondStage`, behind `live_document_extraction`)" -- a second, non-upload call site.
+      expect(intake).toMatch(/forwarded or pasted message already linked to a transaction/);
+      expect(intake).toContain('extract("document_classification"');
+      expect(intake).toContain("extract(`document_${docType}`");
+    });
+
+    it("AgentMail retention: Recoup's Retention section covers only the component copy; the inbox itself is separate, and can outlive account deletion indefinitely (account.ts purge)", () => {
+      const agentMail = PROVIDER_DISCLOSURES.find((p) => p.name === "AgentMail")!;
+      expect(agentMail.retention).toMatch(/covers only the AgentMail component's copy/i);
+      expect(agentMail.retention).toMatch(/separate resource/i);
+      expect(agentMail.retention).toMatch(/indefinitely/i);
+      const account = readFileSync(path.join(HERE, "..", "account.ts"), "utf8");
+      // The REST inbox delete retries a bounded number of times, then gives up for good (D115 6b-4b): nothing
+      // automatically retries it again, so a delete that never succeeds leaves the inbox undeleted at AgentMail.
+      expect(account).toContain("INBOX_DELETE_MAX_ATTEMPTS = 5");
+      expect(account).toContain("inboxDeleted = false");
+      // The component's OWN copy (mailComponentCopy statement) is the separate thing Retention actually covers.
+      expect(account).toContain("internal.mailPurge.purgeInboxData");
+    });
   });
 });

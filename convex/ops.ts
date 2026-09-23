@@ -33,8 +33,9 @@ import { ConvexError, v } from "convex/values";
 import { internalMutation, internalQuery, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { GLOBAL_DAILY_BUDGETS, MARKET_CLAIM_STALE_MS, type GlobalBudgetKind } from "./limits";
-import { utcDay } from "./lib/budget";
+import { GLOBAL_DAILY_BUDGETS, GLOBAL_MONTHLY_BUDGETS, MARKET_CLAIM_STALE_MS, type GlobalBudgetKind } from "./limits";
+import { LINK_LEGACY_CURSOR_KEY } from "./migrations";
+import { budgetPauseKey, isGlobalKindPaused, monthlyKind, utcDay, utcMonth } from "./lib/budget";
 import {
   FLAGS,
   FLAG_NAMES,
@@ -71,6 +72,10 @@ function assertGlobalBudgetKind(kind: string): asserts kind is GlobalBudgetKind 
 // ---------------------------------------------------------------------------
 
 /**
+ * P12-W4 (re-audit): the pause is now DURABLE. Besides pinning today's row (below, unchanged), it writes the opsState
+ * row `budgetPause:<kind>`, which `lib/budget.ts` reads on every global charge — so the switch stays off across UTC
+ * midnight until `resumeKind`, instead of silently lapsing at 00:00 UTC.
+ *
  * Operator kill switch (D79): pauses every path that draws from a
  * deployment-wide global budget (`limits.ts`'s `GLOBAL_DAILY_BUDGETS`) by
  * writing today's (UTC) global `usage` row for `kind` up to its max --
@@ -97,6 +102,9 @@ export const pauseKind = internalMutation({
     } else {
       await ctx.db.insert("usage", { userId: undefined, day, kind, count: max });
     }
+    const now = Date.now();
+    const pause = await ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", budgetPauseKey(kind))).first();
+    if (!pause) await ctx.db.insert("opsState", { key: budgetPauseKey(kind), cursor: JSON.stringify({ since: now }), updatedAt: now });
     return { day, kind, count: max, max };
   },
 });
@@ -119,7 +127,10 @@ export const resumeKind = internalMutation({
       .withIndex("by_user_day_kind", (q) => q.eq("userId", undefined).eq("day", day).eq("kind", kind))
       .first();
     if (row) await ctx.db.delete(row._id);
-    return { day, kind, cleared: row !== null };
+    // P12-W4: lift the durable pause too.
+    const pause = await ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", budgetPauseKey(kind))).first();
+    if (pause) await ctx.db.delete(pause._id);
+    return { day, kind, cleared: row !== null || pause !== null };
   },
 });
 
@@ -131,6 +142,15 @@ export const resumeKind = internalMutation({
 const DEFAULT_SCAN_LIMIT = 2000;
 /** M29: the backlog's opportunity counts (`reevaluateDue`, `userDeadlinesSoon`) read at most this many rows per range. */
 export const OPPORTUNITY_SCAN_CAP = 500;
+/**
+ * P12-W2 (re-audit): rows whose documents carry a payload (failed `processedEvents` hold whole inbound emails;
+ * `evidence` rows may hold extracted text) are counted over a SMALL page, so the diagnostic cannot itself hit the
+ * 16 MiB read limit during the incident it exists for (2,001 failed max-size emails did).
+ */
+export const PAYLOAD_ROWS_SCAN_CAP = 25;
+export const EVIDENCE_ROWS_SCAN_CAP = 100;
+/** P09-SK-2: newest `deleted` tombstones inspected for an incomplete deletion. */
+export const DELETED_ACCOUNTS_SCAN_CAP = 500;
 
 const countShape = v.object({
   /** Capped at the scan limit; see `truncated`. */
@@ -616,7 +636,16 @@ export const backlog = internalQuery({
      * `stuckDeletions` itself bounds its scan, `STUCK_SCAN_CAP` in
      * `account.ts`) -- most of it is ordinary in-flight purge, not stuck.
      */
-    deletions: v.object({ stuck: v.number(), deletingTotal: v.number() }),
+    deletions: v.object({
+      stuck: v.number(),
+      deletingTotal: v.number(),
+      /**
+       * P09-SK-2 (re-audit): 'deleted' tombstones whose remote inbox deletion (`inboxDeleted: false`) or stored-mail
+       * purge (`mailDataPurged: false`) did not complete — the operator's work queue, since the user is signed out
+       * long before the final outcome lands. Over the newest `DELETED_ACCOUNTS_SCAN_CAP` deleted rows.
+       */
+      deletedWithFailures: countShape,
+    }),
     /** M1B (D145): every flag's effective state, in `FLAG_NAMES` order, including `live_document_extraction` and its `approvalRef`. `invalid` marks a row that reads as OFF because it was not written by `setFlag`. */
     flags: v.array(flagStateValidator),
     /** M1B (P12/C58): `recordEvaluation` failures from the per-UTC-day counters, over the `windowDays` days ending at `asOf` (newest first). */
@@ -666,6 +695,20 @@ export const backlog = internalQuery({
     reevaluateDue: countShape,
     /** M29 (C50): `open` + `case_open` opportunities whose next USER deadline falls in (now, now + the attention window]. Each status capped at `min(scanLimit, OPPORTUNITY_SCAN_CAP)`. */
     userDeadlinesSoon: countShape,
+    /**
+     * P12-W7 (re-audit): every deployment-wide switch at `asOf`'s UTC day, in `GLOBAL_DAILY_BUDGETS` order: today's
+     * `used` / `max`, `paused` (an operator pause is in force — durable, P12-W4) and, for a kind billed against a monthly
+     * plan, `monthUsed` / `monthMax` (P03-SK-1).
+     */
+    budgets: v.array(v.object({
+      kind: v.string(), used: v.number(), max: v.number(), paused: v.boolean(),
+      monthUsed: v.optional(v.number()), monthMax: v.optional(v.number()),
+    })),
+    /**
+     * P12-S-4 (re-audit): the Mission-2 backfill `migrations.linkLegacyPurchases` — `ageMs` since its last page (null
+     * before its first run) and `inProgress` while its cursor has a next page.
+     */
+    migrations: v.object({ linkLegacyPurchases: v.object({ ageMs: v.union(v.number(), v.null()), inProgress: v.boolean() }) }),
   }),
   handler: async (ctx, { scanLimit, now: nowArg }) => {
     const limit = scanLimit !== undefined && scanLimit > 0 ? Math.floor(scanLimit) : DEFAULT_SCAN_LIMIT;
@@ -684,10 +727,12 @@ export const backlog = internalQuery({
       .withIndex("by_nextCheck", (q) => q.lte("nextCheckAt", now))
       .take(limit + 1);
 
+    // P12-W2: failed rows carry whole inbound emails — a small page, never `limit` rows of payload.
+    const failedLimit = Math.min(limit, PAYLOAD_ROWS_SCAN_CAP);
     const failedEventRows = await ctx.db
       .query("processedEvents")
       .withIndex("by_status", (q) => q.eq("status", "failed"))
-      .take(limit + 1);
+      .take(failedLimit + 1);
 
     const queuedMailRows = await ctx.db
       .query("mailLog")
@@ -736,12 +781,13 @@ export const backlog = internalQuery({
       withoutRefreshWindow: sourceInputs.withoutWindow,
     };
 
+    const evidenceLimit = Math.min(limit, EVIDENCE_ROWS_SCAN_CAP); // P12-W2: defence in depth (rows may hold text)
     const countExtraction = async (status: "awaiting_doc_type" | "queued" | "running" | "failed") => {
       const rows = await ctx.db
         .query("evidence")
         .withIndex("by_extraction_status_and_extraction_started_at", (q) => q.eq("extractionStatus", status))
-        .take(limit + 1);
-      return summarize(rows.length, limit);
+        .take(evidenceLimit + 1);
+      return summarize(rows.length, evidenceLimit);
     };
     const extraction = {
       awaitingDocType: await countExtraction("awaiting_doc_type"),
@@ -759,6 +805,41 @@ export const backlog = internalQuery({
     };
     const orphanSweep = await sweepAge(ORPHAN_SWEEP_OPS_KEY);
     const recoveryRetention = await sweepAge(RECOVERY_RETENTION_OPS_KEY);
+
+    // ---- re-audit P09-SK-2 / P12-W7 / P12-S-4 ----
+    const deletedRows = await ctx.db
+      .query("accountState")
+      .withIndex("by_status", (q) => q.eq("status", "deleted"))
+      .order("desc")
+      .take(DELETED_ACCOUNTS_SCAN_CAP + 1);
+    const deletedWithFailures = {
+      count: deletedRows.slice(0, DELETED_ACCOUNTS_SCAN_CAP).filter((r) => r.inboxDeleted === false || r.mailDataPurged === false).length,
+      truncated: deletedRows.length > DELETED_ACCOUNTS_SCAN_CAP,
+    };
+    const day = utcDay(asOf);
+    const month = utcMonth(asOf);
+    const budgets = [];
+    for (const kind of Object.keys(GLOBAL_DAILY_BUDGETS) as GlobalBudgetKind[]) {
+      const row = await ctx.db
+        .query("usage")
+        .withIndex("by_user_day_kind", (q) => q.eq("userId", undefined).eq("day", day).eq("kind", kind))
+        .first();
+      const monthly = GLOBAL_MONTHLY_BUDGETS[kind];
+      const monthRow = monthly
+        ? await ctx.db
+            .query("usage")
+            .withIndex("by_user_day_kind", (q) => q.eq("userId", undefined).eq("day", month).eq("kind", monthlyKind(kind)))
+            .first()
+        : null;
+      budgets.push({
+        kind, used: row?.count ?? 0, max: GLOBAL_DAILY_BUDGETS[kind].max, paused: await isGlobalKindPaused(ctx, kind),
+        ...(monthly ? { monthUsed: monthRow?.count ?? 0, monthMax: monthly.max } : {}),
+      });
+    }
+    const migrationRow = await ctx.db.query("opsState").withIndex("by_key", (q) => q.eq("key", LINK_LEGACY_CURSOR_KEY)).first();
+    const migrations = {
+      linkLegacyPurchases: { ageMs: migrationRow ? now - migrationRow.updatedAt : null, inProgress: migrationRow?.cursor !== undefined },
+    };
 
     // ---- M29 ---- (opportunity counts capped at OPPORTUNITY_SCAN_CAP, below `limit`: the rows are larger than the
     // other sections' and three ranges are read; measured at the caps in ops.m29.test.ts)
@@ -794,7 +875,7 @@ export const backlog = internalQuery({
       asOf,
       dueWatches: summarize(dueWatchRows.length, limit),
       dueItems: summarize(dueItemRows.length, limit),
-      processedEventsFailed: summarize(failedEventRows.length, limit),
+      processedEventsFailed: summarize(failedEventRows.length, failedLimit),
       mailLogQueued: summarize(queuedMailRows.length, limit),
       mailLogUnknown: summarize(unknownMailRows.length, limit),
       staleMarketRunning: { count: staleMarketCount, truncated: scannedWatches.length >= limit },
@@ -803,7 +884,7 @@ export const backlog = internalQuery({
         cursorAgeMs: retentionCursorAgeMs,
         stalled: retentionMidCycle && retentionCursorAgeMs > RETENTION_STALL_MS,
       },
-      deletions: { stuck: deletions.stuck, deletingTotal: deletions.deleting },
+      deletions: { stuck: deletions.stuck, deletingTotal: deletions.deleting, deletedWithFailures },
       flags,
       ruleEvaluationFailures,
       staleSources,
@@ -813,6 +894,8 @@ export const backlog = internalQuery({
       deadlineSweep,
       reevaluateDue: summarize(reevaluateDueRows.length, oppLimit),
       userDeadlinesSoon: { count: deadlinesSoon, truncated: deadlinesSoonTruncated },
+      budgets,
+      migrations,
     };
   },
 });

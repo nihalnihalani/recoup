@@ -24,7 +24,7 @@ import { stripControl } from "./lib/text";
 import { isTombstoned } from "./lib/accountState";
 import { parseSingleEmail } from "./lib/email";
 import { sanitizeError } from "./lib/errors";
-import { redact } from "./lib/log";
+import { logEvent, redact } from "./lib/log";
 import { clearPendingMailEvent, getPendingMailEvent } from "./mailEvents";
 import { MAIL_RECONCILE_STALL_MS, MAIL_SWEEP_PAGE, MAX_SENDS_PER_CLAIM } from "./limits";
 import { claimCurrency, formatMinor, type Money } from "./lib/money";
@@ -1403,6 +1403,18 @@ export type SendOutcome = "sent" | "failed" | "retrying" | "unknown" | "gone";
  * `recheckSend`, a user click that must never independently grow the schedule, passes `false`. See the exhausted
  * branch for why the old scan was wrong, not just unbounded.
  */
+/**
+ * P12-W7 (re-audit): one structured, redacted line for a claim email that failed or went unknown (RUNBOOK §5), so an
+ * operator sees merchant-mail trouble without reading drafts by hand. Never throws.
+ */
+function logClaimEmail(kind: "notification_failed" | "notification_stalled", fields: Record<string, unknown>): void {
+  try {
+    logEvent(kind, { channel: "claim_email", ...fields });
+  } catch {
+    // A log line never changes the send outcome.
+  }
+}
+
 export async function applySendOutcome(
   ctx: MutationCtx,
   draftId: Id<"drafts">,
@@ -1437,6 +1449,7 @@ export async function applySendOutcome(
   // Failures first: a bounced message still carries its message id (review H3).
   if (status && isTerminalSendFailure(status)) {
     const sendError = ownerSafeSendError(status.status, status.errorMessage);
+    logClaimEmail("notification_failed", { draftId: draft._id, claimId: claim._id, stage: "delivery", providerStatus: status.status, superseded });
     if (superseded) {
       // The earlier attempt's own record only; its send still counted, and the current attempt is untouched.
       await ctx.db.patch(draft._id, { sendError, nextCheckAt: undefined });
@@ -1467,6 +1480,7 @@ export async function applySendOutcome(
         }
       }
       await clearPendingMailEvent(ctx, status.agentmailMessageId);
+      logClaimEmail("notification_failed", { draftId: draft._id, claimId: claim._id, stage: "bounced_after_delivery", providerStatus: pending.providerStatus, superseded });
       return "failed";
     }
 
@@ -1503,6 +1517,7 @@ export async function applySendOutcome(
   if (status && isAmbiguousSendFailure(status)) {
     if (!superseded && claim.status === "queued") await ctx.db.patch(claim._id, { sendUnknown: true });
     await ctx.db.patch(draft._id, { nextCheckAt: undefined });
+    logClaimEmail("notification_stalled", { draftId: draft._id, claimId: claim._id, stage: "ambiguous_failure", superseded });
     return "unknown";
   }
 
@@ -1515,6 +1530,10 @@ export async function applySendOutcome(
     return "retrying";
   }
 
+  // P12-W7: logged once, when the claim first goes unknown (the stall-interval re-checks below repeat this branch).
+  if (claim.sendUnknown !== true) {
+    logClaimEmail("notification_stalled", { draftId: draft._id, claimId: claim._id, stage: "reconcile_exhausted", attempts: attempt, superseded });
+  }
   if (!superseded && claim.status === "queued") await ctx.db.patch(claim._id, { sendUnknown: true });
   // T06 durable-delivery review: backoff exhausted must not mean "never checked again" -- without this, a draft
   // whose delivery never resolves (worker outage, a status the component never settles) is stuck `sendUnknown`

@@ -124,7 +124,7 @@ describe("retention.sweep — bounded and resumable", () => {
 });
 
 describe("retention.sweep — processedEvents.payload (D75)", () => {
-  it("clears payload only for terminal (succeeded/failed) rows older than RETENTION_PAYLOAD_DAYS; needs_review/received/processing are never touched", async () => {
+  it("clears payload for terminal (succeeded/failed) rows older than RETENTION_PAYLOAD_DAYS, and the CONTENT of needs_review rows (P07-W2, D244d); received/processing are never touched", async () => {
     const t = setup();
     const { userId } = await signedIn(t);
     const ids: Record<string, Id<"processedEvents">> = {};
@@ -165,13 +165,30 @@ describe("retention.sweep — processedEvents.payload (D75)", () => {
     const row = async (id: Id<"processedEvents">) => (await t.run((ctx) => ctx.db.get(id)))!;
     expect((await row(ids.succeededOld)).payload).toBeUndefined();
     expect((await row(ids.failedOld)).payload).toBeUndefined();
-    expect((await row(ids.needsReviewOld)).payload).toBeDefined();
+    // P07-W2 (re-audit, D244d; this pin changed with the lead's ruling): needs_review is the normal end state of an
+    // order email, so its text, subject and sender go too; only the message id stays.
+    expect((await row(ids.needsReviewOld)).payload).toEqual({ messageId: null });
     expect((await row(ids.receivedOld)).payload).toBeDefined();
     expect((await row(ids.processingOld)).payload).toBeDefined();
     // Only 2 days old relative to the swept "now": not old enough yet.
     expect((await row(ids.succeededYoung)).payload).toBeDefined();
     // The row itself is always kept, never deleted.
     expect(await t.run((ctx) => ctx.db.query("processedEvents").collect())).toHaveLength(6);
+  });
+
+  it("P07-W2: an old needs_review row holding a refund that awaits confirmation keeps the refund, its sender and the message id; its text and subject go", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const refund = { amountMinor: 2_500, currency: "USD", merchant: "Acme" };
+    const id = await t.run((ctx) =>
+      ctx.db.insert("processedEvents", {
+        externalId: "held", kind: "agentmail.message.received", status: "needs_review", attempts: 1, userId, route: "intake",
+        payload: { subject: "Your refund", text: "We refunded 25.00", from: "support@acme.example", messageId: "m-held", pendingRefund: refund },
+      }),
+    );
+    vi.advanceTimersByTime((RETENTION_PAYLOAD_DAYS + 1) * DAY_MS);
+    await runFullCycle(t);
+    expect((await t.run((ctx) => ctx.db.get(id)))!.payload).toEqual({ messageId: "m-held", pendingRefund: refund, from: "support@acme.example" });
   });
 });
 

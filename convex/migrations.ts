@@ -5,7 +5,8 @@
  *
  * Idempotent (re-running writes no new evaluation row for an unchanged result), resumable (an `opsState` cursor),
  * bounded (one page per transaction, then it schedules itself), and tombstone-safe. Internal only; the lead runs it
- * after activating a pack (`npx convex run migrations:linkLegacyPurchases '{}'`).
+ * after activating a pack (`npx convex run migrations:linkLegacyPurchases '{}'`). Each page writes one
+ * `migration_progress` log line; `ops.backlog.migrations.linkLegacyPurchases` shows its cursor's age (P12-S-4).
  */
 import { v } from "convex/values";
 import { internalMutation } from "./_generated/server";
@@ -13,6 +14,7 @@ import { internal } from "./_generated/api";
 import { isTombstoned } from "./lib/accountState";
 import { evaluatePurchase } from "./opportunities";
 import { recordRuleEvaluationFailure } from "./ops";
+import { logEvent } from "./lib/log";
 
 export const LINK_LEGACY_CURSOR_KEY = "migration:linkLegacyPurchases";
 /** Purchases per page: each evaluates up to MAX_ITEMS_PER_PURCHASE items, so a page stays well inside one transaction. */
@@ -41,6 +43,13 @@ export const linkLegacyPurchases = internalMutation({
     else await ctx.db.insert("opsState", { key: LINK_LEGACY_CURSOR_KEY, cursor: next, updatedAt: now });
     if (!page.isDone && chain !== false) {
       await ctx.scheduler.runAfter(0, internal.migrations.linkLegacyPurchases, { chain: true });
+    }
+    // P12-S-4 (re-audit): one progress line per page, so an operator can follow the backfill in the logs (its cursor
+    // age is `ops.backlog.migrations.linkLegacyPurchases`).
+    try {
+      logEvent("migration_progress", { migration: "linkLegacyPurchases", pageRows: page.page.length, processed, done: page.isDone, restart: restart === true });
+    } catch {
+      // A log line never fails the page.
     }
     return { processed, done: page.isDone };
   },

@@ -3,6 +3,7 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { internalKey } from "./lib/idempotency";
+import { PAYLOAD_CLEARED_MESSAGE } from "./intake";
 
 /**
  * Reply classification (D21). The OpenAI call in `classify` is verified
@@ -435,6 +436,30 @@ describe("replies.listForClaim", () => {
     await expect(other.as.query(api.replies.listForClaim, { claimId })).rejects.toThrow(
       /Claim not found/,
     );
+  });
+});
+
+// F1 (D266 audit): retention clears a TERMINAL (failed) row's whole payload once it is RETENTION_PAYLOAD_DAYS old
+// (`retention.ts` sweepProcessedEvents), which can happen while a reply-route row is still under MAX_ATTEMPTS and
+// waiting for `intake.retryFailed`'s hourly pass. Without a guard, that pass would reschedule `replies.classify` on
+// an empty `payload.text` -- a real, charged OpenAI call over nothing -- because `messageId` alone (kept) was enough
+// to pass the old branch condition.
+describe("intake.retryFailed pass 2: a failed reply row whose payload was already cleared (F1)", () => {
+  it("is never rescheduled, and spends no budget", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const claimId = await seedSentClaim(t, userId);
+    const id = await t.run((ctx) =>
+      ctx.db.insert("processedEvents", {
+        externalId: "evt-cleared-reply", kind: "agentmail.message.received", status: "failed", attempts: 1, userId, route: "reply", claimId,
+        payload: { messageId: "msg-cleared" }, // retention already cleared `text`/`subject`/`from`
+      }),
+    );
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    const row = await t.run((ctx) => ctx.db.get(id));
+    expect(row!.status).toBe("needs_review"); // never "processing" -- replies.classify was never scheduled
+    expect(row!.summary).toBe(PAYLOAD_CLEARED_MESSAGE);
+    expect(await t.run((ctx) => ctx.db.query("usage").collect())).toEqual([]);
   });
 });
 

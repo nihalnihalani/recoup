@@ -15,6 +15,7 @@ import {
 import { EVALUATION_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, EVIDENCE_TEXT_KINDS, ORPHAN_BLOB_MIN_AGE_HOURS } from "./lib/privacyFacts";
 import { isBlobReferenced, releaseEvidenceBlob } from "./lib/blobRefs";
 import { pruneMarketPoints } from "./lib/marketRetention";
+import { BUDGET_PAUSED_SUMMARY, PAYLOAD_CLEARED_MESSAGE, PER_USER_BUDGET_PAUSED_SUMMARY } from "./intake";
 
 /**
  * D75: a resumable, bounded data-retention sweep. NEVER touches
@@ -83,11 +84,35 @@ type StepResult = { isDone: boolean; continueCursor: string; deleted: number; pa
 // ---------------------------------------------------------------------------
 // processedEvents: clear `payload` (up to 60KB of raw email) for terminal
 // (succeeded/failed) rows once they are old enough that nothing will ever
-// retry them off it. The row itself, its `summary`/`errorSummary`, and
-// every other field are kept -- only the payload blob is cleared.
+// retry them off it, and the raw CONTENT of `needs_review` rows (P07-W2).
+// The row itself, its `summary`/`errorSummary`, and every other field are
+// kept -- only the payload (content) is cleared.
 // ---------------------------------------------------------------------------
 
 const TERMINAL_EVENT_STATUSES = new Set<Doc<"processedEvents">["status"]>(["succeeded", "failed"]);
+
+/**
+ * P07-W2 (re-audit, D244d): `needs_review` is the normal END state of every extracted order email (confirming the
+ * purchase does not move the row), so its raw content now follows the same window. Only the content goes: the text
+ * and subject always; the sender too unless a held refund from it still awaits the user's confirmation (its view shows
+ * the sender "as delivered", DA-B-18). `messageId` (dedupe) and `pendingRefund` stay, so a held refund stays
+ * confirmable; `intake.retryEvent` refuses a row whose content is gone.
+ */
+function clearedNeedsReviewPayload(payload: unknown): Record<string, unknown> | undefined {
+  const p = (payload ?? {}) as Record<string, unknown>;
+  const kept: Record<string, unknown> = {};
+  if (p.messageId !== undefined) kept.messageId = p.messageId;
+  if (p.pendingRefund !== undefined) {
+    kept.pendingRefund = p.pendingRefund;
+    if (p.from !== undefined) kept.from = p.from;
+  }
+  return Object.keys(kept).length > 0 ? kept : undefined;
+}
+
+const hasContent = (payload: unknown) => {
+  const p = (payload ?? {}) as Record<string, unknown>;
+  return p.text !== undefined || p.subject !== undefined || (p.from !== undefined && p.pendingRefund === undefined);
+};
 
 /**
  * M14b (D163): this step pages `PROCESSED_EVENTS_PAGE` (25) rows, not
@@ -106,11 +131,24 @@ async function sweepProcessedEvents(ctx: MutationCtx, page: string | null, now: 
   const cutoff = now - RETENTION_PAYLOAD_DAYS * DAY_MS;
   let patched = 0;
   for (const row of result.page) {
-    if (!TERMINAL_EVENT_STATUSES.has(row.status)) continue;
     if (row._creationTime >= cutoff) continue;
     if (row.payload === undefined) continue; // already cleared; no-op write avoided
-    await ctx.db.patch(row._id, { payload: undefined });
-    patched++;
+    if (TERMINAL_EVENT_STATUSES.has(row.status)) {
+      await ctx.db.patch(row._id, { payload: undefined });
+      patched++;
+    } else if (row.status === "needs_review" && hasContent(row.payload)) {
+      // F1 (D266 audit): a budget-paused row's summary (BUDGET_PAUSED_SUMMARY / PER_USER_BUDGET_PAUSED_SUMMARY)
+      // otherwise stays put forever once cleared, so `intake.retryFailed`'s budget-paused pass keeps matching it
+      // and reschedules `processEvent`/`replies.classify` on now-empty text -- a real, charged model call over
+      // nothing. Retitle it here, in the SAME patch as the clear, so the two can never observe a row that reads
+      // budget-paused with no content behind it.
+      const isBudgetPaused = row.summary === BUDGET_PAUSED_SUMMARY || row.summary === PER_USER_BUDGET_PAUSED_SUMMARY;
+      await ctx.db.patch(row._id, {
+        payload: clearedNeedsReviewPayload(row.payload),
+        ...(isBudgetPaused ? { summary: PAYLOAD_CLEARED_MESSAGE } : {}),
+      });
+      patched++;
+    }
   }
   return { isDone: result.isDone, continueCursor: result.continueCursor, deleted: 0, patched };
 }

@@ -44,11 +44,16 @@ describe("Privacy page copy (DA-A-7)", () => {
     );
   });
 
-  it("discloses the mail component's own unmasked copy (D142)", () => {
+  it("discloses the mail component's own unmasked copy (D142), and that a purge can be left unfinished (P09-F2)", () => {
     const text = renderPage();
     expect(text).toContain(PRIVACY_STATEMENTS.mailComponentCopy);
     expect(PRIVACY_STATEMENTS.mailComponentCopy).toMatch(/cannot mask that copy/);
-    expect(PRIVACY_STATEMENTS.mailComponentCopy).toMatch(/deleting your account purges it/);
+    expect(PRIVACY_STATEMENTS.mailComponentCopy).toMatch(/kept until you delete your account/);
+    // P09-F2 (X2/X5): the statement promises the purge starts, not that it always finishes — account.ts's
+    // `inboxDeleted`/`mailDataPurged` are reported literally (never coerced to true), so a stalled purge is
+    // recorded on the tombstone for the operator (ops.backlog.deletions.deletedWithFailures), not silently true.
+    expect(PRIVACY_STATEMENTS.mailComponentCopy).toMatch(/starts a purge of it/);
+    expect(PRIVACY_STATEMENTS.mailComponentCopy).toMatch(/recorded on the account's deletion record/);
   });
 
   it("shows each window's number from the imported constant, not a hand-typed copy", () => {

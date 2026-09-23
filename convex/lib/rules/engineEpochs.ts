@@ -14,5 +14,5 @@
 export type EngineEpoch = { ruleId: string; version: number; engineEpoch: number; engineClosureSha256: string };
 
 export const ENGINE_EPOCHS: readonly EngineEpoch[] = [
-  { ruleId: "R01.retail_price_adjustment", version: 1, engineEpoch: 2, engineClosureSha256: "46dc8004dbd3bf86698dc2d2bb743af7006d9ae2702ccf3bbff671b5a5579254" },
+  { ruleId: "R01.retail_price_adjustment", version: 1, engineEpoch: 2, engineClosureSha256: "4d1ab26bc073f7126c2d6108b9af77fd48c55f5d9cb0c13ec66a60648ec49dfc" },
 ];

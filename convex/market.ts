@@ -332,16 +332,21 @@ export const requestLookup = internalMutation({
     if (!process.env.SHOPSAVVY_API_KEY) {
       // Never set marketFetchedAt for this branch: it is not a retrieval, and a key added later must be
       // able to run the very first lookup rather than being blocked by a stale "already looked up" mark.
-      if (current !== "not_configured") await ctx.db.patch(watchId, { marketState: "not_configured" });
-      return { scheduled: false, state: "not_configured", reason: "not_configured" };
+      // P03-B (re-audit): removing the key (RUNBOOK's last-resort stop) only ever labels a watch that has NO market
+      // state yet. Stored evidence (success, empty_result, terminal_failure, retryable_failure) is kept as it is, and a
+      // queued/running lookup is never touched, so its paid result still lands; once the key is back, nothing is
+      // bought again before its own refresh age.
+      if (current === undefined) await ctx.db.patch(watchId, { marketState: "not_configured" });
+      return { scheduled: false, state: current ?? "not_configured", reason: "not_configured" };
     }
     // P03-C: ShopSavvy recently refused the deployment's key or plan. Until the cooldown ends nothing is charged or
     // fetched; afterwards the next accepted check (or a manual refresh) asks again, so fixing the key recovers.
     if ((await authBlockedUntil(ctx, now)) !== null) {
-      if (current !== "not_configured" && current !== "queued" && current !== "running") {
+      // P03-B: the same rule during the key/plan cooldown — only a watch with no market state yet is labelled.
+      if (current === undefined) {
         await ctx.db.patch(watchId, { marketState: "not_configured", marketNote: MARKET_NOTE.not_configured });
       }
-      return { scheduled: false, state: "not_configured", reason: "not_configured" };
+      return { scheduled: false, state: current ?? "not_configured", reason: "not_configured" };
     }
 
     if (current === "queued" || current === "running") {

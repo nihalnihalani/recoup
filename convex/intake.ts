@@ -34,7 +34,7 @@ import { queueTextSecondStage, recordTextEvidence, STATUS_SUMMARY, TEXT_EXTRACTO
 import { candidatesFromDoc, type DocCandidate } from "./lib/docFacts";
 import { boundExtracted, CLASSIFIER_SYSTEM, DocClassification, DOC_SCHEMAS, DOC_SYSTEMS, type ExtractableDocType } from "./lib/schemas_docs";
 import { textLayerHasPan } from "./lib/sniff";
-import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS, MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER } from "./limits";
+import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS, MAX_ITEMS_PER_PURCHASE, MAX_PURCHASES_PER_USER, RETENTION_PAYLOAD_DAYS } from "./limits";
 
 /**
  * What the model is told. The email itself is untrusted content and goes in
@@ -675,8 +675,9 @@ async function applyRefund(
 
   if (!trust.verified) {
     // Held as a candidate: the validated refund waits on the event for the user's confirmation. Nothing is written to
-    // the ledger or the claims until then. Retention clears the payload after 30 days; a later forward from the
-    // account email (or a paste) is then the way to record it.
+    // the ledger or the claims until then. Retention clears the raw text/subject after RETENTION_PAYLOAD_DAYS
+    // (retention.ts's clearedNeedsReviewPayload), but keeps `pendingRefund` and the sender specifically so
+    // `confirmRefundEmail` below can still apply it whenever the user confirms -- nothing is lost by waiting.
     const row = await ctx.db.get(processedEventId);
     const payload = (row?.payload ?? {}) as Record<string, unknown>;
     await ctx.db.patch(processedEventId, { payload: { ...payload, pendingRefund: refund } });
@@ -1127,6 +1128,9 @@ async function alreadyProducedPurchase(
  * Every re-run is another model call, so it is charged to the caller's daily `intake_retry` budget (B5).
  * `attempts` is never reset: a row that is out of attempts is granted exactly one more per (budgeted) click.
  */
+/** P07-W2: the refusal for re-reading an email whose content retention already cleared. */
+export const PAYLOAD_CLEARED_MESSAGE = `This email's content was cleared after ${RETENTION_PAYLOAD_DAYS} days; forward it again to have Recoup read it`;
+
 export const retryEvent = mutation({
   args: { processedEventId: v.id("processedEvents") },
   returns: v.null(),
@@ -1136,6 +1140,11 @@ export const retryEvent = mutation({
     if (!row || row.userId !== userId) throw new ConvexError("Event not found");
     if (row.status !== "failed" && row.status !== "needs_review") {
       throw new ConvexError("This event is not waiting on anything");
+    }
+    // P07-W2 (re-audit): retention clears an email's content after RETENTION_PAYLOAD_DAYS, needs_review rows included;
+    // there is nothing left to re-read, so refuse before any charge.
+    if (typeof (row.payload as { text?: unknown } | undefined)?.text !== "string") {
+      throw new ConvexError(PAYLOAD_CLEARED_MESSAGE);
     }
     if (row.route === "reply") {
       // Re-read a merchant reply whose classification failed (review H2).
@@ -1303,11 +1312,17 @@ export const retryFailed = internalMutation({
       }
       const payload = (row.payload ?? {}) as Record<string, unknown>;
       const read = (key: string) => (typeof payload[key] === "string" ? (payload[key] as string) : "");
-      if (row.route === "intake") {
+      // F1 (D266 audit): retention clears a `failed` row's whole payload once it is RETENTION_PAYLOAD_DAYS old
+      // (sweepProcessedEvents), so a row can sit in `failed` (not yet at MAX_ATTEMPTS) past that window with
+      // nothing left to read. Without this guard, `processEvent`/`replies.classify` would be rescheduled anyway
+      // and run on empty text -- a real model call, charged budget, over nothing (`beginEvent` never checks
+      // payload content, only attempts/budget/tombstone).
+      const payloadCleared = typeof payload.text !== "string";
+      if (row.route === "intake" && !payloadCleared) {
         await ctx.db.patch(row._id, { status: "received", lastError: undefined });
         await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId: row._id });
         retried++;
-      } else if (row.route === "reply" && row.claimId && read("messageId")) {
+      } else if (row.route === "reply" && row.claimId && read("messageId") && !payloadCleared) {
         await ctx.db.patch(row._id, {
           status: "processing",
           processingStartedAt: now,
@@ -1324,10 +1339,10 @@ export const retryFailed = internalMutation({
         });
         retried++;
       } else {
-        // Nothing here can be re-run (never routed, or a reply with no message id).
+        // Nothing here can be re-run: never routed, a reply with no message id, or (F1) content already cleared.
         await ctx.db.patch(row._id, {
           status: "needs_review",
-          summary: row.summary ?? "This message could not be routed and cannot be re-read automatically.",
+          summary: payloadCleared ? PAYLOAD_CLEARED_MESSAGE : (row.summary ?? "This message could not be routed and cannot be re-read automatically."),
         });
       }
     }
@@ -1362,13 +1377,20 @@ export const retryFailed = internalMutation({
       }
       const payload = (row.payload ?? {}) as Record<string, unknown>;
       const read = (key: string) => (typeof payload[key] === "string" ? (payload[key] as string) : "");
-      if (row.route === "intake") {
+      // F1 (D266 audit): retention's needs_review clear ALSO retitles a budget-paused row's summary away from
+      // BUDGET_PAUSED_SUMMARY/PER_USER_BUDGET_PAUSED_SUMMARY (sweepProcessedEvents), so `isBudgetPause` above
+      // already excludes a freshly cleared row going forward. This is defence in depth for a row whose summary
+      // still reads budget-paused despite a cleared payload (e.g. cleared before that retitle existed): never
+      // reschedule `processEvent`/`replies.classify` on missing text -- that would be a real, charged model call
+      // over nothing.
+      const payloadCleared = typeof payload.text !== "string";
+      if (row.route === "intake" && !payloadCleared) {
         await ctx.db.patch(row._id, { status: "received", summary: undefined });
         await ctx.scheduler.runAfter(0, internal.intake.processEvent, { processedEventId: row._id });
         retried++;
         budgetRetried++;
         budgetRetriesByUser.set(row.userId, usedByUser + 1);
-      } else if (row.route === "reply" && row.claimId && read("messageId")) {
+      } else if (row.route === "reply" && row.claimId && read("messageId") && !payloadCleared) {
         await ctx.db.patch(row._id, { status: "processing", processingStartedAt: now, summary: undefined });
         await ctx.scheduler.runAfter(0, internal.replies.classify, {
           processedEventId: row._id,
@@ -1380,6 +1402,9 @@ export const retryFailed = internalMutation({
         });
         retried++;
         budgetRetried++;
+        budgetRetriesByUser.set(row.userId, usedByUser + 1);
+      } else if (payloadCleared) {
+        await ctx.db.patch(row._id, { status: "needs_review", summary: PAYLOAD_CLEARED_MESSAGE });
         budgetRetriesByUser.set(row.userId, usedByUser + 1);
       }
       // Else: nothing to re-run. Neither writer of a budget-paused summary

@@ -18,8 +18,8 @@
         "convex/lib/rules/outcome.ts",
         "convex/lib/deadlines/engine.ts"
       ],
-      "engineClosureSha256": "46dc8004dbd3bf86698dc2d2bb743af7006d9ae2702ccf3bbff671b5a5579254",
-      "engineClosureDecision": "D263",
+      "engineClosureSha256": "4d1ab26bc073f7126c2d6108b9af77fd48c55f5d9cb0c13ec66a60648ec49dfc",
+      "engineClosureDecision": "D266",
       "engineEpoch": 2,
       "reviewer": "opus-rules-reviewer",
       "reviewedAt": "2026-09-23",

@@ -24,48 +24,71 @@ they read/write the same deployment-wide `usage` row that `convex/limits.ts`'s
 `GLOBAL_DAILY_BUDGETS` and `convex/lib/budget.ts`'s
 `tryConsumeGlobalBudget`/`consumeGlobalBudget` already enforce on every paid
 call, so pausing a kind takes effect immediately for every user, not just new
-signups, and needs no code deploy.
+signups, and needs no code deploy. **Limit (D261, security review LOW-3):** a
+pause refuses the *next* call; it does not stop an alert or claim email that
+was already handed to the AgentMail component before the pause (normally a
+window of seconds with `retryAttempts: 1`, longer under a mail backlog). To stop
+mail already in flight, turn alerts off or suppress the address (both cancel
+pending sends, P02-OW-3) or let reconcile record the outcome.
 
-**Pause** writes today's (UTC) usage count for `kind` up to its max, so the
-next call anywhere in the app that draws from that switch is refused exactly
-as if the real daily budget had been spent:
+**Pause** writes today's (UTC) usage count for `kind` up to its max AND a
+durable pause row (`opsState` key `budgetPause:<kind>`; P12-W4). Every global
+charge in `convex/lib/budget.ts` reads that row, so the switch stays off
+across UTC midnight — on every day — until you resume it:
 
 ```sh
 npx convex run ops:pauseKind '{"kind":"price_check"}' --deployment adorable-lion-138
 ```
 
-**Resume** clears today's usage row for `kind` back to zero (not to whatever
-real usage was before the pause — that number was never recorded):
+**Resume** deletes the durable pause row and clears today's usage row for
+`kind` back to zero (not to whatever real usage was before the pause — that
+number was never recorded):
 
 ```sh
 npx convex run ops:resumeKind '{"kind":"price_check"}' --deployment adorable-lion-138
 ```
 
-Valid `kind` values (`convex/limits.ts`'s `GLOBAL_DAILY_BUDGETS`) and what
-each one stops:
+`ops.backlog`'s `budgets` field shows, for every kind, today's `used`/`max`
+and `paused` (§4). Valid `kind` values (`convex/limits.ts`'s
+`GLOBAL_DAILY_BUDGETS`) and what each one stops:
 
 | `kind` | Stops |
 |---|---|
 | `price_check` | Every automatic price read: `watches.sweep`'s hourly tick and `priceWatch.runAll`'s tick, plus manual "check now" on owned items and watches (their own per-user daily cap still applies underneath; this is the deployment-wide ceiling) |
 | `policy_fetch` | New price-adjustment/returns policy research (`convex/policies.ts`) triggered by purchase creation/confirmation or a manual refresh |
 | `drop_email` | **Outbound mail**: price-drop alert emails (`convex/notify.ts`) to account holders |
-| `market_lookup` | Third-party ShopSavvy price-history lookups (`convex/market.ts`) |
+| `market_lookup` | Third-party ShopSavvy price-history lookups (`convex/market.ts`). Also capped per UTC **month** against the plan's credits (`GLOBAL_MONTHLY_BUDGETS`, P03-SK-1; `backlog.budgets` shows `monthUsed`/`monthMax`) |
 | `claim_email` | **Outbound mail**: the claim request emails a user approves and sends (`convex/drafts.ts`) |
-| `inbound_extract` | Model extraction of pasted/forwarded order emails (`convex/intake.ts`) — pausing this does not stop inbound webhook events from being *received* (they still get a `processedEvents` row), only from being *read* by the model; a refused one becomes `needs_review` and is retried hourly once you resume |
+| `inbound_extract` | Model extraction of pasted/forwarded order emails (`convex/intake.ts`) and uploaded documents (`convex/evidence.ts`) — pausing this does not stop inbound webhook events from being *received* (they still get a `processedEvents` row), only from being *read* by the model; a refused one becomes `needs_review` and is retried hourly once you resume |
+| `evidence_bytes` | Document uploads: every upload finalize refuses (`convex/evidence.ts`; SEC-UP-8) |
+| `offer_search` | "Find other stores" (`offers.find`: a Firecrawl search, scrapes and extractions; P12-W4) |
+| `draft_generate` | Claim-draft writing (`drafts.generate`, a model call; P12-W4) |
 
 `pauseKind`/`resumeKind` throw a `ConvexError` for any other string,
-including a real *per-user* budget kind like `draft_generate` (those have no
-global switch to pause — see `convex/limits.ts`'s `DAILY_BUDGETS` vs
+including a real *per-user* budget kind like `paste` (those have no global
+switch to pause — see `convex/limits.ts`'s `DAILY_BUDGETS` vs
 `GLOBAL_DAILY_BUDGETS`).
 
+**Auth mail has no switch.** Sign-in and password-reset codes (`convex/auth.ts`)
+are not budgeted by any kind above; stopping them means removing the provider
+key (below), which also breaks sign-in.
+
 **To stop everything at once** (a full incident, not just one kind): call
-`pauseKind` for all six kinds above, in one shell loop:
+`pauseKind` for every kind above, in one shell loop (`opsSignals.reaudit.test.ts`
+checks this list equals `GLOBAL_DAILY_BUDGETS`):
 
 ```sh
-for k in price_check policy_fetch drop_email market_lookup claim_email inbound_extract; do
+for k in price_check policy_fetch drop_email market_lookup claim_email inbound_extract evidence_bytes offer_search draft_generate; do
   npx convex run ops:pauseKind "{\"kind\":\"$k\"}" --deployment adorable-lion-138
 done
 ```
+
+**Feature flags** (`convex/lib/flags.ts`, D156) are separate from the kill
+switches: `npx convex run ops:getFlag '{"name":"live_document_extraction"}'`
+reads one, `ops:flagAudit` lists every change, and `ops:setFlag` is the only
+writer — it refuses to turn on an approval-gated flag (`live_document_extraction`,
+D145) without an `approvalRef` naming the DECISIONS entry that records the
+user's approval. `ops.backlog`'s `flags` field shows every flag's state.
 
 **Last resort, not a substitute for the above:** removing a provider key
 (`npx convex env remove AGENTMAIL_API_KEY`, etc.) also stops the
@@ -149,7 +172,12 @@ real number is at least this, possibly more":
 |---|---|
 | `dueWatches` | The hourly `watches.sweep` cron is falling behind (or paused via `price_check` — check that first) |
 | `dueItems` | The 2-hour `priceWatch.runAll` cron is falling behind (same check) |
-| `processedEventsFailed` | Inbound webhook/paste processing is failing faster than the hourly `intake.retryFailed` safety net clears it — read a few rows' `lastError`/`errorSummary` by hand (`npx convex run --inline-query 'await ctx.db.query("processedEvents").withIndex("by_status", q => q.eq("status", "failed")).take(5)'`) before assuming it will self-heal |
+| `processedEventsFailed` | Inbound webhook/paste processing is failing faster than the hourly `intake.retryFailed` safety net clears it — read a few rows' `lastError`/`errorSummary` by hand (`npx convex run --inline-query 'await ctx.db.query("processedEvents").withIndex("by_status", q => q.eq("status", "failed")).take(5)'`) before assuming it will self-heal. **Capped at 25 rows** (P12-W2): each failed row carries a whole inbound email, so a larger page could itself hit the read limit — `truncated: true` means "at least 25" |
+| `extraction.*` | Evidence waiting on the user or on extraction; capped at 100 rows each (P12-W2) |
+| `budgets` | Every deployment-wide switch today: `used`/`max`, `paused` (a durable operator pause, §1), and `monthUsed`/`monthMax` for `market_lookup` (P12-W7, P03-SK-1) |
+| `deletions.deletedWithFailures` | `deleted` accounts whose remote inbox deletion or stored-mail purge did not complete (P09-SK-2) — the operator's queue, because the user is signed out long before the final outcome lands; see §12 |
+| `deadlineSweep`, `reevaluateDue`, `userDeadlinesSoon` | The hourly deadline sweep (M29): its last cycle and age (older than ~1h means the cron is not running), not-yet-due paths waiting for re-evaluation, and user deadlines inside the attention window |
+| `migrations.linkLegacyPurchases` | The Mission-2 backfill's cursor age and whether it has pages left (P12-S-4) |
 | `mailLogQueued` | Mail handed to AgentMail with no confirmed message id yet; the hourly `notify.sweepStalled` cron re-checks these — a persistently large number suggests AgentMail's own status API is failing, not just slow |
 | `mailLogUnknown` | Reconciliation gave up after its backoff schedule with still no message id; these do not self-heal further, and are effectively "delivery unknown" state shown to the user (D13) |
 | `staleMarketRunning` | A ShopSavvy lookup has been claimed `running` for over 15 minutes — almost certainly a crashed/killed action, not one still in flight (a real call times out at 30s). It self-heals the next time anyone calls `market.refresh`/`requestLookup` on that exact watch (the stale-reclaim logic in `market.ts`), but a watch nobody revisits can sit here indefinitely; a nonzero, non-shrinking count across repeated `backlog` calls is worth a look |
@@ -215,14 +243,14 @@ raw secret ever reaches the log — see the module doc comment in
 | `kind` | Roughly means | Where |
 |---|---|---|
 | `extraction_failed` | A model call for order/price/policy extraction ran but produced nothing usable | `intake.ts`, `priceWatch.ts` |
-| `notification_failed` | A price-drop alert send failed outright | `notify.ts` |
-| `notification_stalled` | A price-drop alert is stuck `claimed`/`queued`/`unknown` past its reconcile window | `notify.ts` |
+| `notification_failed` | A price-drop alert send failed outright (`stage`: enqueue, delivery, bounced_after_delivery) | `notify.ts` |
+| `notification_stalled` | A price-drop alert went `unknown` (`stage`: ambiguous_failure, or reconcile_exhausted after its backoff) | `notify.ts` |
 | `price_check_failed` | A scrape/read of a product page failed | `priceWatch.ts`, `watches.ts` |
-| `budget_exhausted` | A deployment-wide global budget refused a call (a symptom, not a bug — check whether it was paused deliberately via §1 first) | anywhere `charge`/`tryCharge`/`consumeGlobalBudget` is on the call path |
+| `budget_exhausted` | A deployment-wide global budget refused (or short-granted) a call; `reason` is `paused` (an operator pause, §1) or `spent` (the day's or month's cap) | `lib/budget.ts` — every `charge`/`tryCharge`/`consumeGlobalBudget`/`takeGlobalBudget` |
 | `webhook_rejected` | An inbound webhook failed signature verification or malformed-body validation | `http.ts` |
-| `scheduler_backlog` | A cron/sweep noticed it is behind (see §4's `backlog` fields for the same signal on demand) | crons/sweeps |
+| `scheduler_backlog` | Reserved: nothing emits it yet; §4's `backlog` fields carry the same signal on demand | — |
 | `market_failed` | A ShopSavvy lookup failed (`retryable_failure`/`terminal_failure`). With `failure: "auth"`, ShopSavvy refused the deployment's key or plan (401/402/403): every lookup pauses for an hour (opsState `market.authBlockedUntil`) and recovers on its own once the key or plan is fixed (P03-C) | `market.ts` |
-| `migration_progress` | A resumable migration page ran (§3) | `lib/authMigrate.ts`, `market.ts` |
+| `migration_progress` | A resumable migration page ran (§3) | `lib/authMigrate.ts`, `migrations.ts` (`linkLegacyPurchases`, one line per page) |
 
 As of this writing, `logEvent` is a primitive with tests
 (`convex/lib/log.test.ts`) but the existing bare `console.error` call sites
@@ -380,9 +408,13 @@ the next cron tick: `npx convex run account:reDriveStuckDeletions '{}'
 **What `inboxDeleted: false` means, and the manual fallback.**
 `account.deletionStatus`/the per-row `accountState.inboxDeleted` field is
 read LITERALLY, never inferred from `status` (`purge`'s own docstring has
-the full state table): `status: "deleted"` means Recoup's own side (app
-data, the AgentMail component's per-inbox rows, and every auth row) is
-fully gone; `inboxDeleted: false` on a `"deleted"` row means the REMOTE
+the full state table): `status: "deleted"` means Recoup's app data and every
+auth row are gone and the purge of the AgentMail component's per-inbox rows
+was attempted — it is complete only when `mailDataPurged` is not `false`
+(P09-SK-2). `ops.backlog`'s `deletions.deletedWithFailures` counts `deleted`
+rows with `inboxDeleted: false` or `mailDataPurged: false`; the user never
+sees this outcome (they were signed out hours earlier), so these are the
+operator's to finish. `inboxDeleted: false` on a `"deleted"` row means the REMOTE
 AgentMail inbox itself was never confirmed deleted after all 5 retry
 attempts (backoff: 1m, 10m, 1h, 6h, 24h — `INBOX_DELETE_BACKOFF_MS`). This
 is not a stuck row (there is no more retry chain to re-drive: the account is

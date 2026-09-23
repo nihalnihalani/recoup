@@ -90,20 +90,41 @@ export type Budget = {
   global?: { kind: GlobalBudgetKind; units: number };
 };
 
-export type GlobalBudgetKind = "price_check" | "policy_fetch" | "drop_email" | "market_lookup" | "claim_email" | "inbound_extract" | "evidence_bytes";
+export type GlobalBudgetKind =
+  | "price_check" | "policy_fetch" | "drop_email" | "market_lookup" | "claim_email" | "inbound_extract" | "evidence_bytes"
+  | "offer_search" | "draft_generate";
+
+// --- ShopSavvy market history (declared here, ahead of the budgets below, so they can reference the credits figure
+// directly instead of a second hand-copied arithmetic expression -- P03-SK-1 re-audit finding: the copy HAD drifted
+// from `market.ts`'s actual request shape once already) --------------------------------------------------------
+
+/** Days of history asked for per lookup. One credit per day of history, so this drives what one lookup bills. */
+export const MARKET_HISTORY_DAYS = 14;
+/**
+ * Credits one ShopSavvy lookup bills. `market.ts`'s `historyRange` asks `start = now - MARKET_HISTORY_DAYS days` to
+ * `end = now`, and ShopSavvy bills one credit per DATE in that range inclusive of both ends -- MARKET_HISTORY_DAYS + 1
+ * distinct calendar dates (14 days back to today is 15 dates), not MARKET_HISTORY_DAYS. Plus the flat 3-credit base
+ * fee: 3 + 14 + 1 = 18. (P03-SK-1 audit follow-up: the constant previously omitted the "+1" for the inclusive end,
+ * undercounting at 17.) `GLOBAL_MONTHLY_BUDGETS` divides by this.
+ */
+export const MARKET_CREDITS_PER_LOOKUP = 3 + MARKET_HISTORY_DAYS + 1;
 
 /**
  * Deployment-wide daily kill switches (usage rows with no userId), so the worst day is bounded in dollars whatever
  * the number of accounts.
  */
 export const GLOBAL_DAILY_BUDGETS: Record<GlobalBudgetKind, { max: number; label: string }> = {
-  /** One unit = one ShopSavvy lookup (3 credits + 1 per day of history). Bounds the trial plan's 1,000 monthly credits against any number of accounts. */
-  market_lookup: { max: 40, label: "market history look-ups" },
+  /**
+   * One unit = one ShopSavvy lookup (`MARKET_CREDITS_PER_LOOKUP` credits). P03-SK-1 (re-audit): a daily cap alone
+   * cannot bound a MONTHLY credit plan (40 × MARKET_CREDITS_PER_LOOKUP = 720 credits a day against 1,000 a month), so
+   * the real bound is `GLOBAL_MONTHLY_BUDGETS.market_lookup`; this daily cap only spreads the month
+   * (10 × MARKET_CREDITS_PER_LOOKUP = 180 credits a day at most).
+   */
+  market_lookup: { max: 10, label: "market history look-ups" },
   /** One unit = one scrape + one extraction (~1-2 cents). The two sweeps alone can use 1,800 a day (50/h + 50/2h); 3,000 leaves room for manual checks and caps the day at roughly $50. */
   price_check: { max: 3_000, label: "price checks" },
   /** One unit = one policy research (a search that scrapes 3 pages plus up to 3 extractions, ~5 cents). 500 is ~250 new stores a day and at most about $25. */
   policy_fetch: { max: 500, label: "store policy look-ups" },
-  /** One ShopSavvy lookup bills 3 credits plus one per day of history; at MARKET_HISTORY_DAYS=14 that is 17. The trial plan holds 1,000 credits a month, so 20 a day is about a third of it and leaves room to demo. */
   /** Drop alerts leave from one shared inbox to unverified addresses (B2); 300 a day keeps the sending domain's reputation safe however many accounts exist. */
   drop_email: { max: 300, label: "price alert emails" },
   /** Claim emails leave from one shared inbox to caller-chosen addresses (B1); bounds the deployment-wide total whatever the number of accounts (T01/D76). */
@@ -117,6 +138,31 @@ export const GLOBAL_DAILY_BUDGETS: Record<GlobalBudgetKind, { max: number; label
    * the operator kill switch: it pins today's row to max, so every finalize refuses.
    */
   evidence_bytes: { max: 2 * 1024 * 1024 * 1024, label: "document uploads" },
+  /**
+   * P12-W4 (re-audit): one unit = one `offers.find` (a Firecrawl search, scrapes and extractions for other stores).
+   * Before this, "find other stores" drew on no global switch, so no operator pause could stop it.
+   */
+  offer_search: { max: 300, label: "searches for other stores" },
+  /** P12-W4 (re-audit): one unit = one claim-draft model call (`drafts.generate`), so the operator can pause drafting. */
+  draft_generate: { max: 600, label: "writing drafts" },
+};
+
+// --- Monthly provider plans (P03-SK-1) ----------------------------------------
+
+/**
+ * The ShopSavvy plan's monthly credits. The TRIAL plan's size (D83: the dev key is a placeholder, so the real plan and
+ * its exhaustion behaviour are unverified); the lead records the chosen plan in DECISIONS and changes it here.
+ */
+export const MARKET_PLAN_MONTHLY_CREDITS = 1_000;
+
+/**
+ * Deployment-wide MONTHLY caps (usage rows with no userId, `day` = the UTC month "YYYY-MM", kind `<kind>@month`),
+ * checked by `lib/budget.ts` together with the daily switch of the same kind. Only kinds billed against a monthly
+ * provider plan have one.
+ */
+export const GLOBAL_MONTHLY_BUDGETS: Partial<Record<GlobalBudgetKind, { max: number }>> = {
+  /** Lookups that fit the plan: floor(MARKET_PLAN_MONTHLY_CREDITS / MARKET_CREDITS_PER_LOOKUP) = floor(1,000 / 18) = 55 a month (55 × 18 = 990 ≤ 1,000). */
+  market_lookup: { max: Math.floor(MARKET_PLAN_MONTHLY_CREDITS / MARKET_CREDITS_PER_LOOKUP) },
 };
 
 export const DAILY_BUDGETS = {
@@ -128,8 +174,8 @@ export const DAILY_BUDGETS = {
   policy_refresh: { max: 10, label: "re-reading store policies", global: { kind: "policy_fetch", units: 1 } },
   /** One fetchBoth = two policy researches (~10 cents), shared by purchases.create, purchases.confirm and watches.markBought. 15 new stores a day is a heavy import. */
   policy_fetch: { max: 15, label: "looking up store policies", global: { kind: "policy_fetch", units: 2 } },
-  /** One draft = one model call and one stored row. 30 covers rewriting every open claim several times. */
-  draft_generate: { max: 30, label: "writing drafts" },
+  /** One draft = one model call and one stored row. 30 covers rewriting every open claim several times. P12-W4: also draws on the global `draft_generate` switch. */
+  draft_generate: { max: 30, label: "writing drafts", global: { kind: "draft_generate", units: 1 } },
   /** Mail to a caller-chosen address from our sending domain (B1): 10 a day is more claims than anyone files and too few to be a relay. Global claim_email cap added T01/D76: charge() enforces both. */
   claim_email: { max: 10, label: "sending claim emails", global: { kind: "claim_email", units: 1 } },
   /** Manual "check the price now" on owned items: one scrape + one extraction each; 40 is every item on a big order, twice. */
@@ -157,10 +203,8 @@ export const DAILY_BUDGETS = {
 
 export type BudgetKind = keyof typeof DAILY_BUDGETS;
 
-// --- ShopSavvy market history ------------------------------------------------
+// --- ShopSavvy market history (MARKET_HISTORY_DAYS, MARKET_CREDITS_PER_LOOKUP: declared near GLOBAL_DAILY_BUDGETS above) ---
 
-/** Days of history asked for per lookup. One credit per day, so this is the price of the feature. */
-export const MARKET_HISTORY_DAYS = 14;
 /** Most dated points kept per watch. A chart needs a shape, not every row. */
 export const MARKET_MAX_POINTS = 120;
 /** Most stores one lookup may add as offer candidates, so a popular product cannot flood the panel. */

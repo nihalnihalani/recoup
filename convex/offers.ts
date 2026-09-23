@@ -34,7 +34,7 @@ import { components, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { offerStatus, priceSource, variantMatch } from "./schema";
 import { ownedWatch, requireUserId } from "./lib/access";
-import { takeGlobalBudget } from "./lib/budget";
+import { consumeGlobalBudget, takeGlobalBudget } from "./lib/budget";
 import { assertTimestamp } from "./lib/money";
 import { isTombstoned } from "./lib/accountState";
 import { logEvent } from "./lib/log";
@@ -52,6 +52,7 @@ import {
 } from "./lib/offerMatch";
 import { observePrice, rejectionReason, truncate, type Observation, type PageObservation } from "./priceWatch";
 import {
+  GLOBAL_DAILY_BUDGETS,
   MAX_OFFER_FINDS_PER_DAY,
   MAX_OFFER_PAGES_PER_FIND,
   MAX_OFFER_RECHECKS,
@@ -340,7 +341,11 @@ export const find = mutation({
     if (searchName(watch) === null) {
       throw new ConvexError("Name this item first so other stores can be searched for it");
     }
-    await consumeFindLimit(ctx, userId, watchId, Date.now());
+    const now = Date.now();
+    await consumeFindLimit(ctx, userId, watchId, now);
+    // P12-W4 (re-audit): a find (Firecrawl search + scrapes + extractions) draws on a deployment-wide switch, so the
+    // operator can pause it; a refusal throws before anything is scheduled or written.
+    await consumeGlobalBudget(ctx, "offer_search", GLOBAL_DAILY_BUDGETS.offer_search.max, 1, now);
     await ctx.db.insert("offers", {
       watchId,
       userId,

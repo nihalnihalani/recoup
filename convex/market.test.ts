@@ -8,6 +8,8 @@ import { OUT_OF_STOCK_NOTE as OUT_OF_STOCK_NOTE_UI } from "../src/lib/offerNotes
 import {
   DAILY_BUDGETS,
   GLOBAL_DAILY_BUDGETS,
+  MARKET_CREDITS_PER_LOOKUP,
+  MARKET_HISTORY_DAYS,
   MARKET_MAX_ATTEMPTS,
   MARKET_REFRESH_MIN_AGE_MS,
   MARKET_RETRY_BACKOFF_MS,
@@ -145,6 +147,37 @@ describe("missing key", () => {
     expect(after.marketFetchedAt).toBe(T0);
     expect(after.marketNote).toBeUndefined();
     expect(await usageCount(t, userId, "market_lookup")).toBe(1);
+  });
+});
+
+// F3/P03-SK-1 (D266 audit): the auditor found `MARKET_CREDITS_PER_LOOKUP` undercounted by 1 -- a request's
+// `start`..`end` window is INCLUSIVE of both ends (MARKET_HISTORY_DAYS + 1 = 15 distinct dates for
+// MARKET_HISTORY_DAYS = 14), not MARKET_HISTORY_DAYS dates. This ties the constant to the real request shape so it
+// cannot silently drift from `historyRange` again.
+describe("P03-SK-1: MARKET_CREDITS_PER_LOOKUP matches the real request's inclusive date span", () => {
+  it("the actual start..end window sent to ShopSavvy spans MARKET_HISTORY_DAYS + 1 dates inclusive", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    const fetchSpy = vi.fn(async (_url: string) => jsonResponse(bodyWithOnePoint()));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
+    await t.action(internal.market.lookup, { watchId });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const url = String(fetchSpy.mock.calls[0]![0]);
+    const startParam = /[?&]start=([^&]+)/.exec(url)?.[1];
+    const endParam = /[?&]end=([^&]+)/.exec(url)?.[1];
+    expect(startParam).toBeDefined();
+    expect(endParam).toBeDefined();
+    const start = new Date(`${decodeURIComponent(startParam!)}T00:00:00Z`).getTime();
+    const end = new Date(`${decodeURIComponent(endParam!)}T00:00:00Z`).getTime();
+    const inclusiveDateSpan = Math.round((end - start) / DAY) + 1;
+    expect(inclusiveDateSpan).toBe(MARKET_HISTORY_DAYS + 1);
+    // The 3-credit base fee plus one credit per date in that inclusive span (P03-SK-1's arithmetic in limits.ts).
+    expect(MARKET_CREDITS_PER_LOOKUP).toBe(3 + inclusiveDateSpan);
   });
 });
 
@@ -1324,5 +1357,66 @@ describe("transition window (watches.ts calling lookup directly, per T10's Risks
 
     const row = await watchRow(t, watchId);
     expect(row.marketState).toBe("success");
+  });
+});
+
+describe("P03-B (re-audit): removing the key never erases stored market state or a paid in-flight result", () => {
+  it("success at T0; key removed; an accepted check at T0+2h; key restored; another at T0+1d → still 1 fetch, state success, usage unchanged", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    const fetchSpy = vi.fn(async () => jsonResponse(bodyWithOnePoint()));
+    vi.stubGlobal("fetch", fetchSpy);
+    await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
+    await t.action(internal.market.lookup, { watchId });
+    const before = await watchRow(t, watchId);
+    expect(before.marketState).toBe("success");
+    const points = await marketRows(t, watchId);
+    expect(points.length).toBeGreaterThan(0);
+
+    delete process.env.SHOPSAVVY_API_KEY;
+    vi.setSystemTime(T0 + 2 * 3_600_000);
+    expect(await t.mutation(internal.market.requestLookup, { watchId, trigger: "auto" })).toEqual({ scheduled: false, state: "success", reason: "not_configured" });
+    const during = await watchRow(t, watchId);
+    expect([during.marketState, during.marketFetchedAt, during.marketNote]).toEqual([before.marketState, before.marketFetchedAt, before.marketNote]);
+    expect(await marketRows(t, watchId)).toHaveLength(points.length);
+
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    vi.setSystemTime(T0 + DAY);
+    const again = await t.mutation(internal.market.requestLookup, { watchId, trigger: "auto" });
+    expect(again).toMatchObject({ scheduled: false, state: "success" });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect((await watchRow(t, watchId)).marketState).toBe("success");
+    vi.setSystemTime(T0);
+    expect(await usageCount(t, userId, "market_lookup")).toBe(1);
+  });
+
+  it("the key removed while a lookup is running (an accepted check calls requestLookup mid-fetch) → the paid result still lands", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    process.env.SHOPSAVVY_API_KEY = "test-key";
+    const fetchSpy = vi.fn(async () => {
+      delete process.env.SHOPSAVVY_API_KEY;
+      const mid = await t.mutation(internal.market.requestLookup, { watchId, trigger: "auto" });
+      expect(mid).toEqual({ scheduled: false, state: "running", reason: "not_configured" });
+      return jsonResponse(bodyWithOnePoint());
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    await t.mutation(internal.market.requestLookup, { watchId, trigger: "manual" });
+    await t.action(internal.market.lookup, { watchId });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(await marketRows(t, watchId)).toHaveLength(1);
+    expect((await watchRow(t, watchId)).marketState).toBe("success");
+  });
+
+  it("a watch with no market state yet is still labelled not_configured (unchanged)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const watchId = await seedWatch(t, userId);
+    expect(await t.mutation(internal.market.requestLookup, { watchId, trigger: "auto" })).toEqual({ scheduled: false, state: "not_configured", reason: "not_configured" });
+    expect((await watchRow(t, watchId)).marketState).toBe("not_configured");
   });
 });

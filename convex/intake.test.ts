@@ -4,7 +4,7 @@ import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { DAILY_BUDGETS, GLOBAL_DAILY_BUDGETS } from "./limits";
-import { BUDGET_PAUSED_SUMMARY, PER_USER_BUDGET_PAUSED_SUMMARY } from "./intake";
+import { BUDGET_PAUSED_SUMMARY, PAYLOAD_CLEARED_MESSAGE, PER_USER_BUDGET_PAUSED_SUMMARY } from "./intake";
 
 // `createPasteEvent` and `retryEvent` schedule `processEvent`, which would
 // call OpenAI. Fake timers keep convex-test from running it (D31).
@@ -995,6 +995,27 @@ describe("intake.retryFailed (hourly safety net)", () => {
     );
     expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
     expect((await eventRow(t, id)).status).toBe("needs_review");
+  });
+
+  // F1 (D266 audit): retention clears a TERMINAL (failed) row's whole payload once it is RETENTION_PAYLOAD_DAYS
+  // old (`retention.ts` sweepProcessedEvents), which can happen while the row is still under MAX_ATTEMPTS and sits
+  // in `failed` waiting for this hourly pass. Without a guard, this pass would reschedule `processEvent` on an
+  // empty `payload.text` -- a real, charged OpenAI call over nothing.
+  it("F1: a failed intake row whose payload was already cleared is never rescheduled, and spends no budget", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const id = await t.run(
+      async (ctx) =>
+        await ctx.db.insert("processedEvents", {
+          externalId: "evt-cleared-intake", kind: "agentmail.message.received", status: "failed", attempts: 1, userId, route: "intake",
+          payload: { messageId: "msg-cleared" }, // retention already cleared `text`/`subject`/`from`
+        }),
+    );
+    expect(await t.mutation(internal.intake.retryFailed, {})).toEqual({ unstuck: 0, retried: 0 });
+    const row = await eventRow(t, id);
+    expect(row.status).toBe("needs_review"); // never "received" -- processEvent was never scheduled
+    expect(row.summary).toBe(PAYLOAD_CLEARED_MESSAGE);
+    expect(await t.run((ctx) => ctx.db.query("usage").collect())).toEqual([]);
   });
 
   it("does not fail or double-schedule an OLD row that re-entered processing a moment ago (H5)", async () => {
