@@ -17,7 +17,7 @@
  * is read with `t.run` to confirm what the code did and did not schedule.
  * `vi.spyOn(agentmail, "sendMessage" | "status")` replaces the network seam.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
@@ -25,6 +25,7 @@ import { claimDrop, applyDropOutcome, DROP_SUBJECT } from "./notify";
 import { BACKOFF_MS } from "./drafts";
 import { MAIL_RECONCILE_STALL_MS } from "./limits";
 import { agentmail } from "./mail";
+import { suppressAddress, tokenFor } from "./alerts";
 
 type T = ReturnType<typeof setup>;
 
@@ -590,5 +591,204 @@ describe("T09 acceptance — merchant drafts still hold after T06 (P02)", () => 
         recipientConfirmed: true,
       }),
     ).rejects.toThrow(/closed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P02-OW-3 / P01-2 / P09-F8 (D244): closing the gate cancels a pending send.
+//
+// The re-audit's R1/R2/R3/R4a/R4b repros, inverted. Unlike the suite above,
+// these drive the REAL AgentMail component (no `sendMessage` mock) with
+// `fetch` stubbed at the provider boundary, so a provider POST is counted,
+// not assumed. The scheduler is driven in bounded steps, never
+// `finishAllScheduledFunctions`: the component's workpool reschedules its own
+// status loop forever once a job exists.
+// ---------------------------------------------------------------------------
+
+describe("P02-OW-3: opt-out, unsubscribe, suppression and deletion cancel a send still pending in the component", () => {
+  const T0 = Date.UTC(2026, 8, 23, 12);
+  const CONTACT = "support@acme.example";
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  /** Stubs the provider; returns a POST counter for /messages/send. Every other call answers `{}`. */
+  function stubProvider() {
+    let posts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        if (String(url).includes("/messages/send")) {
+          posts++;
+          return new Response(JSON.stringify({ message_id: `mid-${posts}`, thread_id: `th-${posts}` }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+    return () => posts;
+  }
+
+  async function drive(t: T, steps: number, stepMs = 5_000) {
+    for (let i = 0; i < steps; i++) {
+      vi.advanceTimersByTime(stepMs);
+      await t.finishInProgressScheduledFunctions();
+    }
+  }
+
+  async function componentStatus(t: T, outboundId: NonNullable<Doc<"mailLog">["outboundId"]>) {
+    return await t.run((ctx) => agentmail.status(ctx as never, outboundId));
+  }
+
+  /** A verified user with an inbox, and one alert handed to the component (`queued`, component row `pending`, not yet POSTed). */
+  async function queuedAlert(t: T, name: string) {
+    const user = await verifiedUser(t, name);
+    await inboxFor(t, user.userId, name);
+    const watch = await activeWatch(t, user.userId);
+    const mailLogId = (await t.run((ctx) => claimDrop(ctx, watch, 4_000, "USD")))!;
+    await t.mutation(internal.notify.sendDrop, { mailLogId });
+    const row = (await t.run((ctx) => ctx.db.get(mailLogId)))!;
+    expect(row.status).toBe("queued");
+    expect((await componentStatus(t, row.outboundId!))?.status).toBe("pending");
+    return { ...user, mailLogId, outboundId: row.outboundId! };
+  }
+
+  async function expectCancelled(t: T, mailLogId: Id<"mailLog">, reason: string) {
+    const row = (await t.run((ctx) => ctx.db.get(mailLogId)))!;
+    expect(row.status).toBe("suppressed");
+    expect(row.reason).toBe(reason);
+    // P02-SK-3: a cancel can land while the POST is in flight, so the copy never claims nothing was sent.
+    expect(row.error).toMatch(/cancelled, but it may already have gone out/);
+    const component = await componentStatus(t, row.outboundId!);
+    expect(component?.status).toBe("failed");
+    expect(component?.errorMessage).toBe("Cancelled by user");
+  }
+
+  it("R4a inverted: setAlerts(false) before the workpool runs → 0 provider POSTs, the row ends suppressed/opted_out", async () => {
+    const t = setup();
+    const posts = stubProvider();
+    const { as, mailLogId } = await queuedAlert(t, "Opal");
+
+    await as.mutation(api.alerts.setAlerts, { enabled: false });
+    await drive(t, 60);
+
+    expect(posts()).toBe(0); // before: 1
+    await expectCancelled(t, mailLogId, "opted_out");
+  });
+
+  it("R4b inverted: one-click unsubscribe before the workpool runs → 0 provider POSTs, the row ends suppressed/opted_out", async () => {
+    const t = setup();
+    const posts = stubProvider();
+    const { userId, mailLogId } = await queuedAlert(t, "Uma");
+    const token = await t.run((ctx) => tokenFor(ctx, userId));
+
+    expect(await t.mutation(internal.alerts.unsubscribeByToken, { token })).toBe(true);
+    await drive(t, 60);
+
+    expect(posts()).toBe(0); // before: 1
+    await expectCancelled(t, mailLogId, "opted_out");
+  });
+
+  it("a bounce/complaint suppression of the address cancels another alert still pending to it", async () => {
+    const t = setup();
+    const posts = stubProvider();
+    const { userId, mailLogId } = await queuedAlert(t, "Bea");
+
+    await t.run((ctx) => suppressAddress(ctx, userId, "complained"));
+    await drive(t, 60);
+
+    expect(posts()).toBe(0);
+    await expectCancelled(t, mailLogId, "address_suppressed");
+  });
+
+  it("control: when the POST already completed before the opt-out, nothing is cancelled and the row ends sent, never suppressed", async () => {
+    const t = setup();
+    const posts = stubProvider();
+    const { as, mailLogId, outboundId } = await queuedAlert(t, "Cora");
+
+    // Up to five 1 s steps: the workpool POSTs and the component records `sent`, while the
+    // first reconcile (BACKOFF_MS[0] = 30 s) has not run yet, so the row is still `queued`.
+    for (let i = 0; i < 5 && (await componentStatus(t, outboundId))?.status !== "sent"; i++) await drive(t, 1, 1_000);
+    expect(posts()).toBe(1);
+    expect((await componentStatus(t, outboundId))?.status).toBe("sent");
+    expect((await t.run((ctx) => ctx.db.get(mailLogId)))?.status).toBe("queued");
+
+    await as.mutation(api.alerts.setAlerts, { enabled: false });
+    expect((await t.run((ctx) => ctx.db.get(mailLogId)))?.status).toBe("queued"); // left for reconciliation
+    await drive(t, 60);
+
+    expect(posts()).toBe(1);
+    const row = await t.run((ctx) => ctx.db.get(mailLogId));
+    expect(row?.status).toBe("sent");
+    expect(row?.agentmailMessageId).toBe("mid-1");
+  });
+
+  /** A queued claim email for this user: approved through the real `drafts.approveAndSend`, component row `pending`. */
+  async function queuedClaimEmail(t: T, userId: Id<"users">, as: Awaited<ReturnType<typeof signedIn>>["as"]) {
+    const { claimId, draftId } = await t.run(async (ctx) => {
+      const purchaseId = await ctx.db.insert("purchases", {
+        userId, merchant: "Acme", merchantDomain: "acme.example", orderRef: "AC-1",
+        purchasedAt: Date.UTC(2026, 0, 2), currency: "USD", status: "active",
+      });
+      const itemId = await ctx.db.insert("items", {
+        purchaseId, userId, name: "Scarf", unitCents: 4000, qty: 1, returned: true, returnedAt: Date.UTC(2026, 0, 9),
+      });
+      const claimId = await ctx.db.insert("claims", {
+        purchaseId, itemId, userId, type: "return_credit", expectedCents: 4000, status: "drafted", token: "AB12CD", version: 1,
+      });
+      const draftId = await ctx.db.insert("drafts", {
+        claimId, userId, version: 1, claimVersion: 1, to: CONTACT, subject: "Refund [RC-AB12CD]", body: "Please confirm the credit.",
+      });
+      return { claimId, draftId };
+    });
+    const outboundId = await as.mutation(api.drafts.approveAndSend, {
+      draftId, to: CONTACT, subject: "Refund", body: "Please confirm the credit.", claimVersion: 1, draftVersion: 1,
+      recipientConfirmed: true,
+    });
+    expect((await t.run((ctx) => ctx.db.get(claimId)))?.status).toBe("queued");
+    expect((await t.run((ctx) => agentmail.status(ctx as never, outboundId)))?.status).toBe("pending");
+    return { claimId, outboundId };
+  }
+
+  async function requestDeletion(t: T, as: Awaited<ReturnType<typeof signedIn>>["as"], userId: Id<"users">) {
+    await as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
+    return (await t.run((ctx) => ctx.db.query("accountState").withIndex("by_user", (q) => q.eq("userId", userId)).first()))!;
+  }
+
+  it("R2/R3 inverted: requestDeletion with the purge held (the workpool runs first) → 0 POSTs for a queued alert and a queued claim email", async () => {
+    const t = setup();
+    const posts = stubProvider();
+    const { userId, as, mailLogId } = await queuedAlert(t, "Dana");
+    const claim = await queuedClaimEmail(t, userId, as);
+
+    const state = await requestDeletion(t, as, userId);
+    await t.run((ctx) => ctx.scheduler.cancel(state.activePurgeJobId!)); // hold the purge
+    await drive(t, 60);
+
+    expect(posts()).toBe(0); // before: 2 (the alert and the claim email)
+    await expectCancelled(t, mailLogId, "deleted");
+    const claimSend = await t.run((ctx) => agentmail.status(ctx as never, claim.outboundId));
+    expect(claimSend?.status).toBe("failed");
+    expect(claimSend?.errorMessage).toBe("Cancelled by user");
+  });
+
+  it("requestDeletion with the purge left to run → still 0 POSTs, whichever of purge and workpool runs first", async () => {
+    const t = setup();
+    const posts = stubProvider();
+    const { userId, as } = await queuedAlert(t, "Eli");
+    await queuedClaimEmail(t, userId, as);
+
+    await requestDeletion(t, as, userId);
+    await drive(t, 60);
+
+    expect(posts()).toBe(0);
   });
 });

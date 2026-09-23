@@ -481,16 +481,23 @@ describe("a queued outbound mailLog row is suppressed immediately on deletion", 
     await t.run((ctx) => ctx.db.insert("profiles", { userId: a.userId, inboxId: `inbox-${a.userId}`, inboxEmail: "a@example.com" }));
     const watch = await activeWatch(t, a.userId, { targetCents: 5_000 });
 
-    vi.spyOn(agentmail, "sendMessage").mockResolvedValue("outbound-a" as never);
+    // P02-OW-3: the REAL component (no sendMessage mock), so a pending
+    // component send exists and requestDeletion has something to cancel. The
+    // scheduler is never driven here; notify.fault.test.ts drives it and
+    // counts provider POSTs.
     const mailLogId = (await t.run((ctx) => claimDrop(ctx, watch, 4_000, "USD")))!;
     await t.mutation(internal.notify.sendDrop, { mailLogId });
     const queued = await t.run((ctx) => ctx.db.get(mailLogId));
     expect(queued?.status).toBe("queued"); // sanity: the fixture really reached "queued" before deletion
+    expect((await t.run((ctx) => agentmail.status(ctx as never, queued!.outboundId!)))?.status).toBe("pending");
 
     await tombstone(a.as);
 
     const row = await t.run((ctx) => ctx.db.get(mailLogId));
     expect(row?.status).toBe("suppressed");
     expect(row?.reason).toBe("deleted");
+    const component = await t.run((ctx) => agentmail.status(ctx as never, row!.outboundId!));
+    expect(component?.status).toBe("failed");
+    expect(component?.errorMessage).toBe("Cancelled by user");
   });
 });

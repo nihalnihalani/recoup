@@ -92,6 +92,12 @@
  *     the library's own `authorize` (which validates the password first)
  *     and threw a differently-worded error — an account-enumeration oracle
  *     triggerable with zero valid credentials.
+ * 11. P01-1 (D244): `email-verification`/`reset-verification` with no code
+ *     (missing or empty) throws `INVALID_CODE_MESSAGE` right after the
+ *     `authAttempt` limit, before any lookup. Without a code the library
+ *     issues and mails a new one, which made both flows enumeration oracles,
+ *     mailed tombstoned accounts, and left stray auth rows. Codes are only
+ *     requested through `signIn` (D66) and `reset`.
  */
 import { ConvexError, v } from "convex/values";
 import { ConvexCredentials } from "@convex-dev/auth/providers/ConvexCredentials";
@@ -218,6 +224,27 @@ async function guardedAuthorize(params: AuthorizeParams, ctx: Ctx): Promise<Auth
 
   // Before any provider work: 11th attempt for this email in 10 minutes fails closed.
   await rateLimiter.limit(ctx, "authAttempt", { key: email, throws: true });
+
+  // P01-1 (D244): a code flow with no code is not a verification attempt.
+  // The library treats it as a request for a NEW code
+  // (`implementation/signIn.ts` branches on `params.code !== undefined`;
+  // `Password.ts`'s reset-verification sends before its own "Invalid code"),
+  // so letting it through mailed a fresh code to any known address, including
+  // a tombstoned one. That gave two enumeration oracles: a known address
+  // resolved `{tokens:null}` while an unknown one threw INVALID_CODE, and
+  // only a known address hit the authMailPerEmail cap. For an unverified
+  // target it also left a second `users` row plus `authAccounts` and code
+  // rows that `purgeAuth` never reaches. Refused here, before any lookup,
+  // with the byte-identical error a wrong code gets, so every address reads
+  // the same and nothing is mailed. The legitimate ways to get a code are
+  // unchanged, and both are bounded by authMailPerEmail: `signIn` with the
+  // password (D66) and `reset`. The client always sends a string code.
+  if (
+    (flow === "email-verification" || flow === "reset-verification") &&
+    (typeof params.code !== "string" || params.code.length === 0)
+  ) {
+    throw new ConvexError(INVALID_CODE_MESSAGE);
+  }
 
   try {
     if (flow === "reset") {

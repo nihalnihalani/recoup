@@ -329,6 +329,13 @@ function buildMessage(row: Doc<"mailLog">, watch: Doc<"watches">): string {
  * time may have passed since `claimDrop` (a sweep-triggered retry, or a
  * 24h re-claim), and the user's alert eligibility or the watch's status may
  * have changed since.
+ *
+ * P02-OW-3 (D244): this check runs in the transaction that enqueues, but the
+ * component POSTs later, from its own workpool. The other half of the
+ * send-time check is `alerts.cancelPendingDrops`: every change that closes
+ * the gate (opt-out, one-click unsubscribe, bounce/complaint suppression,
+ * deletion) cancels this user's still-pending component sends in its own
+ * transaction. Whichever commits first, no POST starts after the gate closes.
  */
 export const sendDrop = internalMutation({
   args: { mailLogId: v.id("mailLog") },

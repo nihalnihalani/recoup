@@ -863,3 +863,105 @@ describe("checkpoint 6b (D115) 6b-4a — beforeSessionCreation gates sign-in on 
     expect(typeof (tombstonedErr as ConvexError<string>).data).toBe("string"); // no {kind, retryAfter} envelope -- not distinguishable from a rate limit either.
   });
 });
+
+describe("P01-1 (D244) — the two code flows refuse a request with no code before the library can mail one", () => {
+  beforeAll(async () => {
+    process.env.SITE_URL = "https://recoup.example";
+    process.env.CONVEX_SITE_URL = "https://recoup-test.convex.site";
+    const { privateKey } = await generateKeyPair("RS256", { extractable: true });
+    process.env.JWT_PRIVATE_KEY = await exportPKCS8(privateKey);
+    process.env.ALERTS_INBOX_ID = "inbox_test";
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function authRowCounts(t: ReturnType<typeof setup>) {
+    return await t.run(async (ctx) => ({
+      users: (await ctx.db.query("users").collect()).length,
+      authAccounts: (await ctx.db.query("authAccounts").collect()).length,
+      authVerificationCodes: (await ctx.db.query("authVerificationCodes").collect()).length,
+    }));
+  }
+
+  type AddressKind = "known-verified" | "known-unverified" | "unknown" | "tombstoned";
+
+  /** Seeds one address of the given kind; returns it with the transport spy cleared. */
+  async function seedAddress(t: ReturnType<typeof setup>, send: SendSpy & { mockClear(): void }, kind: AddressKind) {
+    const email = `p011-${kind}@example.com`;
+    if (kind !== "unknown") {
+      await signIn(t, { flow: "signUp", email, password: PASSWORD });
+      if (kind !== "known-unverified") {
+        await signIn(t, { flow: "email-verification", email, code: lastCode(send) });
+      }
+    }
+    if (kind === "tombstoned") {
+      await t.run(async (ctx) => {
+        const user = await ctx.db
+          .query("users")
+          .withIndex("email", (q) => q.eq("email", email))
+          .unique();
+        await ctx.db.insert("accountState", { userId: user!._id, status: "deleting", requestedAt: Date.now(), attempts: 0 });
+      });
+    }
+    send.mockClear();
+    return email;
+  }
+
+  // One case per (address, flow), so each of the re-audit's repros fails on
+  // its own against the unfixed code: S1 (email-verification: a known address
+  // resolved {tokens:null} and was mailed), S2 (reset-verification: a known
+  // address was mailed and went RateLimited on the 4th call), S2b (an
+  // unverified target grew a second users row plus authAccounts/code rows),
+  // S3 (a tombstoned account was mailed a code).
+  const ADDRESSES: AddressKind[] = ["known-verified", "known-unverified", "unknown", "tombstoned"];
+  const FLOWS = ["email-verification", "reset-verification"] as const;
+  const CASES = ADDRESSES.flatMap((kind) => FLOWS.map((flow) => [kind, flow] as const));
+
+  it.each(CASES)(
+    "%s address, %s with no code: the same INVALID_CODE .data four times, never RateLimited, no mail, no new auth rows",
+    async (kind, flow) => {
+      const t = setup();
+      const send = vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
+      const email = await seedAddress(t, send, kind);
+      const before = await authRowCounts(t);
+      const params =
+        flow === "email-verification" ? { flow, email } : { flow, email, newPassword: "a-brand-new-password-1" };
+
+      // Four calls: the 4th is past the 3-per-hour authMailPerEmail cap S2
+      // used to hit for a known address only, and still under the
+      // 10-per-10-min authAttempt cap every address shares.
+      for (let call = 1; call <= 4; call++) {
+        let caught: unknown;
+        let result: unknown;
+        try {
+          result = await signIn(t, params);
+        } catch (err) {
+          caught = err;
+        }
+        const label = `${flow} for a ${kind} address, call ${call} (resolved: ${JSON.stringify(result)})`;
+        expect(caught, label).toBeInstanceOf(ConvexError);
+        expect(isRateLimitError(caught), label).toBe(false);
+        // A string compared with toBe: every address and flow gets the byte-identical .data.
+        expect((caught as ConvexError<string>).data, label).toBe(INVALID_CODE_MESSAGE);
+        expect(send, label).not.toHaveBeenCalled();
+        expect(await authRowCounts(t), label).toEqual(before);
+      }
+    },
+  );
+
+  it("an empty-string code is refused exactly like a missing one", async () => {
+    const t = setup();
+    const send = vi.spyOn(authMailTransport, "send").mockResolvedValue(undefined);
+    const email = "p011-empty-code@example.com";
+    await signIn(t, { flow: "signUp", email, password: PASSWORD });
+    send.mockClear();
+
+    await expect(signIn(t, { flow: "email-verification", email, code: "" })).rejects.toThrow(INVALID_CODE_MESSAGE);
+    await expect(
+      signIn(t, { flow: "reset-verification", email, code: "", newPassword: "a-brand-new-password-1" }),
+    ).rejects.toThrow(INVALID_CODE_MESSAGE);
+    expect(send).not.toHaveBeenCalled();
+  });
+});

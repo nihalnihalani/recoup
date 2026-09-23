@@ -415,16 +415,39 @@ describe("account.requestDeletion", () => {
     expect(tokens).toHaveLength(0);
   });
 
-  it("suppresses queued mailLog rows immediately, with a deleted reason, before purge ever runs", async () => {
+  it("P02-OW-3: cancels a queued alert's pending component send and marks it suppressed/deleted before purge ever runs; a row whose send is not pending stays queued", async () => {
     const t = setup();
     const a = await signedIn(t, "A");
     const seeded = await seedFullAccount(t, a.userId, "a@example.com");
+    // A send still pending in THIS backend's component. Never driven, so its
+    // workpool job never runs (see SAMPLE_OUTBOUND_ID's note above).
+    const pendingOutboundId = await t.mutation(components.agentmail.lib.enqueueSend, {
+      config: { retryAttempts: 1, initialBackoffMs: 10 },
+      inboxId: "inbox-alerts",
+      kind: "send" as const,
+      payload: { to: "a@example.com", subject: "Price drop!", text: "sample" },
+    });
+    const pendingRowId = await t.run((ctx) =>
+      ctx.db.insert("mailLog", {
+        userId: a.userId, dedupeKey: "watch:pending:6800", kind: "price_drop", to: "a@example.com", subject: "Price drop!",
+        status: "queued", outboundId: pendingOutboundId as never, attempt: 0, nextCheckAt: T0 + 600_000,
+      }),
+    );
 
     await a.as.mutation(api.account.requestDeletion, { confirmation: "delete my account" });
 
-    const row = await t.run((ctx) => ctx.db.get(seeded.queuedMailLogId));
+    const row = await t.run((ctx) => ctx.db.get(pendingRowId));
     expect(row?.status).toBe("suppressed");
     expect(row?.reason).toBe("deleted");
+    expect(row?.error).toMatch(/asked for this alert to be cancelled, but it may already have gone out/);
+    const component = await t.query(components.agentmail.lib.getOutboundStatus, { outboundId: pendingOutboundId });
+    expect(component?.status).toBe("failed");
+    expect(component?.errorMessage).toBe("Cancelled by user");
+
+    // The seeded row's outboundId has no row in this backend: nothing was
+    // cancelled, so it is not claimed as suppressed. Reconciliation (or the
+    // purge) settles it.
+    expect((await t.run((ctx) => ctx.db.get(seeded.queuedMailLogId)))?.status).toBe("queued");
   });
 
   it("another user's requestDeletion never tombstones the caller", async () => {
