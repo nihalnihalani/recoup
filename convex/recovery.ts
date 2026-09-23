@@ -8,9 +8,12 @@
  *   net       = max(0, confirmed − debited)
  *   lossAll   = max(claim expected, opportunity estimate) over K     lossOpen = the same over OPEN members
  *   recovered = min(Σ net, lossAll)                                   excess = Σ net − recovered (never erased)
- *   excess split (D195/D196, DA-B-8): RED `possibleDoubleCredit` when ≥ 2 claims in K have net > 0; otherwise
- *               NEUTRAL `extraCredited` ("more than you asked — often tax or shipping"). A single refund that
- *               includes tax or shipping is recovered money, never a suspected double credit.
+ *   excess split (D195/D196, DA-B-8; D222): NEUTRAL `extraCredited` ("more than you asked — often tax or shipping") =
+ *               each credited claim's credit above its OWN ask, Σ max(0, net − expected), up to the excess; RED
+ *               `possibleDoubleCredit` = the rest of the excess. With one credited claim the whole excess is that
+ *               claim's own extra, so it is all neutral: a single refund that includes tax or shipping is recovered
+ *               money, never a suspected double credit. With ≥ 2 credited claims only the part no single claim
+ *               explains is red (A asks 25, credited 27; B asks 120, credited 120; loss 120 → neutral 2, red 25).
  *   outstanding = K has an open member ? max(0, lossOpen − recovered) : 0
  *   tile(K)   = furthest state over open members: promised > refused > asked > sending_or_unknown > ready > potential;
  *               `ready` is the CATCH-ALL for every open claim not in a higher tile (C4). `refused` (DA-B-13, D196,
@@ -150,6 +153,10 @@ export function components(claims: readonly SummaryClaim[], opps: readonly Summa
     const recovered = Math.min(sumNet, lossAll);
     const credited = cs.filter((c) => netOf(c) > 0).length;
     const excess = sumNet - recovered;
+    // D222: the neutral part is what each claim was credited above its own ask (tax, shipping); only the excess no
+    // single claim explains is red. One credited claim: that claim's extra IS the excess → all neutral (D196).
+    const ownExtra = cs.reduce((a, c) => a + Math.max(0, netOf(c) - c.expectedMinor), 0);
+    const neutral = credited >= 2 ? Math.min(excess, ownExtra) : excess;
     const hasOpen = openClaims.length > 0 || os.length > 0;
     const outstanding = hasOpen ? Math.max(0, lossOpen - recovered) : 0;
     let tile: Tile | null = null;
@@ -171,9 +178,9 @@ export function components(claims: readonly SummaryClaim[], opps: readonly Summa
       lossKeys: [...new Set(members.flatMap((m) => (m.kind === "claim" ? m.c.lossKeys : m.o.lossKeys)))],
       anchor: anchors[0] ?? null,
       recovered,
-      // D196: red only when ≥ 2 claims in the component were credited; one claim's extra is neutral.
-      extraCredited: credited >= 2 ? 0 : excess,
-      possibleDoubleCredit: credited >= 2 ? excess : 0,
+      // D196/D222: red only when ≥ 2 claims in the component were credited, and only beyond their own extras.
+      extraCredited: neutral,
+      possibleDoubleCredit: excess - neutral,
       credited,
       outstanding,
       provisional: Math.min(outstanding, provisionalSum),

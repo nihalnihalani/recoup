@@ -210,6 +210,55 @@ describe("DA-B-8 (D195/D196): the excess splits into neutral extra credit and re
     expect(parts(usd([credited("a", "k", 4_000, 4_000), credited("b", "k", 4_000, 1_000)]))).toEqual([4_000, 0, 1_000, 1_000]);
   });
 
+  describe("D222: with ≥ 2 credited claims only the excess no single claim explains is red", () => {
+    // Same item, one loss of 120.00: A asked 25.00 and got 27.00 (the extra 2.00 is tax); B asked 120.00.
+    const a = credited("a", "item:i", 2_500, 2_700);
+    const b = (got: number) => credited("b", "item:i", 12_000, got);
+
+    it("A credited 27.00 + B credited 120.00 → Recovered 120.00, neutral 2.00 (A's own extra), red 25.00", () => {
+      expect(parts(usd([a, b(12_000)]))).toEqual([12_000, 200, 2_500, 2_700]);
+    });
+
+    it("B only partly credited (100.00) → neutral 2.00, red 5.00", () => {
+      expect(parts(usd([a, b(10_000)]))).toEqual([12_000, 200, 500, 700]);
+    });
+
+    it("Σ net within the loss (27.00 + 90.00 ≤ 120.00) → no excess, nothing neutral, nothing red", () => {
+      expect(parts(usd([a, b(9_000)]))).toEqual([11_700, 0, 0, 0]);
+    });
+
+    it("the neutral part never exceeds the excess: two claims each credited above their asks, excess smaller than both extras", () => {
+      // loss 120.00; A 100.00 → 110.00 (+10.00), B 120.00 → 125.00 (+5.00); Σ net 235.00, excess 115.00 → neutral 15.00, red 100.00.
+      expect(parts(usd([credited("a", "k", 10_000, 11_000), credited("b", "k", 12_000, 12_500)]))).toEqual([12_000, 1_500, 10_000, 11_500]);
+      // A 50.00 → 60.00, B 60.00 → 65.00; loss 60.00, Σ net 125.00, excess 65.00 → neutral 15.00, red 50.00.
+      expect(parts(usd([credited("a", "k", 5_000, 6_000), credited("b", "k", 6_000, 6_500)]))).toEqual([6_000, 1_500, 5_000, 6_500]);
+    });
+
+    it("one credited claim stays all neutral, as before (D196), even beside an uncredited claim on the same loss", () => {
+      // loss 25.00 (A's ask; B asked 20.00 and got nothing): A's 27.00 → Recovered 25.00, neutral 2.00, nothing red.
+      expect(parts(usd([a, credited("b", "item:i", 2_000, 0)]))).toEqual([2_500, 200, 0, 200]);
+    });
+
+    it("the paid cap still applies after the split, and I2/I2b hold: a confirmed 100.00 order total moves 20.00 more to red", () => {
+      const s = usd([a, b(12_000)], [], orderTotal(10_000));
+      expect(parts(s)).toEqual([10_000, 200, 4_500, 4_700]);
+      expect(s.recoveredMinor + s.overCreditMinor).toBe(2_700 + 12_000); // I2
+      expect(s.extraCreditedMinor + s.possibleDoubleCreditMinor).toBe(s.overCreditMinor); // I2b
+      // An item-only 120.00 total is not exceeded by the 120.00 recovered: nothing moves.
+      expect(parts(usd([a, b(12_000)], [], itemOnly(12_000)))).toEqual([12_000, 200, 2_500, 2_700]);
+    });
+
+    it("mixed currencies: the USD split and a EUR split are computed and reported separately, never summed", () => {
+      const rows = computeSummary(
+        [a, b(12_000), credited("e1", "item:j", 2_500, 2_700, "EUR"), credited("e2", "item:j", 12_000, 10_000, "EUR")],
+        [],
+        new Map(),
+      );
+      const byCur = Object.fromEntries(rows.map((r) => [r.currency, parts(r as ReturnType<typeof usd>)]));
+      expect(byCur).toEqual({ USD: [12_000, 200, 2_500, 2_700], EUR: [12_000, 200, 500, 700] });
+    });
+  });
+
   it("mixed currencies stay separate: USD red and EUR neutral never mix, never sum", () => {
     const rows = computeSummary(
       [credited("u1", "a", 3_000, 3_000), credited("u2", "b", 3_000, 3_000), credited("e1", "c", 2_500, 2_700, "EUR")],
@@ -261,6 +310,7 @@ describe("I1–I5 per currency over the C4 generator (every status × delivery �
   it("holds on 3,000 generated ledgers", () => {
     const rnd = mulberry32(20260923);
     let refusedComponents = 0;
+    let mixedComponents = 0; // D222: components with both a neutral and a red part
     const pick = <T,>(xs: readonly T[]) => xs[Math.floor(rnd() * xs.length)];
     let componentsWithOpen = 0;
     for (let run = 0; run < 3_000; run++) {
@@ -313,6 +363,17 @@ describe("I1–I5 per currency over the C4 generator (every status × delivery �
         // I2b (D196): extra credit + possible double credit = over-credit, neither negative.
         expect(cur.extraCreditedMinor + cur.possibleDoubleCreditMinor).toBe(cur.overCreditMinor);
         expect(Math.min(cur.extraCreditedMinor, cur.possibleDoubleCreditMinor)).toBeGreaterThanOrEqual(0);
+        // D222, per component before the cap: neutral = min(excess, Σ each claim's credit above its own ask); red = the
+        // rest; with one credited claim the whole excess is neutral.
+        for (const k of comps) {
+          const nets = k.claims.map((c) => Math.max(0, c.confirmedMinor - c.debitedMinor));
+          const excess = nets.reduce((x, y) => x + y, 0) - k.recovered;
+          const ownExtra = k.claims.reduce((x, c, i) => x + Math.max(0, nets[i] - c.expectedMinor), 0);
+          const creditedCount = nets.filter((n) => n > 0).length;
+          const neutral = creditedCount >= 2 ? Math.min(excess, ownExtra) : excess;
+          expect([k.extraCredited, k.possibleDoubleCredit]).toEqual([neutral, excess - neutral]);
+          if (k.extraCredited > 0 && k.possibleDoubleCredit > 0) mixedComponents += 1;
+        }
         // D196 red rule: red only with ≥ 2 credited claims in one component, or a paid total that applies and is
         // confirmed, or item-only with ≥ 2 credited claims on the transaction.
         if (cur.possibleDoubleCreditMinor > 0) {
@@ -344,6 +405,7 @@ describe("I1–I5 per currency over the C4 generator (every status × delivery �
     }
     expect(componentsWithOpen).toBeGreaterThan(1_000); // the generator really exercises open components
     expect(refusedComponents).toBeGreaterThan(100); // …and the refused tile
+    expect(mixedComponents).toBeGreaterThan(20); // …and the D222 neutral + red mix
   });
 
   it("I4 exactly: after the cap, Σ (recovered + outstanding) on a capped transaction ≤ its paid total", () => {
