@@ -18,7 +18,8 @@
  *   tile(K)   = furthest state over open members: promised > refused > asked > sending_or_unknown > ready > potential;
  *               `ready` is the CATCH-ALL for every open claim not in a higher tile (C4). `refused` (DA-B-13, D196,
  *               display only): an open claim whose newest classified reply is a refusal with no later promise or
- *               credit — "the merchant said no; no money yet" (wave 2 moves `denied` to closed-for-ask)
+ *               credit — "the merchant said no; no money yet" (wave 2 moves `denied` to closed-for-ask). Such a claim
+ *               counts as refused, not promised, even if an earlier promise exists (D223)
  *   provisional(K) = min(outstanding(K), Σ provisional) — shown "of which provisional" inside tile(K)
  *   per-transaction cap (D145, D188), per transaction per currency, against its confirmed paid total P (retail: a
  *               confirmed `retail.order_total`, else Σ unit × qty labelled `paidTotalPartial`):
@@ -161,7 +162,9 @@ export function components(claims: readonly SummaryClaim[], opps: readonly Summa
     const outstanding = hasOpen ? Math.max(0, lossOpen - recovered) : 0;
     let tile: Tile | null = null;
     if (hasOpen) {
-      if (openClaims.some((c) => c.status === "promised" && c.promisedMinor > netOf(c))) tile = "promised";
+      // D223: a claim refused after its promise (newest classified reply a refusal, no promise or credit since) is
+      // refused, not promised; precedence ACROSS claims is unchanged.
+      if (openClaims.some((c) => !c.refused && c.status === "promised" && c.promisedMinor > netOf(c))) tile = "promised";
       else if (openClaims.some((c) => c.refused)) tile = "refused";
       else if (openClaims.some((c) => ASKED_DELIVERIES.has(c.delivery))) tile = "asked";
       else if (openClaims.some((c) => SENDING_DELIVERIES.has(c.delivery))) tile = "sendingOrUnknown";

@@ -728,7 +728,19 @@ function c4Cases(): C4Case[] {
     { id: "m:confirmed+alt-opp", alt: 7_000, claims: [{ ...base, status: "confirmed", expected: 3_000, credit: 3_000 }] },
     { id: "m:refused+promised-member", alt: null, claims: [{ ...base, status: "sent", refusal: "newest" }, { ...base, status: "promised", promise: 9_000 }] },
     { id: "m:refused+asked-member", alt: 3_000, claims: [{ ...base, status: "sent" }, { ...base, status: "drafted", refusal: "newest" }] },
+    // D222: one claim credited above its own ask beside a second credited claim on the same loss.
+    { id: "d222:lead-example", alt: null, claims: [{ ...base, status: "confirmed", expected: 2_500, credit: 2_700 }, { ...base, status: "confirmed", expected: 12_000, credit: 12_000 }] },
+    { id: "d222:above-ask-capped", alt: null, claims: [{ ...base, status: "confirmed", expected: 10_000, credit: 13_000 }, { ...base, status: "sent", expected: 12_000, credit: 1_000 }] },
+    { id: "d222:net-after-debit", alt: null, claims: [{ ...base, status: "confirmed", expected: 2_500, credit: 4_000, debit: 1_000 }, { ...base, status: "confirmed", expected: 12_000, credit: 12_000 }] },
+    { id: "d222:both-above-ask", alt: null, claims: [{ ...base, status: "confirmed", expected: 2_500, credit: 3_000 }, { ...base, status: "confirmed", expected: 4_000, credit: 4_600 }] },
   );
+  // D222, generated: two credited claims on one loss, each credited below, at or above its own ask.
+  const mix = c4Random(20260924);
+  for (let n = 0; n < 24; n++) {
+    const a: C4Claim = { ...base, status: mix(["confirmed", "sent", "promised"] as const), expected: mix([2_500, 5_000] as const), credit: mix([1_000, 2_500, 2_700, 6_000] as const), debit: mix([0, 500] as const), promise: null };
+    const b: C4Claim = { ...base, status: mix(["confirmed", "sent"] as const), expected: mix([5_000, 12_000] as const), credit: mix([3_000, 5_000, 12_000, 13_000] as const), debit: 0 };
+    cases.push({ id: `d222:mix${n}`, alt: mix([null, 7_000] as const), claims: [a, b] });
+  }
   return cases;
 }
 
@@ -749,14 +761,19 @@ function c4Oracle(c: C4Case): C4Expected {
   const sumNet = nodes.reduce((a, x) => a + net(x), 0);
   const recovered = Math.min(sumNet, lossAll);
   const excess = sumNet - recovered;
-  // D196: red only for ≥ 2 credited claims in one loss component (no confirmed order total here); else neutral.
-  const credited = nodes.filter((x) => net(x) > 0).length;
+  // D196: red only with ≥ 2 credited claims in one loss component (no confirmed order total here); else neutral.
+  // D222: with ≥ 2 credited claims, the neutral part is each credited claim's (net) credit above its OWN ask, summed
+  // and capped at the excess; the rest of the excess is red.
+  const credited = nodes.filter((x) => net(x) > 0);
+  const aboveOwnAsk = credited.reduce((a, x) => a + Math.max(0, net(x) - x.expected), 0);
+  const extraMulti = Math.min(excess, aboveOwnAsk);
   const outstanding = hasOpen ? Math.max(0, lossOpen - recovered) : 0;
   const hasMoneyEvent = (x: C4Claim) => x.promise !== null || x.credit > 0;
   const claimTile = (x: C4Claim): C4Tile => {
-    if (x.status === "promised" && (x.promise ?? 0) > net(x)) return "promised";
-    // D196: the newest classified reply is a refusal, with no promise or credit recorded after it.
+    // D196/D223: the newest classified reply is a refusal, with no promise or credit after it → refused, even over an
+    // earlier promise (a claim refused after its promise is refused, not promised).
     if (x.refusal === "newest" || (x.refusal === "moneyAfter" && !hasMoneyEvent(x))) return "refused";
+    if (x.status === "promised" && (x.promise ?? 0) > net(x)) return "promised";
     const asked = x.delivery === "sent" || x.status === "sent" || x.status === "packet"; // legacy: sent / user_reported
     if (asked) return "asked";
     if (x.status === "queued" || x.delivery === "queued" || x.delivery === "unknown") return "sendingOrUnknown";
@@ -773,7 +790,8 @@ function c4Oracle(c: C4Case): C4Expected {
   const provisionalSum = nodes.reduce((a, x) => a + x.provisional, 0);
   return {
     tile, outstanding, provisional: hasOpen ? Math.min(outstanding, provisionalSum) : 0, recovered,
-    extra: credited >= 2 ? 0 : excess, red: credited >= 2 ? excess : 0, hasNodes: nodes.length > 0 || c.alt !== null,
+    extra: credited.length >= 2 ? extraMulti : excess, red: credited.length >= 2 ? excess - extraMulti : 0,
+    hasNodes: nodes.length > 0 || c.alt !== null,
   };
 }
 
@@ -881,6 +899,12 @@ describe("C4. every status × delivery × promised ≶ net × provisional × ref
     expect(oracles.some((o) => o.red > 0)).toBe(true);
     expect(oracles.some((o) => o.provisional > 0)).toBe(true);
     expect(oracles.some((o) => o.tile !== null && o.outstanding === 0)).toBe(true); // an open member, nothing outstanding
+    // D222: both a split (neutral AND red in one component) and a neutral part capped at the excess occur.
+    expect(oracles.some((o) => o.extra > 0 && o.red > 0)).toBe(true);
+    const lead = c4Oracle(cases.find((c) => c.id === "d222:lead-example")!);
+    expect({ extra: lead.extra, red: lead.red, recovered: lead.recovered }).toEqual({ extra: 200, red: 2_500, recovered: 12_000 });
+    const capped = c4Oracle(cases.find((c) => c.id === "d222:above-ask-capped")!);
+    expect({ extra: capped.extra, red: capped.red }).toEqual({ extra: 2_000, red: 0 }); // 3,000 above its ask, capped at the 2,000 excess
   });
 
   it("recovery.summary equals the §3.4 oracle for every generated case (I1, I2, I3 and the D196 excess split)", async () => {

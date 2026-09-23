@@ -285,6 +285,25 @@ describe("DA-B-13 (D196): refused — the merchant said no, no money yet — ins
     expect([p.tiles.promised.amountMinor, p.tiles.refused.amountMinor]).toEqual([4_000, 0]);
   });
 
+  it("D223: a promise followed by a refusal → refused, not promised (the refusal is the newest answer)", () => {
+    // `refused` is true only when no promise or credit was recorded after the refusal (refusedState).
+    const s = usd([sent({ id: "a", expectedMinor: 2_500, status: "promised", promisedMinor: 2_500, refused: true })]);
+    expect([s.tiles.promised.amountMinor, s.tiles.refused.amountMinor]).toEqual([0, 2_500]);
+  });
+
+  it("D223: a refusal followed by a promise → promised (the promise undid the refusal)", () => {
+    const s = usd([sent({ id: "a", expectedMinor: 2_500, status: "promised", promisedMinor: 2_500, refused: false })]);
+    expect([s.tiles.promised.amountMinor, s.tiles.refused.amountMinor]).toEqual([2_500, 0]);
+  });
+
+  it("D223: precedence across claims is unchanged — another claim's live promise still wins the component", () => {
+    const s = usd([
+      sent({ id: "a", status: "promised", promisedMinor: 4_000, refused: true }),
+      sent({ id: "b", status: "promised", promisedMinor: 4_000 }),
+    ]);
+    expect([s.tiles.promised.amountMinor, s.tiles.refused.amountMinor]).toEqual([4_000, 0]);
+  });
+
   it("a refused claim that is closed for asking sits in no tile", () => {
     const s = usd([sent({ id: "a", refused: true, status: "dismissed", closedForAsk: true })]);
     expect(TILES.every((t) => s.tiles[t].components === 0)).toBe(true);
@@ -353,7 +372,9 @@ describe("I1–I5 per currency over the C4 generator (every status × delivery �
         // C4 precedence (D196): promised > refused > asked > sendingOrUnknown > ready > potential.
         for (const k of withOpen) {
           const open = k.claims.filter((c) => !c.closedForAsk);
-          const promised = open.some((c) => c.status === "promised" && c.promisedMinor > Math.max(0, c.confirmedMinor - c.debitedMinor));
+          // D223: a claim refused after its promise is refused, not promised.
+          const promised = open.some((c) => !c.refused && c.status === "promised" && c.promisedMinor > Math.max(0, c.confirmedMinor - c.debitedMinor));
+          if (promised) expect(k.tile).toBe("promised");
           if (!promised && open.some((c) => c.refused)) expect(k.tile).toBe("refused");
           if (k.tile === "refused") expect(open.some((c) => c.refused) && !promised).toBe(true);
         }
@@ -436,7 +457,7 @@ describe("recovery.summary (query)", () => {
       return { purchaseId, itemId };
     });
   }
-  async function claimRow(t: T, userId: Id<"users">, w: { purchaseId: Id<"purchases">; itemId: Id<"items"> }, o: { expected: number; status?: "detected" | "confirmed" | "sent"; confirmed?: number; isExample?: boolean; type?: "price_adjustment" | "return_credit" }) {
+  async function claimRow(t: T, userId: Id<"users">, w: { purchaseId: Id<"purchases">; itemId: Id<"items"> }, o: { expected: number; status?: "detected" | "confirmed" | "sent" | "promised"; confirmed?: number; isExample?: boolean; type?: "price_adjustment" | "return_credit" }) {
     return await t.run(async (ctx) => {
       const claimId = await ctx.db.insert("claims", {
         purchaseId: w.purchaseId, itemId: w.itemId, userId, type: o.type ?? "price_adjustment", expectedCents: o.expected,
@@ -519,6 +540,33 @@ describe("recovery.summary (query)", () => {
     expect(await tiles()).toMatchObject({ refused: { amountMinor: 4_000 }, asked: { amountMinor: 0 } });
     await reply("question");
     expect(await tiles()).toMatchObject({ refused: { amountMinor: 0 }, asked: { amountMinor: 4_000 } });
+  });
+
+  it("D223 end to end: promise, then refusal → refused; then a credit of the promised amount → out of both tiles", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const w = await seedItem(t, userId);
+    const claimId = await claimRow(t, userId, w, { expected: 2_500, status: "promised" });
+    const tiles = async () => (await as.query(api.recovery.summary, { now: NOW })).currencies[0].tiles;
+    await t.run((ctx) => ctx.db.insert("ledgerEvents", { claimId, userId, kind: "promised_credit", cents: 2_500, evidence: "test" }));
+    expect(await tiles()).toMatchObject({ promised: { amountMinor: 2_500 }, refused: { amountMinor: 0 } });
+    await t.run((ctx) => ctx.db.insert("replies", { claimId, userId, messageId: "r-refusal", from: "help@acme.example", classification: "refusal", summary: "s", senderMismatch: false, receivedAt: NOW }));
+    expect(await tiles()).toMatchObject({ promised: { amountMinor: 0 }, refused: { amountMinor: 2_500, components: 1 } });
+    await t.run((ctx) => ctx.db.insert("ledgerEvents", { claimId, userId, kind: "confirmed_credit", cents: 2_500, evidence: "test" }));
+    const after = await tiles();
+    expect([after.promised.amountMinor, after.refused.amountMinor]).toEqual([0, 0]);
+    expect([after.promised.components, after.refused.components]).toEqual([0, 0]);
+  });
+
+  it("D223 end to end: refusal, then a promise → promised", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const w = await seedItem(t, userId);
+    const claimId = await claimRow(t, userId, w, { expected: 2_500, status: "promised" });
+    await t.run((ctx) => ctx.db.insert("replies", { claimId, userId, messageId: "r-refusal", from: "help@acme.example", classification: "refusal", summary: "s", senderMismatch: false, receivedAt: NOW }));
+    await t.run((ctx) => ctx.db.insert("ledgerEvents", { claimId, userId, kind: "promised_credit", cents: 2_500, evidence: "test" }));
+    const tiles = (await as.query(api.recovery.summary, { now: NOW })).currencies[0].tiles;
+    expect([tiles.promised.amountMinor, tiles.refused.amountMinor]).toEqual([2_500, 0]);
   });
 
   it("examples are excluded (claims, their ledger and non-cash rows, and example opportunities)", async () => {
