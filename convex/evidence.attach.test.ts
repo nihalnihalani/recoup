@@ -12,8 +12,18 @@ import { EVIDENCE_LIST_LIMIT, RECENT_UPLOADS_MAX } from "./evidence";
 type T = ReturnType<typeof setup>;
 const T0 = Date.UTC(2026, 8, 23, 12);
 
+/**
+ * ALL timers are fake, not just `Date` (D231). `purchases.create` schedules `policies:fetchBoth` with runAfter(0).
+ * With a real `setTimeout`, convex-test runs it in the background while the test uploads. convex-test's
+ * `ctx.storage.store` in an action decides whether it is inside a mutation from a GLOBAL "a transaction is running"
+ * flag. If the background function's mutation holds that flag, the upload's `_storage` insert joins that mutation's
+ * write layer. If that mutation commits while the store awaits its SHA-256, the insert throws "Write outside of
+ * transaction …_storage" (intermittently, seen in CI). This is a harness race, not the route: the upload route and
+ * `finalizeUpload` await every call. With fake timers, scheduled functions stay pending unless a test drives them,
+ * exactly as in evidence.test.ts and isolationM1.test.ts.
+ */
 beforeEach(() => {
-  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.useFakeTimers();
   vi.setSystemTime(T0);
 });
 afterEach(() => {
@@ -194,6 +204,9 @@ describe("evidence.listRecent", () => {
     const res = await a.as.fetch("/evidence/upload", { method: "POST", body, headers: { "Content-Length": String(body.byteLength), "X-Doc-Type": "receipt" } });
     expect(res.status).toBe(200);
     const { evidenceId } = (await res.json()) as { evidenceId: Id<"evidence"> };
+    // D231: nothing scheduled may run concurrently with the upload in this test (see the timer note at the top).
+    const scheduled = await t.run(async (ctx) => await ctx.db.system.query("_scheduled_functions").collect());
+    expect(scheduled.map((s) => [s.name, s.state.kind])).toEqual([["policies:fetchBoth", "pending"]]);
     const recent = await a.as.query(api.evidence.listRecent, { limit: 5 });
     expect(recent.map((e) => e._id)).toEqual([evidenceId]);
     expect(recent[0].transactionId).toBeNull();
