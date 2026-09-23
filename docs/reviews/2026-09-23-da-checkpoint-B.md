@@ -216,3 +216,74 @@ Model (self-reported from my system prompt): Opus 5.5 / claude-opus-5-5
   - One known wart: after a dismissal, "Open the claim" can still link to the dismissed claim (DA-B-7, M12d).
 - **Placeholder support.** The server creates no card without an active pack (registry). "Paths not checked" shows reasons only, never amounts, and no digital-content path appears for a physical item.
 - **Isolation through URLs.** `forPurchase`, `forTransaction` and `get` use owned* helpers with an identical not-found; M16's reflective two-user guard covers every new public function. External source links use `rel="noreferrer noopener"`, so no internal ids leak through Referer.
+
+---
+
+# M17b — recheck of the checkpoint-B fixes (wave-1 close gate)
+
+Model (self-reported from my system prompt): Opus 5.5 / claude-opus-5-5
+
+- **Target:** `origin/main` `a53a2bf`.
+- **Worktree:** the durable `/Users/nihalnihalani/Desktop/Github/recoup-wt-m17b` (D209), with `node_modules` symlinked. No production code was edited and nothing was stashed. Throwaway probes were deleted after running.
+- **Gates on main:** 146 files, **3,266 pass + 1 expected fail + 3 todo**; both typechecks exit 0; `check-rule-packs` OK (engine pin 1/1).
+- **Method:**
+  - **(a) Fail-before, pass-after.** For every fix commit, check out its parent, add the fix commit's own test files, and run them (fail-before). Then check out the fix commit and run them again (pass-after). Every test also passes on main.
+  - **(b) Mutation checks.** DA-B-4 and DA-B-6 guard against future regressions rather than fixing broken code, so for those I broke the production code on main and confirmed the guard fails.
+  - **(c) Original repros.** My Appendix B, S1/S2 and U1/U2 repros re-run against main; each defect is gone.
+  - **(d) Attacks on the fixes.** Four new probes, P1–P4.
+
+## Verdict: **wave 1 may close**
+
+- **All fourteen DA-B findings are closed.** DA-B-13 reopens for one edge case (low; see below).
+- **New findings:** one medium, DA-B-15. It is not a wave-1 blocker, because no uncovered function exists today, but it must be fixed **before M20 pushes any new public function**. The four new low findings are routed.
+
+## Per-finding verdicts
+
+Counts are "fix commit's tests on its parent → at the fix commit".
+
+| Finding | Fix | Fail-before → pass-after | Other evidence | Verdict |
+|---|---|---|---|---|
+| DA-B-1 late-window ack and `rule_withdrawn` at send | `0dc874b` (M13b) | parent **`01db658`**: 15 fail / 43 → 43/43 (incl. "B1 inverted (linked)" and "B3 inverted") | — | **closed** |
+| DA-B-2 amount above the estimate | `0dc874b`; projection `25ff8dd` (M12d) | as above ("B4 inverted", "acknowledged … never a hard block", "after adjustExpected … no prompt"); projection: 1 fail / 3 → 3/3 | — | **closed** |
+| DA-B-3 From header is not authentication; every refund waits for the tap (D194) | `8f6b428` (M13b) | parent `9345b65`, where `intake.ts` is unchanged since `01db658`: 9 fail / 110 → 109 + 1 todo | "aligned pass → applied" is an `it.todo`, reserved per D194. One-shot tap: owner-only, removes `pendingRefund` before applying, so a double tap is refused under OCC. Isolation case present. | **closed** (see DA-B-18) |
+| DA-B-4 activation guard able to fail | `cb9969b` (M12d) | parent `132f182`: 8 fail / 45 → 45/45 | **Mutation on main:** production ignoring `activation.ts` → **5 fail**; a bare `import "./lib/rules/testRegistry"` → the guard fails | **closed** |
+| DA-B-5 wider content check | `0dc874b` | included in the 15 above | All five Appendix-B strings are named cases on main (`drafts.prepare.test.ts:464–490`). A false positive ("2026 USD") is logged in D214 for M28. | **closed** |
+| DA-B-6 engine pin, gated deploy | `cb9969b`; D191 `deploy:dev`; D197/D206 | included above | **Mutation on main:** the `outcome.ts` rule-8 edit → `check-rule-packs` **FAIL (engine pin)**; a comment-only edit to `lib/money.ts` → **FAIL**. `deploy:dev` = check-rule-packs → typecheck → vitest → `convex dev --once`. D191's override (no production deploy script) is accepted. | **closed** |
+| DA-B-7 case closure at dismiss/confirm | `cb9969b` | "dismiss → the opportunity is open at once", "a settling credit → closed at once" failed on the parent | **P4:** confirm → later debit (claim `reopened`) → the next evaluation re-links (`closed` → `case_open`, `activeClaimId` = the claim). Holds. | **closed** |
+| DA-B-8 excess split | `d2e8fd2` (M12e); display `7289232` (M15c) | parent `df39e0c`: 21 fail / 57 → 57/57; display parent `3f6a92a`: 6 fail / 13 → 13/13 | **S1/S2 on main:** 25 + 2 tax → Recovered 2,500, `extraCredited` 200, `possibleDoubleCredit` 0; a return of 120 + 9.60 tax on an items-only total → 12,000 / 960 / 0 | **closed** |
+| DA-B-9 "You asked for" | `80ed8e9` (M15b) | parent `1234394`: 12 fail / 56 → 61/61 (incl. "never 'owed'") | — | **closed** |
+| DA-B-10 "How did it come back?" | `80ed8e9` | as above (`Claim.test.tsx:131,148,160`) | Non-cash never reaches the ledger or Recovered. See DA-B-16 and DA-B-17 for its remaining edges. | **closed** |
+| DA-B-11 content acknowledgment bound to the findings | server `85b6e1f` (M13c); client `d717444` / `85b6e1f` | parent `1234394`: 7 fail / 52 → 52/52 ("U2 inverted", "the boolean alone no longer acknowledges") | `findingsHash` covers the sorted findings, the text and the draft version, and is bound into `preparedHash`; `approveAndSend` recomputes it read-only. See DA-B-19 for the cap. | **closed** |
+| DA-B-12 focus and DOM order | `d717444` (M15b) | parent `9345b65`: 9 fail / 17 → 17/17 ("moves focus to the refusal's heading … safe action before 'Send anyway'") | — | **closed** |
+| DA-B-13 refused ≠ "no answer yet" | `d2e8fd2`; display `7289232` | included in the 21 and 6 above | **P1: a promise followed by a refusal still shows "Promised".** `recovery.ts:157` checks `promised` (status promised and promised > net) **before** `refused`. A claim whose merchant promised 25.00 and later refused is `refused` by D196's own definition (newest classified reply is a refusal, with nothing recorded after it), yet it shows `tiles.promised` = 2,500 and `tiles.refused` = 0. | **reopened (low)**: let `refused` outrank `promised` when the refusal is newer than the last promise event. Test: P1 inverted. Owner M12 → M20. |
+| DA-B-14 `implemented_live_unverified` | `d2e8fd2` | "active, no record → implemented_live_unverified" failed on the parent | `LIVE_VERIFICATIONS` is empty and lead-owned | **closed** |
+
+## New findings
+
+| ID | Sev | Requirement | Reproduction | Expected vs observed | Smallest fix | Regression test | Owner |
+|---|---|---|---|---|---|---|---|
+| **DA-B-15** | medium | Mission §17 "at least two users … foreign ids on every public function"; §6 ownership | The reflective isolation guard (`isolationM1.test.ts:404–419`) turns each uncovered public function into **`it.todo`**, which never fails CI. Throwaway repro: a new module `convex/zzLeak.ts` with `export const peek = query({ args: { claimId: v.id("claims") }, handler: (ctx, a) => ctx.db.get(a.claimId) })` returns **any user's** claim by id, and the suite stays green (29 passed, **1 todo**). Today there is no uncovered function, so nothing leaks now. | **Expected:** a new public function without a two-user case fails the build. **Observed:** it only adds a todo. It is the same kind of problem as DA-B-4 (a guard that cannot fail), and wave 2 adds packets, submissions, `recordDenial` and more. | Replace the `it.todo` loop with `expect(uncovered).toEqual([])`, plus an explicit, commented `ISOLATION_EXEMPT` list reviewed by security. | "a new id-taking public function without a probe fails the guard" (a fixture module under the test glob) | M16 / QA. **Must land before M20 pushes.** |
+| **DA-B-16** | low | Mission §14 dashboard truth; DA-A-18 | **P2:** a 25.00 gift card recorded as received through "How did it come back?" (`recordNonCashRemedy`) leaves the claim `drafted`, with **Ready 2,500** still on the dashboard and reminders still due. DA-A-18's `recordNonCashResolution` is wave 2 (M20), and DA-B-10 has made this path reachable in wave 1. | **Expected:** a claim settled in store credit leaves the cash tiles. **Observed:** it is still shown as outstanding. | Until M20: after a non-cash record, offer "This settled the claim — close it", recorded as a claimNote plus a dismiss that keeps the non-cash row. M20 then replaces this with `recordNonCashResolution`. | P2 inverted once M20 lands; an interim copy test now | M15 (interim), M20 |
+| **DA-B-17** | low | D177 "two money representations, kept distinct" | **P3:** `CreditLandedForm` sends `parseHundredths(amount)` (legacy hundredths) as `faceValue.amountMinor` (ISO minor units, `Claim.tsx:314`), and the claim page shows it with `formatMinor` (`Claim.tsx:244`). For a legacy JPY claim, a ¥1,200 gift card becomes 120,000 and is **displayed as ¥120,000**; for KWD the value is off by a factor of 10. Display only; it is never summed. | **Expected:** ISO minor units for `Money`. **Observed:** hundredths stored as ISO minor. | Convert hundredths to ISO minor by the currency exponent before building `faceValue` (or parse with the ISO parser); add a JPY case. | "¥1,200 gift card → faceValue 1,200 JPY, shown ¥1,200" | M15 |
+| **DA-B-18** | low | SEC-AI-6 / D194: the tap exists so the user can judge authenticity | The held-refund card (`HeldRefund.tsx`) says "We can't verify who sent this email" but shows neither the **From address** nor the subject. The only identity shown is the **merchant name extracted from the email itself**, so a spoofed email that names "Target" shows "a promise from Target". | **Expected:** the user sees who actually sent it before tapping. **Observed:** only attacker-controlled content is shown. | Show the masked From address and the received time on the held card (both are already in the payload); label the merchant name "as written in the email". | Held card shows the From address | M15, M13 (`needsAttention` projection) |
+| **DA-B-19** | low | SEC-AI-4: an acknowledgment covers what the user saw | `unverifiedContent` stops at `MAX_FINDINGS = 10` (`drafts.ts:541,607`), and `findingsHash` covers the capped list. A body with 11 or more unknown items lists 10, with no "and N more", and acknowledging those 10 approves the text with the rest unseen in the list. The text itself is visible, which limits the impact. | **Expected:** the user is told the list is truncated. **Observed:** the list silently stops at 10. | Return `moreFindings: n` and render "and n more — edit the message"; refuse the acknowledgment when truncated. | "11 unknown links → truncated flag, acknowledgment refused" | M13 / M28 (the content check moves to `lib/contentCheck.ts`, D206) |
+
+## Fix attacks that hold (one line each)
+
+- **D194 hold and one-tap:**
+  - The tap is owner-only and one-shot.
+  - It re-validates the held candidate with the same schema and applies exactly what was shown (no re-extraction).
+  - A retry is not offered for a held row, and retention keeps `needs_review` payloads.
+  - Every inbound row records `senderAuth: "unavailable"`; the reserved `dmarc_aligned_pass` is never written (test).
+  - The isolation probe covers `confirmRefundEmail`.
+- **`findingsHash` drift:** a change in the findings between prepare and send → refused with the fresh findings. The same findings still send, and a double click sends once.
+- **Refused tile:** a refusal followed by a promise or a credit leaves `refused`. The refused tile sits inside the exhaustive tile set. The 200×200 read budget was re-measured (D201). The one gap is P1.
+- **Non-cash path:**
+  - There is no default route.
+  - Store credit, a gift card or points never reach the ledger, "Back on your card" or Recovered.
+  - The idempotency key is per submission.
+  - The server refuses a face value in another currency.
+- **Composer:**
+  - The late-window acknowledgment, `rule_withdrawn`, `amount_exceeds_estimate` (acknowledgeable, with "Adjust to X") and the content acknowledgment each need an explicit action.
+  - Focus moves to the refusal.
+  - Prepare and send still happen in one click.
