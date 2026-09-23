@@ -272,16 +272,24 @@ to keep out. If you need to debug an auth issue, read the specific
 Rolling back to an older commit and redeploying only changes which function
 code runs. Three things it never reverts:
 
-1. **Schema.** This repo's convention is additive-only schema changes (no
-   existing table loses a field; new fields are always optional — see
-   `convex/schema.ts`'s own comments and `docs/team/DECISIONS.md`'s D01-era
-   invariants), specifically so an older deploy of function code keeps
-   working against the current schema. But the schema itself is not rolled
-   back by redeploying old code — if the commit you are rolling back to
-   predates a schema change, you are running old code against the *current*
-   (newer) schema, not the schema that shipped with that commit. Check
-   `convex/schema.ts`'s git history for what actually changed before
-   assuming a rollback fixes a schema-shaped problem.
+1. **Schema — an old tag may not deploy at all.** Convex pushes
+   `convex/schema.ts` together with the function code and validates every
+   existing document against it; a push whose schema does not accept the
+   data already stored is **rejected**. This repo's changes are additive
+   (new fields optional, new tables), which keeps *newer* code compatible
+   with older data, but not the reverse: once Mission-2 data exists
+   (e.g. `claims.currency`, `drafts.binding`, ledger kind
+   `provisional_credit`, the `transactions`/`facts`/`evidence`/
+   `opportunities`/`evaluations`/`packets`/`submissions` tables, claim type
+   `scenario`, status `denied`), a pre-Mission-2 tag such as `357dc37` /
+   `rc-2026-09-21.2` cannot be deployed over it (D244, re-audit P12-S-2).
+   **Mission-2 rollback policy (forward-only):** revert the offending change
+   *on top of current main* (keeping the current schema) and deploy that;
+   meanwhile use the operator controls (§1 `pauseKind`, the live-extraction
+   and other flags via `ops:setFlag`) to stop the bad behaviour; if data was
+   damaged, restore a backup (§9, with file storage) into a **fresh**
+   non-production deployment and repair from there. Never plan on
+   redeploying an older tag across a schema generation.
 2. **Data.** Every row already written stays written. A rollback does not
    un-run a migration (§3), un-prune a retention sweep, or restore a row a
    user deleted. If bad code wrote bad data, fixing the code stops it from
@@ -293,14 +301,20 @@ code runs. Three things it never reverts:
 
 ## 9. Backup (export) and restore (import)
 
-**Export** a deployment's data to a local ZIP (`--include-file-storage` also
-captures the AgentMail-unrelated `_storage` table, if this deployment ever
-uses Convex file storage directly — currently this app does not, but the
-flag is harmless either way):
+**Export** a deployment's data to a local ZIP. **Always pass
+`--include-file-storage`** (D244, re-audit P12-W1): since Mission 2, uploaded
+evidence (receipts, PDFs, screenshots) lives in Convex file storage
+(`_storage`, referenced from `evidence` rows — `convex/http.ts`
+`/evidence/upload`, `convex/schema.ts` `evidence`). A backup without the flag
+restores the rows but not the files, so every evidence link would point at a
+missing blob.
 
 ```sh
-npx convex export --path backup-$(date +%Y%m%d-%H%M%S).zip --deployment adorable-lion-138
+npx convex export --include-file-storage --path backup-$(date +%Y%m%d-%H%M%S).zip --deployment adorable-lion-138
 ```
+
+After a restore, spot-check that an `evidence` row's download
+(`GET /evidence/file`) returns the file, not a not-found.
 
 **Restore** into a **non-production** deployment only — never the deployment
 named as production in `docs/ops/ENVIRONMENT.md`/`README.md`

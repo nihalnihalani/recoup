@@ -66,7 +66,7 @@ Run every command below with a deployment selector that actually reaches
 `cool-oyster-399` — see the `CONVEX_DEPLOYMENT`/`CONVEX_DEPLOY_KEY` note
 above before assuming any given invocation is safe to copy-paste.
 
-1. **Backup.** `npx convex export --path prod-backup-$(date +%Y%m%d-%H%M%S).zip`
+1. **Backup.** `npx convex export --include-file-storage --path prod-backup-$(date +%Y%m%d-%H%M%S).zip` (the flag is mandatory since Mission 2: evidence files live in `_storage`, D244)
    against production. Keep this file somewhere durable outside the repo —
    it is the only way to recover if the release goes wrong (§3, "What a
    rollback does NOT undo").
@@ -175,17 +175,24 @@ undo"). Summarized for release time:
 
 1. **Cannot un-send mail.** A claim email or price-drop alert already handed
    to AgentMail is gone; `mailLog`/`drafts` rows only record what happened.
-2. **Schema fields stay.** Additive-only schema means an old code rollback
-   still runs against the *current* schema, not the schema that shipped with
-   the commit you are rolling back to. Check `convex/schema.ts`'s git
-   history before assuming a rollback fixes a schema-shaped problem.
+2. **An older tag may be undeployable.** Convex validates stored data
+   against the schema pushed with the code, so a tag whose schema predates
+   data already written is rejected. After Mission-2 data exists, a
+   pre-Mission-2 tag cannot be redeployed; rollback is forward-only (revert
+   on top of current main, use the operator pauses/flags, restore a backup
+   with `--include-file-storage` into a fresh non-production deployment).
+   See RUNBOOK §8 (D244).
 3. **Data written by the new code stays.** Rolling back stops the bad code
    from writing *more* bad data; it does not touch rows already written. Fix
    forward, write a targeted migration, or restore from the backup taken in
    step 1 — there is no fourth option.
 
-**To redeploy the previous tag** (e.g. this release turns out to be bad and
-the prior `rc-<date>` tag is still good):
+**To redeploy the previous tag** — only when the previous tag belongs to the
+**same schema generation** (its `convex/schema.ts` accepts every document
+already stored; check `git diff <previous-tag> HEAD -- convex/schema.ts` for
+removed fields, narrowed unions or new required fields first). Production
+deploys are not authorized in this mission (D136); this procedure is for a
+future authorized operator:
 
 ```sh
 git fetch origin --tags
