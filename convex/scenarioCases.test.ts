@@ -460,7 +460,8 @@ describe("D206 batch readers skip item-less claims (never throw)", () => {
     const t = setup();
     const { as, claimId } = await approvedCase(t);
     const activity = await as.query(api.insights.activity, {});
-    expect(JSON.stringify(activity)).not.toContain(claimId);
+    // M2C (D241): insights.activity handles item-less claims (optional ids + claimCurrency) instead of skipping them.
+    expect(activity.events.find((e) => e.claimId === claimId && e.kind === "claim_opened")).toMatchObject({ currency: "USD", cents: 40_000, subject: "First Bank" });
     await expect(as.query(api.tracking.overview, { now: NOW })).resolves.toBeDefined();
     await expect(as.query(api.purchases.board, {})).resolves.toBeDefined();
     expect((await summaryUsd(as))?.tiles.ready.amountMinor).toBe(40_000); // detected, packet approved (not sent yet)

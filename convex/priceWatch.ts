@@ -37,7 +37,7 @@ import { priceDropCents, windowEndsAt } from "./lib/ledger";
 import { openClaim } from "./claims";
 import { isClosedForAsk } from "./lib/claimState";
 import { activePack } from "./lib/rules/registry";
-import { autoOpenR01, evaluatePurchase } from "./opportunities";
+import { autoOpenR01, deniedObservedMinor, evaluatePurchase } from "./opportunities";
 import { Price } from "./lib/schemas";
 import { extract } from "./lib/ai";
 import { imageUrlChange, pageImageUrl } from "./lib/imageUrl";
@@ -153,6 +153,25 @@ async function hasOpenPriceClaim(ctx: QueryCtx, itemId: Id<"items">): Promise<bo
   // contract §5: the one closed-for-ask rule (confirmed/dismissed today; + denied / non-cash in wave 2).
   return claims.some((c) => !isClosedForAsk(c));
 }
+
+/** DA-A-22: denied price claims read per item for the re-ask rule (a handful in practice; bounded like any read). */
+const DENIED_CLAIMS_PER_ITEM = 50;
+
+/**
+ * DA-A-22 (M2C, contract §2.8 "After a denial"): the lowest opening observation of the item's DENIED price claims, or
+ * undefined when none. One `by_item_type_status` range on exactly (item, price_adjustment, denied), then the shared
+ * `opportunities.deniedObservedMinor` (the same reading R01 v1's case context uses, so both modes agree, C3).
+ */
+async function deniedObservation(ctx: QueryCtx, item: Doc<"items">): Promise<number | undefined> {
+  const denied = await ctx.db
+    .query("claims")
+    .withIndex("by_item_type_status", (q) => q.eq("itemId", item._id).eq("type", "price_adjustment").eq("status", "denied"))
+    .take(DENIED_CLAIMS_PER_ITEM);
+  return await deniedObservedMinor(ctx, item.userId, denied);
+}
+
+/** The note a denial-blocked observation returns in both modes (legacy fallback and R01 v1). */
+export const DENIED_NOTE = "Denied for this drop";
 
 /** Cents already asked for and settled on this item's price drops; dismissed claims do not count. */
 async function settledPriceClaimCents(ctx: QueryCtx, itemId: Id<"items">): Promise<number> {
@@ -319,7 +338,9 @@ export const itemForCheck = internalQuery({
     const parsed = parseProductUrl(item.productUrl);
     if (!parsed) return null;
     const purchase = await ctx.db.get(item.purchaseId);
-    if (!purchase) return null;
+    // D243 (D25): a needs_review (or archived) purchase has no trustworthy purchase data yet; a scrape queued before a
+    // status change spends nothing and records nothing.
+    if (!purchase || purchase.status !== "active") return null;
     return { name: item.name, productUrl: parsed.productUrl, currency: purchase.currency };
   },
 });
@@ -425,13 +446,27 @@ export const recordCheck = internalMutation({
     if (settled > 0 && remaining < Math.max(100, Math.round(item.unitCents * item.qty * 0.02))) {
       return { priceCheckId, claimId: null, accepted: true, note: "Drop already claimed" };
     }
+    // DA-A-22 (M2C): after a denial the merchant said no at the denied claim's opening price. Only an observation
+    // strictly below it, by at least the per-unit threshold, re-asks automatically, and only for the new difference
+    // (with a paid claim too, the smaller of the two readings, never money already paid). Anything else is the user's
+    // own "ask again". Same rule, order and note as R01 v1 (caseContext.deniedObservedMinor + r01AutoOpen, R01-10).
+    let expectedCents = remaining;
+    const denied = await deniedObservation(ctx, item);
+    if (denied !== undefined) {
+      const perUnitThreshold = Math.max(100, Math.round(item.unitCents * 0.02));
+      if (args.observedCents >= denied || denied - args.observedCents < perUnitThreshold) {
+        return { priceCheckId, claimId: null, accepted: true, note: DENIED_NOTE };
+      }
+      const difference = (denied - args.observedCents) * item.qty;
+      expectedCents = settled > 0 ? Math.min(difference, remaining) : difference;
+    }
 
     const claimId = await openClaim(ctx, {
       userId: item.userId,
       purchaseId: item.purchaseId,
       itemId: item._id,
       type: "price_adjustment",
-      expectedCents: remaining,
+      expectedCents,
       windowEndsAt: window.endsAt,
       policyId: window.policy._id,
       openedFromPriceCheckId: priceCheckId,
@@ -466,9 +501,13 @@ async function recordCheckV1(
   // A pack that failed was recorded (ops); nothing opens on a failed evaluation.
   if (!e) return { priceCheckId, claimId: null, accepted: true, note: "Price rule unavailable" };
   const opened = await autoOpenR01(ctx, e, now);
-  return opened.claimId !== null
-    ? { priceCheckId, claimId: opened.claimId, accepted: true, note: undefined }
-    : { priceCheckId, claimId: null, accepted: true, note: opened.note };
+  if (opened.claimId !== null) return { priceCheckId, claimId: opened.claimId, accepted: true, note: undefined };
+  // DA-A-22: at or above the denied observation the pack's difference is zero, so the result carries no amount and
+  // `r01AutoOpen` gives no note; the reason is the denial — the same note the legacy fallback returns (parity, C3).
+  const deniedNoAmount =
+    opened.note === undefined && e.retail?.deniedObservedMinor !== undefined && e.activeClaimId === null && e.result.amount === null &&
+    (e.result.outcome === "eligible" || e.result.outcome === "likely_eligible");
+  return { priceCheckId, claimId: null, accepted: true, note: deniedNoAmount ? DENIED_NOTE : opened.note };
 }
 
 /**
@@ -707,6 +746,9 @@ export const runAll = internalAction({
 // Public surface
 // ---------------------------------------------------------------------------
 
+/** D243: the refusal for a price check on a purchase the user has not confirmed yet (needs_review). */
+export const CONFIRM_BEFORE_CHECK = "Confirm this purchase before checking its price";
+
 /**
  * "Check the price now" on an item the caller owns. A mutation, not an action,
  * so the cooldown read and the schedule happen in one transaction: two rapid
@@ -729,6 +771,10 @@ export const checkNow = mutation({
     if (!purchase || purchase.isExample || purchase.status === "archived") {
       throw new ConvexError("This item cannot be checked");
     }
+    // D243 (D25, defence in depth): a needs_review purchase has no trustworthy purchase data, so a vetted observation
+    // must not be recorded beside its unconfirmed facts. Refused before any budget charge; ownership was checked first
+    // (`ownedItem`), so another user's item still gets the identical "Item not found".
+    if (purchase.status !== "active") throw new ConvexError(CONFIRM_BEFORE_CHECK);
 
     const now = Date.now();
     const last = await ctx.db

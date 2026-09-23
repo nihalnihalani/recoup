@@ -8,7 +8,8 @@ import { latest } from "./policies";
 import { assertCoarseNow } from "./watches";
 import { MAX_ITEMS_PER_PURCHASE } from "./limits";
 import { isTombstoned } from "./lib/accountState";
-import { hasLegacyIds } from "./lib/legacyClaim";
+import { isClosedForAsk } from "./lib/claimState";
+import { claimCurrency } from "./lib/money";
 
 /** Most recent purchases the dashboard reads; older ones stay reachable from their own page. */
 const MAX_PURCHASES = 60;
@@ -52,6 +53,20 @@ const MAX_POINTS = 12;
  * budget is only ever spent on rows that exist.
  */
 const MAX_ITEMS_TOTAL = 250;
+/**
+ * M2C (DA-A-34 A.7): the money totals read EVERY price-adjustment claim on an item, not only the newest, so each
+ * purchase's claims list is bounded (read one past the cap, `truncated` on a real cut). A realistic item carries a
+ * handful of price claims over its life (one open at a time, D44); four per item is generous headroom.
+ */
+const MAX_CLAIMS_PER_PURCHASE = MAX_ITEMS_PER_PURCHASE * 4;
+/**
+ * M2C: a shared budget of claims read (and so of claim balances, one `ledgerEvents` range each, `claimBalance`) across
+ * the whole call, spent as claims are read -- the same spend-as-read shape as `MAX_ITEMS_TOTAL`. With MAX_ITEMS_TOTAL items x 12 checks, 60
+ * purchases x 3 ranges and this many ledger ranges, the call stays far under the 4,096-range limit (measured in
+ * tracking.test.ts at the caps). A purchase whose claims no longer fit is cut entirely (`truncated`), never shown with a
+ * partial money picture.
+ */
+const MAX_CLAIM_BALANCES_TOTAL = 1_000;
 
 const point = v.object({ at: v.number(), cents: v.number() });
 
@@ -103,6 +118,13 @@ const trackedItem = v.object({
  * only the display-derived `watching` count. When omitted, each purchase
  * falls back to its own `purchasedAt` (never `Date.now()`), which can only
  * ever make a window look open, never falsely closed.
+ *
+ * M2C (wave 2): the money totals are the PRICE dashboard's own figures, never the account's headline (every money
+ * number on a page comes from `recovery.summary`, SEC-MF-1/DA-A-34). They now sum every non-dismissed price claim on
+ * an item (DA-A-34 repro A.7 inverted: 2,000 recovered on an earlier confirmed claim stays recovered when a newer claim
+ * opens), count as "found" only claims still open for ask (`isClosedForAsk`: a denied or non-cash-resolved claim is
+ * not money being asked for), and key each claim by its own currency (`claimCurrency`). Item-less `scenario` claims
+ * are never price rows: they are not read here at all (a different claim `type`) and appear on their transaction.
  */
 export const overview = query({
   args: { now: v.optional(v.number()) },
@@ -112,7 +134,7 @@ export const overview = query({
       tracked: v.number(),
       watching: v.number(),
       /**
-       * F5b (D103): money in `purchases.currency` for `primaryCurrency` only
+       * F5b (D103): money in the claim's currency (`claimCurrency`: its own, else the purchase's; M2C) for `primaryCurrency` only
        * (D72: never summed across currencies) -- the currency with the most
        * combined found+recovered money, ties broken by whichever purchase
        * was read first (newest first). `null`/all-zero when nothing has a
@@ -166,6 +188,7 @@ export const overview = query({
     // reads rows, not allotted per purchase up front -- see MAX_ITEMS_TOTAL's
     // doc comment.
     let itemsRoom = MAX_ITEMS_TOTAL;
+    let claimsRoom = MAX_CLAIM_BALANCES_TOTAL;
 
     const items = [];
     let watching = 0;
@@ -185,7 +208,7 @@ export const overview = query({
     }
 
     for (const purchase of purchases.slice(0, MAX_PURCHASES)) {
-      if (itemsRoom <= 0) {
+      if (itemsRoom <= 0 || claimsRoom <= 0) {
         // C1 (D107): the shared budget is spent; every purchase from here on
         // is cut entirely rather than read-and-discarded (an index range read
         // per purchase we already know will contribute nothing).
@@ -214,24 +237,51 @@ export const overview = query({
       const rows = overflow ? probe.slice(0, cap) : probe;
       itemsRoom -= rows.length;
 
-      // F3 (D103): one range read for every non-dismissed price_adjustment
-      // claim on this whole purchase (`by_purchase_type`), instead of one
-      // per item -- grouped below to the newest claim per item, the same
-      // pick `claims.filter(...).sort(...)[0]` made per item before. This is
-      // what turns the per-purchase query count from O(items) into O(1),
-      // the dominant fix for the "too many index ranges read" crash (see
-      // MAX_POINTS' doc comment).
-      const purchaseClaims = await ctx.db
+      // F3 (D103): one range read for every price_adjustment claim on this whole purchase (`by_purchase_type`),
+      // instead of one per item -- what turns the per-purchase query count from O(items) into O(1), the dominant fix
+      // for the "too many index ranges read" crash (see MAX_POINTS' doc comment). M2C: bounded (MAX_CLAIMS_PER_PURCHASE).
+      // Item-less (`scenario`) claims are a different `type`, so this range never contains them: they belong to their
+      // transaction, and their money is `recovery.summary`'s (DA-A-34), never a price row's.
+      const claimsCap = Math.min(MAX_CLAIMS_PER_PURCHASE, claimsRoom);
+      const claimsProbe = await ctx.db
         .query("claims")
         .withIndex("by_purchase_type", (q) => q.eq("purchaseId", purchase._id).eq("type", "price_adjustment"))
-        .collect();
-      const priceClaimByItem = new Map<string, (typeof purchaseClaims)[number]>();
-      for (const c of purchaseClaims) {
-        // M20 (D206): a batch reader SKIPS item-less claims (none on this index in practice: scenario claims have
-        // type "scenario"), never throws.
-        if (c.status === "dismissed" || !hasLegacyIds(c)) continue;
+        .take(claimsCap + 1);
+      if (claimsProbe.length > claimsCap) {
+        // The budget cannot hold this purchase's claims: cut it entirely, and every purchase after it.
+        truncated = true;
+        break;
+      }
+      claimsRoom -= claimsProbe.length;
+      const priceClaims = claimsProbe.filter((c) => c.status !== "dismissed");
+      const readItemIds = new Set<string>(rows.map((r) => r._id));
+      // The row each item shows: its newest non-dismissed claim (unchanged pick).
+      const priceClaimByItem = new Map<string, (typeof priceClaims)[number]>();
+      for (const c of priceClaims) {
+        if (c.itemId === undefined) continue; // a price claim is always an item's; nothing to attribute otherwise
         const existing = priceClaimByItem.get(c.itemId);
         if (!existing || c._creationTime > existing._creationTime) priceClaimByItem.set(c.itemId, c);
+      }
+      // M2C (DA-A-34 A.7 inverted): the money totals sum EVERY non-dismissed price claim on the items read -- an earlier
+      // confirmed claim's recovered money no longer disappears behind a newer claim on the same item. "Found" is only
+      // what is still being asked for: a claim closed for ask (`lib/claimState.isClosedForAsk`: confirmed, dismissed,
+      // DENIED, or resolved non-cash) contributes none, whatever its unresolved balance. Currency is the claim's own
+      // (`claimCurrency`), else the purchase's.
+      const balanceByClaim = new Map<string, Awaited<ReturnType<typeof claimBalance>>>();
+      for (const c of priceClaims) {
+        if (c.itemId !== undefined && !readItemIds.has(c.itemId)) continue; // its item was cut by the item budget
+        const balance = await claimBalance(ctx, c);
+        balanceByClaim.set(c._id, balance);
+        const isExample = purchase.isExample === true || c.isExample === true;
+        const totals = currencyTotals(claimCurrency(c, purchase) ?? purchase.currency);
+        const found = isClosedForAsk(c) ? 0 : Math.max(balance.unresolved, 0);
+        if (isExample) {
+          // Never mixed into real totals (D27); reported apart so the UI can explain a $0 headline over example rows.
+          totals.exampleFoundCents += found;
+        } else {
+          totals.foundCents += found;
+          totals.recoveredCents += Math.max(balance.confirmed - balance.debited, 0);
+        }
       }
 
       for (const item of rows) {
@@ -247,19 +297,11 @@ export const overview = query({
         const latestPoint = points[points.length - 1];
 
         const priceClaim = priceClaimByItem.get(item._id);
-        const balance = priceClaim ? await claimBalance(ctx, priceClaim) : undefined;
+        const balance = priceClaim ? balanceByClaim.get(priceClaim._id) : undefined;
 
         const isExample = purchase.isExample === true;
         if (item.productUrl && !item.returned && ends !== undefined && ends > now) watching += 1;
         checks += recent.length;
-        if (priceClaim && balance && !isExample) {
-          const t = currencyTotals(purchase.currency);
-          t.foundCents += Math.max(balance.unresolved, 0);
-          t.recoveredCents += Math.max(balance.confirmed - balance.debited, 0);
-        } else if (priceClaim && balance && isExample) {
-          // Never mixed into real totals (D27); reported apart so the UI can explain a $0 headline over example rows.
-          currencyTotals(purchase.currency).exampleFoundCents += Math.max(balance.unresolved, 0);
-        }
 
         items.push({
           itemId: item._id,

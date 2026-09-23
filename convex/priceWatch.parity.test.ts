@@ -195,12 +195,110 @@ describe("R01 dual-mode parity: legacy fallback vs R01 v1 open the same claims",
   });
 });
 
-describe("DA-A-22 (wave 2, M2C in priceWatch — stub prepared by M12)", () => {
-  // The pure rule is in the R01 v1 pack and passes fixture R01-10 (caseContext.deniedObservedMinor + r01AutoOpen).
-  // The wave-1 schema has no `denied` claim status; M2C wires `recordDenial`'s claims into r01Runs' case context
-  // (deniedObservedMinor = the denied claim's opening observation) and turns these into real tests.
-  it.todo("a denied claim at the same price → no claim (only a user-initiated 'ask again' reopens it)");
-  it.todo("a lower price after a denial → one claim for (deniedObserved − new) × qty only, subject to the per-unit threshold");
+/**
+ * DA-A-22 (M2C, D241; contract §2.8 "After a denial"; fixture R01-10). A denied claim was opened from an observation D
+ * (its `openedFromPriceCheckId`). Afterwards an observation at or above D never re-asks automatically; one strictly
+ * below D by at least the per-unit threshold opens a claim for (D − new) × qty only (with a paid claim too, the smaller
+ * of that and the paid-claim remainder). Both modes run the PRODUCTION path: legacy = priceWatch's fallback;
+ * v1 = registry → opportunities.r01Runs (caseContext.deniedObservedMinor) → autoOpenR01's guard.
+ */
+function deniedClaim(observedCents: number, over: { expectedCents?: number; token?: string } = {}): NonNullable<Scenario["seed"]> {
+  return async (t, userId, w) => {
+    await t.run(async (ctx) => {
+      const opening = await ctx.db.insert("priceChecks", {
+        itemId: w.itemId, userId, observedCents, currency: "USD", confidence: 0.92, variantMatch: "exact",
+        observedAt: NOW - DAY, sourceUrl: `https://${DOMAIN}/p/jacket`,
+      });
+      await ctx.db.insert("claims", {
+        purchaseId: w.purchaseId, itemId: w.itemId, userId, type: "price_adjustment", expectedCents: over.expectedCents ?? 5_000,
+        status: "denied", token: over.token ?? "DENY01", version: 2, openedFromPriceCheckId: opening,
+      });
+    });
+  };
+}
+const seeds = (...fns: NonNullable<Scenario["seed"]>[]): NonNullable<Scenario["seed"]> => async (t, userId, w) => {
+  for (const f of fns) await f(t, userId, w);
+};
+const paidClaim = (expectedCents: number): NonNullable<Scenario["seed"]> => async (t, userId, w) => {
+  await t.run((ctx) => ctx.db.insert("claims", { purchaseId: w.purchaseId, itemId: w.itemId, userId, type: "price_adjustment", expectedCents, status: "confirmed", token: "PAID02", version: 1 }));
+};
+
+/** Two units at 12,000 (R01-08's world): per-unit threshold 240. */
+const DENIAL_SCENARIOS: (Scenario & { expected: number[]; note: string | null })[] = [
+  { name: "R01-10a: denied at 9,500, the same price again → no claim", world: { qty: 2 }, seed: deniedClaim(9_500), checks: (i) => [check(i, 9_500)], expected: [], note: "Denied for this drop" },
+  { name: "a price back ABOVE the denied observation (still a drop vs paid) → no claim", world: { qty: 2 }, seed: deniedClaim(9_500), checks: (i) => [check(i, 10_000)], expected: [], note: "Denied for this drop" },
+  { name: "R01-10b: denied at 9,500, now 9,200 → one claim for (9,500 − 9,200) × 2 = 600", world: { qty: 2 }, seed: deniedClaim(9_500), checks: (i) => [check(i, 9_200)], expected: [600], note: null },
+  { name: "R01-10c: denied at 9,500, now 9,450 → no claim (50 per unit < 240)", world: { qty: 2 }, seed: deniedClaim(9_500), checks: (i) => [check(i, 9_450)], expected: [], note: "Denied for this drop" },
+  { name: "per-unit threshold boundary: 240 below the denied observation opens (480), 239 does not", world: { qty: 2 }, seed: deniedClaim(9_500), checks: (i) => [check(i, 9_261), check(i, 9_260)], expected: [480], note: null },
+  { name: "two denials: the LOWEST denied observation (9,200) is the bar — 9,300 → none, 8,900 → (9,200 − 8,900) × 2", world: { qty: 2 }, seed: seeds(deniedClaim(9_500), deniedClaim(9_200, { expectedCents: 5_600, token: "DENY02" })), checks: (i) => [check(i, 9_300), check(i, 8_900)], expected: [600], note: null },
+  { name: "paid 5,000 + denied at 9,000, now 8,500 → min((9,000 − 8,500) × 2, 7,000 − 5,000) = 1,000", world: { qty: 2 }, seed: seeds(paidClaim(5_000), deniedClaim(9_000, { expectedCents: 1_000 })), checks: (i) => [check(i, 8_500)], expected: [1_000], note: null },
+  { name: "a dismissed claim is not a denial (unchanged: the full drop opens)", world: { qty: 2 }, seed: async (t, userId, w) => {
+    await t.run((ctx) => ctx.db.insert("claims", { purchaseId: w.purchaseId, itemId: w.itemId, userId, type: "price_adjustment", expectedCents: 5_000, status: "dismissed", token: "DISM02", version: 1 }));
+  }, checks: (i) => [check(i, 9_500)], expected: [5_000], note: null },
+];
+
+describe("DA-A-22 (M2C, D241): after a denial — dual mode, production path, fixture R01-10", () => {
+  pinClockEach(NOW);
+
+  it.each(DENIAL_SCENARIOS.map((s) => [s.name, s] as const))("%s", async (_name, s) => {
+    const out: Record<Mode, Awaited<ReturnType<typeof run>>> = {} as never;
+    for (const mode of MODES) out[mode] = await run(mode, s);
+    const strip = (x: Awaited<ReturnType<typeof run>>) => ({ results: x.results, claims: x.claims, acceptedCents: x.acceptedCents });
+    expect(strip(out.v1)).toEqual(strip(out.legacy));
+    for (const mode of MODES) {
+      // Hand-written expectations (never computed by the code under test).
+      expect(out[mode].claims.filter((c) => c.status === "detected").map((c) => c.expectedCents), mode).toEqual(s.expected);
+      if (s.note !== null) expect(out[mode].results.map((r) => r.note), mode).toContain(s.note);
+    }
+  });
+
+  it("a denied claim at the same price → no claim (only a user-initiated 'ask again' reopens it)", async () => {
+    for (const mode of MODES) {
+      const r = await run(mode, DENIAL_SCENARIOS[0]);
+      expect(r.results, mode).toEqual([{ accepted: true, opened: false, note: "Denied for this drop" }]);
+      expect(r.claims.map((c) => c.status), mode).toEqual(["denied"]);
+    }
+  });
+
+  it("a lower price after a denial → one claim for (deniedObserved − new) × qty only, subject to the per-unit threshold", async () => {
+    for (const mode of MODES) {
+      const r = await run(mode, DENIAL_SCENARIOS[2]);
+      expect(r.results, mode).toEqual([{ accepted: true, opened: true, note: null }]);
+      // Opened from the NEW check (index 1; index 0 is the denied claim's opening check), for the difference only.
+      expect(r.claims.find((c) => c.status === "detected"), mode).toMatchObject({ expectedCents: 600, openedFromCheck: 1 });
+      if (mode === "v1") {
+        const [opp] = await r.t.run((ctx) => ctx.db.query("opportunities").collect());
+        const evaluation = (await r.t.run((ctx) => ctx.db.get(opp.currentEvaluationId!)))!;
+        expect(evaluation.amount?.formula).toBe("(9,500 denied observation - 9,200) x 2");
+        expect(evaluation.amount?.estimate).toEqual({ amountMinor: 600, currency: "USD" });
+      }
+    }
+  });
+
+  it("end to end in v1: auto-opened 5,000 → sent → claims.recordDenial → 9,500 again: no claim; 9,000: a claim for 1,000", async () => {
+    selectMode("v1");
+    // All timers faked and never advanced: recordDenial's scheduled re-evaluation must not race this test (D233).
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const w = await world(t, userId, { qty: 2 });
+    const first = await t.mutation(internal.priceWatch.recordCheck, check(w.itemId, 9_500));
+    const claimId = first.claimId!;
+    expect((await t.run((ctx) => ctx.db.get(claimId)))!.expectedCents).toBe(5_000);
+    await t.run((ctx) => ctx.db.patch(claimId, { status: "sent" }));
+    await as.mutation(api.claims.recordDenial, { claimId, reason: "The store says the sale price does not qualify" });
+
+    expect(await t.mutation(internal.priceWatch.recordCheck, check(w.itemId, 9_500))).toMatchObject({ claimId: null, note: "Denied for this drop" });
+    const lower = await t.mutation(internal.priceWatch.recordCheck, check(w.itemId, 9_000));
+    expect(lower.claimId).not.toBeNull();
+    const reopened = (await t.run((ctx) => ctx.db.get(lower.claimId!)))!;
+    expect(reopened).toMatchObject({ status: "detected", expectedCents: 1_000 });
+    const [opp] = await t.run((ctx) => ctx.db.query("opportunities").collect());
+    expect(opp).toMatchObject({ status: "case_open", activeClaimId: lower.claimId });
+    const claims = await t.run((ctx) => ctx.db.query("claims").withIndex("by_item", (q) => q.eq("itemId", w.itemId)).collect());
+    expect(claims.map((c) => [c.status, c.expectedCents])).toEqual([["denied", 5_000], ["detected", 1_000]]);
+  });
 });
 
 describe("R01 v1 only: what the retrofit adds (DA-A-3, S-M03-3 unaffected)", () => {

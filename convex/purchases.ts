@@ -4,7 +4,8 @@ import type { Doc } from "./_generated/dataModel";
 import { ownedItem, ownedPurchase, requireUserId } from "./lib/access";
 import { netRecovered } from "./lib/ledger";
 import { claimsWithBalance, claimBalance, balanceValidator } from "./lib/balance";
-import { assertCents, assertCurrency, assertNonEmpty, assertQty, assertTimestamp } from "./lib/money";
+import { assertCents, assertCurrency, assertNonEmpty, assertQty, assertTimestamp, claimCurrency } from "./lib/money";
+import { isClosedForAsk } from "./lib/claimState";
 import { cancelPending } from "./followUps";
 import { normalizeDomain } from "./lib/policyText";
 import { latestPolicy } from "./lib/latestPolicy";
@@ -487,11 +488,30 @@ const MAX_BOARD_CLAIMS_TOTAL = MAX_BOARD_PURCHASES * MAX_ITEMS_PER_PURCHASE;
 /** B-6: per-purchase claims cap mirroring `MAX_ITEMS_PER_PURCHASE`'s role for items -- a realistic item carries at most one claim per type (price_adjustment, return_credit), so twice the item cap is generous headroom before the shared budget above ever needs to cut a single heavy purchase's claims list. */
 const MAX_BOARD_CLAIMS_PER_PURCHASE = MAX_ITEMS_PER_PURCHASE * 2;
 
+/** One currency's board money (M2C): the same three figures as the legacy `totals`, never summed across currencies. */
+const boardCurrencyTotals = v.object({ owed: v.number(), asked: v.number(), confirmed: v.number() });
+
+/** Legacy "asked" statuses (D13): the board's own reading, unchanged. */
+const BOARD_ASKED_STATUSES: ReadonlySet<string> = new Set(["sent", "packet", "promised"]);
+
 export const board = query({
   args: {},
   returns: v.object({
     purchases: v.array(boardRow),
+    /**
+     * LEGACY, unrendered, summed across currencies (D39; `purchases.test.ts:387–407` and `lib/ledger.test.ts:198–202`
+     * assert it and stay unmodified, D145). Every money figure a page shows comes from `recovery.summary` (SEC-MF-1).
+     * M2C only removes item-less `scenario` claims from it (repro A.1 inverted); its formula is untouched.
+     */
     totals: v.object({ owed: v.number(), asked: v.number(), confirmed: v.number() }),
+    /**
+     * M2C (DA-A-12): the board's money PER CURRENCY — keyed by each claim's own currency (`claimCurrency`: its own,
+     * else its purchase's), never converted or summed across currencies. `confirmed` is net recovered (D39 clamp).
+     * Unlike the legacy `totals`, `owed`/`asked` count only claims still open for ask (`isClosedForAsk`): a `denied`
+     * or non-cash-resolved claim is not money being asked for. With only wave-1 statuses in one currency the entry
+     * equals `totals`.
+     */
+    totalsByCurrency: v.record(v.string(), boardCurrencyTotals),
     attention: v.array(boardAttentionRow),
     /** F-AUD-1: true only on a REAL cut (more purchases or items exist than were read), never merely because a bound exists. */
     truncated: v.boolean(),
@@ -522,6 +542,7 @@ export const board = query({
     let owed = 0,
       asked = 0,
       confirmed = 0;
+    const byCurrency = new Map<string, { owed: number; asked: number; confirmed: number }>();
     // F-AUD-1: shared budget, spent as rows are actually read -- see
     // MAX_BOARD_ITEMS_TOTAL's doc comment.
     let itemsRoom = MAX_BOARD_ITEMS_TOTAL;
@@ -577,8 +598,12 @@ export const board = query({
       if (claimsOverflow) truncated = true;
       const purchaseClaims = claimsOverflow ? claimsProbe.slice(0, claimsCap) : claimsProbe;
       claimsRoom -= purchaseClaims.length;
+      // M2C (DA-A-12, repro A.1 inverted): the board is the RETAIL item board. An item-less `scenario` claim that
+      // carries this purchase's id (an order-level case, contract §2.3) belongs to its transaction's page and to
+      // `recovery.summary`; it is skipped here — no row, no money, no balance read — never counted as owed or asked.
+      const itemClaims = purchaseClaims.filter((c) => c.type !== "scenario");
       const claims = await Promise.all(
-        purchaseClaims.map(async (c) => ({ ...c, balance: await claimBalance(ctx, c) })),
+        itemClaims.map(async (c) => ({ ...c, balance: await claimBalance(ctx, c) })),
       );
 
       // Example purchases and example claims never contribute to real
@@ -586,10 +611,22 @@ export const board = query({
       if (!p.isExample) {
         for (const c of claims) {
           if (c.status === "dismissed" || c.isExample) continue;
-          confirmed += netRecovered(c.balance);
+          const net = netRecovered(c.balance);
           const unresolvedPositive = Math.max(0, c.balance.unresolved);
+          const isAsked = BOARD_ASKED_STATUSES.has(c.status);
+          // Legacy totals: formula untouched (D145).
+          confirmed += net;
           owed += unresolvedPositive;
-          if (["sent", "packet", "promised"].includes(c.status)) asked += unresolvedPositive;
+          if (isAsked) asked += unresolvedPositive;
+          // M2C per currency: closed-for-ask claims (denied, non-cash resolved) are not owed or asked.
+          const currency = claimCurrency(c, p) ?? p.currency;
+          const row = byCurrency.get(currency) ?? { owed: 0, asked: 0, confirmed: 0 };
+          row.confirmed += net;
+          if (!isClosedForAsk(c)) {
+            row.owed += unresolvedPositive;
+            if (isAsked) row.asked += unresolvedPositive;
+          }
+          byCurrency.set(currency, row);
         }
       }
 
@@ -634,6 +671,12 @@ export const board = query({
         errorSummary: e.errorSummary ?? (e.lastError !== undefined ? "Processing failed" : undefined),
       }));
 
-    return { purchases: rows, totals: { owed, asked, confirmed }, attention, truncated };
+    return {
+      purchases: rows,
+      totals: { owed, asked, confirmed },
+      totalsByCurrency: Object.fromEntries(byCurrency),
+      attention,
+      truncated,
+    };
   },
 });

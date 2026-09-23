@@ -8,7 +8,7 @@ import { MAX_ITEMS_PER_PURCHASE } from "./limits";
 import { assertCoarseNow } from "./watches";
 import { isPriceStale } from "./lib/freshness";
 import { isTombstoned } from "./lib/accountState";
-import { hasLegacyIds } from "./lib/legacyClaim";
+import { claimCurrency } from "./lib/money";
 
 /**
  * Read models for the dashboard: what happened lately, and how each store is
@@ -308,12 +308,16 @@ export const activity = query({
     // ledger pages) are independent of every other claim's, so they run in
     // parallel too.
     const claimEventLists = await Promise.all(
-      // M20 (D206): a batch reader SKIPS item-less (scenario) claims, never throws (M2C adds them).
-      claims.filter(hasLegacyIds).map(async (claim) => {
+      // M2C (DA-A-12; replaces M20's skip guard): every claim is in the feed, item-less (`scenario`) ones included.
+      // Each id is optional and read only when present; a scenario claim's subject and store come from its own
+      // transaction (owner-checked), and every amount carries the claim's own currency (`claimCurrency`), never a
+      // purchase default.
+      claims.map(async (claim) => {
         const claimEvents: ActivityEvent[] = [];
-        const [item, purchase, drafts, replies, ledger] = await Promise.all([
-          ctx.db.get(claim.itemId),
-          ctx.db.get(claim.purchaseId),
+        const [item, purchase, txn, drafts, replies, ledger] = await Promise.all([
+          claim.itemId !== undefined ? ctx.db.get(claim.itemId) : null,
+          claim.purchaseId !== undefined ? ctx.db.get(claim.purchaseId) : null,
+          claim.itemId === undefined && claim.transactionId !== undefined ? ctx.db.get(claim.transactionId) : null,
           ctx.db
             .query("drafts")
             .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
@@ -327,10 +331,12 @@ export const activity = query({
             .withIndex("by_claim", (q) => q.eq("claimId", claim._id))
             .collect(),
         ]);
+        const ownTxn = txn !== null && txn.userId === userId ? txn : null;
+        const currency = claimCurrency(claim, purchase);
         const base = {
-          subject: item?.name ?? "Claim",
-          storeDomain: purchase?.merchantDomain,
-          currency: purchase?.currency,
+          subject: item?.name ?? ownTxn?.counterpartyName ?? purchase?.merchant ?? "Claim",
+          storeDomain: purchase?.merchantDomain ?? ownTxn?.counterpartyDomain,
+          ...(currency !== null ? { currency } : {}),
           claimId: claim._id,
           purchaseId: claim.purchaseId,
         };
@@ -359,7 +365,8 @@ export const activity = query({
         }
 
         for (const entry of ledger) {
-          // provisional credits are not recovery events; wave-2 M2C adds a feed entry
+          // Provisional credits are not recovery events (§3.2). A feed entry for them needs a new activity kind that the
+          // dashboard's exhaustive kind maps (ActivityTimeline, NotificationBell) render first; the frontend owns that.
           if (entry.kind === "provisional_credit" || entry.kind === "provisional_released") continue;
           claimEvents.push({
             ...base,

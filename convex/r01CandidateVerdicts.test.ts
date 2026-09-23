@@ -1,9 +1,9 @@
 /// <reference types="vite/client" />
 /**
  * E3 (D234(1), D243): no R01 v1 negative verdict rests on an unconfirmed candidate — through the PRODUCTION registry
- * (activation.ts, R01 v1 active) and the real public path: `priceWatch.checkNow` accepts an item of a needs_review
- * (unconfirmed) purchase, and the check it schedules lands in `recordCheck`, which stores an accepted price check and
- * evaluates R01 with the purchase's extracted-candidate unit price, quantity and date.
+ * (activation.ts, R01 v1 active) and the real path: `priceWatch.checkNow` used to accept an item of a needs_review
+ * (unconfirmed) purchase (refused since M2C, D243); a check that still lands in `recordCheck` stores an accepted price
+ * check and evaluates R01 with the purchase's extracted-candidate unit price, quantity and date.
  *   P1 — candidate unit/qty, drop below the threshold: was not_eligible, now needs_facts.
  *   P5 — two differing unit-price candidates, both below the threshold (5c "same answer"): was not_eligible, now
  *        needs_facts (5b — the user says which value is right).
@@ -14,6 +14,7 @@ import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { pinClockEach, setup, signedIn } from "./test.setup";
 import { activePack, REGISTRY_KIND } from "./lib/rules/registry";
+import { CONFIRM_BEFORE_CHECK } from "./priceWatch";
 
 const NOW = Date.UTC(2026, 8, 20, 14);
 const DAY = 86_400_000;
@@ -47,9 +48,13 @@ async function unconfirmedPurchase(t: T, o: { unit: number; secondUnitCandidate?
   return { userId, as, ...w };
 }
 
-/** The user presses "check price now" (accepted for an unconfirmed purchase), then the scheduled check lands. */
+/**
+ * The user presses "check price now" — refused on an unconfirmed purchase since M2C (D243 defence in depth,
+ * CONFIRM_BEFORE_CHECK) — and a check that still lands in `recordCheck` (e.g. one queued before the status changed; the
+ * mutation itself stays ungated) is the E3 pin's input: its verdict must never be negative.
+ */
 async function checkNowThenRecord(t: T, as: Awaited<ReturnType<typeof signedIn>>["as"], itemId: Id<"items">, observedCents: number) {
-  await as.mutation(api.priceWatch.checkNow, { itemId });
+  await expect(as.mutation(api.priceWatch.checkNow, { itemId })).rejects.toThrow(CONFIRM_BEFORE_CHECK);
   const res = await t.mutation(internal.priceWatch.recordCheck, {
     itemId, sourceUrl: "https://acme.example/p/jacket", observedCents, currency: "USD", confidence: 0.95, variantMatch: "exact",
   });

@@ -718,3 +718,57 @@ describe("D115 6b-3 / T18.3: a tombstoned caller sees the same signed-out shape"
     expect((await as.query(api.insights.trackedTable, {})).length).toBeGreaterThan(0);
   });
 });
+
+describe("M2C (DA-A-12): insights.activity handles item-less claims (optional ids, claimCurrency)", () => {
+  async function scenarioClaim(t: ReturnType<typeof setup>, userId: Id<"users">, txnOwner: Id<"users"> = userId) {
+    return await t.run(async (ctx) => {
+      const transactionId = await ctx.db.insert("transactions", {
+        userId: txnOwner, category: "card_charge", status: "active", counterpartyName: "First Bank", counterpartyDomain: "firstbank.example",
+        currency: "EUR", liveFactCount: 0,
+      });
+      const claimId = await ctx.db.insert("claims", {
+        userId, type: "scenario", expectedCents: 40_000, status: "sent", token: "SCNA01", version: 1, transactionId,
+        scenarioId: "R03", remedyKey: "billing_correction", currency: "EUR", lossKeys: [`txn:${transactionId}:paid`],
+      });
+      await ctx.db.insert("ledgerEvents", { claimId, userId, kind: "confirmed_credit", cents: 15_000, evidence: "statement", idempotencyKey: "k1", currency: "EUR" });
+      return { transactionId, claimId };
+    });
+  }
+
+  it("an item-less scenario claim is in the feed: subject and store from its transaction, every amount in the claim's currency", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const { claimId } = await scenarioClaim(t, userId);
+    const { events } = await as.query(api.insights.activity, {});
+    const mine = events.filter((e) => e.claimId === claimId);
+    expect(mine.map((e) => e.kind).sort()).toEqual(["claim_opened", "credit_confirmed"]);
+    for (const e of mine) {
+      expect(e).toMatchObject({ subject: "First Bank", storeDomain: "firstbank.example", currency: "EUR" });
+      expect(e.purchaseId).toBeUndefined();
+    }
+    expect(mine.find((e) => e.kind === "credit_confirmed")?.cents).toBe(15_000);
+  });
+
+  it("a claim whose transaction is not the caller's never shows that transaction's names (defensive owner check)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t, "Alice");
+    const { userId: bob } = await signedIn(t, "Bob");
+    const { claimId } = await scenarioClaim(t, userId, bob);
+    const { events } = await as.query(api.insights.activity, {});
+    const opened = events.find((e) => e.claimId === claimId && e.kind === "claim_opened");
+    expect(opened).toMatchObject({ subject: "Claim", currency: "EUR" });
+    expect(JSON.stringify(events)).not.toContain("First Bank");
+  });
+
+  it("a retail claim with its own currency reports that currency, not its purchase's (claimCurrency)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const claimId = await t.run(async (ctx) => {
+      const purchaseId = await ctx.db.insert("purchases", { userId, merchant: "Acme", merchantDomain: "acme.example", currency: "USD", status: "active" });
+      const itemId = await ctx.db.insert("items", { purchaseId, userId, name: "Jacket", unitCents: 12_000, qty: 1, returned: false });
+      return await ctx.db.insert("claims", { purchaseId, itemId, userId, type: "price_adjustment", expectedCents: 2_500, status: "detected", token: "CURR01", version: 1, currency: "GBP" });
+    });
+    const { events } = await as.query(api.insights.activity, {});
+    expect(events.find((e) => e.claimId === claimId && e.kind === "claim_opened")).toMatchObject({ subject: "Jacket", currency: "GBP", storeDomain: "acme.example" });
+  });
+});

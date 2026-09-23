@@ -7,7 +7,12 @@ import rl from "@convex-dev/rate-limiter/test";
 import bw from "@convex-dev/batch-worker/test"; // for .schema only
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { setup, signedIn } from "./test.setup";
+import { pinClockEach, setup, signedIn } from "./test.setup";
+
+type CurrencyTotals = { foundCents: number; recoveredCents: number; exampleFoundCents: number };
+/** `totals.byCurrency.USD` (the handler's inferred type includes the empty `{}` of the signed-out shape). */
+const usdOf = (out: { totals: { byCurrency: Record<string, CurrencyTotals> | object } }) =>
+  (out.totals.byCurrency as Record<string, CurrencyTotals>).USD;
 import schema from "./schema";
 
 describe("tracking.overview", () => {
@@ -149,6 +154,133 @@ describe("D115 6b-3 / T18.3: a tombstoned caller sees the same empty dashboard a
     await as.mutation(api.examples.load, {});
     const out = await as.query(api.tracking.overview, {});
     expect(out.items.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M2C (wave 2): overview money. DA-A-34 repro A.7 inverted (every price claim on an item counts, not only the
+// newest); closed-for-ask (`isClosedForAsk`: denied, non-cash) is never "found"; each claim's own currency
+// (`claimCurrency`); item-less `scenario` claims are never price rows (DA-A-12). Hand-written expected values.
+// ---------------------------------------------------------------------------
+
+describe("M2C: tracking.overview money (DA-A-34 A.7 inverted, isClosedForAsk, claimCurrency, item-less claims)", () => {
+  const NOW = Date.UTC(2026, 8, 23, 12);
+  pinClockEach(NOW);
+  type T = ReturnType<typeof setup>;
+
+  async function purchaseWithItem(t: T, userId: Id<"users">, currency = "USD") {
+    return await t.run(async (ctx) => {
+      const purchaseId = await ctx.db.insert("purchases", {
+        userId, merchant: "Acme", merchantDomain: "acme.example", purchasedAt: NOW - 3 * 86_400_000, currency, status: "active",
+      });
+      const itemId = await ctx.db.insert("items", { purchaseId, userId, name: "Jacket", unitCents: 12_000, qty: 1, returned: false });
+      return { purchaseId, itemId };
+    });
+  }
+  let tokenSeq = 0;
+  async function priceClaim(
+    t: T, userId: Id<"users">, w: { purchaseId: Id<"purchases">; itemId: Id<"items"> },
+    over: { status?: "detected" | "sent" | "confirmed" | "denied" | "dismissed"; expectedCents: number; currency?: string; nonCashResolvedAt?: number },
+  ) {
+    return await t.run((ctx) => ctx.db.insert("claims", {
+      purchaseId: w.purchaseId, itemId: w.itemId, userId, type: "price_adjustment", expectedCents: over.expectedCents,
+      status: over.status ?? "detected", token: `TRK${String(++tokenSeq).padStart(3, "0")}`, version: 1,
+      ...(over.currency ? { currency: over.currency } : {}),
+      ...(over.nonCashResolvedAt !== undefined ? { nonCashResolvedAt: over.nonCashResolvedAt } : {}),
+    }));
+  }
+  async function credit(t: T, userId: Id<"users">, claimId: Id<"claims">, cents: number, kind: "confirmed_credit" | "later_debit" = "confirmed_credit") {
+    await t.run((ctx) => ctx.db.insert("ledgerEvents", { claimId, userId, kind, cents, evidence: "statement", idempotencyKey: `${claimId}:${kind}:${cents}`, currency: "USD" }));
+  }
+
+  it("A.7 inverted: confirmed 2,000 (credited) + a NEWER detected 1,000 on the same item → recovered 2,000, found 1,000", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const w = await purchaseWithItem(t, userId);
+    const c1 = await priceClaim(t, userId, w, { status: "confirmed", expectedCents: 2_000 });
+    await credit(t, userId, c1, 2_000);
+    const c2 = await priceClaim(t, userId, w, { expectedCents: 1_000 });
+    const out = await as.query(api.tracking.overview, { now: NOW });
+    expect(out.totals.byCurrency).toEqual({ USD: { foundCents: 1_000, recoveredCents: 2_000, exampleFoundCents: 0 } });
+    expect([out.totals.foundCents, out.totals.recoveredCents]).toEqual([1_000, 2_000]);
+    // The row still shows the newest claim (unchanged pick).
+    expect(out.items[0].claim).toMatchObject({ claimId: c2, status: "detected", expectedCents: 1_000, unresolvedCents: 1_000 });
+  });
+
+  it("a later debit on the earlier claim reduces what it recovered (net, never below 0)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const w = await purchaseWithItem(t, userId);
+    const c1 = await priceClaim(t, userId, w, { status: "confirmed", expectedCents: 2_000 });
+    await credit(t, userId, c1, 2_000);
+    await credit(t, userId, c1, 500, "later_debit");
+    await priceClaim(t, userId, w, { expectedCents: 1_000 });
+    const out = await as.query(api.tracking.overview, { now: NOW });
+    expect(usdOf(out)).toEqual({ foundCents: 1_000, recoveredCents: 1_500, exampleFoundCents: 0 });
+  });
+
+  it("isClosedForAsk: a DENIED claim's 3,000 is not found money; the row shows it as denied", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const w = await purchaseWithItem(t, userId);
+    const denied = await priceClaim(t, userId, w, { status: "denied", expectedCents: 3_000 });
+    const out = await as.query(api.tracking.overview, { now: NOW });
+    expect(out.totals.byCurrency).toEqual({ USD: { foundCents: 0, recoveredCents: 0, exampleFoundCents: 0 } });
+    expect(out.items[0].claim).toMatchObject({ claimId: denied, status: "denied", unresolvedCents: 3_000 });
+  });
+
+  it("isClosedForAsk: a claim resolved non-cash (voucher) is not found money either", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const w = await purchaseWithItem(t, userId);
+    await priceClaim(t, userId, w, { status: "sent", expectedCents: 4_000, nonCashResolvedAt: NOW - 1_000 });
+    const out = await as.query(api.tracking.overview, { now: NOW });
+    expect(usdOf(out).foundCents).toBe(0);
+  });
+
+  it("a dismissed claim contributes nothing and is not the row's claim (unchanged)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const w = await purchaseWithItem(t, userId);
+    const d = await priceClaim(t, userId, w, { status: "dismissed", expectedCents: 2_500 });
+    await credit(t, userId, d, 1_000);
+    const out = await as.query(api.tracking.overview, { now: NOW });
+    expect(out.items[0].claim).toBeUndefined();
+    expect(out.totals.byCurrency).toEqual({});
+  });
+
+  it("claimCurrency: a claim's own currency keys its money, not its purchase's", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const w = await purchaseWithItem(t, userId, "USD");
+    await priceClaim(t, userId, w, { expectedCents: 700, currency: "EUR" });
+    const out = await as.query(api.tracking.overview, { now: NOW });
+    expect(out.totals.byCurrency).toEqual({ EUR: { foundCents: 700, recoveredCents: 0, exampleFoundCents: 0 } });
+  });
+
+  it("repro A.1 shape: an item-less scenario claim carrying the purchaseId is never a price row and never in the totals", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const w = await purchaseWithItem(t, userId);
+    await t.run((ctx) => ctx.db.insert("claims", {
+      purchaseId: w.purchaseId, userId, type: "scenario", expectedCents: 60_000, status: "sent", token: "SCEN01", version: 1,
+      currency: "USD", scenarioId: "R05", remedyKey: "refund", lossKeys: ["txn:x:paid"],
+    }));
+    const out = await as.query(api.tracking.overview, { now: NOW });
+    expect(out.items).toHaveLength(1);
+    expect(out.items[0].claim).toBeUndefined();
+    expect(out.totals.byCurrency).toEqual({});
+    expect(out.totals.foundCents).toBe(0);
+  });
+
+  it("an example claim on a real purchase is example money only (D27/D48)", async () => {
+    const t = setup();
+    const { as, userId } = await signedIn(t);
+    const w = await purchaseWithItem(t, userId);
+    const c = await priceClaim(t, userId, w, { expectedCents: 900 });
+    await t.run((ctx) => ctx.db.patch(c, { isExample: true }));
+    const out = await as.query(api.tracking.overview, { now: NOW });
+    expect(usdOf(out)).toEqual({ foundCents: 0, recoveredCents: 0, exampleFoundCents: 900 });
   });
 });
 
@@ -429,6 +561,75 @@ describe("tracking.overview: read budget at 40 purchases x 50 items x 30 checks 
       expect(errorMessage).toBeNull();
       expect(result).toBeDefined();
       expect(result!.truncated).toBe(true); // 3,000 items total, capped at MAX_ITEMS_TOTAL (250)
+      expect(metrics.documentsRead.used).toBeLessThan(32_000);
+      expect(metrics.databaseQueries.used).toBeLessThan(4_096);
+    },
+    150_000,
+  );
+});
+
+describe("tracking.overview: M2C claim budget measured at the caps", () => {
+  const NOW = Date.UTC(2026, 8, 23, 12);
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it(
+    "6 purchases x 50 items x 12 checks x 4 price claims (3 credited) → no error, truncated, bounded ranges and documents",
+    async () => {
+      const t = limitedHarness();
+      const userId: Id<"users"> = await t.run((ctx) => ctx.db.insert("users", { name: "Heavy claims" }));
+      const as = t.withIdentity({ subject: `${userId}|session` });
+      const DAY = 86_400_000;
+      const HOUR = 3_600_000;
+      // MAX_ITEMS_TOTAL (250) cuts at the 6th purchase; MAX_CLAIMS_PER_PURCHASE (200) is exactly 50 x 4, and the
+      // shared MAX_CLAIM_BALANCES_TOTAL (1,000) is spent by the first five purchases.
+      for (let p = 0; p < 6; p++) {
+        await t.run(async (ctx) => {
+          const merchantDomain = `claims${p}.example`;
+          const purchaseId = await ctx.db.insert("purchases", {
+            userId, merchant: `Store ${p}`, merchantDomain, purchasedAt: NOW - 10 * DAY, currency: "USD", status: "active",
+          });
+          for (let i = 0; i < 50; i++) {
+            const productUrl = `https://${merchantDomain}/p/${i}`;
+            const itemId = await ctx.db.insert("items", { purchaseId, userId, name: `Item ${p}-${i}`, unitCents: 5_000, qty: 1, productUrl, returned: false });
+            for (let c = 0; c < 12; c++) {
+              await ctx.db.insert("priceChecks", { itemId, userId, observedCents: 4_500 + c, currency: "USD", observedAt: NOW - (12 - c) * HOUR, sourceUrl: productUrl });
+            }
+            for (let k = 0; k < 4; k++) {
+              const claimId = await ctx.db.insert("claims", {
+                purchaseId, itemId, userId, type: "price_adjustment", expectedCents: 100, status: k < 3 ? "confirmed" : "detected",
+                token: `H${p}-${i}-${k}`, version: 1,
+              });
+              if (k < 3) await ctx.db.insert("ledgerEvents", { claimId, userId, kind: "confirmed_credit", cents: 100, evidence: "stmt", currency: "USD" });
+            }
+          }
+        });
+      }
+
+      const { result, errorMessage, metrics } = await as.run(async (ctx) => {
+        let result: Awaited<ReturnType<typeof ctx.runQuery<typeof api.tracking.overview>>> | undefined;
+        let errorMessage: string | null = null;
+        try {
+          result = await ctx.runQuery(api.tracking.overview, { now: NOW });
+        } catch (e) {
+          errorMessage = e instanceof Error ? e.message : String(e);
+        }
+        const metrics = await ctx.meta.getTransactionMetrics();
+        return { result, errorMessage, metrics };
+      });
+      // eslint-disable-next-line no-console
+      console.log(
+        "[read-budget] tracking.overview M2C claims (6x50x12x4)",
+        JSON.stringify({ documentsRead: metrics.documentsRead.used, databaseQueries: metrics.databaseQueries.used, bytesRead: metrics.bytesRead.used, errorMessage }),
+      );
+      expect(errorMessage).toBeNull();
+      expect(result!.truncated).toBe(true);
+      expect(result!.items).toHaveLength(250);
+      // 250 items x 3 credited claims x 100, hand-computed: every earlier confirmed claim counts (A.7), found 250 x 100.
+      expect(usdOf(result!)).toEqual({ foundCents: 25_000, recoveredCents: 75_000, exampleFoundCents: 0 });
       expect(metrics.documentsRead.used).toBeLessThan(32_000);
       expect(metrics.databaseQueries.used).toBeLessThan(4_096);
     },

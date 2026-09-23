@@ -4,7 +4,8 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { setup, signedIn } from "./test.setup";
 import { fetchBothImpl } from "./policies";
-import { MIN_PLAUSIBLE_FRACTION, implausiblyCheap } from "./priceWatch";
+import { activePack } from "./lib/rules/registry";
+import { CONFIRM_BEFORE_CHECK, MIN_PLAUSIBLE_FRACTION, implausiblyCheap } from "./priceWatch";
 import {
   DAILY_BUDGETS,
   GLOBAL_DAILY_BUDGETS,
@@ -997,6 +998,95 @@ describe("priceWatch.checkNow", () => {
       ctx.db.patch(checks[0]._id, { observedAt: Date.now() - 120_000 }),
     );
     await expect(as.mutation(api.priceWatch.checkNow, { itemId })).resolves.toBeNull();
+  });
+});
+
+describe("DA-A-22 (M2C, D241) through the PRODUCTION registry → opportunities (fixture R01-10)", () => {
+  // No registry mock in this file: R01 v1 is active in `activation.ts` (D186), so recordCheck runs recordCheckV1 →
+  // evaluatePurchase → r01Runs (caseContext.deniedObservedMinor) → autoOpenR01. priceWatch.v1.test.ts re-runs this
+  // under the test registry; priceWatch.parity.test.ts runs it in both modes against the legacy fallback.
+  async function deniedAt(t: ReturnType<typeof setup>, userId: Id<"users">, w: World, observedCents: number) {
+    await t.run(async (ctx) => {
+      const opening = await ctx.db.insert("priceChecks", {
+        itemId: w.itemId, userId, observedCents, currency: "USD", confidence: 0.92, variantMatch: "exact", observedAt: Date.now() - DAY, sourceUrl: URL,
+      });
+      await ctx.db.insert("claims", {
+        purchaseId: w.purchaseId, itemId: w.itemId, userId, type: "price_adjustment", expectedCents: 5_000, status: "denied",
+        token: "DENYPR", version: 2, openedFromPriceCheckId: opening,
+      });
+    });
+  }
+  const opened = (t: ReturnType<typeof setup>, itemId: Id<"items">) =>
+    t.run(async (ctx) => (await ctx.db.query("claims").withIndex("by_item", (q) => q.eq("itemId", itemId)).collect()).filter((c) => c.status !== "denied"));
+
+  it("the production registry has R01 v1 active (so these run the v1 path)", () => {
+    expect(activePack("R01")).not.toBeNull();
+  });
+
+  it("R01-10a: denied at 9,500 (2 × 12,000) → a check at 9,500 opens nothing", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const w = await world(t, userId, { qty: 2 });
+    await deniedAt(t, userId, w, 9_500);
+    expect(await t.mutation(internal.priceWatch.recordCheck, good(w.itemId, 9_500))).toMatchObject({ claimId: null, note: "Denied for this drop" });
+    expect(await opened(t, w.itemId)).toEqual([]);
+  });
+
+  it("R01-10b: then 9,200 → one claim for (9,500 − 9,200) × 2 = 600", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const w = await world(t, userId, { qty: 2 });
+    await deniedAt(t, userId, w, 9_500);
+    const r = await t.mutation(internal.priceWatch.recordCheck, good(w.itemId, 9_200));
+    expect(r.claimId).not.toBeNull();
+    expect((await opened(t, w.itemId)).map((c) => c.expectedCents)).toEqual([600]);
+  });
+
+  it("R01-10c: then 9,450 → nothing (50 per unit is under the 240 per-unit threshold)", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const w = await world(t, userId, { qty: 2 });
+    await deniedAt(t, userId, w, 9_500);
+    expect(await t.mutation(internal.priceWatch.recordCheck, good(w.itemId, 9_450))).toMatchObject({ claimId: null, note: "Denied for this drop" });
+    expect(await opened(t, w.itemId)).toEqual([]);
+  });
+});
+
+describe("D243 (D25): no price check on a needs_review purchase", () => {
+  it("checkNow refuses with a clear message, before any charge or schedule; confirming the purchase makes it checkable", async () => {
+    const t = setup();
+    const { userId, as } = await signedIn(t);
+    const { itemId, purchaseId } = await world(t, userId, { status: "needs_review" });
+    await expect(as.mutation(api.priceWatch.checkNow, { itemId })).rejects.toThrow(CONFIRM_BEFORE_CHECK);
+    expect(await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect())).toHaveLength(0);
+    expect(await t.run((ctx) => ctx.db.query("usage").collect())).toHaveLength(0);
+    expect((await t.run((ctx) => ctx.db.get(itemId)))!.checkRequestedAt).toBeUndefined();
+    await t.run((ctx) => ctx.db.patch(purchaseId, { status: "active" }));
+    await expect(as.mutation(api.priceWatch.checkNow, { itemId })).resolves.toBeNull();
+  });
+
+  it("two users: another user's needs_review item gets the identical not-found, never the confirm message", async () => {
+    const t = setup();
+    const owner = await signedIn(t, "Owner");
+    const other = await signedIn(t, "Other");
+    const { itemId } = await world(t, owner.userId, { status: "needs_review" });
+    const missing = await t.run(async (ctx) => {
+      const id = await ctx.db.insert("items", { purchaseId: (await ctx.db.query("purchases").first())!._id, userId: owner.userId, name: "x", unitCents: 1, qty: 1, returned: false });
+      await ctx.db.delete(id);
+      return id;
+    });
+    const foreign = await other.as.mutation(api.priceWatch.checkNow, { itemId }).then(() => "resolved", (e: Error) => e.message);
+    const absent = await other.as.mutation(api.priceWatch.checkNow, { itemId: missing }).then(() => "resolved", (e: Error) => e.message);
+    expect(foreign).toBe(absent);
+    expect(foreign).not.toContain("Confirm");
+    expect(await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect())).toHaveLength(0);
+  });
+
+  it("itemForCheck returns null for a needs_review purchase, so a queued scrape spends nothing", async () => {
+    const t = setup();
+    const { userId } = await signedIn(t);
+    const { itemId } = await world(t, userId, { status: "needs_review" });
+    expect(await t.query(internal.priceWatch.itemForCheck, { itemId })).toBeNull();
   });
 });
 

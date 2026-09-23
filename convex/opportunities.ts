@@ -150,8 +150,33 @@ type Run = {
   /** That case's own currency (`lib/money.claimCurrency`: its own, else its purchase's; null when unknown — no default). */
   openClaimCurrency: string | null;
   /** What case opening needs for a retail price claim. */
-  retail?: { purchaseId: Id<"purchases">; itemId: Id<"items">; policyId?: Id<"policies">; priceCheckId?: Id<"priceChecks">; observedMinor?: number; unitMinor?: number };
+  retail?: {
+    purchaseId: Id<"purchases">; itemId: Id<"items">; policyId?: Id<"policies">; priceCheckId?: Id<"priceChecks">; observedMinor?: number; unitMinor?: number;
+    /** DA-A-22 (M2C, D241): the lowest opening observation of the item's denied price claims (`deniedObservedMinor`). */
+    deniedObservedMinor?: number;
+  };
 };
+
+/**
+ * DA-A-22 (M2C, D241): the opening observation (`openedFromPriceCheckId.observedCents`) of the user's DENIED price
+ * claims among `claims` — the LOWEST, so a denial at any price blocks an automatic re-ask at or above it. Undefined when
+ * none. Every R01 claim is opened from a price check (legacy `recordCheck` and `insertR01Case` both pass it), so a
+ * denied R01 claim always carries one. Shared with priceWatch's legacy fallback (parity, C3).
+ */
+export async function deniedObservedMinor(
+  ctx: QueryCtx,
+  userId: Id<"users">,
+  claims: readonly Doc<"claims">[],
+): Promise<number | undefined> {
+  let lowest: number | undefined;
+  for (const c of claims) {
+    if (c.userId !== userId || c.type !== "price_adjustment" || c.status !== "denied" || !c.openedFromPriceCheckId) continue;
+    const pc = await ctx.db.get(c.openedFromPriceCheckId);
+    if (pc?.observedCents === undefined) continue;
+    if (lowest === undefined || pc.observedCents < lowest) lowest = pc.observedCents;
+  }
+  return lowest;
+}
 
 const itemIdOf = (subjectKey: string): Id<"items"> | null =>
   subjectKey.startsWith("item:") ? (subjectKey.slice(5) as Id<"items">) : null;
@@ -190,8 +215,11 @@ async function r01Runs(ctx: QueryCtx, txn: Doc<"transactions">, subjects: readon
       const pc = await ctx.db.get(open.openedFromPriceCheckId);
       if (pc && pc.observedCents !== undefined) opening = { amountMinor: pc.observedCents, currency: pc.currency ?? purchase.currency, observedAt: pc.observedAt };
     }
+    // DA-A-22 (M2C, D241): after a denial only a strictly lower observation re-asks, for the difference (R01-10).
+    const denied = await deniedObservedMinor(ctx, txn.userId, claims);
     const caseContext: R01CaseContext = {
       settledMinorByLossKey,
+      ...(denied !== undefined ? { deniedObservedMinor: denied } : {}),
       ...(open
         ? {
             activeClaimId: open._id,
@@ -256,6 +284,7 @@ async function r01Runs(ctx: QueryCtx, txn: Doc<"transactions">, subjects: readon
         ...(item.observation ? { priceCheckId: item.observation.priceCheckId } : {}),
         ...(obs?.kind === "money" ? { observedMinor: obs.amountMinor } : {}),
         ...(unit?.kind === "money" ? { unitMinor: unit.amountMinor } : {}),
+        ...(denied !== undefined ? { deniedObservedMinor: denied } : {}),
       },
     });
   }
@@ -785,6 +814,7 @@ export async function autoOpenR01(
     openClaimExists: e.activeClaimId !== null,
     ...(e.retail?.observedMinor !== undefined ? { observedMinor: e.retail.observedMinor } : {}),
     ...(e.retail?.unitMinor !== undefined ? { unitMinor: e.retail.unitMinor } : {}),
+    ...(e.retail?.deniedObservedMinor !== undefined ? { deniedObservedMinor: e.retail.deniedObservedMinor } : {}),
   });
   if (!decision.opens) return { claimId: null, ...(decision.note ? { note: decision.note } : {}) };
   const opp = await ctx.db.get(e.opportunityId);
