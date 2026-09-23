@@ -9,7 +9,7 @@ import { amountHeading, formatInstant, OUTCOME_COPY, SCENARIO_TITLES, type Oppor
  * stands, an estimate only when the card would show one (never for not-yet-due, needs-facts or ineligible paths),
  * and the next user deadline. Rows are never added up: alternatives for one loss must not look like more money.
  */
-export function OpportunityRow({ view, href }: { view: OpportunityView; href: string }) {
+export function OpportunityRow({ view, href }: { view: Pick<OpportunityView, "opportunity" | "evaluation">; href: string }) {
   const { opportunity, evaluation } = view;
   const outcome = evaluation?.outcome ?? opportunity.outcome;
   const amount = evaluation ? evaluation.amount : null;

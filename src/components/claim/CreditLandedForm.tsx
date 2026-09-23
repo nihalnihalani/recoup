@@ -20,16 +20,17 @@ const ROUTES: readonly { value: CreditRoute; label: string; hint: string }[] = [
   {
     value: "store_credit",
     label: "Store credit or a gift card",
-    hint: "Recorded as non-cash. Never counted as money back on your card.",
+    hint: "Non-cash. Closes this claim, and is never counted as money back on your card.",
   },
-  { value: "points", label: "Points", hint: "Recorded as non-cash. Never counted as money back on your card." },
+  { value: "points", label: "Points", hint: "Non-cash. Closes this claim, and is never counted as money back on your card." },
 ];
 
 /**
  * "Credit landed" (DA-B-10): the user first says HOW it came back. To the card or original payment is a confirmed
- * cash credit (`claims.confirmCredit`, the only confirmed-money writer); store credit, a gift card or points go to
- * the non-cash path (`claims.recordNonCashRemedy`, received) and never reach the ledger, "Back to your card" or
- * the Recovered total. There is no default: the choice is required. A fresh idempotency key per submission (D24).
+ * cash credit (`claims.confirmCredit`, the only confirmed-money writer); store credit, a gift card or points resolve
+ * the claim with a non-cash remedy (DA-B-16: `claims.recordNonCashResolution`, which closes it for ask) and never
+ * reach the ledger, "Back to your card" or the Recovered total. There is no default: the choice is required. A fresh
+ * idempotency key per submission (D24).
  */
 export function CreditLandedForm({
   currency,
@@ -84,7 +85,9 @@ export function CreditLandedForm({
           ...(cents !== null && cents > 0 ? { faceValueMinor: cents } : {}),
           idempotencyKey: crypto.randomUUID(),
         });
-        setDone(`Recorded as ${route === "points" ? "points" : "store credit"}. It is listed on this claim and is never counted as money back on your card.`);
+        setDone(
+          `Recorded as ${route === "points" ? "points" : "store credit"}. This claim is now closed with a non-cash remedy: it is never counted as money back on your card.`,
+        );
       }
       setAmount("");
       setEvidence("");

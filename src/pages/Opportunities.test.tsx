@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 /**
- * M24 /opportunities: recovery paths grouped by transaction, each linking to its purchase or transaction page, and
- * never added into one "money found" number (alternatives are not additive, D145).
+ * M24 /opportunities (D220): recovery paths from ONE `opportunities.listMine` read, grouped by transaction, each
+ * group linking to its transaction page (a retail one forwards to its purchase), and never added into one "money
+ * found" number (alternatives are not additive, D145).
  */
 import axe from "axe-core";
 import { getFunctionName, type FunctionReference } from "convex/server";
@@ -13,23 +14,22 @@ import { render, screen, within } from "../test/dom";
 import { view } from "../test/opportunityFixtures";
 import Opportunities from "./Opportunities";
 
-let transactions: unknown[] = [];
-let byTransaction: Record<string, unknown> = {};
+let listMine: { items: unknown[]; truncated: boolean } | undefined;
+const queried: string[] = [];
 
 vi.mock("convex/react", () => ({
-  useQuery: (ref: FunctionReference<"query">, args: { transactionId?: string } | "skip") => {
+  useQuery: (ref: FunctionReference<"query">, args: unknown) => {
     if (args === "skip") return undefined;
     const name = getFunctionName(ref);
-    if (name === "transactions:list") return { transactions, truncated: false };
-    if (name === "opportunities:forTransaction") return byTransaction[args.transactionId!];
+    queried.push(name);
+    if (name === "opportunities:listMine") return listMine;
     return undefined;
   },
 }));
 
-const txn = (id: string, extra: Record<string, unknown> = {}) => ({
-  _id: id, _creationTime: 1, userId: "u1", category: "air_travel", status: "active", counterpartyName: `Carrier ${id}`,
-  currency: "USD", liveFactCount: 0, ...extra,
-});
+function item(transactionId: string, category: string, counterpartyName: string, v: ReturnType<typeof view>) {
+  return { ...v, transactionId, category, counterpartyName };
+}
 
 function renderPage() {
   render(
@@ -40,33 +40,34 @@ function renderPage() {
   return document.body.textContent ?? "";
 }
 
+const estimate = (amountMinor: number) => ({
+  amount: { estimate: { amountMinor, currency: "USD" }, basis: "exact_formula" as const, formula: "", inputs: [] },
+});
+
 beforeEach(() => {
-  transactions = [txn("t1"), txn("t2", { category: "retail_order", purchaseId: "p2", counterpartyName: "Northwind" }), txn("t3")];
-  byTransaction = {
-    // Two alternative paths for one loss on t1, 2,500 and 3,000: they must never show as 5,500.
-    t1: {
-      opportunities: [
-        view({ amount: { estimate: { amountMinor: 2_500, currency: "USD" }, basis: "exact_formula", formula: "", inputs: [] } }, { _id: "o1" as Id<"opportunities">, scenarioId: "R02", lossKeys: ["txn:t1:paid"] }),
-        view({ amount: { estimate: { amountMinor: 3_000, currency: "USD" }, basis: "exact_formula", formula: "", inputs: [] } }, { _id: "o2" as Id<"opportunities">, scenarioId: "R03", lossKeys: ["txn:t1:paid"] }),
-      ],
-      pathsNotChecked: [],
-      truncated: false,
-    },
-    t2: { opportunities: [view({}, { _id: "o3" as Id<"opportunities"> })], pathsNotChecked: [], truncated: false },
-    t3: { opportunities: [], pathsNotChecked: [], truncated: false },
+  queried.length = 0;
+  listMine = {
+    items: [
+      // Two alternative paths for one loss on t1, 2,500 and 3,000: they must never show as 5,500.
+      item("t1", "air_travel", "Carrier t1", view(estimate(2_500), { _id: "o1" as Id<"opportunities">, scenarioId: "R02", lossKeys: ["txn:t1:paid"] })),
+      item("t2", "retail_order", "Northwind", view({}, { _id: "o3" as Id<"opportunities"> })),
+      item("t1", "air_travel", "Carrier t1", view(estimate(3_000), { _id: "o2" as Id<"opportunities">, scenarioId: "R03", lossKeys: ["txn:t1:paid"] })),
+    ],
+    truncated: false,
   };
 });
 
 describe("/opportunities", () => {
-  it("groups paths by transaction and links each group to its page", () => {
+  it("reads listMine once and groups paths by transaction, each linking to its transaction page", () => {
     renderPage();
+    expect(new Set(queried)).toEqual(new Set(["opportunities:listMine"]));
     const air = screen.getByRole("region", { name: "Carrier t1" });
     expect(within(air).getAllByRole("listitem")).toHaveLength(2);
     expect(within(air).getByRole("link", { name: "Carrier t1" }).getAttribute("href")).toBe("/transactions/t1");
     const retail = screen.getByRole("region", { name: "Northwind" });
-    expect(within(retail).getByRole("link", { name: "Northwind" }).getAttribute("href")).toBe("/purchases/p2");
-    // A transaction with no path is not listed.
-    expect(screen.queryByRole("region", { name: "Carrier t3" })).toBeNull();
+    expect(within(retail).getByRole("link", { name: "Northwind" }).getAttribute("href")).toBe("/transactions/t2");
+    // Groups keep the server's order (newest evaluation first).
+    expect(screen.getAllByRole("region").map((r) => r.getAttribute("aria-labelledby"))).toEqual(["group-t1", "group-t2"]);
   });
 
   it("never adds alternative paths into one money figure", () => {
@@ -78,10 +79,31 @@ describe("/opportunities", () => {
     expect(text).toContain("never added together");
   });
 
-  it("an empty account gets a way to add something, not a zero", () => {
-    transactions = [];
+  it("says when the list is cut", () => {
+    listMine = { ...listMine!, truncated: true };
+    expect(renderPage()).toContain("Showing your most recently checked paths only");
+  });
+
+  it("marks an example path and a path with a claim open", () => {
+    listMine = {
+      items: [item("t9", "air_travel", "Example Air", view({}, { _id: "o9" as Id<"opportunities">, isExample: true, status: "case_open" }))],
+      truncated: false,
+    };
     const text = renderPage();
-    expect(text).toContain("Nothing to check yet");
+    expect(text).toContain("Example");
+    expect(text).toContain("Claim open");
+  });
+
+  it("shows a loading state while the read is in flight", () => {
+    listMine = undefined;
+    renderPage();
+    expect(screen.queryByRole("heading", { name: "Recovery paths" })).toBeNull();
+  });
+
+  it("an empty account gets a way to add something, not a zero", () => {
+    listMine = { items: [], truncated: false };
+    const text = renderPage();
+    expect(text).toContain("No recovery paths yet");
     expect(screen.getByRole("link", { name: "Add something" }).getAttribute("href")).toBe("/add");
     expect(text).not.toMatch(/\$0/);
   });

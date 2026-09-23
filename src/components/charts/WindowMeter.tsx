@@ -14,7 +14,7 @@ export function WindowMeter({ purchasedAt, endsAt }: { purchasedAt?: number; end
     return (
       <div role="img" aria-label="No price-adjustment window known">
         <div className="h-1.5 rounded-full border border-dashed border-gray-300" aria-hidden="true" />
-        <p className="mt-1 text-xs text-gray-400">no window known</p>
+        <p className="mt-1 text-xs text-gray-600">no window known</p>
       </div>
     );
   }
@@ -28,7 +28,7 @@ export function WindowMeter({ purchasedAt, endsAt }: { purchasedAt?: number; end
 
   const tone = remaining < DAY ? "bg-rust" : remaining < 3 * DAY ? "bg-gold" : "bg-gray-900";
   const text = closed
-    ? "text-gray-400"
+    ? "text-gray-600"
     : remaining < DAY
       ? "text-red-700"
       : remaining < 3 * DAY
@@ -59,7 +59,7 @@ export function WindowMeter({ purchasedAt, endsAt }: { purchasedAt?: number; end
           {label}
         </span>
         {!closed && purchasedAt !== undefined && (
-          <span className="tabular-nums text-gray-400">{totalDays}d window</span>
+          <span className="tabular-nums text-gray-600">{totalDays}d window</span>
         )}
       </div>
     </div>

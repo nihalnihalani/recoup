@@ -5,23 +5,26 @@ const STEPS = [
   { label: "Promised", statuses: ["promised"] },
   { label: "Back on card", statuses: ["confirmed"] },
 ] as const;
+const ASKED = STEPS.findIndex((step) => step.label === "Asked");
 
 const TERMINAL: Record<string, { label: string; dot: string; text: string }> = {
   reopened: { label: "Charged again", dot: "bg-rust", text: "text-gray-900" },
   dismissed: { label: "Dismissed", dot: "bg-gray-300", text: "text-gray-400 line-through" },
+  /** M20 (§5): the user recorded that the counterparty said no. It was asked, so the path shows Asked as reached. */
+  denied: { label: "Denied", dot: "bg-rust", text: "text-gray-900" },
 };
 
 /**
  * A claim's path as a horizontal stepper: Found, Drafted, Asked, Promised, Back on
  * card. Small ringed dots on a hairline: finished steps are green, the current one
- * is near-black with a halo, the ones ahead are gray. Reopened and dismissed sit
- * outside the path as a dot-and-label chip.
+ * is near-black with a halo, the ones ahead are gray. Reopened, denied and dismissed
+ * sit outside the path as a dot-and-label chip.
  */
 export function StatusSteps({ status }: { status: string }) {
   const terminal = TERMINAL[status];
   const current = STEPS.findIndex((step) => (step.statuses as readonly string[]).includes(status));
-  // A reopened claim had reached the end; a dismissed one shows no progress.
-  const reached = status === "reopened" ? STEPS.length - 1 : current;
+  // A reopened claim had reached the end; a denied one was asked; a dismissed one shows no progress.
+  const reached = status === "reopened" ? STEPS.length - 1 : status === "denied" ? ASKED : current;
   const done = status === "confirmed";
 
   return (

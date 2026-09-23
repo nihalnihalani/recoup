@@ -1,25 +1,41 @@
 import { useQuery } from "convex/react";
+import type { FunctionReturnType } from "convex/server";
 import { Link } from "react-router-dom";
 import { api } from "../../convex/_generated/api";
-import type { Doc } from "../../convex/_generated/dataModel";
+import type { Id } from "../../convex/_generated/dataModel";
 import { OpportunityRow } from "../components/opportunity/OpportunityRow";
 import { Loading } from "../components/States";
 import { CATEGORY_LABELS } from "../components/transaction/labels";
 import { coverageSummary } from "../lib/coverageCopy";
-import { cardClass, day, pageTitleClass } from "../lib/ui";
+import { cardClass, pageTitleClass } from "../lib/ui";
 
-/** Transactions whose paths are listed at once (each is one live `forTransaction` read until `listMine` lands). */
-const GROUP_LIMIT = 25;
+type Item = FunctionReturnType<typeof api.opportunities.listMine>["items"][number];
+type Group = { transactionId: Id<"transactions">; category: Item["category"]; counterpartyName: string; items: Item[] };
+
+/** The server's rows (newest evaluation first) grouped by transaction, in the order each transaction first appears. */
+function groupByTransaction(items: readonly Item[]): Group[] {
+  const groups = new Map<Id<"transactions">, Group>();
+  for (const item of items) {
+    let group = groups.get(item.transactionId);
+    if (!group) {
+      group = { transactionId: item.transactionId, category: item.category, counterpartyName: item.counterpartyName, items: [] };
+      groups.set(item.transactionId, group);
+    }
+    group.items.push(item);
+  }
+  return [...groups.values()];
+}
 
 /**
- * /opportunities (M24; contract §9): every recovery path, grouped by the transaction it belongs to. There is
- * deliberately no total: alternative paths for one loss are not additive (D145), and the dashboard's per-currency
- * summary is the one place money is added up (SEC-MF-1).
+ * /opportunities (M24; contract §9; D220): every open recovery path and every path with a claim open, from ONE owner-
+ * scoped read (`opportunities.listMine`), grouped by the transaction it belongs to. There is deliberately no total:
+ * alternative paths for one loss are not additive (D145), and the dashboard's per-currency summary is the one place
+ * money is added up (SEC-MF-1).
  */
 export default function Opportunities() {
-  const list = useQuery(api.transactions.list, {});
+  const list = useQuery(api.opportunities.listMine, {});
   if (list === undefined) return <Loading rows={4} />;
-  const shown = list.transactions.slice(0, GROUP_LIMIT);
+  const groups = groupByTransaction(list.items);
   return (
     <div className="space-y-6">
       <div>
@@ -29,11 +45,12 @@ export default function Opportunities() {
           never added together; see the dashboard for totals by currency.
         </p>
       </div>
-      {list.transactions.length === 0 ? (
+      {groups.length === 0 ? (
         <section className={`${cardClass} border-dashed px-6 py-12 text-center`}>
-          <h2 className="text-base font-semibold text-gray-900">Nothing to check yet</h2>
+          <h2 className="text-base font-semibold text-gray-900">No recovery paths yet</h2>
           <p className="mx-auto mt-2 max-w-md text-sm text-gray-600">
-            Add a purchase, a flight or a card charge. {coverageSummary()}
+            A path is listed here when something you added may be owed money back. Add a purchase, a flight or a card
+            charge. {coverageSummary()}
           </p>
           <Link to="/add" className="mt-4 inline-block font-semibold text-gray-900 underline underline-offset-4">
             Add something
@@ -41,12 +58,12 @@ export default function Opportunities() {
         </section>
       ) : (
         <div className="space-y-4">
-          {shown.map((txn) => (
-            <TransactionGroup key={txn._id} txn={txn} />
+          {groups.map((group) => (
+            <TransactionGroup key={group.transactionId} group={group} />
           ))}
-          {(list.transactions.length > GROUP_LIMIT || list.truncated) && (
+          {list.truncated && (
             <p className="text-sm text-gray-600">
-              Showing your {GROUP_LIMIT} most recent transactions. Open a purchase or transaction to see the rest.
+              Showing your most recently checked paths only. Open a purchase or transaction to see all of its paths.
             </p>
           )}
         </div>
@@ -55,33 +72,25 @@ export default function Opportunities() {
   );
 }
 
-function TransactionGroup({ txn }: { txn: Doc<"transactions"> }) {
-  const recovery = useQuery(api.opportunities.forTransaction, { transactionId: txn._id });
-  const href = txn.purchaseId ? `/purchases/${txn.purchaseId}` : `/transactions/${txn._id}`;
-  if (recovery !== undefined && recovery.opportunities.length === 0) return null;
-  const headingId = `group-${txn._id}`;
+function TransactionGroup({ group }: { group: Group }) {
+  // A retail transaction's page forwards to its purchase page, so every group links to its transaction.
+  const href = `/transactions/${group.transactionId}`;
+  const headingId = `group-${group.transactionId}`;
   return (
     <section aria-labelledby={headingId} className={`${cardClass} p-5`}>
       <header className="flex flex-wrap items-baseline justify-between gap-2">
         <h2 id={headingId} className="text-base font-semibold text-gray-900">
           <Link to={href} className="underline decoration-gray-300 underline-offset-4 hover:decoration-gray-900">
-            {txn.counterpartyName || CATEGORY_LABELS[txn.category]}
+            {group.counterpartyName || CATEGORY_LABELS[group.category]}
           </Link>
         </h2>
-        <p className="text-sm text-gray-600">
-          {CATEGORY_LABELS[txn.category]}
-          {txn.transactedAt !== undefined ? ` · ${day(txn.transactedAt)}` : ""}
-        </p>
+        <p className="text-sm text-gray-600">{CATEGORY_LABELS[group.category]}</p>
       </header>
-      {recovery === undefined ? (
-        <Loading rows={1} />
-      ) : (
-        <ul className="mt-2 divide-y divide-gray-100">
-          {recovery.opportunities.map((view) => (
-            <OpportunityRow key={view.opportunity._id} view={view} href={href} />
-          ))}
-        </ul>
-      )}
+      <ul className="mt-2 divide-y divide-gray-100">
+        {group.items.map((item) => (
+          <OpportunityRow key={item.opportunity._id} view={item} href={href} />
+        ))}
+      </ul>
     </section>
   );
 }

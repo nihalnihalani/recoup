@@ -183,7 +183,7 @@ export function ClaimTimeline({
               </div>
               <time
                 dateTime={new Date(entry.at).toISOString()}
-                className="mt-0.5 block text-xs text-gray-400"
+                className="mt-0.5 block text-xs text-gray-600"
               >
                 {when(entry.at)}
               </time>
@@ -191,7 +191,7 @@ export function ClaimTimeline({
                 <p className="mt-1.5 break-words text-sm text-gray-500">{entry.detail}</p>
               )}
               {(entry.party !== undefined || entry.warning !== undefined) && (
-                <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-400">
+                <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-600">
                   {entry.party !== undefined && <span className="break-all">{entry.party}</span>}
                   {entry.warning !== undefined && (
                     <span
