@@ -6,16 +6,16 @@ import { AIR_FACT_SPECS } from "./keys_air";
 import { CARD_FACT_SPECS } from "./keys_card";
 
 describe("lib/facts/catalog (closed catalogue, contract §2.5)", () => {
-  it("merges every domain file (air keys arrive with M22; the other wave-2 files stay stubs until their lanes)", () => {
-    expect(ORDER_FACT_SPECS).toEqual([]);
-    expect(AIR_FACT_SPECS.length).toBeGreaterThan(0);
-    expect(AIR_FACT_SPECS.every((s) => s.domain === "air" && s.key.startsWith("air."))).toBe(true);
-    expect(CARD_FACT_SPECS).toEqual([]);
+  it("merges every domain file, each spec tagged with its file's domain", () => {
     expect(FACT_SPECS).toHaveLength(RETAIL_FACT_SPECS.length + ORDER_FACT_SPECS.length + AIR_FACT_SPECS.length + CARD_FACT_SPECS.length);
+    const files: [readonly FactSpec[], FactSpec["domain"]][] = [
+      [RETAIL_FACT_SPECS, "retail"], [ORDER_FACT_SPECS, "order"], [AIR_FACT_SPECS, "air"], [CARD_FACT_SPECS, "card"],
+    ];
+    for (const [specs, domain] of files) for (const s of specs) expect(s.domain, s.key).toBe(domain);
   });
 
   it("holds exactly the retail keys R01 v1 and the legacy adapter use", () => {
-    expect(FACT_SPECS.filter((s) => s.domain === "retail").map((s) => s.key).sort()).toEqual([
+    expect((FACT_SPECS as readonly FactSpec[]).filter((s) => s.domain === "retail").map((s) => s.key).sort()).toEqual([
       "retail.currency",
       "retail.item_name",
       "retail.merchant",
@@ -66,7 +66,8 @@ describe("lib/facts/catalog (closed catalogue, contract §2.5)", () => {
     expect(getFactSpec("__proto__")).toBeNull();
     expect(getFactSpec("constructor")).toBeNull();
     expect(isFactKey("retail.unit_price")).toBe(true);
-    expect(isFactKey("retail.order_total")).toBe(false); // wave 2, keys_order.ts (M21)
+    expect(isFactKey("retail.order_total")).toBe(true); // wave 2, keys_order.ts (M21): the confirmed order total
+    expect(getFactSpec("retail.order_total")).toMatchObject({ domain: "order", value: "money", subject: ["transaction"], categories: ["retail_order"] });
   });
 
   it("types each key's value (compile-time)", () => {

@@ -6,6 +6,7 @@
 import type { Activation } from "./activation";
 import { r01PriceAdjustmentV1 } from "./r01_price_adjustment_v1";
 import { r02AirRefundV1 } from "./r02_air_refund_v1";
+import { r05LateOrderV1 } from "./r05_late_order_v1";
 import type { AnyRulePack, ScenarioId, TransactionCategory } from "./types";
 
 /**
@@ -16,6 +17,7 @@ import type { AnyRulePack, ScenarioId, TransactionCategory } from "./types";
 export const IMPLEMENTED_PACKS: readonly AnyRulePack[] = Object.freeze([
   r01PriceAdjustmentV1,
   r02AirRefundV1,
+  r05LateOrderV1,
 ]);
 
 /**
