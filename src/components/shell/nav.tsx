@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { AddPurchaseIcon, ClaimIcon, DashboardIcon, PurchaseIcon, WatchlistIcon } from "./icons";
+import { AddPurchaseIcon, ClaimIcon, DashboardIcon, PurchaseIcon, SettingsIcon, WatchlistIcon } from "./icons";
 
 export type NavItem = {
   to: string;
@@ -10,13 +10,14 @@ export type NavItem = {
 };
 
 /**
- * Every entry is a real route in App.tsx. "Inbox & settings" lives on the same page as
- * "Add purchase" (/settings), so it is one item rather than two links to one place.
+ * Every entry is a real route in App.tsx. M24: adding things moved to /add (paste, upload, manual entry); /settings
+ * is the inbox and account settings, reached from the user card, so it is not repeated here.
  */
 export const NAV: readonly NavItem[] = [
   { to: "/", end: true, label: "Dashboard", icon: <DashboardIcon /> },
+  { to: "/opportunities", end: false, label: "Recovery paths", icon: <ClaimIcon /> },
   { to: "/watching", end: false, label: "Watchlist", icon: <WatchlistIcon /> },
-  { to: "/settings", end: false, label: "Add purchase", icon: <AddPurchaseIcon /> },
+  { to: "/add", end: false, label: "Add", icon: <AddPurchaseIcon /> },
 ];
 
 /** The breadcrumb's page name and glyph for a pathname. */
@@ -24,7 +25,10 @@ export function pageFor(pathname: string): { label: string; icon: ReactNode } {
   if (pathname.startsWith("/purchases/")) return { label: "Purchase", icon: <PurchaseIcon className="size-4" /> };
   if (pathname.startsWith("/claims/")) return { label: "Claim", icon: <ClaimIcon className="size-4" /> };
   if (pathname.startsWith("/watching")) return { label: "Watchlist", icon: <WatchlistIcon className="size-4" /> };
-  if (pathname.startsWith("/settings")) return { label: "Add purchase", icon: <AddPurchaseIcon className="size-4" /> };
+  if (pathname.startsWith("/transactions/")) return { label: "Transaction", icon: <PurchaseIcon className="size-4" /> };
+  if (pathname.startsWith("/opportunities")) return { label: "Recovery paths", icon: <ClaimIcon className="size-4" /> };
+  if (pathname.startsWith("/add")) return { label: "Add", icon: <AddPurchaseIcon className="size-4" /> };
+  if (pathname.startsWith("/settings")) return { label: "Inbox & settings", icon: <SettingsIcon className="size-4" /> };
   return { label: "Dashboard", icon: <DashboardIcon className="size-4" /> };
 }
 

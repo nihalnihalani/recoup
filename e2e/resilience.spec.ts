@@ -98,6 +98,25 @@ test.describe("resilience", () => {
       await signOut(page);
     });
 
+    // M24: manual entry on /add is completable from the keyboard alone (radio group, fields, submit).
+    test("entering a card charge on /add completes with no pointer interaction", async ({ leadPage: page }) => {
+      await page.goto("/add");
+      await expect(page.getByRole("heading", { name: "Add a purchase or transaction", level: 1 })).toBeVisible({ timeout: 20_000 });
+      const manual = page.getByRole("region", { name: "Enter it yourself" });
+      await manual.getByRole("radio", { name: "Store purchase" }).focus();
+      await page.keyboard.press("ArrowRight"); // -> Flight
+      await page.keyboard.press("ArrowRight"); // -> Card charge
+      await expect(manual.getByRole("radio", { name: "Card charge" })).toBeChecked();
+      await manual.getByLabel("Merchant, as it appears on your statement").focus();
+      await page.keyboard.type("E2E KEYBOARD STORE");
+      await page.keyboard.press("Tab"); // -> Amount charged
+      await page.keyboard.type("12.34");
+      await manual.getByRole("button", { name: "Add card charge" }).focus();
+      await page.keyboard.press("Enter");
+      await expect(page).toHaveURL(/\/transactions\//, { timeout: 20_000 });
+      await expect(page.getByRole("heading", { name: "E2E KEYBOARD STORE", level: 1 })).toBeVisible();
+    });
+
     test("confirming a credit completes with no pointer interaction", async ({ leadPage: page }) => {
       await page.goto(`/claims/${seeded.claimId}`);
       const moneyCard = page.locator("section").filter({ has: page.getByRole("heading", { name: "Record money", level: 2 }) });
@@ -202,6 +221,17 @@ test.describe("resilience", () => {
 
     test("Watching has no serious/critical accessibility violations", async ({ leadPage: page }) => {
       const serious = await gotoAndScan(page, "/watching");
+      expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
+    });
+
+    // M24: the intake hub (paste, upload with a required doc type, manual entry).
+    test("Add has no serious/critical accessibility violations", async ({ leadPage: page }) => {
+      const serious = await gotoAndScan(page, "/add");
+      expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
+    });
+
+    test("Recovery paths has no serious/critical accessibility violations", async ({ leadPage: page }) => {
+      const serious = await gotoAndScan(page, "/opportunities");
       expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
     });
 

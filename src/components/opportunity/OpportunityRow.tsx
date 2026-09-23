@@ -1,0 +1,45 @@
+import { Link } from "react-router-dom";
+import { formatMinor } from "../../lib/money";
+import { DotChip } from "../purchase/parts";
+import { AuthorityBadge } from "./AuthorityBadge";
+import { amountHeading, formatInstant, OUTCOME_COPY, SCENARIO_TITLES, type OpportunityView } from "./model";
+
+/**
+ * One recovery path as a compact row for the /opportunities list: what it is, the authority behind it, where it
+ * stands, an estimate only when the card would show one (never for not-yet-due, needs-facts or ineligible paths),
+ * and the next user deadline. Rows are never added up: alternatives for one loss must not look like more money.
+ */
+export function OpportunityRow({ view, href }: { view: OpportunityView; href: string }) {
+  const { opportunity, evaluation } = view;
+  const outcome = evaluation?.outcome ?? opportunity.outcome;
+  const amount = evaluation ? evaluation.amount : null;
+  const heading = amountHeading(outcome, amount);
+  return (
+    <li className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3">
+      <div className="min-w-0">
+        <Link to={href} className="font-medium text-gray-900 underline decoration-gray-300 underline-offset-4 hover:decoration-gray-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500">
+          {SCENARIO_TITLES[opportunity.scenarioId]}
+        </Link>
+        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+          <DotChip dot={OUTCOME_COPY[outcome].dot}>{OUTCOME_COPY[outcome].label}</DotChip>
+          <AuthorityBadge authority={opportunity.authorityClass} />
+          {opportunity.status === "case_open" && <DotChip dot="bg-gray-900">Claim open</DotChip>}
+          {opportunity.isExample && <DotChip dot="bg-gray-300">Example</DotChip>}
+        </div>
+      </div>
+      <div className="text-right text-sm">
+        {heading && amount ? (
+          <p className="tabular-nums text-gray-900">
+            <span className="font-semibold">{formatMinor(amount.estimate.amountMinor, amount.estimate.currency)}</span>{" "}
+            <span className="text-gray-600">estimated</span>
+          </p>
+        ) : (
+          <p className="text-gray-600">No amount yet</p>
+        )}
+        {opportunity.nextDeadlineAt !== undefined && (
+          <p className="text-xs text-gray-600">Your deadline: {formatInstant(opportunity.nextDeadlineAt)}</p>
+        )}
+      </div>
+    </li>
+  );
+}

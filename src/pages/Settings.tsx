@@ -60,7 +60,6 @@ function SettingsContent() {
   const alerts = useQuery(api.alerts.settings);
   const setAlerts = useMutation(api.alerts.setAlerts);
   const ensureInbox = useAction(api.profiles.ensureInbox);
-  const paste = useAction(api.intake.paste);
   const retryEvent = useMutation(api.intake.retryEvent);
   const confirmRefundEmail = useMutation(api.intake.confirmRefundEmail);
   const requestDeletion = useMutation(api.account.requestDeletion);
@@ -68,11 +67,8 @@ function SettingsContent() {
   const { signOut } = useAuthActions();
   const navigate = useNavigate();
 
-  const [pasted, setPasted] = useState("");
   const [busy, setBusy] = useState(false);
   const [inboxError, setInboxError] = useState<string | null>(null);
-  const [pasteError, setPasteError] = useState<string | null>(null);
-  const [pasteResult, setPasteResult] = useState<string | null>(null);
   const [retryError, setRetryError] = useState<string | null>(null);
   const [alertsError, setAlertsError] = useState<string | null>(null);
   const [alertsBusy, setAlertsBusy] = useState(false);
@@ -117,21 +113,6 @@ function SettingsContent() {
       await ensureInbox({});
     } catch (error) {
       setInboxError(errorText(error));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handlePaste() {
-    setPasteError(null);
-    setPasteResult(null);
-    setBusy(true);
-    try {
-      await paste({ text: pasted });
-      setPasted("");
-      setPasteResult("Added. Recoup is reading it now — it will appear on the board for review.");
-    } catch (error) {
-      setPasteError(errorText(error));
     } finally {
       setBusy(false);
     }
@@ -233,7 +214,13 @@ function SettingsContent() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <h1 className={pageTitleClass}>Settings</h1>
-          <p className="mt-1 text-sm text-gray-500">Forward an order confirmation, or paste one here.</p>
+          <p className="mt-1 text-sm text-gray-500">
+            Your Recoup inbox, alerts and account. To add a purchase, go to{" "}
+            <Link to="/add" className="rounded font-semibold text-gray-900 underline decoration-gray-300 underline-offset-4 hover:decoration-gray-900 focus-visible:outline-2 focus-visible:outline-violet-500">
+              Add
+            </Link>
+            .
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <Link to="/privacy" className="rounded text-sm font-semibold text-gray-500 underline decoration-gray-300 underline-offset-4 outline-none transition hover:text-gray-900 hover:decoration-gray-900 focus-visible:ring-2 focus-visible:ring-violet-500">
@@ -326,39 +313,6 @@ function SettingsContent() {
               </p>
             </div>
           )}
-        </SettingsCard>
-
-        <SettingsCard title="Add a purchase" icon={<ReceiptIcon />}>
-          <div className="space-y-3">
-            <label htmlFor="paste-order" className="sr-only">
-              Order confirmation text
-            </label>
-            <textarea
-              id="paste-order"
-              value={pasted}
-              onChange={(event) => setPasted(event.target.value)}
-              rows={8}
-              placeholder="Paste the order confirmation email text here…"
-              className={`${inputClass} block resize-y`}
-            />
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                onClick={() => void handlePaste()}
-                disabled={busy || pasted.trim().length === 0}
-                className={primaryButtonClass}
-              >
-                {busy ? "Reading…" : "Add purchase"}
-              </button>
-              {pasteResult && (
-                <p role="status" className="flex min-w-0 flex-1 items-start gap-2 text-sm font-medium text-green-700">
-                  <span aria-hidden="true" className="mt-1.5 size-2 shrink-0 rounded-full bg-green-500" />
-                  {pasteResult}
-                </p>
-              )}
-            </div>
-            {pasteError && <ErrorBox error={pasteError} />}
-          </div>
         </SettingsCard>
 
         <SettingsCard
@@ -697,15 +651,6 @@ function InboxIcon() {
     <Line>
       <path d="M4 13.5 6.5 5h11L20 13.5V19H4z" />
       <path d="M4 13.5h4.5a3.5 3.5 0 0 0 7 0H20" />
-    </Line>
-  );
-}
-
-function ReceiptIcon() {
-  return (
-    <Line>
-      <path d="M6 3.5h12v17l-3-1.750-3 1.750-3-1.750-3 1.750z" />
-      <path d="M9.500 8.500h5M9.500 12h5" />
     </Line>
   );
 }

@@ -96,7 +96,7 @@ export default function Board() {
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-end gap-2">
         {noProducts && !nothingYet && loadExampleButton}
-        <Link to="/settings" className={secondaryButtonClass}>
+        <Link to="/add" className={secondaryButtonClass}>
           Add purchase
         </Link>
         <Link to="/watching" className={primaryButtonClass}>

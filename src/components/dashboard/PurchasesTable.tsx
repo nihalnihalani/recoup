@@ -66,10 +66,10 @@ export function PurchasesTable({ items, now, truncated }: { items: Item[]; now: 
       {items.length === 0 ? (
         <p className="py-10 text-center text-sm text-gray-500">
           Nothing bought is being tracked.{" "}
-          <Link to="/settings" className={`rounded font-semibold text-gray-900 underline underline-offset-2 ${focusRing}`}>
+          <Link to="/add" className={`rounded font-semibold text-gray-900 underline underline-offset-2 ${focusRing}`}>
             Add a purchase
           </Link>{" "}
-          and Recoup asks the store for the difference when its price falls.
+          and Recoup checks the store's price-adjustment policy when its price falls.
         </p>
       ) : (
         <>

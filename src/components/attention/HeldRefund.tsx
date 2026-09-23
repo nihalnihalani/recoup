@@ -3,7 +3,7 @@ import type { FunctionReturnType } from "convex/server";
 import type { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { fmt } from "../../lib/money";
-import { errorText, secondaryButtonClass } from "../../lib/ui";
+import { errorText, secondaryButtonClass, when } from "../../lib/ui";
 
 export type ConfirmRefundResult = FunctionReturnType<typeof api.intake.confirmRefundEmail>;
 type AttentionRow = FunctionReturnType<typeof api.intake.needsAttention>[number];
@@ -53,13 +53,38 @@ export function HeldRefund({
 
   const credits = refund?.credits ?? [];
   const merchant = refund?.merchant ?? null;
+  // DA-B-18: who delivered it, as the envelope says (not authenticated), and when; the merchant is only what the
+  // email itself claims.
+  const sender = refund?.sender ?? null;
 
   return (
     <div className="mt-2 space-y-2 rounded-xl border border-yellow-500/40 bg-yellow-500/10 px-3 py-2.5 text-sm text-gray-900">
       <p className="font-semibold">We can't verify who sent this email.</p>
+      {(sender !== null || refund?.receivedAt !== undefined) && (
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 text-gray-700">
+          {sender !== null && (
+            <>
+              <dt>From:</dt>
+              <dd className="break-all font-medium text-gray-900">{sender.address ?? sender.display}</dd>
+            </>
+          )}
+          {refund?.receivedAt !== undefined && (
+            <>
+              <dt>Received:</dt>
+              <dd>{when(refund.receivedAt)}</dd>
+            </>
+          )}
+          {merchant && (
+            <>
+              <dt>Store:</dt>
+              <dd>{merchant}, as written in the email</dd>
+            </>
+          )}
+        </dl>
+      )}
       <p className="text-gray-700">
-        Nothing has been recorded. If this refund is genuine, confirm it and Recoup records it as a promise
-        {merchant ? ` from ${merchant}` : ""}. It counts as money back only once you confirm it reached your card.
+        Nothing has been recorded. If this refund is genuine, confirm it and Recoup records it as a promise. It counts as
+        money back only once you confirm it reached your card.
       </p>
       {credits.length > 0 ? (
         <ul className="space-y-0.5">

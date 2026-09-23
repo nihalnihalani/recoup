@@ -142,6 +142,22 @@ export function useNow(everyMs = 60_000): number {
   return now;
 }
 
+/** Whether the browser says it is online, kept current (M24 §14 offline/reconnect). */
+export function useOnline(): boolean {
+  const [online, setOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine);
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const down = () => setOnline(false);
+    window.addEventListener("online", up);
+    window.addEventListener("offline", down);
+    return () => {
+      window.removeEventListener("online", up);
+      window.removeEventListener("offline", down);
+    };
+  }, []);
+  return online;
+}
+
 /** Tracks an element's rendered width so an SVG can draw at true pixel size. */
 export function useMeasuredWidth<T extends HTMLElement>(fallback: number) {
   const ref = useRef<T | null>(null);

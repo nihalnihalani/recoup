@@ -38,6 +38,10 @@ describe("HeldRefund", () => {
     expect(text).toContain("We can't verify who sent this email.");
     expect(text).toContain("Nothing has been recorded.");
     expect(text).toContain(`Promised, not received: ${fmt(2_500, "USD")} for Kettle`);
+    // DA-B-18: the envelope sender and time, and the store only "as written in the email".
+    expect(text).toContain("From:refunds@northwind.example");
+    expect(text).toContain("Received:");
+    expect(text).toContain("Northwind, as written in the email");
     expect(text).not.toMatch(/credited|refunded to your card|back on your card|received\b(?!:)/i);
     expect(screen.queryByRole("button", { name: /try again/i })).toBeNull();
   });

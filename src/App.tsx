@@ -12,6 +12,9 @@ import SignIn from "./pages/SignIn";
 // /settings. SignIn stays a static import — it's what unauthenticated users
 // see immediately, so lazily fetching it buys nothing.
 const Board = lazy(() => import("./pages/Board"));
+const Add = lazy(() => import("./pages/Add"));
+const Transaction = lazy(() => import("./pages/Transaction"));
+const Opportunities = lazy(() => import("./pages/Opportunities"));
 const Claim = lazy(() => import("./pages/Claim"));
 const Purchase = lazy(() => import("./pages/Purchase"));
 const Settings = lazy(() => import("./pages/Settings"));
@@ -100,6 +103,30 @@ function AuthGate() {
               element={
                 <RoutedPage>
                   <Claim />
+                </RoutedPage>
+              }
+            />
+            <Route
+              path="/add"
+              element={
+                <RoutedPage>
+                  <Add />
+                </RoutedPage>
+              }
+            />
+            <Route
+              path="/transactions/:id"
+              element={
+                <RoutedPage>
+                  <Transaction />
+                </RoutedPage>
+              }
+            />
+            <Route
+              path="/opportunities"
+              element={
+                <RoutedPage>
+                  <Opportunities />
                 </RoutedPage>
               }
             />
